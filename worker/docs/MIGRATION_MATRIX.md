@@ -29,8 +29,8 @@ Status meanings:
 
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
-| OpenAI model list | D1-backed group/model catalog at `/v1/models` and `/models` | Partial | Worker handler tests; add root-alias contract |
-| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Existing gateway tests; add alias, SSE termination, disconnect tests |
+| OpenAI model list | D1-backed group/model catalog at `/v1/models` and `/models` | Partial | Worker handler tests and root alias; add deployed-binding contract |
+| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Existing gateway tests and alias; add SSE termination and disconnect tests |
 | Responses | `/v1/responses`, `/responses`, compact and input-token subroutes | Partial | Existing core tests; add subroute fixtures |
 | Embeddings | OpenAI-compatible request/response and token billing | Planned | Port original embedding handler/service fixtures |
 | Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Planned | Port `apicompat` and Anthropic gateway suites |
@@ -87,8 +87,8 @@ Commercial storage rules:
 | Admin sessions/RBAC | Bootstrap/recovery-issued D1 sessions exist with last-admin protection; normal login, granular roles, step-up, CSRF/origin checks and rate limits remain | Partial | Session boundary/recovery tests; add login, revocation and authorization matrix |
 | User management | List/create/detail/update/disable, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Route/state/concurrency tests and real local D1 migration; add deployed-binding E2E |
 | API-key management | User key create/list/update/revoke, persistent idempotency/CAS, HMAC storage and one-time secret display | Partial | Route, hashing, concurrency and invalidation tests; add user self-service and deployed-binding E2E |
-| Groups/models/prices | CRUD, validation, catalog visibility, immutable active prices | Planned | Control-plane and gateway propagation tests |
-| Accounts/channels | Credential encryption, group/model links, health, quota and manual probes | Partial | Bootstrap exists; add full CRUD and provider probes |
+| Groups/models/prices | Core group/model CRUD, CAS, catalog visibility, integer multiplier and append-only active prices exist; duplicate, atomic batch sort and advanced pricing remain | Partial | Worker control/gateway unit tests plus manual local migration and trigger checks; add binding E2E |
+| Accounts/channels | OpenAI account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual health probe exist; channels, quota and provider lifecycle remain | Partial | Account control tests and Pool stale-revision tests; add deployed-binding E2E and provider probes |
 | Usage/finance | Request ledger, aggregates, reconciliation and corrective workflows | Partial | Projection exists; add query/reconciliation tests |
 | Settings | Typed versioned settings, audit and KV invalidation | Planned | Schema and cache-consistency tests |
 | Announcements/compliance | Editorial lifecycle, audit views and risk actions | Planned | RBAC and lifecycle tests |

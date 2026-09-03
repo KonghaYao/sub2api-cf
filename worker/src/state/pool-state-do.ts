@@ -110,6 +110,8 @@ export class PoolStateDO {
       const activeCounts = activeLeaseCounts(reclaimed);
       return json({
         schema_version: STATE_API_SCHEMA_VERSION,
+        config_revision: reclaimed.config_revision,
+        config_fingerprint: reclaimed.config_fingerprint,
         idempotency_retention_ms: TOMBSTONE_RETENTION_MS,
         accounts: Object.values(reclaimed.accounts).map((account) => ({
           ...account,
@@ -170,6 +172,17 @@ export class PoolStateDO {
   }
 
   private initializeSchema(): void {
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pool_config (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        config_revision INTEGER NOT NULL CHECK (config_revision >= 0),
+        config_fingerprint TEXT NOT NULL CHECK (length(config_fingerprint) IN (0, 64)),
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(
+      "INSERT OR IGNORE INTO pool_config (singleton, config_revision, config_fingerprint, updated_at_ms) VALUES (1, 0, '', 0)",
+    );
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS pool_accounts (
         account_id TEXT PRIMARY KEY,
@@ -250,6 +263,20 @@ export class PoolStateDO {
 
   private loadMachineState(requestId?: string, failureEventId?: string): PoolMachineState {
     const state = createPoolMachineState();
+    const config = Array.from(
+      this.state.storage.sql.exec(
+        "SELECT config_revision, config_fingerprint FROM pool_config WHERE singleton = 1",
+      ),
+    )[0] as { config_revision?: unknown; config_fingerprint?: unknown } | undefined;
+    if (
+      !Number.isSafeInteger(config?.config_revision) ||
+      (config!.config_revision as number) < 0 ||
+      typeof config?.config_fingerprint !== "string"
+    ) {
+      throw new PoolStateMachineError("invalid_persisted_state", "Persisted config revision is invalid");
+    }
+    state.config_revision = config!.config_revision as number;
+    state.config_fingerprint = config!.config_fingerprint as string;
     for (const value of this.state.storage.sql.exec(
       `SELECT schema_version, account_id, enabled, max_concurrency, priority, weight, consecutive_failures,
               cooldown_until_ms, updated_at_ms
@@ -298,6 +325,16 @@ export class PoolStateDO {
     failureAccountId?: string,
     processedAtMs?: number,
   ): void {
+    if (after.config_revision !== before.config_revision) {
+      this.state.storage.sql.exec(
+        `UPDATE pool_config
+            SET config_revision = ?, config_fingerprint = ?, updated_at_ms = ?
+          WHERE singleton = 1`,
+        after.config_revision,
+        after.config_fingerprint,
+        processedAtMs ?? Date.now(),
+      );
+    }
     for (const [accountId, account] of Object.entries(after.accounts)) {
       if (account === before.accounts[accountId]) continue;
       this.persistAccount(account);
@@ -425,6 +462,7 @@ export class PoolStateDO {
 
 function commandTypeFor(method: string, pathname: string): PoolCommand["type"] | null {
   if (method !== "POST") return null;
+  if (pathname === "/accounts/sync") return "sync_accounts";
   if (pathname === "/accounts/upsert") return "upsert_account";
   if (pathname === "/reserve") return "reserve";
   if (pathname === "/renew") return "renew";
@@ -438,6 +476,14 @@ function parseCommand(
   body: Record<string, unknown>,
 ): PoolCommand {
   switch (type) {
+    case "sync_accounts":
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        config_revision: requireSafeInteger(body, "config_revision", { minimum: 1 }),
+        config_fingerprint: requireString(body, "config_fingerprint", 64),
+        accounts: parseConfiguredAccounts(body.accounts),
+      };
     case "upsert_account":
       return {
         schema_version: STATE_API_SCHEMA_VERSION,
@@ -497,6 +543,27 @@ function parseCommand(
         }),
       };
   }
+}
+
+function parseConfiguredAccounts(value: unknown): Extract<PoolCommand, { type: "sync_accounts" }>["accounts"] {
+  if (!Array.isArray(value) || value.length > 10_000) {
+    throw new StateApiError(400, "invalid_accounts", "accounts must be an array with at most 10000 entries");
+  }
+  return value.map((entry) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new StateApiError(400, "invalid_accounts", "Each account must be an object");
+    }
+    const account = entry as Record<string, unknown>;
+    return {
+      account_id: requireString(account, "account_id"),
+      max_concurrency: requireSafeInteger(account, "max_concurrency", {
+        minimum: 1,
+        maximum: 1_000_000,
+      }),
+      priority: requireSafeInteger(account, "priority", { maximum: 1_000_000 }),
+      weight: requireSafeInteger(account, "weight", { minimum: 1, maximum: 1_000_000 }),
+    };
+  });
 }
 
 function toAccountState(value: object): PoolAccountState {

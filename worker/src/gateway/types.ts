@@ -11,6 +11,7 @@ export interface GatewayPrincipal {
 }
 
 export interface ModelRoute {
+  config_revision: number
   model_id: string
   public_name: string
   upstream_name: string
@@ -22,6 +23,7 @@ export interface ModelRoute {
   cache_read_micros_per_million: number
   per_request_micros: number
   minimum_reservation_micros: number
+  rate_multiplier_ppm: number
   max_output_tokens: number
   default_max_output_tokens: number
 }
@@ -33,6 +35,7 @@ export interface AccountCandidate {
   priority: number
   weight: number
   config_version: number
+  config_revision: number
 }
 
 export interface AccountCredential {

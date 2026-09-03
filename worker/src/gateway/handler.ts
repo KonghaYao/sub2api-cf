@@ -11,10 +11,9 @@ import {
 import {
   authenticateGatewayRequest,
   credentialAad,
-  findModel,
   getAccountCredential,
-  listAccountCandidates,
   listModels,
+  resolveGatewayRoute,
   validateBaseUrl,
 } from './repository'
 import {
@@ -90,14 +89,15 @@ export async function handleGateway(
     validateClientControls(parsed.body)
     const requestedModel = requiredModel(parsed.body)
     const stream = parseStream(parsed.body)
-    const model = await findModel(context.env, principal.group_id, requestedModel, endpoint)
-    const reservationMicros = reservationForRequest(model, parsed.body, parsed.bytes.byteLength)
-    const candidates = await listAccountCandidates(
+    const route = await resolveGatewayRoute(
       context.env,
       principal.group_id,
-      model.model_id,
+      requestedModel,
       endpoint,
     )
+    const model = route.model
+    const reservationMicros = reservationForRequest(model, parsed.body, parsed.bytes.byteLength)
+    const candidates = route.candidates
 
     await prepareUserReservation(context.env, principal, requestId, reservationMicros)
     let pool: DurableObjectStub

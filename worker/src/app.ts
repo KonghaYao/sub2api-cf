@@ -6,6 +6,18 @@ import {
   updateAdminApiKey,
 } from './control/api-keys'
 import {
+  createAdminAccount,
+  deleteAdminAccount,
+  deleteAdminAccountGroupLink,
+  deleteAdminAccountModelCapability,
+  getAdminAccount,
+  listAdminAccounts,
+  putAdminAccountGroupLink,
+  putAdminAccountModelCapability,
+  testAdminAccount,
+  updateAdminAccount,
+} from './control/accounts'
+import {
   recoverAdminSession,
   requireAdminSession,
   requireAdminToken,
@@ -17,6 +29,25 @@ import {
   listAdminUsers,
   updateAdminUser,
 } from './control/users'
+import {
+  allAdminGroups,
+  createAdminGroup,
+  createAdminModel,
+  deleteAdminGroup,
+  deleteAdminGroupModel,
+  deleteAdminModel,
+  getAdminGroup,
+  getAdminModel,
+  getAdminModelCandidates,
+  listAdminGroupModels,
+  listAdminGroups,
+  listAdminModelPrices,
+  listAdminModels,
+  publishAdminModelPrice,
+  putAdminGroupModel,
+  updateAdminGroup,
+  updateAdminModel,
+} from './control/catalog'
 import type { Env } from './env'
 import { handleBootstrap, handleGateway, handleModels } from './gateway/handler'
 
@@ -29,6 +60,8 @@ const apiRoots = ['/api', '/v1', '/backend-api']
 function isApiPath(pathname: string): boolean {
   return (
     pathname === '/responses' ||
+    pathname === '/models' ||
+    pathname === '/chat/completions' ||
     apiRoots.some((root) => pathname === root || pathname.startsWith(`${root}/`))
   )
 }
@@ -96,9 +129,38 @@ export function createApp() {
   app.post('/api/v1/admin/users/:id/api-keys', createAdminApiKey)
   app.put('/api/v1/admin/api-keys/:id', updateAdminApiKey)
   app.delete('/api/v1/admin/api-keys/:id', revokeAdminApiKey)
+  app.get('/api/v1/admin/groups', listAdminGroups)
+  app.get('/api/v1/admin/groups/all', allAdminGroups)
+  app.post('/api/v1/admin/groups', createAdminGroup)
+  app.get('/api/v1/admin/groups/:id/models-list-candidates', getAdminModelCandidates)
+  app.get('/api/v1/admin/groups/:id/models', listAdminGroupModels)
+  app.put('/api/v1/admin/groups/:id/models/:model_id', putAdminGroupModel)
+  app.delete('/api/v1/admin/groups/:id/models/:model_id', deleteAdminGroupModel)
+  app.get('/api/v1/admin/groups/:id/models/:model_id/prices', listAdminModelPrices)
+  app.post('/api/v1/admin/groups/:id/models/:model_id/prices', publishAdminModelPrice)
+  app.get('/api/v1/admin/groups/:id', getAdminGroup)
+  app.put('/api/v1/admin/groups/:id', updateAdminGroup)
+  app.delete('/api/v1/admin/groups/:id', deleteAdminGroup)
+  app.get('/api/v1/admin/models', listAdminModels)
+  app.post('/api/v1/admin/models', createAdminModel)
+  app.get('/api/v1/admin/models/:id', getAdminModel)
+  app.put('/api/v1/admin/models/:id', updateAdminModel)
+  app.delete('/api/v1/admin/models/:id', deleteAdminModel)
+  app.get('/api/v1/admin/accounts', listAdminAccounts)
+  app.post('/api/v1/admin/accounts', createAdminAccount)
+  app.get('/api/v1/admin/accounts/:id', getAdminAccount)
+  app.put('/api/v1/admin/accounts/:id', updateAdminAccount)
+  app.delete('/api/v1/admin/accounts/:id', deleteAdminAccount)
+  app.put('/api/v1/admin/accounts/:id/groups/:group_id', putAdminAccountGroupLink)
+  app.delete('/api/v1/admin/accounts/:id/groups/:group_id', deleteAdminAccountGroupLink)
+  app.put('/api/v1/admin/accounts/:id/models/:model_id', putAdminAccountModelCapability)
+  app.delete('/api/v1/admin/accounts/:id/models/:model_id', deleteAdminAccountModelCapability)
+  app.post('/api/v1/admin/accounts/:id/test', testAdminAccount)
 
   app.get('/v1/models', handleModels)
+  app.get('/models', handleModels)
   app.post('/v1/chat/completions', (context) => handleGateway(context, 'chat_completions'))
+  app.post('/chat/completions', (context) => handleGateway(context, 'chat_completions'))
   app.post('/v1/responses', (context) => handleGateway(context, 'responses'))
   app.post('/responses', (context) => handleGateway(context, 'responses'))
 

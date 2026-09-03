@@ -56,19 +56,41 @@ export function estimatedUsage(inputBytes: number, outputBytes: number): TokenUs
 export function calculateCost(model: ModelRoute, usage: TokenUsage): CostBreakdown {
   const cached = Math.min(usage.cache_read_tokens, usage.input_tokens)
   const regularInput = usage.input_tokens - cached
-  const inputAmount = pricedMicros(regularInput, model.input_micros_per_million)
-  const outputAmount = pricedMicros(usage.output_tokens, model.output_micros_per_million)
-  const cacheAmount = pricedMicros(cached, model.cache_read_micros_per_million)
+  const inputAmount = multipliedMicros(
+    pricedMicros(regularInput, model.input_micros_per_million),
+    model.rate_multiplier_ppm,
+  )
+  const outputAmount = multipliedMicros(
+    pricedMicros(usage.output_tokens, model.output_micros_per_million),
+    model.rate_multiplier_ppm,
+  )
+  const cacheAmount = multipliedMicros(
+    pricedMicros(cached, model.cache_read_micros_per_million),
+    model.rate_multiplier_ppm,
+  )
+  const baseAmount = multipliedMicros(model.per_request_micros, model.rate_multiplier_ppm)
   const amount = checkedNumber(
-    BigInt(inputAmount) + BigInt(outputAmount) + BigInt(cacheAmount) + BigInt(model.per_request_micros),
+    BigInt(inputAmount) + BigInt(outputAmount) + BigInt(cacheAmount) + BigInt(baseAmount),
   )
   return {
     input_amount_micros: inputAmount,
     output_amount_micros: outputAmount,
     cache_amount_micros: cacheAmount,
-    base_amount_micros: model.per_request_micros,
+    base_amount_micros: baseAmount,
     amount_micros: amount,
   }
+}
+
+function multipliedMicros(amount: number, multiplierPpm: number): number {
+  if (
+    !Number.isSafeInteger(amount) ||
+    amount < 0 ||
+    !Number.isSafeInteger(multiplierPpm) ||
+    multiplierPpm < 0
+  ) {
+    throw new GatewayError(500, 'invalid_pricing_state', 'Pricing state is invalid', 'server_error')
+  }
+  return checkedNumber((BigInt(amount) * BigInt(multiplierPpm) + 999_999n) / 1_000_000n)
 }
 
 export function rewriteModelNames(

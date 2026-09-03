@@ -9,6 +9,7 @@ const accountId = 'account-1'
 const secretId = 'secret-1'
 
 const model: ModelRoute = {
+  config_revision: 1,
   model_id: 'model-1',
   public_name: 'gpt-public',
   upstream_name: 'gpt-upstream',
@@ -20,6 +21,7 @@ const model: ModelRoute = {
   cache_read_micros_per_million: 500_000,
   per_request_micros: 0,
   minimum_reservation_micros: 1,
+  rate_multiplier_ppm: 1_000_000,
   max_output_tokens: 16_384,
   default_max_output_tokens: 4_096,
 }
@@ -28,7 +30,7 @@ class FakeStatement {
   private values: unknown[] = []
 
   constructor(
-    private readonly query: string,
+    readonly query: string,
     private readonly database: FakeDatabase,
   ) {}
 
@@ -64,6 +66,9 @@ class FakeStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
+    if (this.query.includes('FROM group_models gm')) {
+      return { success: true, results: [model as T], meta: {} as D1Meta & Record<string, unknown> }
+    }
     if (this.query.includes('FROM account_groups ag')) {
       return {
         success: true,
@@ -75,13 +80,12 @@ class FakeStatement {
             priority: 0,
             weight: 1,
             config_version: 1,
+            config_revision: 1,
+            model_id: 'model-1',
           } as T,
         ],
         meta: {} as D1Meta & Record<string, unknown>,
       }
-    }
-    if (this.query.includes('FROM group_models gm')) {
-      return { success: true, results: [model as T], meta: {} as D1Meta & Record<string, unknown> }
     }
     throw new Error(`Unexpected all query: ${this.query}`)
   }
@@ -109,6 +113,23 @@ class FakeDatabase {
 
   prepare(query: string): FakeStatement {
     return new FakeStatement(query, this)
+  }
+
+  async batch(statements: FakeStatement[]): Promise<D1Result<unknown>[]> {
+    const values: D1Result<unknown>[] = []
+    for (const statement of statements) {
+      if (statement.query.includes('FROM account_groups ag')) {
+        values.push(await statement.all())
+      } else {
+        const row = await statement.first()
+        values.push({
+          success: true,
+          results: row === null ? [] : [row],
+          meta: {} as D1Meta & Record<string, unknown>,
+        })
+      }
+    }
+    return values
   }
 }
 
@@ -203,6 +224,21 @@ describe('OpenAI-compatible gateway', () => {
     expect(missing.status).toBe(401)
     expect(query.status).toBe(400)
     expect(user.calls).toEqual([])
+  })
+
+  it('serves the root model-list compatibility alias', async () => {
+    const { env } = await harness()
+    const response = await createApp().request(
+      '/models',
+      { headers: { authorization: 'Bearer sk-customer' } },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      object: 'list',
+      data: [{ id: 'gpt-public', object: 'model' }],
+    })
   })
 
   it('rejects client transport controls before reserving funds or capacity', async () => {
@@ -435,7 +471,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(queued[0]).toMatchObject({ event_type: 'settlement.retry.v1' })
   })
 
-  it('disables stale Pool members before adding the current account snapshot', async () => {
+  it('atomically replaces Pool members with a versioned account snapshot', async () => {
     const { env, pool } = await harness()
     pool.snapshotAccounts = [
       { account_id: 'stale-account', enabled: true, max_concurrency: 9 },
@@ -458,13 +494,19 @@ describe('OpenAI-compatible gateway', () => {
     )
 
     expect(pool.calls).toContainEqual({
-      path: '/accounts/upsert',
-      body: {
+      path: '/accounts/sync',
+      body: expect.objectContaining({
         schema_version: 1,
-        account_id: 'stale-account',
-        enabled: false,
-        max_concurrency: 9,
-      },
+        config_revision: 1,
+        accounts: [
+          {
+            account_id: 'account-1',
+            max_concurrency: 4,
+            priority: 0,
+            weight: 1,
+          },
+        ],
+      }),
     })
   })
 })

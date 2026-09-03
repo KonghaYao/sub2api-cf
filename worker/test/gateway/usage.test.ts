@@ -8,6 +8,7 @@ import {
 import type { ModelRoute } from '../../src/gateway/types'
 
 const model: ModelRoute = {
+  config_revision: 1,
   model_id: 'model-1',
   public_name: 'gpt-public',
   upstream_name: 'gpt-upstream',
@@ -19,11 +20,26 @@ const model: ModelRoute = {
   cache_read_micros_per_million: 500_000,
   per_request_micros: 3,
   minimum_reservation_micros: 1,
+  rate_multiplier_ppm: 1_000_000,
   max_output_tokens: 16_384,
   default_max_output_tokens: 4_096,
 }
 
 describe('gateway usage accounting', () => {
+  it('applies the group rate multiplier using integer micro-units', () => {
+    expect(
+      calculateCost(
+        { ...model, rate_multiplier_ppm: 1_500_000, per_request_micros: 2 },
+        { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, estimated: false },
+      ),
+    ).toMatchObject({
+      input_amount_micros: 3,
+      output_amount_micros: 6,
+      base_amount_micros: 3,
+      amount_micros: 12,
+    })
+  })
+
   it('uses integer micro-unit prices and separates cached input', () => {
     const usage = extractUsage({
       usage: {

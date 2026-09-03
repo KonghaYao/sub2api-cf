@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.3.0"
+    "APP_VERSION": "0.4.0"
   },
   "assets": {
     "directory": "../frontend/dist",
@@ -19,6 +19,8 @@
       "/api/*",
       "/v1",
       "/v1/*",
+      "/models",
+      "/chat/completions",
       "/responses",
       "/backend-api",
       "/backend-api/*"
@@ -84,7 +86,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.3.0"
+        "APP_VERSION": "0.4.0"
       },
       "d1_databases": [
         {
@@ -143,7 +145,7 @@
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.3.0"
+        "APP_VERSION": "0.4.0"
       },
       "d1_databases": [
         {

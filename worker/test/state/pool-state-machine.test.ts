@@ -22,6 +22,140 @@ function poolWithAccount(maxConcurrency = 1) {
 }
 
 describe("pool state machine", () => {
+  it("atomically replaces configured accounts and rejects stale configuration revisions", () => {
+    const revisionTwo = applyPoolCommand(
+      createPoolMachineState(),
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 2,
+        config_fingerprint: "2".repeat(64),
+        accounts: [
+          {
+            account_id: "account-new",
+            max_concurrency: 3,
+            priority: 1,
+            weight: 2,
+          },
+        ],
+      },
+      1_000,
+    );
+    const stale = applyPoolCommand(
+      revisionTwo.state,
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 1,
+        config_fingerprint: "1".repeat(64),
+        accounts: [
+          {
+            account_id: "account-stale",
+            max_concurrency: 99,
+            priority: 0,
+            weight: 1,
+          },
+        ],
+      },
+      2_000,
+    );
+
+    expect(revisionTwo.state.config_revision).toBe(2);
+    expect(revisionTwo.state.accounts["account-new"]).toMatchObject({
+      enabled: true,
+      max_concurrency: 3,
+      priority: 1,
+      weight: 2,
+    });
+    expect(stale.idempotent).toBe(true);
+    expect(stale.state).toEqual(revisionTwo.state);
+    expect(stale.state.accounts["account-stale"]).toBeUndefined();
+  });
+
+  it("rejects a different account snapshot that reuses the current revision", () => {
+    const configured = applyPoolCommand(
+      createPoolMachineState(),
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 1,
+        config_fingerprint: "1".repeat(64),
+        accounts: [
+          { account_id: "account-1", max_concurrency: 1, priority: 0, weight: 1 },
+        ],
+      },
+      1_000,
+    );
+
+    expect(() =>
+      applyPoolCommand(
+        configured.state,
+        {
+          schema_version: 1,
+          type: "sync_accounts",
+          config_revision: 1,
+          config_fingerprint: "2".repeat(64),
+          accounts: [
+            { account_id: "account-2", max_concurrency: 1, priority: 0, weight: 1 },
+          ],
+        },
+        2_000,
+      ),
+    ).toThrowError(new PoolStateMachineError(
+      "config_revision_conflict",
+      "config_revision was already applied with different accounts",
+    ));
+  });
+
+  it("disables accounts omitted by a newer configuration without dropping their active leases", () => {
+    const configured = applyPoolCommand(
+      createPoolMachineState(),
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 1,
+        config_fingerprint: "1".repeat(64),
+        accounts: [
+          { account_id: "account-1", max_concurrency: 1, priority: 0, weight: 1 },
+          { account_id: "account-2", max_concurrency: 1, priority: 1, weight: 1 },
+        ],
+      },
+      1_000,
+    );
+    const leased = applyPoolCommand(
+      configured.state,
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        lease_ttl_ms: 5_000,
+        preferred_account_id: "account-1",
+      },
+      1_100,
+    );
+    const replaced = applyPoolCommand(
+      leased.state,
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 2,
+        config_fingerprint: "2".repeat(64),
+        accounts: [
+          { account_id: "account-2", max_concurrency: 4, priority: 0, weight: 3 },
+        ],
+      },
+      1_200,
+    );
+
+    expect(replaced.state.accounts["account-1"]?.enabled).toBe(false);
+    expect(replaced.state.accounts["account-2"]).toMatchObject({
+      enabled: true,
+      max_concurrency: 4,
+      weight: 3,
+    });
+    expect(replaced.state.leases["request-1"]?.status).toBe("active");
+  });
+
   it("schedules the earliest active lease and ignores tombstones", () => {
     expect(
       nextActiveLeaseAlarmAt(

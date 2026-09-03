@@ -87,6 +87,7 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
   const result = await env.DB.prepare(
     `${modelSelect()}
       WHERE gm.group_id = ? AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
+        AND (g.catalog_mode = 'all_routable' OR gm.catalog_visible = 1)
         AND EXISTS (
           SELECT 1
             FROM account_groups ag
@@ -94,7 +95,11 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
             JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
            WHERE ag.group_id = gm.group_id AND a.enabled = 1
              AND a.platform = 'openai' AND a.protocol = 'openai'
-             AND (am.chat_completions = 1 OR am.responses = 1)
+             AND (
+               (m.endpoint = 'chat_completions' AND am.chat_completions = 1) OR
+               (m.endpoint = 'responses' AND am.responses = 1) OR
+               (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1))
+             )
         )
       ORDER BY gm.sort_order ASC, m.public_name ASC`,
   )
@@ -103,51 +108,61 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
   return result.results
 }
 
-export async function findModel(
+export async function resolveGatewayRoute(
   env: Env,
   groupId: string,
   publicName: string,
   endpoint: GatewayEndpoint,
-): Promise<ModelRoute> {
-  const row = await env.DB.prepare(
-    `${modelSelect()}
-      WHERE gm.group_id = ? AND m.public_name = ?
-        AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
-        AND (m.endpoint = ? OR m.endpoint = 'both')
-      LIMIT 1`,
-  )
-    .bind(groupId, publicName, endpoint)
-    .first<ModelRoute>()
-  if (row === null) {
+): Promise<{ model: ModelRoute; candidates: AccountCandidate[] }> {
+  const capabilityColumn = endpoint === 'chat_completions' ? 'am.chat_completions' : 'am.responses'
+  const [modelResult, candidateResult] = await env.DB.batch([
+    env.DB.prepare(
+      `${modelSelect()}
+        WHERE gm.group_id = ? AND m.public_name = ?
+          AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
+          AND g.enabled = 1 AND g.platform = 'openai' AND m.platform = g.platform
+          AND (m.endpoint = ? OR m.endpoint = 'both')
+        LIMIT 1`,
+    ).bind(groupId, publicName, endpoint),
+    accountCandidatesStatement(env, groupId, publicName, capabilityColumn),
+  ])
+  const model = modelResult.results[0] as unknown as ModelRoute | undefined
+  if (model === undefined) {
     throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
   }
-  return row
+  const candidates = candidateResult.results as unknown as AccountCandidate[]
+  if (
+    candidates.length === 0 ||
+    candidates.some((candidate) => candidate.config_revision !== model.config_revision)
+  ) {
+    throw new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
+  }
+  return { model, candidates }
 }
 
-export async function listAccountCandidates(
+function accountCandidatesStatement(
   env: Env,
   groupId: string,
-  modelId: string,
-  endpoint: GatewayEndpoint,
-): Promise<AccountCandidate[]> {
-  const capabilityColumn = endpoint === 'chat_completions' ? 'am.chat_completions' : 'am.responses'
-  const result = await env.DB.prepare(
+  publicName: string,
+  capabilityColumn: 'am.chat_completions' | 'am.responses',
+): D1PreparedStatement {
+  return env.DB.prepare(
     `SELECT a.id AS account_id, a.base_url, a.max_concurrency,
-            ag.priority, ag.weight, a.config_version
+            ag.priority, ag.weight, a.config_version,
+            revision.revision AS config_revision, am.model_id
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
        JOIN account_models am ON am.account_id = a.id
+       CROSS JOIN gateway_config_revision revision
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.platform = 'openai'
         AND a.protocol = 'openai' AND a.base_url IS NOT NULL
-        AND am.model_id = ? AND ${capabilityColumn} = 1
+        AND am.model_id = (
+          SELECT id FROM models WHERE platform = 'openai' AND public_name = ? LIMIT 1
+        )
+        AND ${capabilityColumn} = 1
       ORDER BY ag.priority ASC, a.id ASC`,
   )
-    .bind(groupId, modelId)
-    .all<AccountCandidate>()
-  if (result.results.length === 0) {
-    throw new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
-  }
-  return result.results
+    .bind(groupId, publicName)
 }
 
 export async function getAccountCredential(
@@ -167,6 +182,8 @@ export async function getAccountCredential(
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
         AND ${capabilityColumn} = 1 AND a.enabled = 1
+        AND a.platform = 'openai' AND a.protocol = 'openai'
+        AND a.base_url IS NOT NULL
       LIMIT 1`,
   )
     .bind(accountId, groupId, modelId)
@@ -246,14 +263,18 @@ function readApiKey(headers: Headers): string {
 }
 
 function modelSelect(): string {
-  return `SELECT m.id AS model_id, m.public_name,
+  return `SELECT revision.revision AS config_revision,
+                 m.id AS model_id, m.public_name,
                  COALESCE(gm.upstream_name_override, m.upstream_name) AS upstream_name,
                  m.endpoint, p.id AS price_id, p.version AS price_version,
                  p.input_micros_per_million, p.output_micros_per_million,
                  p.cache_read_micros_per_million, p.per_request_micros,
                  p.minimum_reservation_micros,
+                 g.rate_multiplier_ppm,
                  gm.max_output_tokens, gm.default_max_output_tokens
             FROM group_models gm
+            JOIN "groups" g ON g.id = gm.group_id
             JOIN models m ON m.id = gm.model_id
-            JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id`
+            JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id
+            CROSS JOIN gateway_config_revision revision`
 }

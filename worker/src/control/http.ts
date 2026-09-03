@@ -63,6 +63,63 @@ export function requireSafeInteger(
   return value as number
 }
 
+export function optionalSafeInteger(
+  body: Record<string, unknown>,
+  field: string,
+  minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  return body[field] === undefined
+    ? undefined
+    : requireSafeInteger(body, field, minimum, maximum)
+}
+
+export function optionalBoolean(
+  body: Record<string, unknown>,
+  field: string,
+): boolean | undefined {
+  const value = body[field]
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must be a boolean`)
+  }
+  return value
+}
+
+export function optionalNullableString(
+  body: Record<string, unknown>,
+  field: string,
+  maximum: number,
+): string | null | undefined {
+  if (body[field] === undefined) return undefined
+  if (body[field] === null || body[field] === '') return null
+  return requireString(body, field, maximum)
+}
+
+export function requireExpectedControlVersion(
+  request: Request,
+  body: Record<string, unknown>,
+): number {
+  const bodyValue = optionalSafeInteger(body, 'expected_control_version')
+  const header = request.headers.get('if-match')?.trim()
+  let headerValue: number | undefined
+  if (header !== undefined && header !== '') {
+    const match = /^(?:W\/)?"?(\d+)"?$/.exec(header)
+    if (match === null || !Number.isSafeInteger(Number(match[1]))) {
+      throw new GatewayError(400, 'invalid_if_match', 'If-Match must contain a control version')
+    }
+    headerValue = Number(match[1])
+  }
+  if (bodyValue !== undefined && headerValue !== undefined && bodyValue !== headerValue) {
+    throw new GatewayError(400, 'control_version_mismatch', 'If-Match and expected_control_version disagree')
+  }
+  const value = bodyValue ?? headerValue
+  if (value === undefined) {
+    throw new GatewayError(428, 'control_version_required', 'If-Match or expected_control_version is required')
+  }
+  return value
+}
+
 export function requireResourceId(value: string | undefined, resource: string): string {
   if (
     value === undefined ||

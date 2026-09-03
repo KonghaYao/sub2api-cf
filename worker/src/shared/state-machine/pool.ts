@@ -28,6 +28,8 @@ export interface PoolLeaseState {
 
 export interface PoolMachineState {
   schema_version: typeof POOL_SCHEMA_VERSION;
+  config_revision: number;
+  config_fingerprint: string;
   accounts: Record<string, PoolAccountState>;
   leases: Record<string, PoolLeaseState>;
   failure_events: Record<string, string>;
@@ -37,6 +39,17 @@ type PoolCommandEnvelope = { schema_version: typeof POOL_SCHEMA_VERSION };
 
 export type PoolCommand = PoolCommandEnvelope &
   (
+    | {
+        type: "sync_accounts";
+        config_revision: number;
+        config_fingerprint: string;
+        accounts: Array<{
+          account_id: string;
+          max_concurrency: number;
+          priority: number;
+          weight: number;
+        }>;
+      }
     | {
         type: "upsert_account";
         account_id: string;
@@ -85,6 +98,8 @@ export class PoolStateMachineError extends Error {
 export function createPoolMachineState(): PoolMachineState {
   return {
     schema_version: POOL_SCHEMA_VERSION,
+    config_revision: 0,
+    config_fingerprint: "",
     accounts: {},
     leases: {},
     failure_events: {},
@@ -103,6 +118,8 @@ export function applyPoolCommand(
 
   const state = reclaimExpiredLeases(inputState, nowMs);
   switch (command.type) {
+    case "sync_accounts":
+      return syncAccounts(state, command, nowMs);
     case "upsert_account":
       return upsertAccount(state, command, nowMs);
     case "reserve":
@@ -114,6 +131,85 @@ export function applyPoolCommand(
     case "failure":
       return recordFailure(state, command, nowMs);
   }
+}
+
+function syncAccounts(
+  state: PoolMachineState,
+  command: Extract<PoolCommand, { type: "sync_accounts" }>,
+  nowMs: number,
+): PoolTransition {
+  if (!Number.isSafeInteger(command.config_revision) || command.config_revision <= 0) {
+    throw new PoolStateMachineError(
+      "invalid_config_revision",
+      "config_revision must be a positive safe integer",
+    );
+  }
+  if (!/^[a-f0-9]{64}$/.test(command.config_fingerprint)) {
+    throw new PoolStateMachineError(
+      "invalid_config_fingerprint",
+      "config_fingerprint must be a lowercase SHA-256 digest",
+    );
+  }
+  if (command.config_revision === state.config_revision) {
+    if (command.config_fingerprint !== state.config_fingerprint) {
+      throw new PoolStateMachineError(
+        "config_revision_conflict",
+        "config_revision was already applied with different accounts",
+      );
+    }
+    return { state, idempotent: true, lease: null };
+  }
+  if (command.config_revision < state.config_revision) {
+    return { state, idempotent: true, lease: null };
+  }
+
+  const configuredIds = new Set<string>();
+  const accounts: Record<string, PoolAccountState> = {};
+  for (const configured of command.accounts) {
+    assertIdentifier(configured.account_id, "account_id");
+    if (configuredIds.has(configured.account_id)) {
+      throw new PoolStateMachineError("duplicate_account", "accounts contains a duplicate account_id");
+    }
+    configuredIds.add(configured.account_id);
+    if (!Number.isSafeInteger(configured.max_concurrency) || configured.max_concurrency <= 0) {
+      throw new PoolStateMachineError(
+        "invalid_max_concurrency",
+        "max_concurrency must be a positive safe integer",
+      );
+    }
+    assertNonNegativeSafeInteger(configured.priority, "priority");
+    if (!Number.isSafeInteger(configured.weight) || configured.weight <= 0) {
+      throw new PoolStateMachineError("invalid_weight", "weight must be a positive safe integer");
+    }
+    const existing = state.accounts[configured.account_id];
+    accounts[configured.account_id] = {
+      schema_version: POOL_SCHEMA_VERSION,
+      account_id: configured.account_id,
+      enabled: true,
+      max_concurrency: configured.max_concurrency,
+      priority: configured.priority,
+      weight: configured.weight,
+      consecutive_failures: existing?.consecutive_failures ?? 0,
+      cooldown_until_ms: existing?.cooldown_until_ms ?? 0,
+      updated_at_ms: nowMs,
+    };
+  }
+  for (const existing of Object.values(state.accounts)) {
+    if (configuredIds.has(existing.account_id)) continue;
+    accounts[existing.account_id] = existing.enabled
+      ? { ...existing, enabled: false, updated_at_ms: nowMs }
+      : existing;
+  }
+  return {
+    state: {
+      ...state,
+      config_revision: command.config_revision,
+      config_fingerprint: command.config_fingerprint,
+      accounts,
+    },
+    idempotent: false,
+    lease: null,
+  };
 }
 
 export function reclaimExpiredLeases(state: PoolMachineState, nowMs: number): PoolMachineState {

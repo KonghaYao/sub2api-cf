@@ -1,6 +1,7 @@
 import type { Env } from '../env'
 import type { PlatformEvent, UsageSettledPayload } from '../env'
 import { GatewayError } from './errors'
+import { sha256Hex } from './crypto'
 import type { AccountCandidate, GatewayEndpoint, GatewayPrincipal } from './types'
 
 export const STATE_SCHEMA_VERSION = 1
@@ -120,44 +121,31 @@ export async function syncPoolAccounts(
   candidates: AccountCandidate[],
 ): Promise<DurableObjectStub> {
   const stub = poolStub(env, groupId, modelId, endpoint)
-  const snapshotResponse = await stub.fetch(new Request('https://state.internal/snapshot'))
-  if (!snapshotResponse.ok) throw await stateResponseError(snapshotResponse)
-  const snapshot = (await snapshotResponse.json()) as {
-    accounts?: Array<{ account_id?: unknown; enabled?: unknown; max_concurrency?: unknown }>
+  const configRevision = candidates[0]?.config_revision
+  if (
+    !Number.isSafeInteger(configRevision) ||
+    (configRevision as number) <= 0 ||
+    candidates.some((account) => account.config_revision !== configRevision)
+  ) {
+    throw new GatewayError(500, 'invalid_config_revision', 'Routing config revision is invalid', 'server_error')
   }
-  const currentIds = new Set(candidates.map((account) => account.account_id))
-  const staleAccounts = (snapshot.accounts ?? []).filter(
-    (account): account is { account_id: string; enabled: boolean; max_concurrency: number } =>
-      typeof account.account_id === 'string' &&
-      account.enabled === true &&
-      Number.isSafeInteger(account.max_concurrency) &&
-      !currentIds.has(account.account_id),
-  )
-  await Promise.all(
-    staleAccounts.map((account) =>
-      requireStateOk(
-        post(stub, '/accounts/upsert', {
-          schema_version: STATE_SCHEMA_VERSION,
-          account_id: account.account_id,
-          enabled: false,
-          max_concurrency: account.max_concurrency,
-        }),
-      ),
-    ),
-  )
-  await Promise.all(
-    candidates.map((account) =>
-      requireStateOk(
-        post(stub, '/accounts/upsert', {
-          schema_version: STATE_SCHEMA_VERSION,
-          account_id: account.account_id,
-          enabled: true,
-          max_concurrency: account.max_concurrency,
-          priority: account.priority,
-          weight: account.weight,
-        }),
-      ),
-    ),
+  await requireStateOk(
+    post(stub, '/accounts/sync', {
+      schema_version: STATE_SCHEMA_VERSION,
+      config_revision: configRevision,
+      config_fingerprint: await sha256Hex(JSON.stringify(candidates.map((account) => ({
+        account_id: account.account_id,
+        max_concurrency: account.max_concurrency,
+        priority: account.priority,
+        weight: account.weight,
+      })))),
+      accounts: candidates.map((account) => ({
+        account_id: account.account_id,
+        max_concurrency: account.max_concurrency,
+        priority: account.priority,
+        weight: account.weight,
+      })),
+    }),
   )
   return stub
 }
