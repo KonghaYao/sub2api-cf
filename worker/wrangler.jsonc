@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.1.0"
+    "APP_VERSION": "0.2.0"
   },
   "assets": {
     "directory": "../frontend/dist",
@@ -50,6 +50,15 @@
         "binding": "EVENTS_QUEUE",
         "queue": "sub2api-events-dev"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "sub2api-events-dev",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+        "dead_letter_queue": "sub2api-events-dev-dlq"
+      }
     ]
   },
   "durable_objects": {
@@ -75,7 +84,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.1.0"
+        "APP_VERSION": "0.2.0"
       },
       "d1_databases": [
         {
@@ -103,6 +112,15 @@
             "binding": "EVENTS_QUEUE",
             "queue": "sub2api-events-staging"
           }
+        ],
+        "consumers": [
+          {
+            "queue": "sub2api-events-staging",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 10,
+            "dead_letter_queue": "sub2api-events-staging-dlq"
+          }
         ]
       },
       "durable_objects": {
@@ -116,13 +134,16 @@
             "class_name": "PoolStateDO"
           }
         ]
+      },
+      "triggers": {
+        "crons": ["* * * * *"]
       }
     },
     "production": {
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.1.0"
+        "APP_VERSION": "0.2.0"
       },
       "d1_databases": [
         {
@@ -150,6 +171,15 @@
             "binding": "EVENTS_QUEUE",
             "queue": "sub2api-events-production"
           }
+        ],
+        "consumers": [
+          {
+            "queue": "sub2api-events-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 10,
+            "dead_letter_queue": "sub2api-events-production-dlq"
+          }
         ]
       },
       "durable_objects": {
@@ -163,10 +193,16 @@
             "class_name": "PoolStateDO"
           }
         ]
+      },
+      "triggers": {
+        "crons": ["* * * * *"]
       }
     }
   },
   "observability": {
     "enabled": true
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
   }
 }

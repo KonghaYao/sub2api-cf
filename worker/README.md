@@ -11,9 +11,52 @@ features belong here and must use Cloudflare-native bindings.
 3. Apply local D1 migrations with `pnpm run db:migrate:local`.
 4. Start the local Worker with `pnpm run dev`.
 
-The development, staging, and production resource IDs in `wrangler.jsonc` are
-distinct placeholders. Create separate Cloudflare resources for every
-environment and replace every placeholder before the first remote deployment.
+Development and staging still use placeholders. Production is bound to the
+dedicated D1, KV, R2, Queue, and Durable Object resources created for this
+project.
+
+## Core gateway configuration
+
+The first Worker-native gateway slice supports:
+
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `POST /v1/responses` (plus the `/responses` compatibility alias)
+- native JSON and SSE pass-through for OpenAI-compatible HTTPS upstreams
+
+Set three independent production secrets before accepting traffic:
+
+```sh
+wrangler secret put API_KEY_PEPPER --env production
+wrangler secret put CREDENTIALS_MASTER_KEY --env production
+wrangler secret put ADMIN_TOKEN --env production
+```
+
+Each value must be high entropy; the last two keying secrets and the admin
+token must not be reused. Bootstrap a first user/group/account after applying
+D1 migrations (one bootstrap request accepts up to 20 models):
+
+```sh
+curl -X POST https://YOUR_WORKER/api/v1/admin/bootstrap \
+  -H 'Authorization: Bearer YOUR_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "user":{"email":"admin@example.com","balance_micros":100000000},
+    "group":{"name":"default"},
+    "account":{"name":"primary","base_url":"https://api.openai.com/v1","api_key":"UPSTREAM_KEY","max_concurrency":4},
+    "models":[{
+      "public_name":"gpt-5-mini",
+      "endpoint":"both",
+      "input_micros_per_million":250000,
+      "output_micros_per_million":2000000
+    }]
+  }'
+```
+
+The returned customer API key is shown once. D1 stores only its
+HMAC-SHA-256 digest. The upstream key is encrypted with AES-256-GCM and bound
+to the account/secret version as authenticated data. Client-supplied proxy,
+base URL, SOCKS, uTLS, JA3, and transport controls are rejected.
 
 ## Checks
 
@@ -44,7 +87,18 @@ earliest active lease with a Durable Object Alarm, and reschedules or clears the
 alarm after state changes. Request IDs remain tombstones for seven days so a
 retry cannot silently acquire a second account lease.
 
+`PoolStateDO` also renews active leases with an ordered idempotency sequence,
+so long SSE streams do not silently lose their concurrency slot. Pools are
+isolated by group, model, and endpoint so concurrent model traffic cannot
+overwrite another model's account snapshot.
+
 Queue messages use the versioned envelope `event_id`, `event_type`,
 `occurred_at_ms`, `aggregate_type`, `aggregate_id`, and `payload`. D1 outbox
-rows carry the same routing and occurrence fields before a Queue consumer is
-introduced.
+rows carry the same routing and occurrence fields. Financial settlement and a
+`UserStateDO` outbox event are committed in one SQLite transaction. The Queue
+consumer writes an idempotent D1 usage projection and coalesces API-key
+`last_used_at_ms` updates. A D1 recovery command is written before settlement;
+Queue retries and the minute Cron trigger recover transient Durable Object
+failures, and exhausted Queue messages are retained in a production DLQ.
+Settlement recovery is parked for manual review after 20 failed automatic
+attempts instead of consuming Cron work forever.

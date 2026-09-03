@@ -55,6 +55,10 @@ class FakeUserStateStorage {
       }
       return [];
     }
+    if (normalized.includes("FROM user_outbox")) {
+      if (normalized.includes("MIN(available_at_ms)")) return [{ next_alarm_ms: null }];
+      return [];
+    }
     if (normalized.startsWith("INSERT INTO user_profile")) {
       this.profile = {
         schema_version: params[0] as number,

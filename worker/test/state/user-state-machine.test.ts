@@ -156,6 +156,45 @@ describe("user state machine", () => {
     expect(repeated.state).toEqual(settled.state);
   });
 
+  it("atomically charges actual usage above the estimate when balance remains", () => {
+    const authorized = applyUserCommand(
+      createUserMachineState({
+        user_id: "user-1",
+        balance_micros: 1_000,
+        enabled: true,
+        now_ms: 1_000,
+      }),
+      { schema_version: 1, type: "authorize", request_id: "request-1" },
+      2_000,
+    );
+    const reserved = applyUserCommand(
+      authorized.state,
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        amount_micros: 100,
+      },
+      3_000,
+    );
+    const settled = applyUserCommand(
+      reserved.state,
+      {
+        schema_version: 1,
+        type: "settle",
+        request_id: "request-1",
+        amount_micros: 250,
+      },
+      4_000,
+    );
+
+    expect(settled.state.profile).toMatchObject({
+      balance_micros: 750,
+      reserved_micros: 0,
+      settled_micros: 250,
+    });
+  });
+
   it("rejects negative, fractional, and unsafe monetary values", () => {
     const invalidValues = [-1, 0.5, Number.MAX_SAFE_INTEGER + 1];
 

@@ -231,13 +231,19 @@ KV 保存 API Key hash 到内部 ID 的加速映射、版本化模型价格、�
 
 ## 8. 本次施工进度（2026-09-03）
 
-本次完成的是首轮施工的基础批次，不代表阶段 1、阶段 2 或全量迁移已经验收完成：
+本次完成的是首轮施工和阶段 3 的标准 OpenAI-compatible 核心切片，不代表旧系统全量接口已经迁移：
 
 - 已完成 Workers/Hono/Wrangler 工程基座、健康与就绪探针、API 404 边界和 Static Assets fallback。
-- 已完成 development/staging/production 的独立 binding 骨架；资源 ID 仍为不可部署的占位值。
+- 已创建并绑定 production D1、KV、R2、Queue 与 Durable Objects；development/staging 仍保留占位配置。
 - 已完成 D1 最小 baseline，并验证可从空库迁移。
 - 已完成 `UserStateDO` 原型：整数账务、不可变 ledger、幂等余额变更、预占/续租/结算/释放和 Alarm 回收。
-- 已完成 `PoolStateDO` 原型：账号容量、幂等租约、失败冷却、tombstone 和 Alarm 回收。
+- 已完成 `PoolStateDO`：账号容量、幂等租约/续租、失败冷却、tombstone 和 Alarm 回收。
+- 账号池按分组、模型与端点隔离，取用密钥前再次校验账号能力，避免并发请求串用不兼容账号。
 - 已完成 Vue 的 Cloudflare Static Assets 独立构建输出，旧 Go embed 构建仍可使用。
+- 已完成 HMAC API Key 鉴权、AES-GCM 上游凭据、分组模型目录、整数价格、余额预占和账号租约。
+- 已完成 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 的标准 HTTPS/JSON/SSE 透传；流式事件增量解析，不缓存完整响应。
+- 已完成 User DO 财务 outbox 与 Queue/D1 幂等 usage 投影，所有正常、错误和取消路径均结算或释放。
+- 已完成结算恢复表、Queue 重试、生产 DLQ 和每分钟 Cron 补偿，瞬时 DO 故障不会静默漏账。
+- 已明确拒绝客户端代理、自定义上游、SOCKS、uTLS、JA3 和任意 transport 配置。
 
-下一批优先完成 API contracts/golden fixtures、真实 SQLite-backed DO 并发与故障注入测试，以及第一个标准 HTTPS/SSE 上游垂直切片。旧 Go、PostgreSQL 与 Redis 在灰度切流前不会删除。
+下一批优先完成控制面 CRUD、真实 Workers 测试池的 D1/DO/Queue 故障注入、更多 provider 协议转换与前端切换。旧 Go、PostgreSQL 与 Redis 在完整灰度切流前不会删除。

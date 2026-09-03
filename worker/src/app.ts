@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { Env } from './env'
+import { handleBootstrap, handleGateway, handleModels } from './gateway/handler'
 
 type AppBindings = {
   Bindings: Env
@@ -64,6 +65,13 @@ export function createApp() {
       data: settings ?? defaultPublicSettings(),
     })
   })
+
+  app.post('/api/v1/admin/bootstrap', handleBootstrap)
+
+  app.get('/v1/models', handleModels)
+  app.post('/v1/chat/completions', (context) => handleGateway(context, 'chat_completions'))
+  app.post('/v1/responses', (context) => handleGateway(context, 'responses'))
+  app.post('/responses', (context) => handleGateway(context, 'responses'))
 
   app.notFound(async (context) => {
     const pathname = new URL(context.req.url).pathname

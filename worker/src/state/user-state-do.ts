@@ -28,6 +28,7 @@ import {
   requireString,
   StateApiError,
 } from "./http";
+import type { Env } from "../env";
 
 interface UserProfileRow {
   schema_version: number;
@@ -87,7 +88,10 @@ export interface SetUserEnabledCommand {
 }
 
 export class UserStateDO {
-  constructor(private readonly state: DurableObjectState) {
+  constructor(
+    private readonly state: DurableObjectState,
+    private readonly env?: Env,
+  ) {
     this.state.blockConcurrencyWhile(async () => {
       this.initializeSchema();
       this.state.storage.transactionSync(() => {
@@ -126,6 +130,7 @@ export class UserStateDO {
     this.state.storage.transactionSync(() => {
       this.expireDueReservations(Date.now());
     });
+    await this.publishPendingOutbox();
     await this.scheduleNextReservationAlarm();
   }
 
@@ -352,7 +357,12 @@ export class UserStateDO {
     requireSchemaVersion(body);
     const requestId = requireString(body, "request_id");
     const command = parseCommand(type, body, requestId);
+    const usageEvent = type === "settle" ? parseOptionalUsageEvent(body.usage_event, requestId) : null;
     const nowMs = Date.now();
+
+    if (type === "authorize" && body.api_key_id !== undefined) {
+      await this.verifyAuthorization(body);
+    }
 
     const response = this.state.storage.transactionSync(() => {
       this.expireDueReservations(nowMs);
@@ -379,6 +389,16 @@ export class UserStateDO {
           }),
         );
       }
+      if (command.type === "settle" && usageEvent !== null) {
+        const payload = usageEvent.payload as Record<string, unknown>;
+        if (payload.user_id !== transition.state.profile.user_id) {
+          throw new StateApiError(400, "usage_event_user_mismatch", "usage_event user_id does not match user state");
+        }
+        if (payload.amount_micros !== command.amount_micros) {
+          throw new StateApiError(400, "usage_event_amount_mismatch", "usage_event amount does not match settlement");
+        }
+        this.appendOutboxEvent(usageEvent, nowMs);
+      }
 
       return json({
         schema_version: STATE_SCHEMA_VERSION,
@@ -390,9 +410,32 @@ export class UserStateDO {
       });
     });
     if (type === "reserve" || type === "renew" || type === "cancel" || type === "settle") {
+      if (type === "settle") await this.publishPendingOutbox();
       await this.scheduleNextReservationAlarm();
     }
     return response;
+  }
+
+  private async verifyAuthorization(body: Record<string, unknown>): Promise<void> {
+    const userId = requireString(body, "user_id");
+    const apiKeyId = requireString(body, "api_key_id");
+    const authVersion = requireSafeInteger(body, "api_key_auth_version", { minimum: 1 });
+    if (this.env?.DB === undefined) {
+      throw new StateApiError(503, "authorization_store_unavailable", "Authorization store is unavailable");
+    }
+    const result = await this.env.DB.prepare(
+      `SELECT k.id
+         FROM api_keys k
+         JOIN users u ON u.id = k.user_id
+        WHERE k.id = ? AND k.user_id = ? AND k.auth_version = ?
+          AND k.enabled = 1 AND k.revoked_at_ms IS NULL
+          AND (k.expires_at_ms IS NULL OR k.expires_at_ms > ?)
+          AND u.status = 'active'
+        LIMIT 1`,
+    ).bind(apiKeyId, userId, authVersion, Date.now()).first();
+    if (result === null) {
+      throw new StateApiError(401, "invalid_api_key", "API key authorization is no longer valid");
+    }
   }
 
   private initializeSchema(): void {
@@ -472,6 +515,22 @@ export class UserStateDO {
     this.state.storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS idx_user_ledger_recent
          ON user_ledger(created_at_ms DESC, mutation_key DESC)`,
+    );
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS user_outbox (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        available_at_ms INTEGER NOT NULL CHECK (available_at_ms >= 0),
+        published_at_ms INTEGER CHECK (published_at_ms IS NULL OR published_at_ms >= 0),
+        created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_user_outbox_pending
+         ON user_outbox(available_at_ms, event_id)
+        WHERE published_at_ms IS NULL`,
     );
   }
 
@@ -633,18 +692,121 @@ export class UserStateDO {
     return expiredCount;
   }
 
+  private appendOutboxEvent(event: Record<string, unknown>, nowMs: number): void {
+    const requestId = (event.payload as Record<string, unknown>).request_id as string;
+    const existing = Array.from(
+      this.state.storage.sql.exec(
+        "SELECT payload_json FROM user_outbox WHERE request_id = ?",
+        requestId,
+      ),
+    )[0] as { payload_json: string } | undefined;
+    const payloadJson = JSON.stringify(event);
+    if (existing !== undefined) {
+      if (existing.payload_json !== payloadJson) {
+        throw new StateApiError(409, "usage_event_conflict", "request_id already has a different usage event");
+      }
+      return;
+    }
+    this.state.storage.sql.exec(
+      `INSERT INTO user_outbox (
+         event_id, request_id, payload_json, attempts, available_at_ms, published_at_ms, created_at_ms
+       ) VALUES (?, ?, ?, 0, ?, NULL, ?)`,
+      event.event_id as string,
+      requestId,
+      payloadJson,
+      nowMs,
+      nowMs,
+    );
+  }
+
+  private async publishPendingOutbox(): Promise<void> {
+    if (this.env?.EVENTS_QUEUE === undefined) return;
+    const nowMs = Date.now();
+    const rows = Array.from(
+      this.state.storage.sql.exec(
+        `SELECT event_id, payload_json, attempts
+           FROM user_outbox
+          WHERE published_at_ms IS NULL AND available_at_ms <= ?
+          ORDER BY available_at_ms, event_id
+          LIMIT 10`,
+        nowMs,
+      ),
+    ) as Array<{ event_id: string; payload_json: string; attempts: number }>;
+    for (const row of rows) {
+      try {
+        await this.env.EVENTS_QUEUE.send(JSON.parse(row.payload_json));
+        this.state.storage.sql.exec(
+          "UPDATE user_outbox SET published_at_ms = ? WHERE event_id = ? AND published_at_ms IS NULL",
+          Date.now(),
+          row.event_id,
+        );
+      } catch (error) {
+        const retryAt = Date.now() + Math.min(60_000, 1_000 * 2 ** Math.min(row.attempts, 6));
+        this.state.storage.sql.exec(
+          `UPDATE user_outbox
+              SET attempts = attempts + 1, available_at_ms = ?
+            WHERE event_id = ? AND published_at_ms IS NULL`,
+          retryAt,
+          row.event_id,
+        );
+        console.error("usage outbox publish failed", {
+          event_id: row.event_id,
+          name: error instanceof Error ? error.name : "unknown",
+        });
+        break;
+      }
+    }
+    this.state.storage.sql.exec(
+      "DELETE FROM user_outbox WHERE published_at_ms IS NOT NULL AND published_at_ms < ?",
+      Math.max(0, Date.now() - 7 * 24 * 60 * 60 * 1_000),
+    );
+  }
+
   private async scheduleNextReservationAlarm(): Promise<void> {
-    const row = Array.from(
+    const reservationRow = Array.from(
       this.state.storage.sql.exec(
         `SELECT MIN(reservation_expires_at_ms) AS next_alarm_ms
            FROM user_requests
           WHERE status = 'reserved'`,
       ),
     )[0] as { next_alarm_ms: number | null } | undefined;
-    if (typeof row?.next_alarm_ms === "number") {
-      await this.state.storage.setAlarm(Math.max(row.next_alarm_ms, Date.now()));
+    const outboxRow = Array.from(
+      this.state.storage.sql.exec(
+        `SELECT MIN(available_at_ms) AS next_alarm_ms
+           FROM user_outbox
+          WHERE published_at_ms IS NULL`,
+      ),
+    )[0] as { next_alarm_ms: number | null } | undefined;
+    const candidates = [reservationRow?.next_alarm_ms, outboxRow?.next_alarm_ms].filter(
+      (value): value is number => typeof value === "number",
+    );
+    if (candidates.length > 0) {
+      await this.state.storage.setAlarm(Math.max(Math.min(...candidates), Date.now()));
     }
   }
+}
+
+function parseOptionalUsageEvent(value: unknown, requestId: string): Record<string, unknown> | null {
+  if (value === undefined) return null;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new StateApiError(400, "invalid_usage_event", "usage_event must be an object");
+  }
+  const event = value as Record<string, unknown>;
+  if (
+    event.schema_version !== STATE_SCHEMA_VERSION ||
+    typeof event.event_id !== "string" ||
+    event.event_id.length === 0 ||
+    event.event_id.length > 128 ||
+    event.event_type !== "usage.settled.v1" ||
+    event.aggregate_type !== "user" ||
+    event.payload === null ||
+    typeof event.payload !== "object" ||
+    Array.isArray(event.payload) ||
+    (event.payload as Record<string, unknown>).request_id !== requestId
+  ) {
+    throw new StateApiError(400, "invalid_usage_event", "usage_event has an invalid envelope");
+  }
+  return event;
 }
 
 export function userCommandTypeFor(method: string, pathname: string): UserCommand["type"] | null {

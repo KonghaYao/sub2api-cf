@@ -7,6 +7,8 @@ export interface PoolAccountState {
   account_id: string;
   enabled: boolean;
   max_concurrency: number;
+  priority: number;
+  weight: number;
   consecutive_failures: number;
   cooldown_until_ms: number;
   updated_at_ms: number;
@@ -18,6 +20,8 @@ export interface PoolLeaseState {
   account_id: string;
   status: PoolLeaseStatus;
   expires_at_ms: number;
+  renewal_sequence: number;
+  last_renewal_ttl_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -38,12 +42,20 @@ export type PoolCommand = PoolCommandEnvelope &
         account_id: string;
         enabled: boolean;
         max_concurrency: number;
+        priority?: number;
+        weight?: number;
       }
     | {
         type: "reserve";
         request_id: string;
         lease_ttl_ms: number;
         preferred_account_id?: string;
+      }
+    | {
+        type: "renew";
+        request_id: string;
+        renewal_sequence: number;
+        lease_ttl_ms: number;
       }
     | { type: "release"; request_id: string }
     | {
@@ -95,6 +107,8 @@ export function applyPoolCommand(
       return upsertAccount(state, command, nowMs);
     case "reserve":
       return reserve(state, command, nowMs);
+    case "renew":
+      return renew(state, command, nowMs);
     case "release":
       return release(state, command.request_id, nowMs);
     case "failure":
@@ -128,11 +142,19 @@ function upsertAccount(
       "max_concurrency must be a positive safe integer",
     );
   }
+  const priority = command.priority ?? existingPriority(state, command.account_id);
+  const weight = command.weight ?? existingWeight(state, command.account_id);
+  assertNonNegativeSafeInteger(priority, "priority");
+  if (!Number.isSafeInteger(weight) || weight <= 0) {
+    throw new PoolStateMachineError("invalid_weight", "weight must be a positive safe integer");
+  }
 
   const existing = state.accounts[command.account_id];
   if (
     existing?.enabled === command.enabled &&
-    existing.max_concurrency === command.max_concurrency
+    existing.max_concurrency === command.max_concurrency &&
+    existing.priority === priority &&
+    existing.weight === weight
   ) {
     return { state, idempotent: true, lease: null };
   }
@@ -142,6 +164,8 @@ function upsertAccount(
     account_id: command.account_id,
     enabled: command.enabled,
     max_concurrency: command.max_concurrency,
+    priority,
+    weight,
     consecutive_failures: existing?.consecutive_failures ?? 0,
     cooldown_until_ms: existing?.cooldown_until_ms ?? 0,
     updated_at_ms: nowMs,
@@ -188,10 +212,12 @@ function reserve(
   }
 
   candidates.sort((left, right) => {
+    if (left.priority !== right.priority) return left.priority - right.priority;
     const leftActive = activeCounts[left.account_id] ?? 0;
     const rightActive = activeCounts[right.account_id] ?? 0;
     const utilizationOrder =
-      leftActive * right.max_concurrency - rightActive * left.max_concurrency;
+      leftActive * right.max_concurrency * right.weight -
+      rightActive * left.max_concurrency * left.weight;
     if (utilizationOrder !== 0) return utilizationOrder;
     if (left.consecutive_failures !== right.consecutive_failures) {
       return left.consecutive_failures - right.consecutive_failures;
@@ -210,6 +236,8 @@ function reserve(
     account_id: account.account_id,
     status: "active",
     expires_at_ms: nowMs + command.lease_ttl_ms,
+    renewal_sequence: 0,
+    last_renewal_ttl_ms: null,
     created_at_ms: nowMs,
     updated_at_ms: nowMs,
   };
@@ -217,6 +245,73 @@ function reserve(
     state: { ...state, leases: { ...state.leases, [lease.request_id]: lease } },
     idempotent: false,
     lease,
+  };
+}
+
+function existingPriority(state: PoolMachineState, accountId: string): number {
+  return state.accounts[accountId]?.priority ?? 50;
+}
+
+function existingWeight(state: PoolMachineState, accountId: string): number {
+  return state.accounts[accountId]?.weight ?? 1;
+}
+
+function renew(
+  state: PoolMachineState,
+  command: Extract<PoolCommand, { type: "renew" }>,
+  nowMs: number,
+): PoolTransition {
+  assertIdentifier(command.request_id, "request_id");
+  if (!Number.isSafeInteger(command.renewal_sequence) || command.renewal_sequence <= 0) {
+    throw new PoolStateMachineError(
+      "invalid_renewal_sequence",
+      "renewal_sequence must be a positive safe integer",
+    );
+  }
+  if (!Number.isSafeInteger(command.lease_ttl_ms) || command.lease_ttl_ms <= 0) {
+    throw new PoolStateMachineError("invalid_lease_ttl", "lease_ttl_ms must be a positive safe integer");
+  }
+  if (nowMs > Number.MAX_SAFE_INTEGER - command.lease_ttl_ms) {
+    throw new PoolStateMachineError("invalid_lease_ttl", "Lease expiry exceeds safe integer range");
+  }
+
+  const lease = state.leases[command.request_id];
+  if (lease === undefined) {
+    throw new PoolStateMachineError("lease_not_found", "Lease was not found");
+  }
+  if (lease.status !== "active") {
+    throw new PoolStateMachineError("invalid_transition", `Cannot renew a ${lease.status} lease`);
+  }
+  if (command.renewal_sequence < lease.renewal_sequence) {
+    return { state, idempotent: true, lease };
+  }
+  if (command.renewal_sequence === lease.renewal_sequence) {
+    if (lease.last_renewal_ttl_ms === command.lease_ttl_ms) {
+      return { state, idempotent: true, lease };
+    }
+    throw new PoolStateMachineError(
+      "renewal_conflict",
+      "renewal_sequence was already used with a different lease_ttl_ms",
+    );
+  }
+  if (command.renewal_sequence !== lease.renewal_sequence + 1) {
+    throw new PoolStateMachineError(
+      "renewal_out_of_order",
+      "renewal_sequence must increase by one",
+    );
+  }
+
+  const renewed: PoolLeaseState = {
+    ...lease,
+    expires_at_ms: nowMs + command.lease_ttl_ms,
+    renewal_sequence: command.renewal_sequence,
+    last_renewal_ttl_ms: command.lease_ttl_ms,
+    updated_at_ms: nowMs,
+  };
+  return {
+    state: { ...state, leases: { ...state.leases, [lease.request_id]: renewed } },
+    idempotent: false,
+    lease: renewed,
   };
 }
 

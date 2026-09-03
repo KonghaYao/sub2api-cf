@@ -155,6 +155,49 @@ describe("pool state machine", () => {
     expect(repeated.state).toEqual(released.state);
   });
 
+  it("renews a long-running lease with an ordered idempotency sequence", () => {
+    const reserved = applyPoolCommand(
+      poolWithAccount(),
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        lease_ttl_ms: 1_000,
+      },
+      2_000,
+    );
+    const renewed = applyPoolCommand(
+      reserved.state,
+      {
+        schema_version: 1,
+        type: "renew",
+        request_id: "request-1",
+        renewal_sequence: 1,
+        lease_ttl_ms: 5_000,
+      },
+      2_500,
+    );
+    const repeated = applyPoolCommand(
+      renewed.state,
+      {
+        schema_version: 1,
+        type: "renew",
+        request_id: "request-1",
+        renewal_sequence: 1,
+        lease_ttl_ms: 5_000,
+      },
+      3_000,
+    );
+
+    expect(renewed.lease).toMatchObject({
+      status: "active",
+      expires_at_ms: 7_500,
+      renewal_sequence: 1,
+    });
+    expect(repeated.idempotent).toBe(true);
+    expect(repeated.lease).toEqual(renewed.lease);
+  });
+
   it("records failure events idempotently and enforces cooldown", () => {
     const initial = poolWithAccount();
     const failed = applyPoolCommand(

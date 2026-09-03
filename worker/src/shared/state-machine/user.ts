@@ -338,8 +338,13 @@ function settle(state: UserMachineState, amountMicros: number, nowMs: number): U
   if (request.status !== "reserved") {
     throw new StateMachineError("invalid_transition", `Cannot settle a ${request.status} request`);
   }
-  if (amountMicros > request.reserved_micros) {
-    throw new StateMachineError("settlement_exceeds_reservation", "Settlement exceeds reservation");
+  const otherReservations = state.profile.reserved_micros - request.reserved_micros;
+  const availableForRequest = state.profile.balance_micros - otherReservations;
+  if (amountMicros > availableForRequest) {
+    throw new StateMachineError(
+      "settlement_exceeds_available_balance",
+      "Settlement exceeds the balance available after other reservations",
+    );
   }
   const settledMicros = checkedAddMicros(
     state.profile.settled_micros,

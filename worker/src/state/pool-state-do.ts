@@ -28,6 +28,8 @@ interface PoolAccountRow {
   account_id: string;
   enabled: number;
   max_concurrency: number;
+  priority: number;
+  weight: number;
   consecutive_failures: number;
   cooldown_until_ms: number;
   updated_at_ms: number;
@@ -39,6 +41,8 @@ interface PoolLeaseRow {
   account_id: string;
   status: PoolLeaseState["status"];
   expires_at_ms: number;
+  renewal_sequence: number;
+  last_renewal_ttl_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -172,11 +176,28 @@ export class PoolStateDO {
         schema_version INTEGER NOT NULL CHECK (schema_version = 1),
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
         max_concurrency INTEGER NOT NULL CHECK (max_concurrency > 0),
+        priority INTEGER NOT NULL DEFAULT 50 CHECK (priority >= 0),
+        weight INTEGER NOT NULL DEFAULT 1 CHECK (weight > 0),
         consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
         cooldown_until_ms INTEGER NOT NULL CHECK (cooldown_until_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
       ) STRICT
     `);
+    const accountColumns = new Set(
+      Array.from(this.state.storage.sql.exec("PRAGMA table_info(pool_accounts)"))
+        .map((row) => (row as { name?: unknown }).name)
+        .filter((name): name is string => typeof name === "string"),
+    );
+    if (!accountColumns.has("priority")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE pool_accounts ADD COLUMN priority INTEGER NOT NULL DEFAULT 50 CHECK (priority >= 0)",
+      );
+    }
+    if (!accountColumns.has("weight")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE pool_accounts ADD COLUMN weight INTEGER NOT NULL DEFAULT 1 CHECK (weight > 0)",
+      );
+    }
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS pool_leases (
         request_id TEXT PRIMARY KEY,
@@ -184,10 +205,27 @@ export class PoolStateDO {
         account_id TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('active', 'released', 'expired')),
         expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+        renewal_sequence INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0),
+        last_renewal_ttl_ms INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0),
         created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
       ) STRICT
     `);
+    const leaseColumns = new Set(
+      Array.from(this.state.storage.sql.exec("PRAGMA table_info(pool_leases)"))
+        .map((row) => (row as { name?: unknown }).name)
+        .filter((name): name is string => typeof name === "string"),
+    );
+    if (!leaseColumns.has("renewal_sequence")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE pool_leases ADD COLUMN renewal_sequence INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0)",
+      );
+    }
+    if (!leaseColumns.has("last_renewal_ttl_ms")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE pool_leases ADD COLUMN last_renewal_ttl_ms INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0)",
+      );
+    }
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS pool_failure_events (
         event_id TEXT PRIMARY KEY,
@@ -213,7 +251,7 @@ export class PoolStateDO {
   private loadMachineState(requestId?: string, failureEventId?: string): PoolMachineState {
     const state = createPoolMachineState();
     for (const value of this.state.storage.sql.exec(
-      `SELECT schema_version, account_id, enabled, max_concurrency, consecutive_failures,
+      `SELECT schema_version, account_id, enabled, max_concurrency, priority, weight, consecutive_failures,
               cooldown_until_ms, updated_at_ms
          FROM pool_accounts`,
     )) {
@@ -225,13 +263,13 @@ export class PoolStateDO {
       requestId === undefined
         ? this.state.storage.sql.exec(
             `SELECT schema_version, request_id, account_id, status, expires_at_ms,
-                    created_at_ms, updated_at_ms
+                    renewal_sequence, last_renewal_ttl_ms, created_at_ms, updated_at_ms
                FROM pool_leases
               WHERE status = 'active'`,
           )
         : this.state.storage.sql.exec(
             `SELECT schema_version, request_id, account_id, status, expires_at_ms,
-                    created_at_ms, updated_at_ms
+                    renewal_sequence, last_renewal_ttl_ms, created_at_ms, updated_at_ms
                FROM pool_leases
               WHERE status = 'active' OR request_id = ?`,
             requestId,
@@ -293,13 +331,15 @@ export class PoolStateDO {
   private persistAccount(account: PoolAccountState): void {
     this.state.storage.sql.exec(
       `INSERT INTO pool_accounts (
-         account_id, schema_version, enabled, max_concurrency, consecutive_failures,
+         account_id, schema_version, enabled, max_concurrency, priority, weight, consecutive_failures,
          cooldown_until_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id) DO UPDATE SET
          schema_version = excluded.schema_version,
          enabled = excluded.enabled,
          max_concurrency = excluded.max_concurrency,
+         priority = excluded.priority,
+         weight = excluded.weight,
          consecutive_failures = excluded.consecutive_failures,
          cooldown_until_ms = excluded.cooldown_until_ms,
          updated_at_ms = excluded.updated_at_ms`,
@@ -307,6 +347,8 @@ export class PoolStateDO {
       account.schema_version,
       account.enabled ? 1 : 0,
       account.max_concurrency,
+      account.priority,
+      account.weight,
       account.consecutive_failures,
       account.cooldown_until_ms,
       account.updated_at_ms,
@@ -317,13 +359,15 @@ export class PoolStateDO {
     this.state.storage.sql.exec(
       `INSERT INTO pool_leases (
          request_id, schema_version, account_id, status, expires_at_ms,
-         created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         renewal_sequence, last_renewal_ttl_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(request_id) DO UPDATE SET
          schema_version = excluded.schema_version,
          account_id = excluded.account_id,
          status = excluded.status,
          expires_at_ms = excluded.expires_at_ms,
+         renewal_sequence = excluded.renewal_sequence,
+         last_renewal_ttl_ms = excluded.last_renewal_ttl_ms,
          created_at_ms = excluded.created_at_ms,
          updated_at_ms = excluded.updated_at_ms`,
       lease.request_id,
@@ -331,6 +375,8 @@ export class PoolStateDO {
       lease.account_id,
       lease.status,
       lease.expires_at_ms,
+      lease.renewal_sequence,
+      lease.last_renewal_ttl_ms,
       lease.created_at_ms,
       lease.updated_at_ms,
     );
@@ -381,6 +427,7 @@ function commandTypeFor(method: string, pathname: string): PoolCommand["type"] |
   if (method !== "POST") return null;
   if (pathname === "/accounts/upsert") return "upsert_account";
   if (pathname === "/reserve") return "reserve";
+  if (pathname === "/renew") return "renew";
   if (pathname === "/release") return "release";
   if (pathname === "/failure") return "failure";
   return null;
@@ -398,6 +445,14 @@ function parseCommand(
         account_id: requireString(body, "account_id"),
         enabled: requireBoolean(body, "enabled"),
         max_concurrency: requireSafeInteger(body, "max_concurrency", { minimum: 1 }),
+        priority:
+          body.priority === undefined
+            ? undefined
+            : requireSafeInteger(body, "priority", { maximum: 1_000_000 }),
+        weight:
+          body.weight === undefined
+            ? undefined
+            : requireSafeInteger(body, "weight", { minimum: 1, maximum: 1_000_000 }),
       };
     case "reserve": {
       const preferredAccountId = optionalString(body, "preferred_account_id");
@@ -414,6 +469,17 @@ function parseCommand(
           : { preferred_account_id: preferredAccountId }),
       };
     }
+    case "renew":
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        request_id: requireString(body, "request_id"),
+        renewal_sequence: requireSafeInteger(body, "renewal_sequence", { minimum: 1 }),
+        lease_ttl_ms: requireSafeInteger(body, "lease_ttl_ms", {
+          minimum: 1,
+          maximum: 86_400_000,
+        }),
+      };
     case "release":
       return {
         schema_version: STATE_API_SCHEMA_VERSION,
@@ -441,6 +507,8 @@ function toAccountState(value: object): PoolAccountState {
     account_id: row.account_id,
     enabled: row.enabled === 1,
     max_concurrency: row.max_concurrency,
+    priority: row.priority,
+    weight: row.weight,
     consecutive_failures: row.consecutive_failures,
     cooldown_until_ms: row.cooldown_until_ms,
     updated_at_ms: row.updated_at_ms,
@@ -459,6 +527,8 @@ function toLeaseState(value: object): PoolLeaseState {
     account_id: row.account_id,
     status: row.status,
     expires_at_ms: row.expires_at_ms,
+    renewal_sequence: row.renewal_sequence,
+    last_renewal_ttl_ms: row.last_renewal_ttl_ms,
     created_at_ms: row.created_at_ms,
     updated_at_ms: row.updated_at_ms,
   };
