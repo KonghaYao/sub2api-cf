@@ -1,6 +1,7 @@
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { controlError, controlSuccess, readJsonObject } from '../control/http'
+import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
@@ -460,7 +461,8 @@ async function verifyTurnstile(
   if (typeof token !== 'string' || token.trim() === '' || token.length > 2_048) {
     throw new GatewayError(400, 'captcha_required', 'Turnstile verification is required')
   }
-  const secret = context.env.TURNSTILE_SECRET_KEY
+  const secret = context.env.TURNSTILE_SECRET_KEY ??
+    await readSystemSettingSecret(context.env, 'turnstile_secret_key')
   if (!secret) {
     throw new GatewayError(503, 'turnstile_not_configured', 'Turnstile is not configured', 'server_error')
   }

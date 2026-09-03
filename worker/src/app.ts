@@ -55,6 +55,7 @@ import {
   updateAdminGroup,
   updateAdminModel,
 } from './control/catalog'
+import { getAdminSettings, updateAdminSettings } from './control/settings'
 import type { Env } from './env'
 import {
   handleAnthropicCountTokens,
@@ -71,6 +72,13 @@ import {
   handleResponsesInputTokens,
 } from './gateway/handler'
 import { handleGatewayUsage, handleKeyBillingInfo } from './gateway/info'
+import {
+  createUserApiKey,
+  getUserApiKey,
+  listUserApiKeys,
+  revokeUserApiKey,
+  updateUserApiKey,
+} from './user/api-keys'
 
 type AppBindings = {
   Bindings: Env
@@ -97,6 +105,9 @@ function defaultPublicSettings() {
     site_name: 'Sub2API',
     registration_enabled: false,
     email_verification_enabled: false,
+    email_verify_enabled: false,
+    turnstile_enabled: false,
+    turnstile_site_key: '',
   }
 }
 
@@ -136,10 +147,15 @@ export function createApp() {
 
   app.get('/api/v1/settings/public', async (context) => {
     const key = `${context.env.ENVIRONMENT}:public-settings:v1`
-    const settings = await context.env.CONFIG_KV.get(key, 'json')
+    const settings = await context.env.CONFIG_KV.get<Record<string, unknown>>(key, 'json')
+    const resolved = settings ?? defaultPublicSettings()
     return context.json({
       code: 0,
-      data: settings ?? defaultPublicSettings(),
+      data: {
+        ...resolved,
+        email_verify_enabled:
+          resolved.email_verify_enabled ?? resolved.email_verification_enabled ?? false,
+      },
     })
   })
 
@@ -152,6 +168,8 @@ export function createApp() {
   app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
   app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
   app.use('/api/v1/admin/*', requireAdminSession)
+  app.get('/api/v1/admin/settings', getAdminSettings)
+  app.put('/api/v1/admin/settings', updateAdminSettings)
   app.get('/api/v1/admin/users', listAdminUsers)
   app.post('/api/v1/admin/users', createAdminUser)
   app.get('/api/v1/admin/users/:id', getAdminUser)
@@ -188,6 +206,12 @@ export function createApp() {
   app.put('/api/v1/admin/accounts/:id/models/:model_id', putAdminAccountModelCapability)
   app.delete('/api/v1/admin/accounts/:id/models/:model_id', deleteAdminAccountModelCapability)
   app.post('/api/v1/admin/accounts/:id/test', testAdminAccount)
+
+  app.get('/api/v1/keys', listUserApiKeys)
+  app.post('/api/v1/keys', createUserApiKey)
+  app.get('/api/v1/keys/:id', getUserApiKey)
+  app.put('/api/v1/keys/:id', updateUserApiKey)
+  app.delete('/api/v1/keys/:id', revokeUserApiKey)
 
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)
