@@ -128,14 +128,14 @@
         {
           "binding": "DB",
           "database_name": "sub2api-production",
-          "database_id": "22222222-2222-2222-2222-222222222222",
+          "database_id": "4e7f582b-3aee-441c-b544-8d38f10ec5d4",
           "migrations_dir": "migrations"
         }
       ],
       "kv_namespaces": [
         {
           "binding": "CONFIG_KV",
-          "id": "22222222222222222222222222222222"
+          "id": "dbed85df39ad4bc78c311f3b872974d4"
         }
       ],
       "r2_buckets": [
