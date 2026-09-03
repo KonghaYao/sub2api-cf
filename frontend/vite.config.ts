@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import checker from 'vite-plugin-checker'
 import { resolve } from 'path'
+import { resolveBuildOutDir } from './vite-build-target'
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
@@ -104,7 +105,7 @@ export default defineConfig(({ mode }) => {
     __INTLIFY_JIT_COMPILATION__: true
   },
   build: {
-    outDir: '../backend/internal/web/dist',
+    outDir: resolveBuildOutDir(mode),
     emptyOutDir: true,
     rollupOptions: {
       output: {

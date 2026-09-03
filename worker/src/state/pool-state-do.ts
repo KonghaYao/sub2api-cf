@@ -1,0 +1,485 @@
+import {
+  applyPoolCommand,
+  activeLeaseCounts,
+  createPoolMachineState,
+  nextActiveLeaseAlarmAt,
+  reclaimExpiredLeases,
+  type PoolAccountState,
+  type PoolCommand,
+  type PoolLeaseState,
+  type PoolMachineState,
+  PoolStateMachineError,
+} from "../shared/state-machine/pool";
+import {
+  errorResponse,
+  json,
+  optionalString,
+  readJsonObject,
+  requireBoolean,
+  requireSafeInteger,
+  requireSchemaVersion,
+  requireString,
+  STATE_API_SCHEMA_VERSION,
+  StateApiError,
+} from "./http";
+
+interface PoolAccountRow {
+  schema_version: number;
+  account_id: string;
+  enabled: number;
+  max_concurrency: number;
+  consecutive_failures: number;
+  cooldown_until_ms: number;
+  updated_at_ms: number;
+}
+
+interface PoolLeaseRow {
+  schema_version: number;
+  request_id: string;
+  account_id: string;
+  status: PoolLeaseState["status"];
+  expires_at_ms: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+const TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+
+export class PoolStateDO {
+  constructor(private readonly state: DurableObjectState) {
+    this.state.blockConcurrencyWhile(async () => {
+      this.initializeSchema();
+      const nowMs = Date.now();
+      this.state.storage.transactionSync(() => {
+        this.cleanupTombstones(nowMs);
+        this.reclaimPersistedLeases(nowMs);
+      });
+      await this.scheduleNextLeaseAlarm();
+    });
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    try {
+      const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/health") return this.health();
+      if (request.method === "GET" && url.pathname === "/snapshot") {
+        return await this.snapshot();
+      }
+      if (request.method === "POST" && url.pathname === "/reclaim") {
+        return await this.reclaim(await readJsonObject(request));
+      }
+
+      const commandType = commandTypeFor(request.method, url.pathname);
+      if (commandType !== null) {
+        return await this.executeCommand(commandType, await readJsonObject(request));
+      }
+      throw new StateApiError(404, "route_not_found", "Durable object route was not found");
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const nowMs = Date.now();
+    this.state.storage.transactionSync(() => {
+      this.cleanupTombstones(nowMs);
+      this.reclaimPersistedLeases(nowMs);
+    });
+    await this.scheduleNextLeaseAlarm();
+  }
+
+  private health(): Response {
+    const result = Array.from(this.state.storage.sql.exec("SELECT 1 AS healthy"))[0];
+    return json({
+      schema_version: STATE_API_SCHEMA_VERSION,
+      ok: result?.healthy === 1,
+      service: "pool-state-do",
+      storage: "sqlite",
+    });
+  }
+
+  private async snapshot(): Promise<Response> {
+    const nowMs = Date.now();
+    const response = this.state.storage.transactionSync(() => {
+      this.cleanupTombstones(nowMs);
+      const reclaimed = this.reclaimPersistedLeases(nowMs).state;
+      const activeCounts = activeLeaseCounts(reclaimed);
+      return json({
+        schema_version: STATE_API_SCHEMA_VERSION,
+        idempotency_retention_ms: TOMBSTONE_RETENTION_MS,
+        accounts: Object.values(reclaimed.accounts).map((account) => ({
+          ...account,
+          active_leases: activeCounts[account.account_id] ?? 0,
+        })),
+        active_leases: Object.values(reclaimed.leases).filter(
+          (lease) => lease.status === "active",
+        ),
+      });
+    });
+    await this.scheduleNextLeaseAlarm();
+    return response;
+  }
+
+  private async reclaim(body: Record<string, unknown>): Promise<Response> {
+    requireSchemaVersion(body);
+    const nowMs = Date.now();
+    const response = this.state.storage.transactionSync(() => {
+      this.cleanupTombstones(nowMs);
+      const { reclaimedCount } = this.reclaimPersistedLeases(nowMs);
+      return json({
+        schema_version: STATE_API_SCHEMA_VERSION,
+        reclaimed: reclaimedCount,
+      });
+    });
+    await this.scheduleNextLeaseAlarm();
+    return response;
+  }
+
+  private async executeCommand(
+    type: PoolCommand["type"],
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    requireSchemaVersion(body);
+    const command = parseCommand(type, body);
+    const nowMs = Date.now();
+
+    const response = this.state.storage.transactionSync(() => {
+      this.cleanupTombstones(nowMs);
+      const requestId = "request_id" in command ? command.request_id : undefined;
+      const eventId = "event_id" in command ? command.event_id : undefined;
+      const failureAccountId = command.type === "failure" ? command.account_id : undefined;
+      const current = this.loadMachineState(requestId, eventId);
+      const transition = applyPoolCommand(current, command, nowMs);
+      this.persistTransition(current, transition.state, eventId, failureAccountId, nowMs);
+      return json({
+        schema_version: STATE_API_SCHEMA_VERSION,
+        idempotent: transition.idempotent,
+        lease: transition.lease,
+        account:
+          transition.lease === null
+            ? accountForCommand(transition.state, command)
+            : transition.state.accounts[transition.lease.account_id],
+      });
+    });
+    await this.scheduleNextLeaseAlarm();
+    return response;
+  }
+
+  private initializeSchema(): void {
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pool_accounts (
+        account_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        max_concurrency INTEGER NOT NULL CHECK (max_concurrency > 0),
+        consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+        cooldown_until_ms INTEGER NOT NULL CHECK (cooldown_until_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pool_leases (
+        request_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        account_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'released', 'expired')),
+        expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+        created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pool_failure_events (
+        event_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        account_id TEXT NOT NULL,
+        processed_at_ms INTEGER NOT NULL CHECK (processed_at_ms >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_leases_active_expiry ON pool_leases(status, expires_at_ms)",
+    );
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_leases_account_status ON pool_leases(account_id, status)",
+    );
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_leases_tombstone_cleanup ON pool_leases(status, updated_at_ms)",
+    );
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_failure_events_cleanup ON pool_failure_events(processed_at_ms)",
+    );
+  }
+
+  private loadMachineState(requestId?: string, failureEventId?: string): PoolMachineState {
+    const state = createPoolMachineState();
+    for (const value of this.state.storage.sql.exec(
+      `SELECT schema_version, account_id, enabled, max_concurrency, consecutive_failures,
+              cooldown_until_ms, updated_at_ms
+         FROM pool_accounts`,
+    )) {
+      const account = toAccountState(value);
+      state.accounts[account.account_id] = account;
+    }
+
+    const leaseCursor =
+      requestId === undefined
+        ? this.state.storage.sql.exec(
+            `SELECT schema_version, request_id, account_id, status, expires_at_ms,
+                    created_at_ms, updated_at_ms
+               FROM pool_leases
+              WHERE status = 'active'`,
+          )
+        : this.state.storage.sql.exec(
+            `SELECT schema_version, request_id, account_id, status, expires_at_ms,
+                    created_at_ms, updated_at_ms
+               FROM pool_leases
+              WHERE status = 'active' OR request_id = ?`,
+            requestId,
+          );
+    for (const value of leaseCursor) {
+      const lease = toLeaseState(value);
+      state.leases[lease.request_id] = lease;
+    }
+
+    if (failureEventId !== undefined) {
+      const existing = Array.from(
+        this.state.storage.sql.exec(
+          "SELECT event_id, account_id FROM pool_failure_events WHERE event_id = ?",
+          failureEventId,
+        ),
+      )[0] as { event_id: string; account_id: string } | undefined;
+      if (existing !== undefined) state.failure_events[failureEventId] = existing.account_id;
+    }
+    return state;
+  }
+
+  private persistTransition(
+    before: PoolMachineState,
+    after: PoolMachineState,
+    failureEventId?: string,
+    failureAccountId?: string,
+    processedAtMs?: number,
+  ): void {
+    for (const [accountId, account] of Object.entries(after.accounts)) {
+      if (account === before.accounts[accountId]) continue;
+      this.persistAccount(account);
+    }
+    for (const [requestId, lease] of Object.entries(after.leases)) {
+      if (lease === before.leases[requestId]) continue;
+      this.persistLease(lease);
+    }
+    if (
+      failureEventId !== undefined &&
+      failureAccountId !== undefined &&
+      processedAtMs !== undefined &&
+      before.failure_events[failureEventId] === undefined &&
+      after.failure_events[failureEventId] === failureAccountId
+    ) {
+      const account = after.accounts[failureAccountId];
+      if (account === undefined) {
+        throw new PoolStateMachineError("invalid_transition", "Failure transition has no account");
+      }
+      this.state.storage.sql.exec(
+        `INSERT INTO pool_failure_events (event_id, schema_version, account_id, processed_at_ms)
+         VALUES (?, ?, ?, ?)`,
+        failureEventId,
+        STATE_API_SCHEMA_VERSION,
+        account.account_id,
+        processedAtMs,
+      );
+    }
+  }
+
+  private persistAccount(account: PoolAccountState): void {
+    this.state.storage.sql.exec(
+      `INSERT INTO pool_accounts (
+         account_id, schema_version, enabled, max_concurrency, consecutive_failures,
+         cooldown_until_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(account_id) DO UPDATE SET
+         schema_version = excluded.schema_version,
+         enabled = excluded.enabled,
+         max_concurrency = excluded.max_concurrency,
+         consecutive_failures = excluded.consecutive_failures,
+         cooldown_until_ms = excluded.cooldown_until_ms,
+         updated_at_ms = excluded.updated_at_ms`,
+      account.account_id,
+      account.schema_version,
+      account.enabled ? 1 : 0,
+      account.max_concurrency,
+      account.consecutive_failures,
+      account.cooldown_until_ms,
+      account.updated_at_ms,
+    );
+  }
+
+  private persistLease(lease: PoolLeaseState): void {
+    this.state.storage.sql.exec(
+      `INSERT INTO pool_leases (
+         request_id, schema_version, account_id, status, expires_at_ms,
+         created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(request_id) DO UPDATE SET
+         schema_version = excluded.schema_version,
+         account_id = excluded.account_id,
+         status = excluded.status,
+         expires_at_ms = excluded.expires_at_ms,
+         created_at_ms = excluded.created_at_ms,
+         updated_at_ms = excluded.updated_at_ms`,
+      lease.request_id,
+      lease.schema_version,
+      lease.account_id,
+      lease.status,
+      lease.expires_at_ms,
+      lease.created_at_ms,
+      lease.updated_at_ms,
+    );
+  }
+
+  private reclaimPersistedLeases(nowMs: number): {
+    state: PoolMachineState;
+    reclaimedCount: number;
+  } {
+    const current = this.loadMachineState();
+    const reclaimed = reclaimExpiredLeases(current, nowMs);
+    const reclaimedCount = countChangedLeases(current, reclaimed);
+    this.persistTransition(current, reclaimed);
+    return { state: reclaimed, reclaimedCount };
+  }
+
+  private async scheduleNextLeaseAlarm(): Promise<void> {
+    const expirations = Array.from(
+      this.state.storage.sql.exec(
+        `SELECT status, expires_at_ms
+           FROM pool_leases
+          WHERE status = 'active'`,
+      ),
+    ) as Array<Pick<PoolLeaseState, "status" | "expires_at_ms">>;
+    const nextAlarmAt = nextActiveLeaseAlarmAt(expirations, Date.now());
+    if (nextAlarmAt === null) {
+      await this.state.storage.deleteAlarm();
+      return;
+    }
+    await this.state.storage.setAlarm(nextAlarmAt);
+  }
+
+  private cleanupTombstones(nowMs: number): void {
+    const cutoffMs = Math.max(0, nowMs - TOMBSTONE_RETENTION_MS);
+    this.state.storage.sql.exec(
+      `DELETE FROM pool_leases
+        WHERE status IN ('released', 'expired') AND updated_at_ms < ?`,
+      cutoffMs,
+    );
+    this.state.storage.sql.exec(
+      "DELETE FROM pool_failure_events WHERE processed_at_ms < ?",
+      cutoffMs,
+    );
+  }
+}
+
+function commandTypeFor(method: string, pathname: string): PoolCommand["type"] | null {
+  if (method !== "POST") return null;
+  if (pathname === "/accounts/upsert") return "upsert_account";
+  if (pathname === "/reserve") return "reserve";
+  if (pathname === "/release") return "release";
+  if (pathname === "/failure") return "failure";
+  return null;
+}
+
+function parseCommand(
+  type: PoolCommand["type"],
+  body: Record<string, unknown>,
+): PoolCommand {
+  switch (type) {
+    case "upsert_account":
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        account_id: requireString(body, "account_id"),
+        enabled: requireBoolean(body, "enabled"),
+        max_concurrency: requireSafeInteger(body, "max_concurrency", { minimum: 1 }),
+      };
+    case "reserve": {
+      const preferredAccountId = optionalString(body, "preferred_account_id");
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        request_id: requireString(body, "request_id"),
+        lease_ttl_ms: requireSafeInteger(body, "lease_ttl_ms", {
+          minimum: 1,
+          maximum: 86_400_000,
+        }),
+        ...(preferredAccountId === undefined
+          ? {}
+          : { preferred_account_id: preferredAccountId }),
+      };
+    }
+    case "release":
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        request_id: requireString(body, "request_id"),
+      };
+    case "failure":
+      return {
+        schema_version: STATE_API_SCHEMA_VERSION,
+        type,
+        event_id: requireString(body, "event_id"),
+        account_id: requireString(body, "account_id"),
+        cooldown_ms: requireSafeInteger(body, "cooldown_ms", {
+          maximum: 86_400_000,
+        }),
+      };
+  }
+}
+
+function toAccountState(value: object): PoolAccountState {
+  const row = value as PoolAccountRow;
+  assertSchemaVersion(row.schema_version);
+  return {
+    schema_version: STATE_API_SCHEMA_VERSION,
+    account_id: row.account_id,
+    enabled: row.enabled === 1,
+    max_concurrency: row.max_concurrency,
+    consecutive_failures: row.consecutive_failures,
+    cooldown_until_ms: row.cooldown_until_ms,
+    updated_at_ms: row.updated_at_ms,
+  };
+}
+
+function toLeaseState(value: object): PoolLeaseState {
+  const row = value as PoolLeaseRow;
+  assertSchemaVersion(row.schema_version);
+  if (!(["active", "released", "expired"] as const).includes(row.status)) {
+    throw new PoolStateMachineError("invalid_persisted_state", "Persisted lease has invalid status");
+  }
+  return {
+    schema_version: STATE_API_SCHEMA_VERSION,
+    request_id: row.request_id,
+    account_id: row.account_id,
+    status: row.status,
+    expires_at_ms: row.expires_at_ms,
+    created_at_ms: row.created_at_ms,
+    updated_at_ms: row.updated_at_ms,
+  };
+}
+
+function assertSchemaVersion(value: number): void {
+  if (value !== STATE_API_SCHEMA_VERSION) {
+    throw new PoolStateMachineError("invalid_persisted_state", "Unsupported persisted schema_version");
+  }
+}
+
+function countChangedLeases(before: PoolMachineState, after: PoolMachineState): number {
+  return Object.entries(after.leases).filter(
+    ([requestId, lease]) => lease !== before.leases[requestId],
+  ).length;
+}
+
+function accountForCommand(
+  state: PoolMachineState,
+  command: PoolCommand,
+): PoolAccountState | null {
+  if ("account_id" in command) return state.accounts[command.account_id] ?? null;
+  return null;
+}

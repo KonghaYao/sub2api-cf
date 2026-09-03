@@ -35,10 +35,15 @@ backend/.gocache/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+worker/.wrangler/
+worker/.dev.vars
+worker/worker-configuration.d.ts
 *.local
 *.tsbuildinfo
 vite.config.d.ts
 vite.config.js.timestamp-*
+frontend/vite-build-target.d.ts
+frontend/vite-build-target.js
 
 # 日志
 npm-debug.log*

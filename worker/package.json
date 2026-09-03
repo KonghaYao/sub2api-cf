@@ -1,0 +1,29 @@
+{
+  "name": "sub2api-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:assets": "pnpm --dir ../frontend run build:cloudflare",
+    "dev": "wrangler dev",
+    "deploy": "pnpm run build:assets && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm run typecheck && pnpm run test",
+    "cf-typegen": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "hono": "^4.13.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260903.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.128.0"
+  }
+}
