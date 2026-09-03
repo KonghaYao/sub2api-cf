@@ -50,3 +50,12 @@ export interface UsageSettledPayload {
   duration_ms: number
   estimated: boolean
 }
+
+export interface UserStateChangedPayload {
+  mutation_id: string
+  user_id: string
+  state_version: number
+  balance_micros: number
+  enabled: boolean
+  updated_at_ms: number
+}

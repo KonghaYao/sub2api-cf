@@ -1,4 +1,22 @@
 import { Hono } from 'hono'
+import {
+  createAdminApiKey,
+  listAdminApiKeys,
+  revokeAdminApiKey,
+  updateAdminApiKey,
+} from './control/api-keys'
+import {
+  recoverAdminSession,
+  requireAdminSession,
+  requireAdminToken,
+} from './control/admin-auth'
+import {
+  adjustAdminUserBalance,
+  createAdminUser,
+  getAdminUser,
+  listAdminUsers,
+  updateAdminUser,
+} from './control/users'
 import type { Env } from './env'
 import { handleBootstrap, handleGateway, handleModels } from './gateway/handler'
 
@@ -66,7 +84,18 @@ export function createApp() {
     })
   })
 
-  app.post('/api/v1/admin/bootstrap', handleBootstrap)
+  app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
+  app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
+  app.use('/api/v1/admin/*', requireAdminSession)
+  app.get('/api/v1/admin/users', listAdminUsers)
+  app.post('/api/v1/admin/users', createAdminUser)
+  app.get('/api/v1/admin/users/:id', getAdminUser)
+  app.put('/api/v1/admin/users/:id', updateAdminUser)
+  app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
+  app.get('/api/v1/admin/users/:id/api-keys', listAdminApiKeys)
+  app.post('/api/v1/admin/users/:id/api-keys', createAdminApiKey)
+  app.put('/api/v1/admin/api-keys/:id', updateAdminApiKey)
+  app.delete('/api/v1/admin/api-keys/:id', revokeAdminApiKey)
 
   app.get('/v1/models', handleModels)
   app.post('/v1/chat/completions', (context) => handleGateway(context, 'chat_completions'))

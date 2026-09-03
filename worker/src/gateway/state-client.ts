@@ -29,6 +29,7 @@ export async function prepareUserReservation(
     user_id: principal.user_id,
     balance_micros: principal.balance_micros,
     enabled: true,
+    initial_state_version: principal.user_state_version,
   })
   if (!configured.ok && (await stateErrorCode(configured)) !== 'user_already_configured') {
     throw await stateResponseError(configured)

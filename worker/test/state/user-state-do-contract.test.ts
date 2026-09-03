@@ -27,6 +27,7 @@ interface StoredLedgerEntry {
 
 class FakeUserStateStorage {
   profile: StoredProfile | null = null;
+  stateVersion = 0;
   readonly ledger = new Map<string, StoredLedgerEntry>();
 
   readonly sql = {
@@ -42,8 +43,20 @@ class FakeUserStateStorage {
   private exec(query: string, params: unknown[]): object[] {
     const normalized = query.replace(/\s+/g, " ").trim();
     if (normalized.startsWith("CREATE ")) return [];
+    if (normalized.startsWith("INSERT OR IGNORE INTO user_state_metadata")) return [];
+    if (normalized.includes("SELECT state_version FROM user_state_metadata")) {
+      return [{ state_version: this.stateVersion }];
+    }
+    if (normalized.startsWith("UPDATE user_state_metadata SET state_version =")) {
+      this.stateVersion = params[0] as number;
+      return [];
+    }
     if (normalized.includes("FROM user_profile") && normalized.includes("singleton = 1")) {
       return this.profile === null ? [] : [{ ...this.profile }];
+    }
+    if (normalized.startsWith("DELETE FROM user_ledger WHERE mutation_key = ?")) {
+      this.ledger.delete(params[0] as string);
+      return [];
     }
     if (normalized.includes("FROM user_ledger") && normalized.includes("mutation_key = ?")) {
       const entry = this.ledger.get(params[0] as string);
@@ -162,6 +175,7 @@ describe("UserStateDO balance contract", () => {
     expect(first.status).toBe(200);
     await expect(first.json()).resolves.toMatchObject({
       idempotent: false,
+      state_version: 1,
       profile: { balance_micros: 750, enabled: true },
     });
     expect(storage.ledger.get("balance:adjust-1")).toMatchObject({
@@ -175,6 +189,7 @@ describe("UserStateDO balance contract", () => {
     expect(retry.status).toBe(200);
     await expect(retry.json()).resolves.toMatchObject({
       idempotent: true,
+      state_version: 1,
       profile: { balance_micros: 750 },
     });
     expect(storage.ledger.size).toBe(2);
@@ -237,6 +252,7 @@ describe("UserStateDO balance contract", () => {
     const command = { schema_version: 1, mutation_id: "disable-1", enabled: false };
     const first = await post(object, "/enabled", command);
     expect(first.status).toBe(200);
+    await expect(first.clone().json()).resolves.toMatchObject({ state_version: 1 });
     expect(storage.profile?.enabled).toBe(0);
     expect(storage.profile?.balance_micros).toBe(1_000);
     expect(storage.ledger.get("enabled:disable-1")).toMatchObject({
@@ -247,12 +263,74 @@ describe("UserStateDO balance contract", () => {
 
     const retry = await post(object, "/enabled", command);
     expect(retry.status).toBe(200);
-    await expect(retry.json()).resolves.toMatchObject({ idempotent: true });
+    await expect(retry.json()).resolves.toMatchObject({ idempotent: true, state_version: 1 });
 
     const conflict = await post(object, "/enabled", { ...command, enabled: true });
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toMatchObject({
       error: { code: "mutation_conflict" },
     });
+
+    const reenabled = await post(object, "/enabled", {
+      schema_version: 1,
+      mutation_id: "enable-2",
+      enabled: true,
+    });
+    await expect(reenabled.json()).resolves.toMatchObject({ state_version: 2 });
+
+    const staleConditional = await post(object, "/enabled", {
+      schema_version: 1,
+      mutation_id: "stale-compensation",
+      enabled: false,
+      expected_state_version: 1,
+    });
+    expect(staleConditional.status).toBe(200);
+    await expect(staleConditional.json()).resolves.toMatchObject({
+      applied: false,
+      state_version: 2,
+      profile: { enabled: true },
+    });
+    expect(storage.profile?.enabled).toBe(1);
+
+    const supersededRetry = await post(object, "/enabled", command);
+    expect(supersededRetry.status).toBe(409);
+    await expect(supersededRetry.json()).resolves.toMatchObject({
+      error: { code: "mutation_superseded" },
+    });
+  });
+
+  it("allows a rolled-back enabled mutation to be retried with the original idempotency key", async () => {
+    const { object, storage } = createHarness();
+    await post(object, "/configure", opening);
+    const disable = {
+      schema_version: 1,
+      mutation_id: "disable-retryable",
+      enabled: false,
+    };
+
+    const first = await post(object, "/enabled", disable);
+    await expect(first.json()).resolves.toMatchObject({ state_version: 1 });
+
+    const compensation = await post(object, "/enabled", {
+      schema_version: 1,
+      mutation_id: "compensate-disable-retryable-1",
+      enabled: true,
+      expected_state_version: 1,
+      rollback_mutation_id: "disable-retryable",
+    });
+    await expect(compensation.json()).resolves.toMatchObject({
+      state_version: 2,
+      profile: { enabled: true },
+    });
+    expect(storage.ledger.has("enabled:disable-retryable")).toBe(false);
+
+    const retry = await post(object, "/enabled", disable);
+    expect(retry.status).toBe(200);
+    await expect(retry.json()).resolves.toMatchObject({
+      idempotent: false,
+      state_version: 3,
+      profile: { enabled: false },
+    });
+    expect(storage.profile?.enabled).toBe(0);
   });
 });

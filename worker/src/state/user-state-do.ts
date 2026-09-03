@@ -28,7 +28,7 @@ import {
   requireString,
   StateApiError,
 } from "./http";
-import type { Env } from "../env";
+import type { Env, PlatformEvent, UserStateChangedPayload } from "../env";
 
 interface UserProfileRow {
   schema_version: number;
@@ -73,6 +73,7 @@ export interface ConfigureUserCommand {
   user_id: string;
   balance_micros: number;
   enabled: boolean;
+  initial_state_version: number;
 }
 
 export interface AdjustUserBalanceCommand {
@@ -85,6 +86,8 @@ export interface SetUserEnabledCommand {
   schema_version: typeof STATE_SCHEMA_VERSION;
   mutation_id: string;
   enabled: boolean;
+  expected_state_version?: number;
+  rollback_mutation_id?: string;
 }
 
 export class UserStateDO {
@@ -110,10 +113,10 @@ export class UserStateDO {
         return this.configure(await readJsonObject(request));
       }
       if (request.method === "POST" && url.pathname === "/balance/adjust") {
-        return this.adjustBalance(await readJsonObject(request));
+        return await this.adjustBalance(await readJsonObject(request));
       }
       if (request.method === "POST" && url.pathname === "/enabled") {
-        return this.setEnabled(await readJsonObject(request));
+        return await this.setEnabled(await readJsonObject(request));
       }
 
       const commandType = userCommandTypeFor(request.method, url.pathname);
@@ -173,6 +176,7 @@ export class UserStateDO {
 
       return json({
         schema_version: STATE_SCHEMA_VERSION,
+        state_version: this.loadStateVersion(),
         profile,
         available_micros: profile.balance_micros - profile.reserved_micros,
         requests,
@@ -212,6 +216,7 @@ export class UserStateDO {
         return json({
           schema_version: STATE_SCHEMA_VERSION,
           idempotent: true,
+          state_version: this.loadStateVersion(),
           profile: existing,
         });
       }
@@ -238,15 +243,21 @@ export class UserStateDO {
       });
       this.persistProfile(profile);
       this.appendLedgerEntry(ledgerEntry);
-      return json({ schema_version: STATE_SCHEMA_VERSION, idempotent: false, profile });
+      this.setStateVersion(command.initial_state_version);
+      return json({
+        schema_version: STATE_SCHEMA_VERSION,
+        idempotent: false,
+        state_version: command.initial_state_version,
+        profile,
+      });
     });
   }
 
-  private adjustBalance(body: Record<string, unknown>): Response {
+  private async adjustBalance(body: Record<string, unknown>): Promise<Response> {
     const command = parseAdjustUserBalanceCommand(body);
     const nowMs = Date.now();
 
-    return this.state.storage.transactionSync(() => {
+    const response = this.state.storage.transactionSync(() => {
       this.expireDueReservations(nowMs);
       const profile = this.loadProfile();
       if (profile === null) {
@@ -267,7 +278,12 @@ export class UserStateDO {
             "mutation_id was already used with different balance adjustment values",
           );
         }
-        return json({ schema_version: STATE_SCHEMA_VERSION, idempotent: true, profile });
+        return json({
+          schema_version: STATE_SCHEMA_VERSION,
+          idempotent: true,
+          state_version: this.loadStateVersion(),
+          profile,
+        });
       }
 
       const balanceAfterMicros = profile.balance_micros + command.amount_delta_micros;
@@ -300,15 +316,25 @@ export class UserStateDO {
       });
       this.persistProfile(nextProfile);
       this.appendLedgerEntry(ledgerEntry);
-      return json({ schema_version: STATE_SCHEMA_VERSION, idempotent: false, profile: nextProfile });
+      const stateVersion = this.advanceStateVersion();
+      this.appendStateProjection(nextProfile, stateVersion, command.mutation_id, nowMs);
+      return json({
+        schema_version: STATE_SCHEMA_VERSION,
+        idempotent: false,
+        state_version: stateVersion,
+        profile: nextProfile,
+      });
     });
+    await this.publishPendingOutbox();
+    await this.scheduleNextReservationAlarm();
+    return response;
   }
 
-  private setEnabled(body: Record<string, unknown>): Response {
+  private async setEnabled(body: Record<string, unknown>): Promise<Response> {
     const command = parseSetUserEnabledCommand(body);
     const nowMs = Date.now();
 
-    return this.state.storage.transactionSync(() => {
+    const response = this.state.storage.transactionSync(() => {
       this.expireDueReservations(nowMs);
       const profile = this.loadProfile();
       if (profile === null) {
@@ -329,7 +355,56 @@ export class UserStateDO {
             "mutation_id was already used with a different enabled value",
           );
         }
-        return json({ schema_version: STATE_SCHEMA_VERSION, idempotent: true, profile });
+        if (
+          command.rollback_mutation_id === undefined &&
+          existingMutation.enabled_after !== profile.enabled
+        ) {
+          throw new StateApiError(
+            409,
+            "mutation_superseded",
+            "mutation_id was superseded by a newer enabled-state change",
+          );
+        }
+        return json({
+          schema_version: STATE_SCHEMA_VERSION,
+          idempotent: true,
+          state_version: this.loadStateVersion(),
+          profile,
+        });
+      }
+
+      const currentStateVersion = this.loadStateVersion();
+      if (
+        command.expected_state_version !== undefined &&
+        command.expected_state_version !== currentStateVersion
+      ) {
+        return json({
+          schema_version: STATE_SCHEMA_VERSION,
+          idempotent: false,
+          applied: false,
+          state_version: currentStateVersion,
+          profile,
+        });
+      }
+
+      if (command.rollback_mutation_id !== undefined) {
+        const rollbackKey = `enabled:${command.rollback_mutation_id}`;
+        const rollbackMutation = this.loadLedgerEntry(rollbackKey);
+        if (
+          rollbackMutation === null ||
+          rollbackMutation.entry_type !== "enabled_change" ||
+          rollbackMutation.user_id !== profile.user_id
+        ) {
+          throw new StateApiError(
+            409,
+            "rollback_mutation_not_found",
+            "The enabled-state mutation to roll back was not found",
+          );
+        }
+        this.state.storage.sql.exec(
+          "DELETE FROM user_ledger WHERE mutation_key = ?",
+          rollbackKey,
+        );
       }
 
       const nextProfile: UserProfileState = {
@@ -346,8 +421,18 @@ export class UserStateDO {
       });
       this.persistProfile(nextProfile);
       this.appendLedgerEntry(ledgerEntry);
-      return json({ schema_version: STATE_SCHEMA_VERSION, idempotent: false, profile: nextProfile });
+      const stateVersion = this.advanceStateVersion();
+      this.appendStateProjection(nextProfile, stateVersion, command.mutation_id, nowMs);
+      return json({
+        schema_version: STATE_SCHEMA_VERSION,
+        idempotent: false,
+        state_version: stateVersion,
+        profile: nextProfile,
+      });
     });
+    await this.publishPendingOutbox();
+    await this.scheduleNextReservationAlarm();
+    return response;
   }
 
   private async executeCommand(
@@ -389,6 +474,9 @@ export class UserStateDO {
           }),
         );
       }
+      const stateVersion = command.type === "settle" && !transition.idempotent
+        ? this.advanceStateVersion()
+        : this.loadStateVersion();
       if (command.type === "settle" && usageEvent !== null) {
         const payload = usageEvent.payload as Record<string, unknown>;
         if (payload.user_id !== transition.state.profile.user_id) {
@@ -397,12 +485,21 @@ export class UserStateDO {
         if (payload.amount_micros !== command.amount_micros) {
           throw new StateApiError(400, "usage_event_amount_mismatch", "usage_event amount does not match settlement");
         }
-        this.appendOutboxEvent(usageEvent, nowMs);
+        this.appendOutboxEvent(usageEvent, `usage:${requestId}`, nowMs);
+      }
+      if (command.type === "settle" && !transition.idempotent) {
+        this.appendStateProjection(
+          transition.state.profile,
+          stateVersion,
+          `settlement:${requestId}`,
+          nowMs,
+        );
       }
 
       return json({
         schema_version: STATE_SCHEMA_VERSION,
         idempotent: transition.idempotent,
+        state_version: stateVersion,
         profile: transition.state.profile,
         available_micros:
           transition.state.profile.balance_micros - transition.state.profile.reserved_micros,
@@ -452,6 +549,15 @@ export class UserStateDO {
         CHECK (reserved_micros <= balance_micros)
       ) STRICT
     `);
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS user_state_metadata (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        state_version INTEGER NOT NULL CHECK (state_version >= 0)
+      ) STRICT
+    `);
+    this.state.storage.sql.exec(
+      "INSERT OR IGNORE INTO user_state_metadata (singleton, state_version) VALUES (1, 0)",
+    );
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS user_ledger (
         mutation_key TEXT PRIMARY KEY,
@@ -598,6 +704,35 @@ export class UserStateDO {
     );
   }
 
+  private loadStateVersion(): number {
+    const row = Array.from(
+      this.state.storage.sql.exec(
+        "SELECT state_version FROM user_state_metadata WHERE singleton = 1",
+      ),
+    )[0] as { state_version?: unknown } | undefined;
+    if (!Number.isSafeInteger(row?.state_version) || (row!.state_version as number) < 0) {
+      throw new StateMachineError("invalid_persisted_state", "User state version is invalid");
+    }
+    return row!.state_version as number;
+  }
+
+  private setStateVersion(stateVersion: number): void {
+    this.state.storage.sql.exec(
+      "UPDATE user_state_metadata SET state_version = ? WHERE singleton = 1",
+      stateVersion,
+    );
+  }
+
+  private advanceStateVersion(): number {
+    const current = this.loadStateVersion();
+    if (current >= Number.MAX_SAFE_INTEGER) {
+      throw new StateMachineError("state_version_exhausted", "User state version is exhausted");
+    }
+    const next = current + 1;
+    this.setStateVersion(next);
+    return next;
+  }
+
   private persistRequest(request: UserRequestState): void {
     this.state.storage.sql.exec(
       `INSERT INTO user_requests (
@@ -692,18 +827,25 @@ export class UserStateDO {
     return expiredCount;
   }
 
-  private appendOutboxEvent(event: Record<string, unknown>, nowMs: number): void {
-    const requestId = (event.payload as Record<string, unknown>).request_id as string;
+  private appendOutboxEvent(
+    event: unknown,
+    dedupeKey: string,
+    nowMs: number,
+  ): void {
+    const eventId = (event as { event_id?: unknown } | null)?.event_id;
+    if (typeof eventId !== "string" || eventId.length === 0 || eventId.length > 256) {
+      throw new StateApiError(400, "invalid_outbox_event", "Outbox event id is invalid");
+    }
     const existing = Array.from(
       this.state.storage.sql.exec(
         "SELECT payload_json FROM user_outbox WHERE request_id = ?",
-        requestId,
+        dedupeKey,
       ),
     )[0] as { payload_json: string } | undefined;
     const payloadJson = JSON.stringify(event);
     if (existing !== undefined) {
       if (existing.payload_json !== payloadJson) {
-        throw new StateApiError(409, "usage_event_conflict", "request_id already has a different usage event");
+        throw new StateApiError(409, "outbox_event_conflict", "Outbox key already has a different event");
       }
       return;
     }
@@ -711,12 +853,39 @@ export class UserStateDO {
       `INSERT INTO user_outbox (
          event_id, request_id, payload_json, attempts, available_at_ms, published_at_ms, created_at_ms
        ) VALUES (?, ?, ?, 0, ?, NULL, ?)`,
-      event.event_id as string,
-      requestId,
+      eventId,
+      dedupeKey,
       payloadJson,
       nowMs,
       nowMs,
     );
+  }
+
+  private appendStateProjection(
+    profile: UserProfileState,
+    stateVersion: number,
+    mutationId: string,
+    nowMs: number,
+  ): void {
+    if (this.env?.EVENTS_QUEUE === undefined) return;
+    const payload: UserStateChangedPayload = {
+      mutation_id: mutationId,
+      user_id: profile.user_id,
+      state_version: stateVersion,
+      balance_micros: profile.balance_micros,
+      enabled: profile.enabled,
+      updated_at_ms: profile.updated_at_ms,
+    };
+    const event: PlatformEvent<UserStateChangedPayload> = {
+      schema_version: 1,
+      event_id: `user-state:${profile.user_id}:${stateVersion}`,
+      event_type: "user.state.changed.v1",
+      occurred_at_ms: nowMs,
+      aggregate_type: "user",
+      aggregate_id: profile.user_id,
+      payload,
+    };
+    this.appendOutboxEvent(event, `state:${stateVersion}`, nowMs);
   }
 
   private async publishPendingOutbox(): Promise<void> {
@@ -749,7 +918,7 @@ export class UserStateDO {
           retryAt,
           row.event_id,
         );
-        console.error("usage outbox publish failed", {
+        console.error("user outbox publish failed", {
           event_id: row.event_id,
           name: error instanceof Error ? error.name : "unknown",
         });
@@ -827,6 +996,9 @@ export function parseConfigureUserCommand(body: Record<string, unknown>): Config
     user_id: requireString(body, "user_id"),
     balance_micros: requireSafeInteger(body, "balance_micros"),
     enabled: requireBoolean(body, "enabled"),
+    initial_state_version: body.initial_state_version === undefined
+      ? 0
+      : requireSafeInteger(body, "initial_state_version"),
   };
 }
 
@@ -857,6 +1029,12 @@ export function parseSetUserEnabledCommand(body: Record<string, unknown>): SetUs
     schema_version: STATE_SCHEMA_VERSION,
     mutation_id: requireString(body, "mutation_id"),
     enabled: requireBoolean(body, "enabled"),
+    expected_state_version: body.expected_state_version === undefined
+      ? undefined
+      : requireSafeInteger(body, "expected_state_version"),
+    rollback_mutation_id: body.rollback_mutation_id === undefined
+      ? undefined
+      : requireString(body, "rollback_mutation_id"),
   };
 }
 

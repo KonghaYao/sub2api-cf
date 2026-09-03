@@ -37,6 +37,9 @@ export async function bootstrapGateway(request: Request, env: Env): Promise<Resp
   const secretId = crypto.randomUUID()
   const customerKey = `sk-sub2api-${randomToken(24)}`
   const keyId = crypto.randomUUID()
+  const adminSession = `adm-sub2api-${randomToken(36)}`
+  const adminSessionId = crypto.randomUUID()
+  const adminSessionExpiresAtMs = now + 12 * 60 * 60 * 1_000
   const baseUrl = validateBaseUrl(requireString(body.account.base_url, 'account.base_url', 2_048))
   const upstreamKey = requireString(body.account.api_key, 'account.api_key', 8_192)
   const encrypted = await encryptCredential(
@@ -45,6 +48,10 @@ export async function bootstrapGateway(request: Request, env: Env): Promise<Resp
     credentialAad(env.ENVIRONMENT, accountId, secretId, 1),
   )
   const keyHash = await apiKeyDigest(customerKey, env.API_KEY_PEPPER!)
+  const adminSessionHash = await apiKeyDigest(
+    `admin-session:v1:${adminSession}`,
+    env.API_KEY_PEPPER!,
+  )
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO users (
@@ -102,6 +109,12 @@ export async function bootstrapGateway(request: Request, env: Env): Promise<Resp
       groupId,
       customerKey.slice(0, 16),
     ),
+    env.DB.prepare(
+      `INSERT INTO admin_sessions (
+         id, user_id, token_hash, created_at_ms, expires_at_ms,
+         revoked_at_ms, last_seen_at_ms
+       ) VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+    ).bind(adminSessionId, userId, adminSessionHash, now, adminSessionExpiresAtMs),
   ]
 
   if (!Array.isArray(body.models) || body.models.length === 0 || body.models.length > 20) {
@@ -190,7 +203,9 @@ export async function bootstrapGateway(request: Request, env: Env): Promise<Resp
         account_id: accountId,
         api_key_id: keyId,
         api_key: customerKey,
-        warning: 'This API key is shown only once.',
+        admin_session: adminSession,
+        admin_session_expires_at_ms: adminSessionExpiresAtMs,
+        warning: 'The API key and admin session are shown only once.',
       },
     },
     { status: 201, headers: { 'cache-control': 'no-store' } },

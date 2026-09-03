@@ -1,8 +1,14 @@
-import type { Env, PlatformEvent, UsageSettledPayload } from '../env'
+import type {
+  Env,
+  PlatformEvent,
+  UsageSettledPayload,
+  UserStateChangedPayload,
+} from '../env'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
 
 const CONSUMER = 'usage-projection-v1'
+const USER_STATE_CONSUMER = 'user-state-projection-v1'
 
 export function createUsageEvent(
   payload: UsageSettledPayload,
@@ -19,6 +25,20 @@ export function createUsageEvent(
   }
 }
 
+export function createUserStateEvent(
+  payload: UserStateChangedPayload,
+): PlatformEvent<UserStateChangedPayload> {
+  return {
+    schema_version: 1,
+    event_id: `user-state:${payload.user_id}:${payload.state_version}`,
+    event_type: 'user.state.changed.v1',
+    occurred_at_ms: payload.updated_at_ms,
+    aggregate_type: 'user',
+    aggregate_id: payload.user_id,
+    payload,
+  }
+}
+
 export async function consumeEvents(
   batch: MessageBatch<unknown>,
   env: Env,
@@ -27,6 +47,11 @@ export async function consumeEvents(
     try {
       if (isSettlementRetryEvent(message.body)) {
         await settleRecoveryRequest(env, message.body.payload.request_id)
+        message.ack()
+        continue
+      }
+      if (isUserStateEvent(message.body)) {
+        await projectUserStateEvent(message.body, env)
         message.ack()
         continue
       }
@@ -103,6 +128,44 @@ export async function consumeEvents(
       message.retry()
     }
   }
+}
+
+async function projectUserStateEvent(
+  event: PlatformEvent<UserStateChangedPayload>,
+  env: Env,
+): Promise<void> {
+  const digest = await sha256Hex(JSON.stringify(event))
+  const existing = await env.DB.prepare(
+    'SELECT result_digest FROM inbox WHERE consumer = ? AND event_id = ?',
+  )
+    .bind(USER_STATE_CONSUMER, event.event_id)
+    .first<{ result_digest: string | null }>()
+  if (existing !== null) {
+    if (existing.result_digest !== digest) {
+      throw new Error(`Conflicting replay for user state event ${event.event_id}`)
+    }
+    return
+  }
+  const payload = event.payload
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE users
+          SET balance_micros = ?, status = ?, state_version = ?,
+              updated_at_ms = MAX(updated_at_ms, ?)
+        WHERE id = ? AND state_version < ?`,
+    ).bind(
+      payload.balance_micros,
+      payload.enabled ? 'active' : 'disabled',
+      payload.state_version,
+      payload.updated_at_ms,
+      payload.user_id,
+      payload.state_version,
+    ),
+    env.DB.prepare(
+      `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(USER_STATE_CONSUMER, event.event_id, Date.now(), digest),
+  ])
 }
 
 function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
@@ -183,5 +246,35 @@ function isSettlementRetryEvent(
     typeof event.payload === 'object' &&
     typeof event.payload.request_id === 'string' &&
     event.payload.request_id === event.aggregate_id
+  )
+}
+
+function isUserStateEvent(
+  value: unknown,
+): value is PlatformEvent<UserStateChangedPayload> {
+  if (value === null || typeof value !== 'object') return false
+  const event = value as Partial<PlatformEvent<Partial<UserStateChangedPayload>>>
+  const payload = event.payload
+  return (
+    event.schema_version === 1 &&
+    event.event_type === 'user.state.changed.v1' &&
+    event.aggregate_type === 'user' &&
+    typeof event.aggregate_id === 'string' &&
+    typeof event.event_id === 'string' &&
+    Number.isSafeInteger(event.occurred_at_ms) &&
+    payload !== null &&
+    typeof payload === 'object' &&
+    typeof payload.user_id === 'string' &&
+    payload.user_id === event.aggregate_id &&
+    Number.isSafeInteger(payload.state_version) &&
+    (payload.state_version as number) >= 0 &&
+    Number.isSafeInteger(payload.balance_micros) &&
+    (payload.balance_micros as number) >= 0 &&
+    typeof payload.enabled === 'boolean' &&
+    Number.isSafeInteger(payload.updated_at_ms) &&
+    (payload.updated_at_ms as number) >= 0 &&
+    payload.updated_at_ms === event.occurred_at_ms &&
+    typeof payload.mutation_id === 'string' &&
+    event.event_id === `user-state:${payload.user_id}:${payload.state_version}`
   )
 }

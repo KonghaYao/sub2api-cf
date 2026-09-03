@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Env, UsageSettledPayload } from '../../src/env'
-import { consumeEvents, createUsageEvent } from '../../src/gateway/queue'
+import { consumeEvents, createUsageEvent, createUserStateEvent } from '../../src/gateway/queue'
 
 class QueueStatement {
   values: unknown[] = []
@@ -107,5 +107,33 @@ describe('usage queue projection', () => {
     expect(item.ack).not.toHaveBeenCalled()
     expect(item.retry).toHaveBeenCalledOnce()
     expect(database.batches).toHaveLength(0)
+  })
+
+  it('projects a monotonic user-state event so old deliveries cannot roll back D1', async () => {
+    const database = new QueueDatabase()
+    const item = message(createUserStateEvent({
+      mutation_id: 'admin-balance:mutation-1',
+      user_id: 'user-1',
+      state_version: 7,
+      balance_micros: 900_000,
+      enabled: false,
+      updated_at_ms: 2_000,
+    }))
+
+    await consumeEvents({ queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>, env(database))
+
+    expect(item.ack).toHaveBeenCalledOnce()
+    expect(database.batches).toHaveLength(1)
+    expect(database.batches[0][0].query).toContain('UPDATE users')
+    expect(database.batches[0][0].query).toContain('state_version < ?')
+    expect(database.batches[0][0].values).toEqual([
+      900_000,
+      'disabled',
+      7,
+      2_000,
+      'user-1',
+      7,
+    ])
+    expect(database.batches[0][1].query).toContain('INSERT INTO inbox')
   })
 })
