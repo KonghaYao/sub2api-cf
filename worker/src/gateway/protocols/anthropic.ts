@@ -4,7 +4,6 @@
  * never spread into an upstream request or a downstream response.
  */
 
-const MIN_MAX_OUTPUT_TOKENS = 128
 const MAX_MESSAGES = 1_000
 const MAX_CONTENT_BLOCKS = 1_000
 const MAX_TOOLS = 256
@@ -246,7 +245,7 @@ export function toOpenAIResponsesRequest(
   const result: OpenAIResponsesRequest = {
     model: nonEmptyString(upstreamModel, 'upstreamModel', 256),
     input,
-    max_output_tokens: Math.max(request.max_tokens, MIN_MAX_OUTPUT_TOKENS),
+    max_output_tokens: request.max_tokens,
     stream: request.stream,
     store: false,
     parallel_tool_calls: true,
@@ -304,7 +303,7 @@ export function toOpenAIChatCompletionsRequest(
   const result: OpenAIChatCompletionsRequest = {
     model: nonEmptyString(upstreamModel, 'upstreamModel', 256),
     messages,
-    max_completion_tokens: Math.max(request.max_tokens, MIN_MAX_OUTPUT_TOKENS),
+    max_completion_tokens: request.max_tokens,
     stream: request.stream,
     parallel_tool_calls: true,
     reasoning_effort: 'medium',
@@ -473,6 +472,7 @@ export class ResponsesToAnthropicEventCodec {
   private blockIndex = 0
   private currentBlock: 'text' | 'tool_use' | null = null
   private readonly outputBlocks = new Map<number, number>()
+  private readonly outputBlocksWithArgumentDeltas = new Set<number>()
   private hasToolUse = false
   private usage: AnthropicUsage = emptyUsage()
 
@@ -590,6 +590,7 @@ export class ResponsesToAnthropicEventCodec {
     const outputIndex = nonNegativeIntegerOrZero(event.output_index)
     const index = this.outputBlocks.get(outputIndex)
     if (index === undefined) return []
+    this.outputBlocksWithArgumentDeltas.add(outputIndex)
     return [{
       type: 'content_block_delta',
       index,
@@ -604,6 +605,7 @@ export class ResponsesToAnthropicEventCodec {
     if (this.currentBlock !== 'tool_use') return []
     if (typeof event.arguments === 'string' && event.arguments !== '') {
       const outputIndex = nonNegativeIntegerOrZero(event.output_index)
+      if (this.outputBlocksWithArgumentDeltas.has(outputIndex)) return this.closeBlock()
       const index = this.outputBlocks.get(outputIndex) ?? this.blockIndex
       return [
         {

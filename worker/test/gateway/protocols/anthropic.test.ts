@@ -71,7 +71,7 @@ describe('Anthropic Messages request codec', () => {
           content: [{ type: 'input_text', text: 'Hello' }],
         },
       ],
-      max_output_tokens: 128,
+      max_output_tokens: 64,
       stream: true,
       store: false,
       parallel_tool_calls: true,
@@ -232,6 +232,55 @@ describe('Responses SSE to Anthropic Messages codec', () => {
     expect(formatAnthropicSseEvent(events[2])).toBe(
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
     )
+  })
+
+  it('emits streamed tool arguments exactly once when done includes the full value', () => {
+    const codec = new ResponsesToAnthropicEventCodec('claude-public')
+    const events = [
+      ...codec.push({ type: 'response.created', response: { id: 'resp_tool' } }),
+      ...codec.push({
+        type: 'response.output_item.added',
+        output_index: 2,
+        item: { type: 'function_call', call_id: 'toolu_weather', name: 'weather' },
+      }),
+      ...codec.push({
+        type: 'response.function_call_arguments.delta',
+        output_index: 2,
+        delta: '{"city":',
+      }),
+      ...codec.push({
+        type: 'response.function_call_arguments.delta',
+        output_index: 2,
+        delta: '"Paris"}',
+      }),
+      ...codec.push({
+        type: 'response.function_call_arguments.done',
+        output_index: 2,
+        arguments: '{"city":"Paris"}',
+      }),
+      ...codec.push({
+        type: 'response.completed',
+        response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      }),
+    ]
+
+    const partialJson = events.flatMap((event) => {
+      if (event.type !== 'content_block_delta') return []
+      const delta = event.delta as Record<string, unknown>
+      return delta.type === 'input_json_delta' && typeof delta.partial_json === 'string'
+        ? [delta.partial_json]
+        : []
+    }).join('')
+    expect(partialJson).toBe('{"city":"Paris"}')
+    expect(events.map((event) => event.type)).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ])
   })
 
   it('synthesizes tool_use termination when a Responses stream is truncated', () => {

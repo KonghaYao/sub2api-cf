@@ -625,7 +625,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(String(url)).toBe('https://upstream.example/v1/responses')
     expect(JSON.parse(String(init?.body))).toMatchObject({
       model: 'gpt-upstream',
-      max_output_tokens: 128,
+      max_output_tokens: 64,
       stream: false,
       input: [
         {
