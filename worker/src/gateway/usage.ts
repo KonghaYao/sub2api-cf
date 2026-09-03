@@ -1,5 +1,5 @@
 import { GatewayError } from './errors'
-import type { CostBreakdown, ModelRoute, TokenUsage } from './types'
+import type { CostBreakdown, GatewayEndpoint, ModelRoute, TokenUsage } from './types'
 
 const MAX_SSE_EVENT_CHARS = 256 * 1024
 const encoder = new TextEncoder()
@@ -8,14 +8,15 @@ export function reservationForRequest(
   model: ModelRoute,
   body: Record<string, unknown>,
   bodyBytes: number,
+  endpoint: GatewayEndpoint = 'responses',
 ): number {
-  const requestedMaximum = firstInteger(
-    body.max_output_tokens,
-    body.max_completion_tokens,
-    body.max_tokens,
-  )
-  const outputTokens = requestedMaximum ?? model.default_max_output_tokens
-  if (outputTokens <= 0 || outputTokens > model.max_output_tokens) {
+  const requestedMaximum = endpoint === 'embeddings'
+    ? null
+    : firstInteger(body.max_output_tokens, body.max_completion_tokens, body.max_tokens)
+  const outputTokens = endpoint === 'embeddings'
+    ? 0
+    : requestedMaximum ?? model.default_max_output_tokens
+  if (endpoint !== 'embeddings' && (outputTokens <= 0 || outputTokens > model.max_output_tokens)) {
     throw new GatewayError(
       400,
       'invalid_max_output_tokens',
@@ -35,7 +36,7 @@ export function reservationForRequest(
 export function extractUsage(value: unknown): TokenUsage | null {
   if (value === null || typeof value !== 'object') return null
   const object = value as Record<string, unknown>
-  const direct = parseUsageObject(object.usage)
+  const direct = parseUsageObject(object.usage, Array.isArray(object.data))
   if (direct !== null) return direct
   const response = object.response
   if (response !== null && typeof response === 'object') {
@@ -226,11 +227,11 @@ export function streamErrorFrame(
   )
 }
 
-function parseUsageObject(value: unknown): TokenUsage | null {
+function parseUsageObject(value: unknown, inputOnly = false): TokenUsage | null {
   if (value === null || typeof value !== 'object') return null
   const usage = value as Record<string, unknown>
   const input = firstInteger(usage.input_tokens, usage.prompt_tokens)
-  const output = firstInteger(usage.output_tokens, usage.completion_tokens)
+  const output = firstInteger(usage.output_tokens, usage.completion_tokens) ?? (inputOnly ? 0 : null)
   if (input === null || output === null || input < 0 || output < 0) return null
   const inputDetails = (usage.input_tokens_details ?? usage.prompt_tokens_details) as
     | Record<string, unknown>

@@ -102,16 +102,34 @@ class CatalogStatement {
       return result()
     }
     if (this.query.includes('INSERT INTO models')) {
-      const [id, platform, publicName, upstreamName, endpoint, enabled, createdAt, updatedAt] = this.values
+      const [id, platform, publicName, upstreamName, endpoint, embeddings, enabled, createdAt, updatedAt] = this.values
       this.database.models.set(String(id), {
         id: String(id),
         platform: String(platform),
         public_name: String(publicName),
         upstream_name: String(upstreamName),
         endpoint: String(endpoint),
+        embeddings: Number(embeddings),
         enabled: Number(enabled),
         control_version: 0,
         created_at_ms: Number(createdAt),
+        updated_at_ms: Number(updatedAt),
+      })
+      return result()
+    }
+    if (this.query.includes('UPDATE models SET platform')) {
+      const [platform, publicName, upstreamName, endpoint, embeddings, enabled,
+        expected, nextVersion, updatedAt, id] = this.values
+      const model = this.database.requireRow(this.database.models, String(id))
+      this.database.assertVersion(model, Number(expected))
+      Object.assign(model, {
+        platform: String(platform),
+        public_name: String(publicName),
+        upstream_name: String(upstreamName),
+        endpoint: String(endpoint),
+        embeddings: Number(embeddings),
+        enabled: Number(enabled),
+        control_version: Number(nextVersion),
         updated_at_ms: Number(updatedAt),
       })
       return result()
@@ -265,6 +283,7 @@ class CatalogDatabase {
       public_name: model.public_name,
       upstream_name: model.upstream_name,
       endpoint: model.endpoint,
+      embeddings: model.embeddings,
       price_id: price?.id ?? null,
       price_version: price?.version ?? null,
       input_micros_per_million: price?.input_micros_per_million ?? null,
@@ -492,6 +511,30 @@ describe('admin catalog control plane', () => {
     expect(invalid.status).toBe(400)
     expect((await json(invalid)).code).toBe('invalid_endpoint')
     expect(database.models).toHaveLength(1)
+  })
+
+  it('creates and updates an explicit model embeddings capability while defaulting old clients to false', async () => {
+    const database = new CatalogDatabase()
+    const embeddingModel = await createModel(database, 'model-embeddings', { embeddings: true })
+    const defaultModel = await createModel(database, 'model-default-embeddings')
+
+    expect(embeddingModel).toMatchObject({ embeddings: true, platform: 'openai' })
+    expect(defaultModel).toMatchObject({ embeddings: false, platform: 'openai' })
+
+    const updated = await request(
+      database,
+      `/api/v1/admin/models/${embeddingModel.id}`,
+      'PUT',
+      'model-embeddings-update',
+      { expected_control_version: 0, embeddings: false },
+    )
+
+    expect(updated.status).toBe(200)
+    expect((await json(updated)).data).toMatchObject({
+      id: embeddingModel.id,
+      embeddings: false,
+      control_version: 1,
+    })
   })
 
   it('enforces platform and output-token boundaries when linking a model', async () => {

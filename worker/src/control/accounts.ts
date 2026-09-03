@@ -61,6 +61,7 @@ interface ModelCapability {
   model_id: string
   chat_completions: boolean
   responses: boolean
+  embeddings: boolean
   control_version: number
 }
 
@@ -87,6 +88,7 @@ interface ModelCapabilityInput {
   model_id: string
   chat_completions: boolean
   responses: boolean
+  embeddings?: boolean
 }
 
 interface AccountPatch {
@@ -125,10 +127,11 @@ const ACCOUNT_PROJECTION = `
              'model_id', capabilities.model_id,
              'chat_completions', capabilities.chat_completions,
              'responses', capabilities.responses,
+             'embeddings', capabilities.embeddings,
              'control_version', capabilities.control_version
            ))
              FROM (
-               SELECT model_id, chat_completions, responses, control_version
+               SELECT model_id, chat_completions, responses, embeddings, control_version
                  FROM account_models
                 WHERE account_id = a.id
                 ORDER BY model_id ASC
@@ -249,7 +252,11 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       updated_at_ms: now,
       credential_key_version: 1,
       group_links: input.group_links.map((value) => ({ ...value, control_version: 0 })),
-      model_capabilities: input.model_capabilities.map((value) => ({ ...value, control_version: 0 })),
+      model_capabilities: input.model_capabilities.map((value) => ({
+        ...value,
+        embeddings: value.embeddings ?? false,
+        control_version: 0,
+      })),
     })
     const statements: D1PreparedStatement[] = [
       context.env.DB.prepare(
@@ -429,11 +436,12 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
     const now = Date.now()
     await mutateAccountRelation(context.env, account, context.env.DB.prepare(
       `INSERT INTO account_models (
-         account_id, model_id, chat_completions, responses, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?)
+         account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id, model_id) DO UPDATE SET
          chat_completions = excluded.chat_completions,
          responses = excluded.responses,
+         embeddings = excluded.embeddings,
          control_version = account_models.control_version + 1,
          updated_at_ms = excluded.updated_at_ms`,
     ).bind(
@@ -441,6 +449,7 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
       modelId,
       capability.chat_completions ? 1 : 0,
       capability.responses ? 1 : 0,
+      capability.embeddings ? 1 : 0,
       now,
       now,
     ), now)
@@ -770,15 +779,21 @@ function parseModelCapabilities(value: unknown): ModelCapabilityInput[] {
 
 function parseModelCapability(body: Record<string, unknown>, resourceId?: string): ModelCapabilityInput {
   const modelId = resourceId ?? requireResourceId(requireString(body, 'model_id', 128), 'model')
-  const chatCompletions = optionalBoolean(body, 'chat_completions', true)
-  const responses = optionalBoolean(body, 'responses', true)
-  if (!chatCompletions && !responses) {
+  const chatCompletions = optionalBoolean(body, 'chat_completions') ?? true
+  const responses = optionalBoolean(body, 'responses') ?? true
+  const embeddings = optionalBoolean(body, 'embeddings')
+  if (!chatCompletions && !responses && !embeddings) {
     throw new GatewayError(400, 'invalid_model_capability', 'At least one endpoint capability must be enabled')
   }
-  return { model_id: modelId, chat_completions: chatCompletions, responses }
+  return {
+    model_id: modelId,
+    chat_completions: chatCompletions,
+    responses,
+    ...(embeddings === undefined ? {} : { embeddings }),
+  }
 }
 
-function optionalBoolean(body: Record<string, unknown>, field: string, fallback: boolean): boolean {
+function optionalBoolean(body: Record<string, unknown>, field: string, fallback?: boolean): boolean | undefined {
   if (body[field] === undefined) return fallback
   if (typeof body[field] !== 'boolean') throw new GatewayError(400, `invalid_${field}`, `${field} must be a boolean`)
   return body[field] as boolean
@@ -846,13 +861,14 @@ function capabilityInsertStatements(
 ): D1PreparedStatement[] {
   return capabilities.map((capability) => env.DB.prepare(
     `INSERT INTO account_models (
-       account_id, model_id, chat_completions, responses, created_at_ms, updated_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?)`,
+       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     accountId,
     capability.model_id,
     capability.chat_completions ? 1 : 0,
     capability.responses ? 1 : 0,
+    capability.embeddings ? 1 : 0,
     now,
     now,
   ))
@@ -889,6 +905,7 @@ function publicAccount(row: AccountRow) {
       model_id: String(value.model_id),
       chat_completions: Number(value.chat_completions) === 1,
       responses: Number(value.responses) === 1,
+      embeddings: Number(value.embeddings) === 1,
       control_version: Number(value.control_version),
     }))
   return accountResponse({

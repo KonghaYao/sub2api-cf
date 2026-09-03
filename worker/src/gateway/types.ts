@@ -1,4 +1,5 @@
-export type GatewayEndpoint = 'chat_completions' | 'responses'
+export type GatewayEndpoint = 'chat_completions' | 'responses' | 'embeddings'
+export type GenerativeGatewayEndpoint = Exclude<GatewayEndpoint, 'embeddings'>
 
 export interface GatewayPrincipal {
   api_key_id: string
@@ -15,7 +16,9 @@ export interface ModelRoute {
   model_id: string
   public_name: string
   upstream_name: string
-  endpoint: GatewayEndpoint | 'both'
+  endpoint: GenerativeGatewayEndpoint | 'both'
+  /** D1 capability flag; absent only in legacy test fixtures constructed before migration 0008. */
+  embeddings?: number
   price_id: string
   price_version: number
   input_micros_per_million: number

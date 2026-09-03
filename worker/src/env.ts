@@ -16,6 +16,8 @@ export interface Env {
   CREDENTIALS_MASTER_KEY?: string
   /** Enables the minimal bootstrap endpoint when configured as a Worker secret. */
   ADMIN_TOKEN?: string
+  /** Cloudflare Turnstile secret used when public authentication enables captcha checks. */
+  TURNSTILE_SECRET_KEY?: string
 }
 
 export interface PlatformEvent<TPayload = unknown> {

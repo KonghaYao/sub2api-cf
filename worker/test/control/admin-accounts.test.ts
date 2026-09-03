@@ -127,9 +127,9 @@ class Statement {
       this.deleteRelations(this.db.groupLinks); return result()
     }
     if (this.sql.includes('INSERT INTO account_models')) {
-      const [account_id, model_id, chat_completions, responses, created_at_ms, updated_at_ms] = this.values
+      const [account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms] = this.values
       const key = `${account_id}:${model_id}`; const old = this.db.modelCaps.get(key)
-      this.db.modelCaps.set(key, { account_id, model_id, chat_completions, responses, created_at_ms: old?.created_at_ms ?? created_at_ms, updated_at_ms, control_version: old ? old.control_version + 1 : 0 })
+      this.db.modelCaps.set(key, { account_id, model_id, chat_completions, responses, embeddings, created_at_ms: old?.created_at_ms ?? created_at_ms, updated_at_ms, control_version: old ? old.control_version + 1 : 0 })
       return result()
     }
     if (this.sql.includes('DELETE FROM account_models')) {
@@ -207,6 +207,56 @@ describe('admin account control plane', () => {
     expect(JSON.stringify([account, secret])).not.toContain(input.api_key)
     expect((await decryptCredential(secret.nonce_b64, secret.ciphertext_b64, 'm'.repeat(32), credentialAad('test', account.id, secret.id, 1))).api_key).toBe(input.api_key)
     expect(payload.data).toMatchObject({ base_url: 'https://api.example.com/v1', status: 'active', config_version: 1, control_version: 0, credentials_status: { has_api_key: true } })
+    expect(payload.data.model_capabilities).toEqual([
+      expect.objectContaining({ model_id: 'model-a', embeddings: false }),
+    ])
+  })
+
+  it('creates and updates an embeddings-only account model capability', async () => {
+    const db = new MemoryDb()
+    const createdResponse = await createApp().request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'account-embeddings' },
+      body: JSON.stringify({
+        ...input,
+        model_capabilities: [{
+          model_id: 'model-a',
+          chat_completions: false,
+          responses: false,
+          embeddings: true,
+        }],
+      }),
+    }, env(db))
+    const created = await json(createdResponse)
+
+    expect(createdResponse.status).toBe(201)
+    expect(created.data.model_capabilities).toEqual([
+      expect.objectContaining({
+        model_id: 'model-a',
+        chat_completions: false,
+        responses: false,
+        embeddings: true,
+      }),
+    ])
+
+    const updatedResponse = await createApp().request(`/accounts/${created.data.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'if-match': '0' },
+      body: JSON.stringify({
+        model_capabilities: [{
+          model_id: 'model-b',
+          chat_completions: false,
+          responses: false,
+          embeddings: true,
+        }],
+      }),
+    }, env(db))
+    const updated = await json(updatedResponse)
+
+    expect(updatedResponse.status).toBe(200)
+    expect(updated.data.model_capabilities).toEqual([
+      expect.objectContaining({ model_id: 'model-b', embeddings: true }),
+    ])
   })
 
   it('lists/details safe projections and replaces routing plus credential atomically on partial update', async () => {

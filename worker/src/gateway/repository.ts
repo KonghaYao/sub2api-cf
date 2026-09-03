@@ -98,7 +98,8 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
              AND (
                (m.endpoint = 'chat_completions' AND am.chat_completions = 1) OR
                (m.endpoint = 'responses' AND am.responses = 1) OR
-               (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1))
+               (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
+               (m.embeddings = 1 AND am.embeddings = 1)
              )
         )
       ORDER BY gm.sort_order ASC, m.public_name ASC`,
@@ -114,16 +115,22 @@ export async function resolveGatewayRoute(
   publicName: string,
   endpoint: GatewayEndpoint,
 ): Promise<{ model: ModelRoute; candidates: AccountCandidate[] }> {
-  const capabilityColumn = endpoint === 'chat_completions' ? 'am.chat_completions' : 'am.responses'
+  const capabilityColumn = accountCapabilityColumn(endpoint)
+  const modelCapability = endpoint === 'embeddings'
+    ? 'm.embeddings = 1'
+    : `(m.endpoint = ? OR m.endpoint = 'both')`
+  const modelBindings = endpoint === 'embeddings'
+    ? [groupId, publicName]
+    : [groupId, publicName, endpoint]
   const [modelResult, candidateResult] = await env.DB.batch([
     env.DB.prepare(
       `${modelSelect()}
         WHERE gm.group_id = ? AND m.public_name = ?
           AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
           AND g.enabled = 1 AND g.platform = 'openai' AND m.platform = g.platform
-          AND (m.endpoint = ? OR m.endpoint = 'both')
+          AND ${modelCapability}
         LIMIT 1`,
-    ).bind(groupId, publicName, endpoint),
+    ).bind(...modelBindings),
     accountCandidatesStatement(env, groupId, publicName, capabilityColumn),
   ])
   const model = modelResult.results[0] as unknown as ModelRoute | undefined
@@ -144,7 +151,7 @@ function accountCandidatesStatement(
   env: Env,
   groupId: string,
   publicName: string,
-  capabilityColumn: 'am.chat_completions' | 'am.responses',
+  capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings',
 ): D1PreparedStatement {
   return env.DB.prepare(
     `SELECT a.id AS account_id, a.base_url, a.max_concurrency,
@@ -172,7 +179,7 @@ export async function getAccountCredential(
   endpoint: GatewayEndpoint,
   accountId: string,
 ): Promise<AccountCredential> {
-  const capabilityColumn = endpoint === 'chat_completions' ? 'am.chat_completions' : 'am.responses'
+  const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.base_url, a.auth_scheme,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
@@ -241,6 +248,7 @@ export function validateBaseUrl(value: string): URL {
 function readApiKey(headers: Headers): string {
   const authorization = headers.get('authorization')?.trim() ?? ''
   const alternate = headers.get('x-api-key')?.trim() ?? ''
+  const google = headers.get('x-goog-api-key')?.trim() ?? ''
   let bearer = ''
   if (authorization !== '') {
     if (authorization.length > 8_320) {
@@ -252,10 +260,11 @@ function readApiKey(headers: Headers): string {
     }
     bearer = match[1]
   }
-  if (bearer !== '' && alternate !== '' && bearer !== alternate) {
-    throw new GatewayError(400, 'conflicting_api_keys', 'Authorization and x-api-key credentials conflict')
+  const credentials = [bearer, alternate, google].filter((value) => value !== '')
+  if (new Set(credentials).size > 1) {
+    throw new GatewayError(400, 'conflicting_api_keys', 'API key credentials conflict')
   }
-  const value = bearer || alternate
+  const value = credentials[0] ?? ''
   if (value === '' || value.length > 8_192) {
     throw new GatewayError(401, 'api_key_required', 'API key is required', 'authentication_error')
   }
@@ -266,7 +275,7 @@ function modelSelect(): string {
   return `SELECT revision.revision AS config_revision,
                  m.id AS model_id, m.public_name,
                  COALESCE(gm.upstream_name_override, m.upstream_name) AS upstream_name,
-                 m.endpoint, p.id AS price_id, p.version AS price_version,
+                 m.endpoint, m.embeddings, p.id AS price_id, p.version AS price_version,
                  p.input_micros_per_million, p.output_micros_per_million,
                  p.cache_read_micros_per_million, p.per_request_micros,
                  p.minimum_reservation_micros,
@@ -277,4 +286,14 @@ function modelSelect(): string {
             JOIN models m ON m.id = gm.model_id
             JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id
             CROSS JOIN gateway_config_revision revision`
+}
+
+function accountCapabilityColumn(
+  endpoint: GatewayEndpoint,
+): 'am.chat_completions' | 'am.responses' | 'am.embeddings' {
+  switch (endpoint) {
+    case 'chat_completions': return 'am.chat_completions'
+    case 'responses': return 'am.responses'
+    case 'embeddings': return 'am.embeddings'
+  }
 }

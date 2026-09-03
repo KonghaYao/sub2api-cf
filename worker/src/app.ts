@@ -1,5 +1,12 @@
 import { Hono } from 'hono'
 import {
+  currentUser,
+  loginWithPassword,
+  logoutUserSession,
+  refreshUserSession,
+  registerWithPassword,
+} from './auth/handler'
+import {
   createAdminApiKey,
   listAdminApiKeys,
   revokeAdminApiKey,
@@ -49,7 +56,21 @@ import {
   updateAdminModel,
 } from './control/catalog'
 import type { Env } from './env'
-import { handleBootstrap, handleGateway, handleModels } from './gateway/handler'
+import {
+  handleAnthropicCountTokens,
+  handleAnthropicMessages,
+  handleBootstrap,
+  handleCodexModels,
+  handleEmbeddings,
+  handleGateway,
+  handleGeminiModel,
+  handleGeminiModelOperation,
+  handleGeminiModels,
+  handleModels,
+  handleResponsesCompact,
+  handleResponsesInputTokens,
+} from './gateway/handler'
+import { handleGatewayUsage, handleKeyBillingInfo } from './gateway/info'
 
 type AppBindings = {
   Bindings: Env
@@ -60,8 +81,13 @@ const apiRoots = ['/api', '/v1', '/backend-api']
 function isApiPath(pathname: string): boolean {
   return (
     pathname === '/responses' ||
+    pathname.startsWith('/responses/') ||
     pathname === '/models' ||
     pathname === '/chat/completions' ||
+    pathname === '/messages/count_tokens' ||
+    pathname === '/embeddings' ||
+    pathname === '/v1beta' ||
+    pathname.startsWith('/v1beta/') ||
     apiRoots.some((root) => pathname === root || pathname.startsWith(`${root}/`))
   )
 }
@@ -117,6 +143,12 @@ export function createApp() {
     })
   })
 
+  app.post('/api/v1/auth/register', registerWithPassword)
+  app.post('/api/v1/auth/login', loginWithPassword)
+  app.post('/api/v1/auth/refresh', refreshUserSession)
+  app.post('/api/v1/auth/logout', logoutUserSession)
+  app.get('/api/v1/auth/me', currentUser)
+
   app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
   app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
   app.use('/api/v1/admin/*', requireAdminSession)
@@ -159,10 +191,28 @@ export function createApp() {
 
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)
+  app.get('/backend-api/codex/models', handleCodexModels)
+  app.get('/v1/sub2api/billing', handleKeyBillingInfo)
+  app.get('/v1/usage', handleGatewayUsage)
+  app.get('/v1beta/models', handleGeminiModels)
+  app.get('/v1beta/models/:model', handleGeminiModel)
+  app.post('/v1beta/models/:operation', handleGeminiModelOperation)
   app.post('/v1/chat/completions', (context) => handleGateway(context, 'chat_completions'))
   app.post('/chat/completions', (context) => handleGateway(context, 'chat_completions'))
   app.post('/v1/responses', (context) => handleGateway(context, 'responses'))
   app.post('/responses', (context) => handleGateway(context, 'responses'))
+  app.post('/v1/responses/compact', handleResponsesCompact)
+  app.post('/responses/compact', handleResponsesCompact)
+  app.post('/v1/responses/input_tokens', handleResponsesInputTokens)
+  app.post('/responses/input_tokens', handleResponsesInputTokens)
+  app.post('/backend-api/codex/responses', (context) => handleGateway(context, 'responses'))
+  app.post('/backend-api/codex/responses/compact', handleResponsesCompact)
+  app.post('/backend-api/codex/responses/input_tokens', handleResponsesInputTokens)
+  app.post('/v1/messages', handleAnthropicMessages)
+  app.post('/v1/messages/count_tokens', handleAnthropicCountTokens)
+  app.post('/messages/count_tokens', handleAnthropicCountTokens)
+  app.post('/v1/embeddings', handleEmbeddings)
+  app.post('/embeddings', handleEmbeddings)
 
   app.notFound(async (context) => {
     const pathname = new URL(context.req.url).pathname

@@ -1,5 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../env'
+import { authenticateUserRequest } from '../auth/handler'
+import { isOpaqueToken } from '../auth/tokens'
 import { apiKeyDigest, constantTimeEqual, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/errors'
 
@@ -42,6 +44,21 @@ export const requireAdminSession: MiddlewareHandler<AdminBindings> = async (cont
     return gatewayErrorResponse(
       new GatewayError(503, 'admin_auth_not_configured', 'Admin authentication is not configured', 'server_error'),
     )
+  }
+  if (isOpaqueToken(match[1], 'access')) {
+    let user: Awaited<ReturnType<typeof authenticateUserRequest>>
+    try {
+      user = await authenticateUserRequest(context.req.raw, context.env)
+    } catch (error) {
+      return gatewayErrorResponse(asGatewayError(error))
+    }
+    if (user.role !== 'admin') {
+      return gatewayErrorResponse(
+        new GatewayError(403, 'admin_role_required', 'Administrator role is required', 'permission_error'),
+      )
+    }
+    await next()
+    return
   }
   const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
   const session = await context.env.DB.prepare(
