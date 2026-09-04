@@ -28,6 +28,8 @@ interface AdmissionLeaseRow {
 interface MonetaryProfileRow {
   api_key_id: string
   control_version: number
+  quota_reset_epoch: number
+  rate_limit_reset_epoch: number
   total_limit_micros: number
   limit_5h_micros: number
   limit_1d_micros: number
@@ -49,6 +51,8 @@ interface MonetaryReservationRow {
   request_id: string
   api_key_id: string
   control_version: number
+  quota_reset_epoch: number
+  rate_limit_reset_epoch: number
   status: MonetaryReservationStatus
   reserved_micros: number
   settled_micros: number | null
@@ -56,6 +60,8 @@ interface MonetaryReservationRow {
   tracks_windows: number
   reservation_expires_at_ms: number
   reservation_ttl_ms: number
+  renewal_sequence: number
+  last_renewal_ttl_ms: number | null
   created_at_ms: number
   updated_at_ms: number
 }
@@ -63,6 +69,8 @@ interface MonetaryReservationRow {
 interface MonetaryConfigureInput {
   api_key_id: string
   control_version: number
+  quota_reset_epoch: number
+  rate_limit_reset_epoch: number
   total_limit_micros: number
   limit_5h_micros: number
   limit_1d_micros: number
@@ -150,6 +158,7 @@ export class ApiKeyLimitDO {
       if (url.pathname === '/reclaim') return await this.reclaim()
       if (url.pathname === '/monetary/configure') return await this.configureMonetary(body)
       if (url.pathname === '/monetary/reserve') return await this.reserveMonetary(body)
+      if (url.pathname === '/monetary/renew') return await this.renewMonetary(body)
       if (url.pathname === '/monetary/settle') return await this.settleMonetary(body)
       if (url.pathname === '/monetary/cancel') return await this.cancelMonetary(body)
       throw new StateApiError(404, 'route_not_found', 'Durable object route was not found')
@@ -226,7 +235,8 @@ export class ApiKeyLimitDO {
           ORDER BY window_started_at_ms ASC, scope ASC, scope_id ASC`,
       ))
       const monetaryProfiles = Array.from(this.state.storage.sql.exec(
-        `SELECT api_key_id, control_version, total_limit_micros, limit_5h_micros,
+        `SELECT api_key_id, control_version, quota_reset_epoch, rate_limit_reset_epoch,
+                total_limit_micros, limit_5h_micros,
                 limit_1d_micros, limit_7d_micros, total_settled_micros,
                 created_at_ms, updated_at_ms
            FROM api_key_monetary_profiles ORDER BY api_key_id ASC`,
@@ -236,7 +246,8 @@ export class ApiKeyLimitDO {
            FROM api_key_monetary_windows ORDER BY api_key_id ASC, kind ASC`,
       ))
       const monetaryReservations = Array.from(this.state.storage.sql.exec(
-        `SELECT request_id, api_key_id, control_version, status, reserved_micros,
+        `SELECT request_id, api_key_id, control_version, quota_reset_epoch,
+                rate_limit_reset_epoch, status, reserved_micros,
                 settled_micros, tracks_total, tracks_windows,
                 reservation_expires_at_ms, reservation_ttl_ms, created_at_ms, updated_at_ms
            FROM api_key_monetary_reservations
@@ -471,19 +482,43 @@ export class ApiKeyLimitDO {
           }
           return json({ schema_version: 1, idempotent: true, profile: existing })
         }
+        if (
+          input.quota_reset_epoch < existing.quota_reset_epoch ||
+          input.rate_limit_reset_epoch < existing.rate_limit_reset_epoch
+        ) {
+          throw new StateApiError(
+            409,
+            'api_key_monetary_reset_epoch_regressed',
+            'A newer control version cannot move an API key reset epoch backwards',
+          )
+        }
+        const resetsTotal = input.quota_reset_epoch > existing.quota_reset_epoch
+        const resetsWindows = input.rate_limit_reset_epoch > existing.rate_limit_reset_epoch
         this.state.storage.sql.exec(
           `UPDATE api_key_monetary_profiles
-              SET control_version = ?, total_limit_micros = ?, limit_5h_micros = ?,
-                  limit_1d_micros = ?, limit_7d_micros = ?, updated_at_ms = ?
+              SET control_version = ?, quota_reset_epoch = ?, rate_limit_reset_epoch = ?,
+                  total_limit_micros = ?, limit_5h_micros = ?,
+                  limit_1d_micros = ?, limit_7d_micros = ?, total_settled_micros = ?,
+                  updated_at_ms = ?
             WHERE api_key_id = ?`,
           input.control_version,
+          input.quota_reset_epoch,
+          input.rate_limit_reset_epoch,
           input.total_limit_micros,
           input.limit_5h_micros,
           input.limit_1d_micros,
           input.limit_7d_micros,
+          resetsTotal ? input.total_used_micros : existing.total_settled_micros,
           now,
           input.api_key_id,
         )
+        if (resetsWindows) {
+          this.state.storage.sql.exec(
+            'DELETE FROM api_key_monetary_windows WHERE api_key_id = ?',
+            input.api_key_id,
+          )
+          this.importMonetaryWindows(input, now)
+        }
         return json({
           schema_version: 1,
           idempotent: false,
@@ -492,12 +527,15 @@ export class ApiKeyLimitDO {
       }
       this.state.storage.sql.exec(
         `INSERT INTO api_key_monetary_profiles (
-           api_key_id, control_version, total_limit_micros, limit_5h_micros,
+           api_key_id, control_version, quota_reset_epoch, rate_limit_reset_epoch,
+           total_limit_micros, limit_5h_micros,
            limit_1d_micros, limit_7d_micros, total_settled_micros,
            created_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.api_key_id,
         input.control_version,
+        input.quota_reset_epoch,
+        input.rate_limit_reset_epoch,
         input.total_limit_micros,
         input.limit_5h_micros,
         input.limit_1d_micros,
@@ -562,43 +600,51 @@ export class ApiKeyLimitDO {
         )
       }
 
-      const activeReserved = this.activeMonetaryReserved(apiKeyId)
-      const futureReserved = checkedSum(activeReserved, amount)
+      const totalFutureReserved = checkedSum(
+        this.activeMonetaryReserved(apiKeyId, 'quota_reset_epoch', profile.quota_reset_epoch),
+        amount,
+      )
       if (
-        profile.total_limit_micros > 0 &&
-        checkedSum(profile.total_settled_micros, futureReserved) > profile.total_limit_micros
+        monetaryLimitExceeded(
+          profile.total_limit_micros,
+          profile.total_settled_micros,
+          totalFutureReserved,
+          amount,
+        )
       ) {
         throw new MonetaryLimitError('api_key_quota_exceeded', 'API key total quota is exhausted')
       }
-      if (hasMonetaryWindowLimits(profile)) {
-        for (const kind of ['5h', '1d', '7d'] as const) {
-          const window = this.ensureMonetaryWindow(apiKeyId, kind, now)
-          const limit = monetaryWindowLimit(profile, kind)
-          if (
-            limit > 0 &&
-            checkedSum(window.settled_micros, futureReserved) > limit
-          ) {
-            throw new MonetaryLimitError(
-              `api_key_rate_limit_${kind}_exceeded`,
-              `API key ${kind} amount limit is exhausted`,
-              retryAfterForDurationWindow(now, window.window_started_at_ms, MONETARY_WINDOW_MS[kind]),
-            )
-          }
+      const windowFutureReserved = checkedSum(
+        this.activeMonetaryReserved(apiKeyId, 'rate_limit_reset_epoch', profile.rate_limit_reset_epoch),
+        amount,
+      )
+      for (const kind of ['5h', '1d', '7d'] as const) {
+        const window = this.ensureMonetaryWindow(apiKeyId, kind, now)
+        const limit = monetaryWindowLimit(profile, kind)
+        if (
+          monetaryLimitExceeded(limit, window.settled_micros, windowFutureReserved, amount)
+        ) {
+          throw new MonetaryLimitError(
+            `api_key_rate_limit_${kind}_exceeded`,
+            `API key ${kind} amount limit is exhausted`,
+            retryAfterForDurationWindow(now, window.window_started_at_ms, MONETARY_WINDOW_MS[kind]),
+          )
         }
       }
       this.state.storage.sql.exec(
         `INSERT INTO api_key_monetary_reservations (
-           request_id, api_key_id, control_version, status, reserved_micros,
+           request_id, api_key_id, control_version, quota_reset_epoch,
+           rate_limit_reset_epoch, status, reserved_micros,
            settled_micros, tracks_total, tracks_windows,
            reservation_expires_at_ms, reservation_ttl_ms,
            created_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, 'reserved', ?, NULL, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, NULL, 1, 1, ?, ?, ?, ?)`,
         requestId,
         apiKeyId,
         controlVersion,
+        profile.quota_reset_epoch,
+        profile.rate_limit_reset_epoch,
         amount,
-        profile.total_limit_micros > 0 ? 1 : 0,
-        hasMonetaryWindowLimits(profile) ? 1 : 0,
         checkedSum(now, ttl),
         ttl,
         now,
@@ -610,6 +656,51 @@ export class ApiKeyLimitDO {
         idempotent: false,
         reservation: this.readMonetaryReservation(requestId),
       })
+    })
+    await this.scheduleAlarm()
+    return response
+  }
+
+  private async renewMonetary(body: Record<string, unknown>): Promise<Response> {
+    const requestId = requireString(body, 'request_id', 256)
+    const apiKeyId = requireString(body, 'api_key_id', 128)
+    const renewalSequence = requireSafeInteger(body, 'renewal_sequence', { minimum: 1 })
+    const ttl = requireSafeInteger(body, 'reservation_ttl_ms', {
+      minimum: 1,
+      maximum: MAX_MONETARY_RESERVATION_TTL_MS,
+    })
+    const now = Date.now()
+    const response = this.state.storage.transactionSync(() => {
+      this.cleanup(now)
+      this.expireMonetaryReservations(now)
+      const reservation = this.readMonetaryReservation(requestId)
+      if (reservation === null || reservation.api_key_id !== apiKeyId) {
+        throw new StateApiError(404, 'api_key_monetary_reservation_not_found', 'Monetary reservation was not found')
+      }
+      if (reservation.status !== 'reserved') {
+        throw new StateApiError(409, 'api_key_monetary_invalid_transition', 'Monetary reservation is no longer active')
+      }
+      if (renewalSequence === reservation.renewal_sequence) {
+        if (reservation.last_renewal_ttl_ms !== ttl) {
+          throw new StateApiError(409, 'api_key_monetary_renewal_conflict', 'Renewal sequence was replayed with different input')
+        }
+        return json({ schema_version: 1, idempotent: true, reservation })
+      }
+      if (renewalSequence !== reservation.renewal_sequence + 1) {
+        throw new StateApiError(409, 'api_key_monetary_renewal_out_of_order', 'Renewal sequence must increase by one')
+      }
+      this.state.storage.sql.exec(
+        `UPDATE api_key_monetary_reservations
+            SET reservation_expires_at_ms = ?, renewal_sequence = ?,
+                last_renewal_ttl_ms = ?, updated_at_ms = ?
+          WHERE request_id = ? AND status = 'reserved'`,
+        checkedSum(now, ttl),
+        renewalSequence,
+        ttl,
+        now,
+        requestId,
+      )
+      return json({ schema_version: 1, idempotent: false, reservation: this.readMonetaryReservation(requestId) })
     })
     await this.scheduleAlarm()
     return response
@@ -649,7 +740,7 @@ export class ApiKeyLimitDO {
           usage: this.monetaryUsageSnapshot(apiKeyId),
         })
       }
-      if (reservation.status !== 'reserved') {
+      if (reservation.status !== 'reserved' && reservation.status !== 'expired') {
         throw new StateApiError(
           409,
           'api_key_monetary_invalid_transition',
@@ -664,7 +755,7 @@ export class ApiKeyLimitDO {
         )
       }
       const profile = this.requireMonetaryProfile(apiKeyId)
-      const totalSettled = reservation.tracks_total === 1
+      const totalSettled = reservation.quota_reset_epoch === profile.quota_reset_epoch
         ? checkedSum(profile.total_settled_micros, amount)
         : profile.total_settled_micros
       this.state.storage.sql.exec(
@@ -675,7 +766,7 @@ export class ApiKeyLimitDO {
         now,
         apiKeyId,
       )
-      if (reservation.tracks_windows === 1) {
+      if (reservation.rate_limit_reset_epoch === profile.rate_limit_reset_epoch) {
         for (const kind of ['5h', '1d', '7d'] as const) {
           const window = this.ensureMonetaryWindow(apiKeyId, kind, now)
           this.state.storage.sql.exec(
@@ -692,7 +783,7 @@ export class ApiKeyLimitDO {
       this.state.storage.sql.exec(
         `UPDATE api_key_monetary_reservations
             SET status = 'settled', settled_micros = ?, updated_at_ms = ?
-          WHERE request_id = ? AND status = 'reserved'`,
+          WHERE request_id = ? AND status IN ('reserved', 'expired')`,
         amount,
         now,
         requestId,
@@ -788,6 +879,8 @@ export class ApiKeyLimitDO {
       CREATE TABLE IF NOT EXISTS api_key_monetary_profiles (
         api_key_id TEXT PRIMARY KEY,
         control_version INTEGER NOT NULL CHECK (control_version >= 0),
+        quota_reset_epoch INTEGER NOT NULL DEFAULT 0 CHECK (quota_reset_epoch >= 0),
+        rate_limit_reset_epoch INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0),
         total_limit_micros INTEGER NOT NULL CHECK (total_limit_micros >= 0),
         limit_5h_micros INTEGER NOT NULL CHECK (limit_5h_micros >= 0),
         limit_1d_micros INTEGER NOT NULL CHECK (limit_1d_micros >= 0),
@@ -813,6 +906,8 @@ export class ApiKeyLimitDO {
         request_id TEXT PRIMARY KEY,
         api_key_id TEXT NOT NULL,
         control_version INTEGER NOT NULL CHECK (control_version >= 0),
+        quota_reset_epoch INTEGER NOT NULL DEFAULT 0 CHECK (quota_reset_epoch >= 0),
+        rate_limit_reset_epoch INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0),
         status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'cancelled', 'expired')),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
@@ -820,11 +915,43 @@ export class ApiKeyLimitDO {
         tracks_windows INTEGER NOT NULL CHECK (tracks_windows IN (0, 1)),
         reservation_expires_at_ms INTEGER NOT NULL CHECK (reservation_expires_at_ms >= 0),
         reservation_ttl_ms INTEGER NOT NULL CHECK (reservation_ttl_ms > 0),
+        renewal_sequence INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0),
+        last_renewal_ttl_ms INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0),
         created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
         FOREIGN KEY (api_key_id) REFERENCES api_key_monetary_profiles(api_key_id) ON DELETE CASCADE
       ) STRICT
     `)
+    this.ensureColumn(
+      'api_key_monetary_profiles',
+      'quota_reset_epoch',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (quota_reset_epoch >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_profiles',
+      'rate_limit_reset_epoch',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_reservations',
+      'quota_reset_epoch',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (quota_reset_epoch >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_reservations',
+      'rate_limit_reset_epoch',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_reservations',
+      'renewal_sequence',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_reservations',
+      'last_renewal_ttl_ms',
+      'INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0)',
+    )
     this.state.storage.sql.exec(
       'CREATE INDEX IF NOT EXISTS idx_admission_leases_active_expiry ON admission_leases(status, expires_at_ms)',
     )
@@ -845,6 +972,14 @@ export class ApiKeyLimitDO {
     )
   }
 
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = Array.from(this.state.storage.sql.exec(`PRAGMA table_info(${table})`)) as Array<{
+      name?: unknown
+    }>
+    if (columns.some((entry) => entry.name === column)) return
+    this.state.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+  }
+
   private readLease(requestId: string): AdmissionLeaseRow | null {
     return (Array.from(this.state.storage.sql.exec(
       `SELECT request_id, api_key_id, group_id, status, expires_at_ms,
@@ -857,7 +992,8 @@ export class ApiKeyLimitDO {
 
   private readMonetaryProfile(apiKeyId: string): MonetaryProfileRow | null {
     return (Array.from(this.state.storage.sql.exec(
-      `SELECT api_key_id, control_version, total_limit_micros, limit_5h_micros,
+      `SELECT api_key_id, control_version, quota_reset_epoch, rate_limit_reset_epoch,
+              total_limit_micros, limit_5h_micros,
               limit_1d_micros, limit_7d_micros, total_settled_micros,
               created_at_ms, updated_at_ms
          FROM api_key_monetary_profiles
@@ -880,9 +1016,11 @@ export class ApiKeyLimitDO {
 
   private readMonetaryReservation(requestId: string): MonetaryReservationRow | null {
     return (Array.from(this.state.storage.sql.exec(
-      `SELECT request_id, api_key_id, control_version, status, reserved_micros,
+      `SELECT request_id, api_key_id, control_version, quota_reset_epoch,
+              rate_limit_reset_epoch, status, reserved_micros,
               settled_micros, tracks_total, tracks_windows,
-              reservation_expires_at_ms, reservation_ttl_ms,
+              reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
+              last_renewal_ttl_ms,
               created_at_ms, updated_at_ms
          FROM api_key_monetary_reservations
         WHERE request_id = ?`,
@@ -890,12 +1028,18 @@ export class ApiKeyLimitDO {
     ))[0] as unknown as MonetaryReservationRow | undefined) ?? null
   }
 
-  private activeMonetaryReserved(apiKeyId: string): number {
+  private activeMonetaryReserved(
+    apiKeyId: string,
+    epochColumn?: 'quota_reset_epoch' | 'rate_limit_reset_epoch',
+    epoch?: number,
+  ): number {
     const row = Array.from(this.state.storage.sql.exec(
       `SELECT COALESCE(SUM(reserved_micros), 0) AS amount
          FROM api_key_monetary_reservations
-        WHERE api_key_id = ? AND status = 'reserved'`,
+        WHERE api_key_id = ? AND status = 'reserved'
+          ${epochColumn === undefined ? '' : `AND ${epochColumn} = ?`}`,
       apiKeyId,
+      ...(epochColumn === undefined ? [] : [epoch]),
     ))[0] as { amount?: unknown } | undefined
     if (!Number.isSafeInteger(row?.amount) || (row!.amount as number) < 0) {
       throw new StateApiError(500, 'invalid_persisted_state', 'Persisted monetary reservations are invalid')
@@ -963,11 +1107,18 @@ export class ApiKeyLimitDO {
 
   private monetaryUsageSnapshot(apiKeyId: string): Record<string, unknown> {
     const profile = this.requireMonetaryProfile(apiKeyId)
+    const now = Date.now()
     return {
       api_key_id: apiKeyId,
+      quota_reset_epoch: profile.quota_reset_epoch,
+      rate_limit_reset_epoch: profile.rate_limit_reset_epoch,
       total_settled_micros: profile.total_settled_micros,
       active_reserved_micros: this.activeMonetaryReserved(apiKeyId),
-      windows: (['5h', '1d', '7d'] as const).map((kind) => this.readMonetaryWindow(apiKeyId, kind)),
+      // A settled replay can arrive after cleanup removed an elapsed window.
+      // Re-materialize all three dimensions so recovery always receives a
+      // complete authoritative snapshot rather than an unparsable null.
+      windows: (['5h', '1d', '7d'] as const).map((kind) =>
+        this.ensureMonetaryWindow(apiKeyId, kind, now)),
     }
   }
 
@@ -1112,6 +1263,8 @@ function parseMonetaryConfigure(body: Record<string, unknown>): MonetaryConfigur
   return {
     api_key_id: requireString(body, 'api_key_id', 128),
     control_version: requireSafeInteger(body, 'control_version'),
+    quota_reset_epoch: requireSafeInteger(body, 'quota_reset_epoch'),
+    rate_limit_reset_epoch: requireSafeInteger(body, 'rate_limit_reset_epoch'),
     total_limit_micros: requireSafeInteger(body, 'total_limit_micros'),
     limit_5h_micros: requireSafeInteger(body, 'limit_5h_micros'),
     limit_1d_micros: requireSafeInteger(body, 'limit_1d_micros'),
@@ -1132,7 +1285,9 @@ function requireNullableSafeInteger(body: Record<string, unknown>, field: string
 }
 
 function sameMonetaryPolicy(profile: MonetaryProfileRow, input: MonetaryConfigureInput): boolean {
-  return profile.total_limit_micros === input.total_limit_micros &&
+  return profile.quota_reset_epoch === input.quota_reset_epoch &&
+    profile.rate_limit_reset_epoch === input.rate_limit_reset_epoch &&
+    profile.total_limit_micros === input.total_limit_micros &&
     profile.limit_5h_micros === input.limit_5h_micros &&
     profile.limit_1d_micros === input.limit_1d_micros &&
     profile.limit_7d_micros === input.limit_7d_micros
@@ -1149,16 +1304,21 @@ function checkedSum(...values: number[]): number {
   return sum
 }
 
-function hasMonetaryWindowLimits(profile: MonetaryProfileRow): boolean {
-  return profile.limit_5h_micros > 0 ||
-    profile.limit_1d_micros > 0 ||
-    profile.limit_7d_micros > 0
-}
-
 function monetaryWindowLimit(profile: MonetaryProfileRow, kind: MonetaryWindowKind): number {
   if (kind === '5h') return profile.limit_5h_micros
   if (kind === '1d') return profile.limit_1d_micros
   return profile.limit_7d_micros
+}
+
+function monetaryLimitExceeded(
+  limit: number,
+  settled: number,
+  futureReserved: number,
+  requested: number,
+): boolean {
+  if (limit === 0) return false
+  const projected = checkedSum(settled, futureReserved)
+  return projected > limit || (requested === 0 && projected >= limit)
 }
 
 function retryAfterForDurationWindow(now: number, start: number, duration: number): number {

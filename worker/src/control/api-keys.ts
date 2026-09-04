@@ -15,6 +15,7 @@ import {
   optionalString,
   queryInteger,
   readJsonObject,
+  requireExpectedControlVersion,
   requireIdempotencyKey,
   requireResourceId,
   requireSafeInteger,
@@ -38,6 +39,19 @@ interface ApiKeyRow {
   auth_version: number
   control_version: number
   revoked_at_ms: number | null
+  quota_micros?: number
+  quota_used_micros?: number
+  rate_limit_5h_micros?: number
+  rate_limit_1d_micros?: number
+  rate_limit_7d_micros?: number
+  usage_5h_micros?: number
+  usage_1d_micros?: number
+  usage_7d_micros?: number
+  window_5h_start_ms?: number | null
+  window_1d_start_ms?: number | null
+  window_7d_start_ms?: number | null
+  quota_reset_epoch?: number
+  rate_limit_reset_epoch?: number
 }
 
 interface HydratedApiKeyRow extends ApiKeyRow {
@@ -54,6 +68,10 @@ interface CreateApiKeyInput {
   name: string
   group_id: string
   expires_at_ms: number | null
+  quota_micros: number
+  rate_limit_5h_micros: number
+  rate_limit_1d_micros: number
+  rate_limit_7d_micros: number
 }
 
 interface ApiKeyUpdatePatch {
@@ -61,6 +79,12 @@ interface ApiKeyUpdatePatch {
   group_id?: string | null
   enabled?: boolean
   expires_at_ms?: number | null
+  quota_micros?: number
+  rate_limit_5h_micros?: number
+  rate_limit_1d_micros?: number
+  rate_limit_7d_micros?: number
+  reset_quota?: boolean
+  reset_rate_limit_usage?: boolean
 }
 
 export async function createAdminApiKey(context: Context<ControlBindings>): Promise<Response> {
@@ -124,6 +148,19 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
       auth_version: 1,
       control_version: 0,
       revoked_at_ms: null,
+      quota_micros: input.quota_micros,
+      quota_used_micros: 0,
+      rate_limit_5h_micros: input.rate_limit_5h_micros,
+      rate_limit_1d_micros: input.rate_limit_1d_micros,
+      rate_limit_7d_micros: input.rate_limit_7d_micros,
+      usage_5h_micros: 0,
+      usage_1d_micros: 0,
+      usage_7d_micros: 0,
+      window_5h_start_ms: null,
+      window_1d_start_ms: null,
+      window_7d_start_ms: null,
+      quota_reset_epoch: 0,
+      rate_limit_reset_epoch: 0,
     }
     const safe = publicApiKey(row, authorization.group)
     try {
@@ -133,10 +170,12 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
           `INSERT INTO api_keys (
              id, user_id, key_hash, name, enabled, expires_at_ms,
              last_used_at_ms, created_at_ms, updated_at_ms,
-             group_id, key_prefix, auth_version, revoked_at_ms
+             group_id, key_prefix, auth_version, revoked_at_ms,
+             quota_micros, rate_limit_5h_micros,
+             rate_limit_1d_micros, rate_limit_7d_micros
            ) SELECT ?, ?, ?,
              CASE WHEN ${adminApiKeyGroupAuthorizationPredicate('g')} THEN ? ELSE NULL END,
-             1, ?, NULL, ?, ?, ?, ?, 1, NULL`,
+             1, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?`,
         ).bind(
           row.id,
           row.user_id,
@@ -152,6 +191,10 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
           now,
           row.group_id,
           row.key_prefix,
+          input.quota_micros,
+          input.rate_limit_5h_micros,
+          input.rate_limit_1d_micros,
+          input.rate_limit_7d_micros,
         ),
         controlIdempotencyInsert(context.env, idempotency, 'api_key', row.id, safe, now),
       ])
@@ -261,10 +304,11 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
     const body = await readJsonObject(context.req.raw)
     const patch = parseApiKeyUpdatePatch(body)
+    const expectedControlVersion = requireExpectedControlVersion(context.req.raw, body)
     const idempotency = await controlIdempotency(
-      'admin.api_keys.update.v2',
+      'admin.api_keys.update.v3',
       idempotencyKey,
-      { api_key_id: keyId, ...patch },
+      { api_key_id: keyId, expected_control_version: expectedControlVersion, ...patch },
     )
     const previous = await findControlIdempotency(context.env, idempotency)
     if (previous !== null) {
@@ -276,6 +320,7 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
     }
     let row = await findApiKey(context.env, keyId)
     if (row === null) throw new GatewayError(404, 'api_key_not_found', 'API key was not found')
+    assertApiKeyControlVersion(row.control_version, expectedControlVersion)
 
     const name = patch.name ?? row.name
     const groupId = Object.hasOwn(patch, 'group_id') ? patch.group_id ?? null : row.group_id
@@ -292,11 +337,30 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
     if (Object.hasOwn(patch, 'expires_at_ms')) {
       expiresAtMs = patch.expires_at_ms ?? null
     }
+    const quotaMicros = patch.quota_micros ?? monetaryValue(row.quota_micros)
+    const rateLimit5hMicros = patch.rate_limit_5h_micros ?? monetaryValue(row.rate_limit_5h_micros)
+    const rateLimit1dMicros = patch.rate_limit_1d_micros ?? monetaryValue(row.rate_limit_1d_micros)
+    const rateLimit7dMicros = patch.rate_limit_7d_micros ?? monetaryValue(row.rate_limit_7d_micros)
+    const resetQuota = patch.reset_quota === true
+    const resetRateLimitUsage = patch.reset_rate_limit_usage === true
+    assertResetEpochAvailable(monetaryValue(row.quota_reset_epoch), resetQuota, 'quota_reset_epoch')
+    assertResetEpochAvailable(
+      monetaryValue(row.rate_limit_reset_epoch),
+      resetRateLimitUsage,
+      'rate_limit_reset_epoch',
+    )
     const authChanged =
       groupId !== row.group_id ||
       enabled !== (row.enabled === 1) ||
       expiresAtMs !== row.expires_at_ms
-    const changed = authChanged || name !== row.name
+    const monetaryChanged =
+      quotaMicros !== monetaryValue(row.quota_micros) ||
+      rateLimit5hMicros !== monetaryValue(row.rate_limit_5h_micros) ||
+      rateLimit1dMicros !== monetaryValue(row.rate_limit_1d_micros) ||
+      rateLimit7dMicros !== monetaryValue(row.rate_limit_7d_micros) ||
+      resetQuota ||
+      resetRateLimitUsage
+    const changed = authChanged || name !== row.name || monetaryChanged
     if (changed) {
       const now = Date.now()
       const authVersion = row.auth_version + (authChanged ? 1 : 0)
@@ -311,6 +375,17 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
         ? `UPDATE api_keys
             SET name = ?, group_id = ?, enabled = ?, expires_at_ms = ?,
                 auth_version = ?,
+                quota_micros = ?,
+                rate_limit_5h_micros = ?, rate_limit_1d_micros = ?, rate_limit_7d_micros = ?,
+                quota_used_micros = CASE WHEN ? THEN 0 ELSE quota_used_micros END,
+                usage_5h_micros = CASE WHEN ? THEN 0 ELSE usage_5h_micros END,
+                usage_1d_micros = CASE WHEN ? THEN 0 ELSE usage_1d_micros END,
+                usage_7d_micros = CASE WHEN ? THEN 0 ELSE usage_7d_micros END,
+                window_5h_start_ms = CASE WHEN ? THEN NULL ELSE window_5h_start_ms END,
+                window_1d_start_ms = CASE WHEN ? THEN NULL ELSE window_1d_start_ms END,
+                window_7d_start_ms = CASE WHEN ? THEN NULL ELSE window_7d_start_ms END,
+                quota_reset_epoch = CASE WHEN ? THEN quota_reset_epoch + 1 ELSE quota_reset_epoch END,
+                rate_limit_reset_epoch = CASE WHEN ? THEN rate_limit_reset_epoch + 1 ELSE rate_limit_reset_epoch END,
                 control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                 updated_at_ms = ?
           WHERE id = ?`
@@ -319,6 +394,17 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
                             THEN ? ELSE NULL END,
                 group_id = ?, enabled = ?, expires_at_ms = ?,
                 auth_version = ?,
+                quota_micros = ?,
+                rate_limit_5h_micros = ?, rate_limit_1d_micros = ?, rate_limit_7d_micros = ?,
+                quota_used_micros = CASE WHEN ? THEN 0 ELSE quota_used_micros END,
+                usage_5h_micros = CASE WHEN ? THEN 0 ELSE usage_5h_micros END,
+                usage_1d_micros = CASE WHEN ? THEN 0 ELSE usage_1d_micros END,
+                usage_7d_micros = CASE WHEN ? THEN 0 ELSE usage_7d_micros END,
+                window_5h_start_ms = CASE WHEN ? THEN NULL ELSE window_5h_start_ms END,
+                window_1d_start_ms = CASE WHEN ? THEN NULL ELSE window_1d_start_ms END,
+                window_7d_start_ms = CASE WHEN ? THEN NULL ELSE window_7d_start_ms END,
+                quota_reset_epoch = CASE WHEN ? THEN quota_reset_epoch + 1 ELSE quota_reset_epoch END,
+                rate_limit_reset_epoch = CASE WHEN ? THEN rate_limit_reset_epoch + 1 ELSE rate_limit_reset_epoch END,
                 control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                 updated_at_ms = ?
           WHERE id = ?`)
@@ -335,6 +421,19 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
           enabled ? 1 : 0,
           expiresAtMs,
           authVersion,
+          quotaMicros,
+          rateLimit5hMicros,
+          rateLimit1dMicros,
+          rateLimit7dMicros,
+          resetQuota ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
+          resetQuota ? 1 : 0,
+          resetRateLimitUsage ? 1 : 0,
           row.control_version,
           controlVersion,
           now,
@@ -349,6 +448,20 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
         auth_version: authVersion,
         control_version: controlVersion,
         updated_at_ms: now,
+        quota_micros: quotaMicros,
+        quota_used_micros: resetQuota ? 0 : monetaryValue(row.quota_used_micros),
+        rate_limit_5h_micros: rateLimit5hMicros,
+        rate_limit_1d_micros: rateLimit1dMicros,
+        rate_limit_7d_micros: rateLimit7dMicros,
+        usage_5h_micros: resetRateLimitUsage ? 0 : monetaryValue(row.usage_5h_micros),
+        usage_1d_micros: resetRateLimitUsage ? 0 : monetaryValue(row.usage_1d_micros),
+        usage_7d_micros: resetRateLimitUsage ? 0 : monetaryValue(row.usage_7d_micros),
+        window_5h_start_ms: resetRateLimitUsage ? null : nullableMonetaryValue(row.window_5h_start_ms),
+        window_1d_start_ms: resetRateLimitUsage ? null : nullableMonetaryValue(row.window_1d_start_ms),
+        window_7d_start_ms: resetRateLimitUsage ? null : nullableMonetaryValue(row.window_7d_start_ms),
+        quota_reset_epoch: monetaryValue(row.quota_reset_epoch) + (resetQuota ? 1 : 0),
+        rate_limit_reset_epoch:
+          monetaryValue(row.rate_limit_reset_epoch) + (resetRateLimitUsage ? 1 : 0),
       }
       const result = adminApiKeyUpdateResult(row, group, autoGrantedGroupAccess)
       try {
@@ -371,7 +484,11 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
         const replay = await recoverApiKeyUpdate(context.env, idempotency, keyId)
         if (replay !== null) return controlSuccess(replay)
         if (isControlVersionError(error)) {
-          throw new GatewayError(409, 'api_key_update_conflict', 'API key changed concurrently; retry the update')
+          throw new GatewayError(
+            412,
+            'control_version_conflict',
+            'API key changed concurrently; reload it and retry',
+          )
         }
         if (authorization !== null && groupId !== null && isGroupAuthorizationGuardError(error)) {
           await requireAdminApiKeyGroupAuthorization(context.env, row.user_id, groupId, 'bind')
@@ -403,6 +520,8 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
 }
 
 function parseCreateApiKey(body: Record<string, unknown>): CreateApiKeyInput {
+  rejectLegacyMonetaryFields(body)
+  rejectServerManagedMonetaryFields(body)
   const groupId = requireResourceId(requireString(body, 'group_id', 128), 'group')
   let expiresAtMs: number | null = null
   if (body.expires_at_ms !== undefined && body.expires_at_ms !== null) {
@@ -412,10 +531,16 @@ function parseCreateApiKey(body: Record<string, unknown>): CreateApiKeyInput {
     name: optionalString(body, 'name', 128) ?? 'default',
     group_id: groupId,
     expires_at_ms: expiresAtMs,
+    quota_micros: optionalMonetaryLimit(body, 'quota_micros'),
+    rate_limit_5h_micros: optionalMonetaryLimit(body, 'rate_limit_5h_micros'),
+    rate_limit_1d_micros: optionalMonetaryLimit(body, 'rate_limit_1d_micros'),
+    rate_limit_7d_micros: optionalMonetaryLimit(body, 'rate_limit_7d_micros'),
   }
 }
 
 function parseApiKeyUpdatePatch(body: Record<string, unknown>): ApiKeyUpdatePatch {
+  rejectLegacyMonetaryFields(body)
+  rejectServerManagedMonetaryFields(body)
   const patch: ApiKeyUpdatePatch = {}
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
   if (body.group_id !== undefined) {
@@ -443,7 +568,81 @@ function parseApiKeyUpdatePatch(body: Record<string, unknown>): ApiKeyUpdatePatc
       ? null
       : requireSafeInteger(body, 'expires_at_ms', Date.now() + 1_000)
   }
+  for (const field of MONETARY_LIMIT_FIELDS) {
+    if (Object.hasOwn(body, field)) patch[field] = requireSafeInteger(body, field)
+  }
+  if (Object.hasOwn(body, 'reset_quota')) {
+    if (typeof body.reset_quota !== 'boolean') {
+      throw new GatewayError(400, 'invalid_reset_quota', 'reset_quota must be a boolean')
+    }
+    patch.reset_quota = body.reset_quota
+  }
+  if (Object.hasOwn(body, 'reset_rate_limit_usage')) {
+    if (typeof body.reset_rate_limit_usage !== 'boolean') {
+      throw new GatewayError(
+        400,
+        'invalid_reset_rate_limit_usage',
+        'reset_rate_limit_usage must be a boolean',
+      )
+    }
+    patch.reset_rate_limit_usage = body.reset_rate_limit_usage
+  }
   return patch
+}
+
+const MONETARY_LIMIT_FIELDS = [
+  'quota_micros',
+  'rate_limit_5h_micros',
+  'rate_limit_1d_micros',
+  'rate_limit_7d_micros',
+] as const
+
+const LEGACY_MONETARY_FIELDS = [
+  'quota',
+  'quota_used',
+  'rate_limit_5h',
+  'rate_limit_1d',
+  'rate_limit_7d',
+  'usage_5h',
+  'usage_1d',
+  'usage_7d',
+] as const
+
+const SERVER_MANAGED_MONETARY_FIELDS = [
+  'quota_used_micros',
+  'usage_5h_micros',
+  'usage_1d_micros',
+  'usage_7d_micros',
+  'window_5h_start_ms',
+  'window_1d_start_ms',
+  'window_7d_start_ms',
+  'quota_reset_epoch',
+  'rate_limit_reset_epoch',
+] as const
+
+function optionalMonetaryLimit(
+  body: Record<string, unknown>,
+  field: typeof MONETARY_LIMIT_FIELDS[number],
+): number {
+  return Object.hasOwn(body, field) ? requireSafeInteger(body, field) : 0
+}
+
+function rejectLegacyMonetaryFields(body: Record<string, unknown>): void {
+  const field = LEGACY_MONETARY_FIELDS.find((candidate) => Object.hasOwn(body, candidate))
+  if (field !== undefined) {
+    throw new GatewayError(
+      400,
+      'legacy_monetary_field_not_supported',
+      `${field} is not supported; use the corresponding integer _micros field`,
+    )
+  }
+}
+
+function rejectServerManagedMonetaryFields(body: Record<string, unknown>): void {
+  const field = SERVER_MANAGED_MONETARY_FIELDS.find((candidate) => Object.hasOwn(body, candidate))
+  if (field !== undefined) {
+    throw new GatewayError(400, `invalid_${field}`, `${field} is managed by the Worker`)
+  }
 }
 
 function requireApiKeyPepper(env: Env): string {
@@ -462,6 +661,11 @@ function apiKeySelect(): string {
   return `SELECT k.id, k.user_id, k.key_hash, k.name, k.enabled, k.expires_at_ms,
                  k.last_used_at_ms, k.created_at_ms, k.updated_at_ms, k.group_id,
                  k.key_prefix, k.auth_version, k.control_version, k.revoked_at_ms,
+                 k.quota_micros, k.quota_used_micros,
+                 k.rate_limit_5h_micros, k.rate_limit_1d_micros, k.rate_limit_7d_micros,
+                 k.usage_5h_micros, k.usage_1d_micros, k.usage_7d_micros,
+                 k.window_5h_start_ms, k.window_1d_start_ms, k.window_7d_start_ms,
+                 k.quota_reset_epoch, k.rate_limit_reset_epoch,
                  g.name AS group_name, g.description AS group_description,
                  g.platform AS group_platform, g.enabled AS group_enabled,
                  g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
@@ -536,6 +740,7 @@ function publicApiKey(
   row: ApiKeyRow,
   group = groupFromRow(row),
 ): Omit<ApiKeyRow, 'key_hash'> & Record<string, unknown> {
+  const windows = effectiveRateLimitWindows(row, Date.now())
   return {
     id: row.id,
     user_id: row.user_id,
@@ -550,6 +755,23 @@ function publicApiKey(
     auth_version: row.auth_version,
     control_version: row.control_version,
     revoked_at_ms: row.revoked_at_ms,
+    quota_micros: monetaryValue(row.quota_micros),
+    quota_used_micros: monetaryValue(row.quota_used_micros),
+    rate_limit_5h_micros: monetaryValue(row.rate_limit_5h_micros),
+    rate_limit_1d_micros: monetaryValue(row.rate_limit_1d_micros),
+    rate_limit_7d_micros: monetaryValue(row.rate_limit_7d_micros),
+    usage_5h_micros: windows['5h'].usage_micros,
+    usage_1d_micros: windows['1d'].usage_micros,
+    usage_7d_micros: windows['7d'].usage_micros,
+    window_5h_start_ms: windows['5h'].window_start_ms,
+    window_1d_start_ms: windows['1d'].window_start_ms,
+    window_7d_start_ms: windows['7d'].window_start_ms,
+    reset_5h_at_ms: windows['5h'].reset_at_ms,
+    reset_1d_at_ms: windows['1d'].reset_at_ms,
+    reset_7d_at_ms: windows['7d'].reset_at_ms,
+    quota_reset_epoch: monetaryValue(row.quota_reset_epoch),
+    rate_limit_reset_epoch: monetaryValue(row.rate_limit_reset_epoch),
+    rate_limit_windows: windows,
     status: apiKeyStatus(row),
     expires_at: nullableIso(row.expires_at_ms),
     last_used_at: nullableIso(row.last_used_at_ms),
@@ -704,10 +926,72 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function apiKeyStatus(row: ApiKeyRow): 'active' | 'inactive' | 'expired' {
+function apiKeyStatus(row: ApiKeyRow): 'active' | 'inactive' | 'expired' | 'quota_exhausted' {
   if (row.revoked_at_ms !== null || row.enabled !== 1) return 'inactive'
   if (row.expires_at_ms !== null && row.expires_at_ms <= Date.now()) return 'expired'
+  const quota = monetaryValue(row.quota_micros)
+  if (quota > 0 && monetaryValue(row.quota_used_micros) >= quota) return 'quota_exhausted'
   return 'active'
+}
+
+const RATE_LIMIT_WINDOW_MS = {
+  '5h': 5 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+  '7d': 7 * 24 * 60 * 60_000,
+} as const
+
+interface EffectiveRateLimitWindow {
+  usage_micros: number
+  window_start_ms: number | null
+  reset_at_ms: number | null
+}
+
+function effectiveRateLimitWindows(
+  row: ApiKeyRow,
+  now: number,
+): Record<keyof typeof RATE_LIMIT_WINDOW_MS, EffectiveRateLimitWindow> {
+  return {
+    '5h': effectiveRateLimitWindow(row.usage_5h_micros, row.window_5h_start_ms, RATE_LIMIT_WINDOW_MS['5h'], now),
+    '1d': effectiveRateLimitWindow(row.usage_1d_micros, row.window_1d_start_ms, RATE_LIMIT_WINDOW_MS['1d'], now),
+    '7d': effectiveRateLimitWindow(row.usage_7d_micros, row.window_7d_start_ms, RATE_LIMIT_WINDOW_MS['7d'], now),
+  }
+}
+
+function effectiveRateLimitWindow(
+  usage: number | undefined,
+  start: number | null | undefined,
+  duration: number,
+  now: number,
+): EffectiveRateLimitWindow {
+  const safeStart = nullableMonetaryValue(start)
+  if (safeStart === null || safeStart <= now - duration) {
+    return { usage_micros: 0, window_start_ms: null, reset_at_ms: null }
+  }
+  return {
+    usage_micros: monetaryValue(usage),
+    window_start_ms: safeStart,
+    reset_at_ms: safeStart + duration,
+  }
+}
+
+function monetaryValue(value: number | undefined): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0
+}
+
+function nullableMonetaryValue(value: number | null | undefined): number | null {
+  return value === null || value === undefined ? null : monetaryValue(value)
+}
+
+function assertApiKeyControlVersion(actual: number, expected: number): void {
+  if (actual !== expected) {
+    throw new GatewayError(412, 'control_version_conflict', 'API key changed; reload it and retry')
+  }
+}
+
+function assertResetEpochAvailable(epoch: number, reset: boolean, field: string): void {
+  if (reset && epoch >= Number.MAX_SAFE_INTEGER) {
+    throw new GatewayError(409, `${field}_exhausted`, `${field} is exhausted`)
+  }
 }
 
 function nullableIso(value: number | null): string | null {

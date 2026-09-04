@@ -24,7 +24,47 @@ export interface GatewayPrincipal {
   user_rpm_limit: number
   /** Effective override-or-group fixed-minute ceiling; zero means exempt/unlimited. */
   group_rpm_limit: number
+  /** Complete D1 projection used to configure the user-sharded monetary authority. */
+  api_key_monetary: ApiKeyMonetaryPolicy
   billing: GatewayBilling
+}
+
+export interface ApiKeyMonetaryPolicy {
+  control_version: number
+  quota_micros: number
+  quota_used_micros: number
+  rate_limit_5h_micros: number
+  rate_limit_1d_micros: number
+  rate_limit_7d_micros: number
+  usage_5h_micros: number
+  usage_1d_micros: number
+  usage_7d_micros: number
+  window_5h_start_ms: number | null
+  window_1d_start_ms: number | null
+  window_7d_start_ms: number | null
+  quota_reset_epoch: number
+  rate_limit_reset_epoch: number
+}
+
+export interface ApiKeyMonetaryWindowSnapshot {
+  api_key_id: string
+  kind: '5h' | '1d' | '7d'
+  window_started_at_ms: number
+  settled_micros: number
+  updated_at_ms: number
+}
+
+export interface ApiKeyMonetaryUsageSnapshot {
+  api_key_id: string
+  quota_reset_epoch: number
+  rate_limit_reset_epoch: number
+  total_settled_micros: number
+  active_reserved_micros: number
+  windows: [
+    ApiKeyMonetaryWindowSnapshot,
+    ApiKeyMonetaryWindowSnapshot,
+    ApiKeyMonetaryWindowSnapshot,
+  ]
 }
 
 export type GatewayBilling =

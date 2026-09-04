@@ -52,6 +52,7 @@ function post(
     | '/reclaim'
     | '/monetary/configure'
     | '/monetary/reserve'
+    | '/monetary/renew'
     | '/monetary/settle'
     | '/monetary/cancel',
   body: Record<string, unknown>,
@@ -78,6 +79,8 @@ function monetaryConfig(overrides: Record<string, unknown> = {}): Record<string,
     window_5h_start_ms: null,
     window_1d_start_ms: null,
     window_7d_start_ms: null,
+    quota_reset_epoch: 0,
+    rate_limit_reset_epoch: 0,
     ...overrides,
   }
 }
@@ -416,6 +419,19 @@ describe('ApiKeyLimitDO monetary quota contract', () => {
     expect((await monetaryReserve(object, 'over-remaining', 51)).status).toBe(429)
   })
 
+  it('rejects a zero-cost request once a positive key quota is exactly exhausted', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'exhaust-quota', 100)
+    expect((await monetarySettle(object, 'exhaust-quota', 100)).status).toBe(200)
+
+    const blocked = await monetaryReserve(object, 'free-token-count', 0)
+    expect(blocked.status).toBe(429)
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: { code: 'api_key_quota_exceeded' },
+    })
+  })
+
   it('idempotently cancels a reservation and immediately returns its capacity', async () => {
     const { object } = harness()
     await post(object, '/monetary/configure', monetaryConfig())
@@ -531,7 +547,7 @@ describe('ApiKeyLimitDO monetary quota contract', () => {
     expect(settled.status).toBe(200)
     await expect(settled.json()).resolves.toMatchObject({
       usage: {
-        total_settled_micros: 0,
+        total_settled_micros: 50,
         windows: expect.arrayContaining([
           expect.objectContaining({ kind: '5h', settled_micros: 50 }),
           expect.objectContaining({ kind: '1d', settled_micros: 50 }),
@@ -540,6 +556,140 @@ describe('ApiKeyLimitDO monetary quota contract', () => {
       },
     })
     expect((await monetaryReserve(object, 'window-over-remaining', 51)).status).toBe(429)
+  })
+
+  it('accounts for total and every rolling window even while all limits are unlimited', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig({
+      total_limit_micros: 0,
+    }))
+    await monetaryReserve(object, 'unlimited-accounting', 80)
+
+    const settled = await monetarySettle(object, 'unlimited-accounting', 50)
+    expect(settled.status).toBe(200)
+    await expect(settled.json()).resolves.toMatchObject({
+      usage: {
+        quota_reset_epoch: 0,
+        rate_limit_reset_epoch: 0,
+        total_settled_micros: 50,
+        windows: expect.arrayContaining([
+          expect.objectContaining({ kind: '5h', settled_micros: 50 }),
+          expect.objectContaining({ kind: '1d', settled_micros: 50 }),
+          expect.objectContaining({ kind: '7d', settled_micros: 50 }),
+        ]),
+      },
+    })
+  })
+
+  it('resets total and rolling usage independently and ignores an in-flight pre-reset settlement', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig({
+      total_limit_micros: 1_000,
+      limit_5h_micros: 1_000,
+    }))
+    await monetaryReserve(object, 'before-reset', 80)
+
+    const totalReset = await post(object, '/monetary/configure', monetaryConfig({
+      control_version: 2,
+      total_limit_micros: 1_000,
+      limit_5h_micros: 1_000,
+      quota_reset_epoch: 1,
+    }))
+    expect(totalReset.status).toBe(200)
+    expect((await monetarySettle(object, 'before-reset', 50)).status).toBe(200)
+
+    await monetaryReserve(object, 'between-resets', 80, { control_version: 2 })
+    expect((await monetarySettle(object, 'between-resets', 40)).status).toBe(200)
+    const rateReset = await post(object, '/monetary/configure', monetaryConfig({
+      control_version: 3,
+      total_limit_micros: 1_000,
+      limit_5h_micros: 1_000,
+      quota_reset_epoch: 1,
+      rate_limit_reset_epoch: 1,
+    }))
+    expect(rateReset.status).toBe(200)
+
+    const snapshot = await object.fetch(new Request('https://api-key-limit.test/snapshot'))
+    await expect(snapshot.json()).resolves.toMatchObject({
+      monetary: {
+        profiles: [expect.objectContaining({
+          quota_reset_epoch: 1,
+          rate_limit_reset_epoch: 1,
+          total_settled_micros: 40,
+        })],
+        windows: [],
+      },
+    })
+  })
+
+  it('settles an expired reservation exactly once so delayed recovery cannot lose spend', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'delayed-recovery', 80, { reservation_ttl_ms: 1_000 })
+    vi.advanceTimersByTime(1_001)
+    await post(object, '/reclaim', {})
+
+    const settled = await monetarySettle(object, 'delayed-recovery', 50)
+    expect(settled.status).toBe(200)
+    await expect(settled.json()).resolves.toMatchObject({
+      reservation: { status: 'settled', settled_micros: 50 },
+      usage: { total_settled_micros: 50 },
+    })
+    const replay = await monetarySettle(object, 'delayed-recovery', 50)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({ idempotent: true })
+  })
+
+  it('returns a complete usage snapshot when settled replay follows rolling-window cleanup', async () => {
+    const { object } = harness()
+    const startedAt = Date.now()
+    await post(object, '/monetary/configure', monetaryConfig({
+      total_limit_micros: 0,
+      limit_5h_micros: 100,
+    }))
+    await monetaryReserve(object, 'cleanup-replay', 50)
+    expect((await monetarySettle(object, 'cleanup-replay', 50)).status).toBe(200)
+
+    vi.setSystemTime(startedAt + 5 * 60 * 60_000)
+    const replay = await monetarySettle(object, 'cleanup-replay', 50)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({
+      idempotent: true,
+      usage: {
+        total_settled_micros: 50,
+        windows: [
+          expect.objectContaining({ kind: '5h', window_started_at_ms: Date.now(), settled_micros: 0 }),
+          expect.objectContaining({ kind: '1d', window_started_at_ms: startedAt, settled_micros: 50 }),
+          expect.objectContaining({ kind: '7d', window_started_at_ms: startedAt, settled_micros: 50 }),
+        ],
+      },
+    })
+  })
+
+  it('renews a long-lived monetary reservation with ordered replay protection', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'long-stream', 80, { reservation_ttl_ms: 1_000 })
+    vi.advanceTimersByTime(500)
+
+    const renewed = await post(object, '/monetary/renew', {
+      request_id: 'long-stream',
+      api_key_id: 'key-1',
+      renewal_sequence: 1,
+      reservation_ttl_ms: 1_000,
+    })
+    expect(renewed.status).toBe(200)
+    const replay = await post(object, '/monetary/renew', {
+      request_id: 'long-stream',
+      api_key_id: 'key-1',
+      renewal_sequence: 1,
+      reservation_ttl_ms: 1_000,
+    })
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({ idempotent: true })
+
+    vi.advanceTimersByTime(501)
+    expect((await monetarySettle(object, 'long-stream', 50)).status).toBe(200)
   })
 
   it('versions monetary policy without letting stale projections reopen quota', async () => {

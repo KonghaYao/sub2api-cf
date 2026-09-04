@@ -63,12 +63,28 @@ class FakeStatement {
     if (this.query.includes('INSERT INTO settlement_recovery')) {
       if (this.database.failRecoveryWrites) throw new Error('D1 unavailable')
       this.database.recovery = {
+        request_id: this.values[0],
         user_id: this.values[1],
         billing_type: this.values[2],
         subscription_id: this.values[3],
-        amount_micros: this.values[4],
-        usage_event_json: this.values[5],
+        api_key_id: this.values[4],
+        amount_micros: this.values[5],
+        usage_event_json: this.values[6],
+        attempts: 0,
+        billing_settled: 0,
+        api_key_settled: 0,
+        api_key_usage_json: null,
+        api_key_projected: 0,
       }
+    } else if (this.query.includes('SET billing_settled = 1')) {
+      if (this.database.recovery !== null) this.database.recovery.billing_settled = 1
+    } else if (this.query.includes('SET api_key_settled = 1')) {
+      if (this.database.recovery !== null) {
+        this.database.recovery.api_key_settled = 1
+        this.database.recovery.api_key_usage_json = this.values[0]
+      }
+    } else if (this.query.includes('SET api_key_projected = 1')) {
+      if (this.database.recovery !== null) this.database.recovery.api_key_projected = 1
     } else if (this.query.includes('DELETE FROM settlement_recovery')) {
       this.database.recovery = null
     }
@@ -128,6 +144,24 @@ class FakeDatabase {
     user_status: 'active',
     balance_micros: 1_000_000,
     user_state_version: 0,
+    limit_config_version: 1,
+    concurrency_limit: 0,
+    user_rpm_limit: 0,
+    group_rpm_limit: 0,
+    api_key_control_version: 0,
+    quota_micros: 0,
+    quota_used_micros: 0,
+    rate_limit_5h_micros: 0,
+    rate_limit_1d_micros: 0,
+    rate_limit_7d_micros: 0,
+    usage_5h_micros: 0,
+    usage_1d_micros: 0,
+    usage_7d_micros: 0,
+    window_5h_start_ms: null,
+    window_1d_start_ms: null,
+    window_7d_start_ms: null,
+    api_key_quota_reset_epoch: 0,
+    api_key_rate_limit_reset_epoch: 0,
     group_id: 'group-1',
     group_enabled: 1,
     group_accessible: 1,
@@ -145,6 +179,8 @@ class FakeDatabase {
     for (const statement of statements) {
       if (statement.query.includes('FROM account_groups ag')) {
         values.push(await statement.all())
+      } else if (statement.query.includes('UPDATE api_keys')) {
+        values.push(await statement.run())
       } else {
         const row = await statement.first()
         values.push({
@@ -163,7 +199,7 @@ class FakeStateStub {
   settleFailures = 0
   snapshotAccounts: Array<Record<string, unknown>> = []
 
-  constructor(private readonly kind: 'user' | 'subscription' | 'pool') {}
+  constructor(private readonly kind: 'user' | 'subscription' | 'pool' | 'limit') {}
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname
@@ -182,6 +218,22 @@ class FakeStateStub {
       }
       return Response.json({ profile: { balance_micros: 999_960, settled_micros: 40 } })
     }
+    if (this.kind === 'limit' && path === '/admit') {
+      return Response.json({ admitted: true, lease: { request_id: body.request_id, status: 'active' } })
+    }
+    if (this.kind === 'limit' && path === '/monetary/settle') {
+      return Response.json({ usage: {
+        api_key_id: 'key-1',
+        quota_reset_epoch: 0,
+        rate_limit_reset_epoch: 0,
+        total_settled_micros: 40,
+        active_reserved_micros: 0,
+        windows: (['5h', '1d', '7d'] as const).map((window) => ({
+          api_key_id: 'key-1', kind: window, window_started_at_ms: 1,
+          settled_micros: 40, updated_at_ms: 1,
+        })),
+      } })
+    }
     return Response.json({})
   }
 }
@@ -192,6 +244,7 @@ async function harness(): Promise<{
   user: FakeStateStub
   subscription: FakeStateStub
   pool: FakeStateStub
+  limit: FakeStateStub
   poolNames: string[]
   queued: unknown[]
 }> {
@@ -215,6 +268,7 @@ async function harness(): Promise<{
   const user = new FakeStateStub('user')
   const subscription = new FakeStateStub('subscription')
   const pool = new FakeStateStub('pool')
+  const limit = new FakeStateStub('limit')
   const poolNames: string[] = []
   const queued: unknown[] = []
   const namespace = (stub: FakeStateStub, names?: string[]) =>
@@ -234,12 +288,13 @@ async function harness(): Promise<{
     USER_STATE: namespace(user),
     SUBSCRIPTION_STATE: namespace(subscription),
     POOL_STATE: namespace(pool, poolNames),
+    API_KEY_LIMIT_STATE: namespace(limit),
     ASSETS: { fetch: async () => new Response('asset') } as unknown as Fetcher,
     CONFIG_KV: {} as KVNamespace,
     OBJECTS: {} as R2Bucket,
     EVENTS_QUEUE: { send: async (value: unknown) => void queued.push(value) } as unknown as Queue,
   }
-  return { env, database, user, subscription, pool, poolNames, queued }
+  return { env, database, user, subscription, pool, limit, poolNames, queued }
 }
 
 async function compressGatewayBody(
@@ -282,6 +337,16 @@ function captureExecutionContext(): {
     passThroughOnException() {},
   } as unknown as ExecutionContext
   return { executionCtx, tasks }
+}
+
+function expectZeroCostBillingLifecycle(user: FakeStateStub): void {
+  expect(user.calls.map((call) => call.path)).toEqual([
+    '/configure', '/authorize', '/reserve', '/cancel',
+  ])
+  expect(user.calls.find((call) => call.path === '/reserve')?.body).toMatchObject({
+    amount_micros: 0,
+  })
+  expect(user.calls.some((call) => call.path === '/settle')).toBe(false)
 }
 
 describe('OpenAI-compatible gateway', () => {
@@ -1273,7 +1338,7 @@ describe('OpenAI-compatible gateway', () => {
   })
 
   it('does not corrupt a completed stream when every settlement path is unavailable', async () => {
-    const { env, database, user, pool } = await harness()
+    const { env, database, user, pool, limit } = await harness()
     database.failRecoveryWrites = true
     user.settleFailures = 3
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
@@ -1301,6 +1366,43 @@ describe('OpenAI-compatible gateway', () => {
     expect(text).not.toContain('upstream_stream_error')
     expect(pool.calls.some((call) => call.path === '/failure')).toBe(false)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(0)
+    expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(0)
+    expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
+  })
+
+  it('returns 503 without settling either authority when the recovery command cannot be persisted', async () => {
+    const { env, database, user, limit } = await harness()
+    database.failRecoveryWrites = true
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({
+        model: 'gpt-upstream',
+        choices: [],
+        usage: { prompt_tokens: 2, completion_tokens: 1 },
+      })),
+    )
+
+    const response = await createApp().request(
+      '/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+      },
+      env,
+    )
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'settlement_recovery_unavailable' },
+    })
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(0)
+    expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(0)
+    expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
   })
 
   it('maps upstream auth failures to a sanitized 502 and releases both reservations', async () => {
@@ -1879,7 +1981,7 @@ describe('OpenAI-compatible gateway', () => {
         },
       ],
     })
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
@@ -1918,7 +2020,7 @@ describe('OpenAI-compatible gateway', () => {
       model: 'gpt-upstream',
       messages: [{ role: 'user', content: 'Hello' }],
     })
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
@@ -1948,7 +2050,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(response.status).toBe(200)
     const payload = await response.json() as { input_tokens: number }
     expect(payload.input_tokens).toBeGreaterThan(0)
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.some((call) => call.path === '/failure')).toBe(false)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
@@ -2148,7 +2250,7 @@ describe('OpenAI-compatible gateway', () => {
       instructions: 'Be concise.',
       input: [{ role: 'user', content: 'Hello' }],
     })
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
@@ -2480,7 +2582,7 @@ describe('OpenAI-compatible gateway', () => {
       model: 'gpt-upstream',
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'How many?' }] }],
     })
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
@@ -2512,7 +2614,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(String(url)).toBe('https://generativelanguage.example/v1beta/models/gpt-upstream:countTokens')
     expect(new Headers(init?.headers).get('x-goog-api-key')).toBe('sk-upstream-secret')
     expect(JSON.parse(String(init?.body))).toEqual(body)
-    expect(user.calls).toEqual([])
+    expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })

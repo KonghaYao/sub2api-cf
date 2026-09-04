@@ -17,6 +17,19 @@ interface ApiKeyRow {
   auth_version: number
   control_version: number
   revoked_at_ms: number | null
+  quota_micros?: number
+  quota_used_micros?: number
+  rate_limit_5h_micros?: number
+  rate_limit_1d_micros?: number
+  rate_limit_7d_micros?: number
+  usage_5h_micros?: number
+  usage_1d_micros?: number
+  usage_7d_micros?: number
+  window_5h_start_ms?: number | null
+  window_1d_start_ms?: number | null
+  window_7d_start_ms?: number | null
+  quota_reset_epoch?: number
+  rate_limit_reset_epoch?: number
 }
 
 interface GroupRow {
@@ -123,6 +136,19 @@ class KeyStatement {
         enabled,
         expiresAt,
         authVersion,
+        quotaMicros,
+        rateLimit5hMicros,
+        rateLimit1dMicros,
+        rateLimit7dMicros,
+        resetQuota,
+        resetUsage5h,
+        resetUsage1d,
+        resetUsage7d,
+        resetWindow5h,
+        resetWindow1d,
+        resetWindow7d,
+        bumpQuotaEpoch,
+        bumpRateLimitEpoch,
         expectedControlVersion,
         controlVersion,
         updatedAt,
@@ -145,6 +171,23 @@ class KeyStatement {
         key.enabled = Number(enabled)
         key.expires_at_ms = expiresAt === null ? null : Number(expiresAt)
         key.auth_version = Number(authVersion)
+        key.quota_micros = Number(quotaMicros)
+        key.rate_limit_5h_micros = Number(rateLimit5hMicros)
+        key.rate_limit_1d_micros = Number(rateLimit1dMicros)
+        key.rate_limit_7d_micros = Number(rateLimit7dMicros)
+        if (Number(resetQuota) === 1) key.quota_used_micros = 0
+        if (Number(resetUsage5h) === 1) key.usage_5h_micros = 0
+        if (Number(resetUsage1d) === 1) key.usage_1d_micros = 0
+        if (Number(resetUsage7d) === 1) key.usage_7d_micros = 0
+        if (Number(resetWindow5h) === 1) key.window_5h_start_ms = null
+        if (Number(resetWindow1d) === 1) key.window_1d_start_ms = null
+        if (Number(resetWindow7d) === 1) key.window_7d_start_ms = null
+        if (Number(bumpQuotaEpoch) === 1) {
+          key.quota_reset_epoch = (key.quota_reset_epoch ?? 0) + 1
+        }
+        if (Number(bumpRateLimitEpoch) === 1) {
+          key.rate_limit_reset_epoch = (key.rate_limit_reset_epoch ?? 0) + 1
+        }
         key.control_version = Number(controlVersion)
         key.updated_at_ms = Number(updatedAt)
         changes = 1
@@ -171,6 +214,10 @@ class KeyStatement {
         _updatedAt,
         persistedGroupId,
         keyPrefix,
+        quotaMicros,
+        rateLimit5hMicros,
+        rateLimit1dMicros,
+        rateLimit7dMicros,
       ] = this.values
       if (
         permissionUserId !== userId ||
@@ -195,6 +242,19 @@ class KeyStatement {
         auth_version: 1,
         control_version: 0,
         revoked_at_ms: null,
+        quota_micros: Number(quotaMicros),
+        quota_used_micros: 0,
+        rate_limit_5h_micros: Number(rateLimit5hMicros),
+        rate_limit_1d_micros: Number(rateLimit1dMicros),
+        rate_limit_7d_micros: Number(rateLimit7dMicros),
+        usage_5h_micros: 0,
+        usage_1d_micros: 0,
+        usage_7d_micros: 0,
+        window_5h_start_ms: null,
+        window_1d_start_ms: null,
+        window_7d_start_ms: null,
+        quota_reset_epoch: 0,
+        rate_limit_reset_epoch: 0,
       })
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
@@ -329,6 +389,7 @@ const headers = {
   authorization: `Bearer ${'s'.repeat(32)}`,
   'content-type': 'application/json',
   'idempotency-key': 'create-key-alice-0001',
+  'if-match': '"0"',
 }
 
 describe('admin API keys', () => {
@@ -647,9 +708,9 @@ describe('admin API keys', () => {
       body: JSON.stringify({ name: 'renamed' }),
     }, env(database))
 
-    expect(response.status).toBe(409)
+    expect(response.status).toBe(412)
     await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'api_key_update_conflict' },
+      error: { code: 'control_version_conflict' },
     })
     expect(database.keys.get('key-1')).toMatchObject({
       name: 'automation',

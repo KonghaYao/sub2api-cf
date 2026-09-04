@@ -88,6 +88,20 @@ function app(): Hono<{ Bindings: Env }> {
   return app
 }
 
+function runBeforeFirstBatch(database: D1Database, beforeBatch: () => void): D1Database {
+  let armed = true
+  return {
+    prepare: (query: string) => database.prepare(query),
+    batch: async (statements: D1PreparedStatement[]) => {
+      if (armed) {
+        armed = false
+        beforeBatch()
+      }
+      return database.batch(statements)
+    },
+  } as unknown as D1Database
+}
+
 function seedKey(
   raw: any,
   input: { id: string; userId: string; name: string; hashByte: string },
@@ -215,6 +229,7 @@ describe('user API keys', () => {
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': '"0"',
       },
       body: JSON.stringify({ name: 'Renamed', group_id: 'group-b', expires_at: expiresAt }),
     }
@@ -279,6 +294,7 @@ describe('user API keys', () => {
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': '"0"',
       },
       body: JSON.stringify({ group_id: 'private-group' }),
     }, test.env)
@@ -318,18 +334,19 @@ describe('user API keys', () => {
     seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
     seedKey(test.raw, { id: 'bob-key', userId: 'bob', name: 'Bob key', hashByte: 'b' })
 
-    const update = (id: string, status: string) => app().request(`/keys/${id}`, {
+    const update = (id: string, status: string, version: number) => app().request(`/keys/${id}`, {
       method: 'PUT',
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': `"${version}"`,
       },
       body: JSON.stringify({ status }),
     }, test.env)
 
-    const foreign = await update('bob-key', 'inactive')
-    const deactivated = await update('alice-key', 'inactive')
-    const reactivated = await update('alice-key', 'active')
+    const foreign = await update('bob-key', 'inactive', 0)
+    const deactivated = await update('alice-key', 'inactive', 0)
+    const reactivated = await update('alice-key', 'active', 1)
 
     expect(foreign.status).toBe(404)
     await expect(deactivated.json()).resolves.toMatchObject({
@@ -357,21 +374,22 @@ describe('user API keys', () => {
   it('rechecks access before reactivating a key in the same group', async () => {
     const test = await fixture()
     seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
-    const update = (status: 'active' | 'inactive') => app().request('/keys/alice-key', {
+    const update = (status: 'active' | 'inactive', version: number) => app().request('/keys/alice-key', {
       method: 'PUT',
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': `"${version}"`,
       },
       body: JSON.stringify({ status }),
     }, test.env)
 
-    expect((await update('inactive')).status).toBe(200)
+    expect((await update('inactive', 0)).status).toBe(200)
     test.raw.prepare(
       `UPDATE "groups" SET is_exclusive = 1, updated_at_ms = ? WHERE id = 'group-a'`,
     ).run(Date.now())
 
-    const denied = await update('active')
+    const denied = await update('active', 1)
 
     expect(denied.status).toBe(403)
     await expect(denied.json()).resolves.toMatchObject({ code: 'group_access_denied' })
@@ -389,6 +407,7 @@ describe('user API keys', () => {
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': '"0"',
       },
       body: JSON.stringify({ status: 'paused' }),
     }, test.env)
@@ -401,6 +420,7 @@ describe('user API keys', () => {
       headers: {
         authorization: test.authorization.alice,
         'content-type': 'application/json',
+        'if-match': '"1"',
       },
       body: JSON.stringify({ status: 'active' }),
     }, test.env)
@@ -440,5 +460,270 @@ describe('user API keys', () => {
       `SELECT COUNT(*) AS total FROM auth_audit_events
        WHERE event_type = 'user.api_keys.revoke' AND user_id = 'alice'`,
     ).get()).toEqual({ total: 1 })
+  })
+
+  it('creates integer monetary limits and exposes the complete effective projection', async () => {
+    const test = await fixture()
+    const response = await app().request('/keys', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': 'alice-monetary-create-0001',
+      },
+      body: JSON.stringify({
+        name: 'Budgeted',
+        group_id: 'group-a',
+        quota_micros: 10_000_000,
+        rate_limit_5h_micros: 1_000_000,
+        rate_limit_1d_micros: 2_000_000,
+        rate_limit_7d_micros: 3_000_000,
+      }),
+    }, test.env)
+
+    expect(response.status).toBe(201)
+    await expect(response.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        status: 'active',
+        control_version: 0,
+        quota_micros: 10_000_000,
+        quota_used_micros: 0,
+        rate_limit_5h_micros: 1_000_000,
+        rate_limit_1d_micros: 2_000_000,
+        rate_limit_7d_micros: 3_000_000,
+        usage_5h_micros: 0,
+        usage_1d_micros: 0,
+        usage_7d_micros: 0,
+        window_5h_start_ms: null,
+        window_1d_start_ms: null,
+        window_7d_start_ms: null,
+        reset_5h_at_ms: null,
+        reset_1d_at_ms: null,
+        reset_7d_at_ms: null,
+        quota_reset_epoch: 0,
+        rate_limit_reset_epoch: 0,
+        rate_limit_windows: {
+          '5h': { usage_micros: 0, window_start_ms: null, reset_at_ms: null },
+          '1d': { usage_micros: 0, window_start_ms: null, reset_at_ms: null },
+          '7d': { usage_micros: 0, window_start_ms: null, reset_at_ms: null },
+        },
+      },
+    })
+  })
+
+  it('rejects negative, fractional, unsafe, legacy, and server-managed monetary input', async () => {
+    const test = await fixture()
+    const invalidCreateBodies = [
+      { quota_micros: -1 },
+      { rate_limit_5h_micros: 1.5 },
+      { rate_limit_1d_micros: Number.MAX_SAFE_INTEGER + 1 },
+      { quota: 1.25 },
+      { usage_7d_micros: 1 },
+    ]
+    for (const [index, monetary] of invalidCreateBodies.entries()) {
+      const response = await app().request('/keys', {
+        method: 'POST',
+        headers: {
+          authorization: test.authorization.alice,
+          'content-type': 'application/json',
+          'idempotency-key': `invalid-monetary-create-${index}`,
+        },
+        body: JSON.stringify({ name: 'Invalid', group_id: 'group-a', ...monetary }),
+      }, test.env)
+      expect(response.status).toBe(400)
+    }
+
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    const invalidUpdate = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ reset_quota: 'yes' }),
+    }, test.env)
+    expect(invalidUpdate.status).toBe(400)
+    await expect(invalidUpdate.json()).resolves.toMatchObject({ code: 'invalid_reset_quota' })
+  })
+
+  it('requires a matching control version and resets both usage dimensions atomically', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    const now = Date.now()
+    test.raw.prepare(
+      `UPDATE api_keys
+          SET quota_micros = 100, quota_used_micros = 100,
+              rate_limit_5h_micros = 200, rate_limit_1d_micros = 300,
+              rate_limit_7d_micros = 400,
+              usage_5h_micros = 20, usage_1d_micros = 30, usage_7d_micros = 40,
+              window_5h_start_ms = ?, window_1d_start_ms = ?, window_7d_start_ms = ?
+        WHERE id = 'alice-key'`,
+    ).run(now, now, now)
+
+    const exhausted = await app().request('/keys/alice-key', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    await expect(exhausted.json()).resolves.toMatchObject({
+      data: {
+        status: 'quota_exhausted',
+        usage_5h_micros: 20,
+        window_5h_start_ms: now,
+        reset_5h_at_ms: now + 5 * 60 * 60_000,
+        rate_limit_windows: {
+          '5h': { usage_micros: 20, window_start_ms: now, reset_at_ms: now + 5 * 60 * 60_000 },
+        },
+      },
+    })
+
+    const missingVersion = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: { authorization: test.authorization.alice, 'content-type': 'application/json' },
+      body: JSON.stringify({ quota_micros: 101 }),
+    }, test.env)
+    expect(missingVersion.status).toBe(428)
+
+    const expanded = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ quota_micros: 101 }),
+    }, test.env)
+    expect(expanded.status).toBe(200)
+    await expect(expanded.json()).resolves.toMatchObject({
+      data: { status: 'active', quota_micros: 101, quota_used_micros: 100, control_version: 1 },
+    })
+
+    const stale = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ reset_quota: true }),
+    }, test.env)
+    expect(stale.status).toBe(412)
+    await expect(stale.json()).resolves.toMatchObject({ code: 'control_version_conflict' })
+
+    const reset = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"1"',
+      },
+      body: JSON.stringify({ reset_quota: true, reset_rate_limit_usage: true }),
+    }, test.env)
+    expect(reset.status).toBe(200)
+    await expect(reset.json()).resolves.toMatchObject({
+      data: {
+        status: 'active',
+        quota_used_micros: 0,
+        usage_5h_micros: 0,
+        usage_1d_micros: 0,
+        usage_7d_micros: 0,
+        window_5h_start_ms: null,
+        window_1d_start_ms: null,
+        window_7d_start_ms: null,
+        quota_reset_epoch: 1,
+        rate_limit_reset_epoch: 1,
+        control_version: 2,
+      },
+    })
+    expect(test.raw.prepare(
+      `SELECT enabled, auth_version, quota_used_micros,
+              usage_5h_micros, usage_1d_micros, usage_7d_micros,
+              window_5h_start_ms, window_1d_start_ms, window_7d_start_ms,
+              quota_reset_epoch, rate_limit_reset_epoch, control_version
+         FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({
+      enabled: 1,
+      auth_version: 1,
+      quota_used_micros: 0,
+      usage_5h_micros: 0,
+      usage_1d_micros: 0,
+      usage_7d_micros: 0,
+      window_5h_start_ms: null,
+      window_1d_start_ms: null,
+      window_7d_start_ms: null,
+      quota_reset_epoch: 1,
+      rate_limit_reset_epoch: 1,
+      control_version: 2,
+    })
+  })
+
+  it('projects an exactly expired window as empty without writing D1', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    const start = Date.now() - 5 * 60 * 60_000
+    test.raw.prepare(
+      `UPDATE api_keys
+          SET rate_limit_5h_micros = 100, usage_5h_micros = 99, window_5h_start_ms = ?
+        WHERE id = 'alice-key'`,
+    ).run(start)
+
+    const response = await app().request('/keys/alice-key', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        usage_5h_micros: 0,
+        window_5h_start_ms: null,
+        reset_5h_at_ms: null,
+        rate_limit_windows: {
+          '5h': { usage_micros: 0, window_start_ms: null, reset_at_ms: null },
+        },
+      },
+    })
+    expect(test.raw.prepare(
+      'SELECT usage_5h_micros, window_5h_start_ms FROM api_keys WHERE id = ?',
+    ).get('alice-key')).toEqual({ usage_5h_micros: 99, window_5h_start_ms: start })
+  })
+
+  it('does not overwrite hot-path usage during a stale ordinary edit', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Before', hashByte: 'a' })
+    const now = Date.now()
+    const environment = {
+      ...test.env,
+      DB: runBeforeFirstBatch(test.env.DB, () => {
+        test.raw.prepare(
+          `UPDATE api_keys
+              SET quota_used_micros = quota_used_micros + 30,
+                  usage_5h_micros = usage_5h_micros + 42,
+                  usage_1d_micros = usage_1d_micros + 42,
+                  usage_7d_micros = usage_7d_micros + 42,
+                  window_5h_start_ms = ?, window_1d_start_ms = ?, window_7d_start_ms = ?
+            WHERE id = 'alice-key'`,
+        ).run(now, now, now)
+      }),
+    }
+
+    const response = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ name: 'After' }),
+    }, environment)
+
+    expect(response.status).toBe(200)
+    expect(test.raw.prepare(
+      `SELECT name, quota_used_micros, usage_5h_micros, usage_1d_micros, usage_7d_micros
+         FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({
+      name: 'After',
+      quota_used_micros: 30,
+      usage_5h_micros: 42,
+      usage_1d_micros: 42,
+      usage_7d_micros: 42,
+    })
   })
 })

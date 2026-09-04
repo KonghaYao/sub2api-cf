@@ -7,6 +7,10 @@ import KeysView from '../KeysView.vue'
 
 const {
   listKeys,
+  createKey,
+  updateKey,
+  deleteKey,
+  toggleKeyStatus,
   getPublicSettings,
   getDashboardApiKeysUsage,
   getAvailableGroups,
@@ -18,6 +22,10 @@ const {
   nextStep,
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
+  createKey: vi.fn(),
+  updateKey: vi.fn(),
+  deleteKey: vi.fn(),
+  toggleKeyStatus: vi.fn(),
   getPublicSettings: vi.fn(),
   getDashboardApiKeysUsage: vi.fn(),
   getAvailableGroups: vi.fn(),
@@ -31,6 +39,8 @@ const {
 
 const messages: Record<string, string> = {
   'common.actions': 'Actions',
+  'common.create': 'Create',
+  'common.edit': 'Edit',
   'common.name': 'Name',
   'common.refresh': 'Refresh',
   'common.status': 'Status',
@@ -47,6 +57,9 @@ const messages: Record<string, string> = {
   'keys.lastUsedAt': 'Last Used',
   'keys.lastUsedIP': 'Last Used IP',
   'keys.rateLimitColumn': 'Rate Limit',
+  'keys.reset': 'Reset',
+  'keys.resetRateLimitUsage': 'Reset Rate Limit Usage',
+  'keys.resetUsage': 'Reset usage',
   'keys.searchPlaceholder': 'Search name or key...',
   'keys.status.active': 'Active',
   'keys.status.expired': 'Expired',
@@ -58,10 +71,10 @@ const messages: Record<string, string> = {
 vi.mock('@/api', () => ({
   keysAPI: {
     list: listKeys,
-    create: vi.fn(),
-    update: vi.fn(),
-    delete: vi.fn(),
-    toggleStatus: vi.fn(),
+    create: createKey,
+    update: updateKey,
+    delete: deleteKey,
+    toggleStatus: toggleKeyStatus,
   },
   authAPI: {
     getPublicSettings,
@@ -105,7 +118,7 @@ vi.mock('vue-i18n', async () => {
   }
 })
 
-const createApiKey = (): ApiKey => ({
+const createApiKey = (overrides: Partial<ApiKey> = {}): ApiKey => ({
   id: 1,
   user_id: 1,
   key: 'sk-test-key',
@@ -134,6 +147,7 @@ const createApiKey = (): ApiKey => ({
   reset_5h_at: null,
   reset_1d_at: null,
   reset_7d_at: null,
+  ...overrides,
 })
 
 const AppLayoutStub = {
@@ -173,11 +187,20 @@ const DataTableStub = {
         <div data-test="current-concurrency">
           <slot name="cell-current_concurrency" :value="row.current_concurrency" :row="row" />
         </div>
+        <div v-if="columns.some((col) => col.key === 'usage')" data-test="usage-cell">
+          <slot name="cell-usage" :value="row.usage" :row="row" />
+        </div>
+        <div v-if="columns.some((col) => col.key === 'rate_limit')" data-test="rate-limit-cell">
+          <slot name="cell-rate_limit" :value="row.rate_limit_5h" :row="row" />
+        </div>
         <div
           v-if="columns.some((col) => col.key === 'last_used_ip')"
           data-test="last-used-ip"
         >
           <slot name="cell-last_used_ip" :value="row.last_used_ip" :row="row" />
+        </div>
+        <div data-test="actions-cell">
+          <slot name="cell-actions" :row="row" />
         </div>
       </div>
       <slot name="empty" />
@@ -215,6 +238,17 @@ const IconStub = {
   template: '<span data-test="icon">{{ name }}</span>',
 }
 
+const BaseDialogStub = {
+  props: ['show', 'title'],
+  template: '<div v-if="show" data-test="base-dialog"><slot /><slot name="footer" /></div>',
+}
+
+const ConfirmDialogStub = {
+  props: ['show', 'title', 'message'],
+  emits: ['confirm', 'cancel'],
+  template: '<button v-if="show" data-test="confirm-dialog" @click="$emit(\'confirm\')">Confirm</button>',
+}
+
 const mountView = async () => {
   const wrapper = mount(KeysView, {
     global: {
@@ -223,8 +257,8 @@ const mountView = async () => {
         TablePageLayout: TablePageLayoutStub,
         DataTable: DataTableStub,
         Pagination: PaginationStub,
-        BaseDialog: true,
-        ConfirmDialog: true,
+        BaseDialog: BaseDialogStub,
+        ConfirmDialog: ConfirmDialogStub,
         EmptyState: true,
         Select: SelectStub,
         SearchInput: SearchInputStub,
@@ -261,6 +295,10 @@ describe('user KeysView column settings', () => {
     localStorage.clear()
 
     listKeys.mockReset()
+    createKey.mockReset()
+    updateKey.mockReset()
+    deleteKey.mockReset()
+    toggleKeyStatus.mockReset()
     getPublicSettings.mockReset()
     getDashboardApiKeysUsage.mockReset()
     getAvailableGroups.mockReset()
@@ -283,6 +321,10 @@ describe('user KeysView column settings', () => {
     getAvailableGroups.mockResolvedValue([])
     getUserGroupRates.mockResolvedValue({})
     isCurrentStep.mockReturnValue(false)
+    createKey.mockResolvedValue(createApiKey({ id: 'created-key', key: 'sk-created' }))
+    updateKey.mockImplementation(async (_id, _updates, version) =>
+      createApiKey({ id: 'worker-key', control_version: (version ?? 0) + 1 })
+    )
   })
 
   it('uses the default API key columns with low-frequency columns hidden', async () => {
@@ -436,6 +478,231 @@ describe('user KeysView column settings', () => {
         sort_order: 'asc',
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('renders Worker quota progress, rolling-window usage, and reset countdown for a UUID key', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2027-01-01T00:00:00.000Z'))
+    localStorage.setItem(
+      'api-key-hidden-columns',
+      JSON.stringify(['id', 'last_used_at', 'last_used_ip'])
+    )
+    localStorage.setItem('api-key-column-settings-version', '3')
+    listKeys.mockResolvedValueOnce({
+      items: [createApiKey({
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        control_version: 7,
+        quota: 10,
+        quota_used: 2.5,
+        rate_limit_5h: 5,
+        usage_5h: 1,
+        reset_5h_at: '2027-01-01T02:30:00.000Z',
+      })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+
+    const wrapper = await mountView()
+
+    expect(wrapper.get('[data-test="usage-cell"]').text()).toContain('$2.50 / $10.00')
+    expect(wrapper.get('[data-test="rate-limit-cell"]').text()).toContain('$1.00/$5.00')
+    expect(wrapper.get('[data-test="rate-limit-cell"]').text()).toContain('2h 30m')
+    expect(wrapper.get('[data-test="rate-limit-cell"]').text()).toContain('Reset usage')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('submits an enabled quota from the existing create form', async () => {
+    const groupID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    getAvailableGroups.mockResolvedValueOnce([{
+      id: groupID,
+      name: 'OpenAI',
+      description: null,
+      platform: 'openai',
+      rate_multiplier: 1,
+      subscription_type: 'standard',
+    }])
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('budgeted')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')
+    expect(groupSelect).toBeDefined()
+    groupSelect!.vm.$emit('update:modelValue', groupID)
+    await nextTick()
+    await wrapper.get('[data-testid="api-key-quota-toggle"]').trigger('click')
+    await wrapper.get('input[step="0.000001"]').setValue('0.000001')
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(createKey).toHaveBeenCalledWith(
+      'budgeted',
+      groupID,
+      undefined,
+      [],
+      [],
+      0.000001,
+      undefined,
+      { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
+    )
+  })
+
+  it('submits zero for disabled quota and rate-limit controls when creating', async () => {
+    const groupID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    getAvailableGroups.mockResolvedValueOnce([{ id: groupID, name: 'OpenAI' }])
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('unlimited')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')
+    groupSelect!.vm.$emit('update:modelValue', groupID)
+    await nextTick()
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(createKey).toHaveBeenCalledWith(
+      'unlimited',
+      groupID,
+      undefined,
+      [],
+      [],
+      0,
+      undefined,
+      { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
+    )
+  })
+
+  it('clears an existing quota and all rate windows when their edit toggles are disabled', async () => {
+    const key = createApiKey({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      control_version: 7,
+      quota: 10,
+      rate_limit_5h: 5,
+      rate_limit_1d: 20,
+      rate_limit_7d: 80,
+    })
+    listKeys.mockResolvedValueOnce({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    updateKey.mockResolvedValueOnce({ ...key, quota: 0, rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 })
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Edit').trigger('click')
+    await wrapper.get('[data-testid="api-key-quota-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="api-key-rate-limit-toggle"]').trigger('click')
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      expect.objectContaining({
+        quota: 0,
+        rate_limit_5h: 0,
+        rate_limit_1d: 0,
+        rate_limit_7d: 0,
+      }),
+      {
+        expectedControlVersion: 7,
+        monetaryBaseline: key
+      }
+    )
+  })
+
+  it('passes the loaded raw micros as the unchanged edit baseline for lossless saving', async () => {
+    const key = createApiKey({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      control_version: 11,
+      quota: 9_007_199_254.740992,
+      quota_micros: Number.MAX_SAFE_INTEGER,
+      rate_limit_5h: 9_007_199_254.74099,
+      rate_limit_5h_micros: Number.MAX_SAFE_INTEGER - 1,
+      rate_limit_1d: 20,
+      rate_limit_1d_micros: 20_000_000,
+      rate_limit_7d: 80,
+      rate_limit_7d_micros: 80_000_000,
+    })
+    listKeys.mockResolvedValueOnce({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    updateKey.mockResolvedValueOnce(key)
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Edit').trigger('click')
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      expect.objectContaining({
+        quota: key.quota,
+        rate_limit_5h: key.rate_limit_5h,
+        rate_limit_1d: key.rate_limit_1d,
+        rate_limit_7d: key.rate_limit_7d,
+      }),
+      {
+        expectedControlVersion: 11,
+        monetaryBaseline: key
+      }
+    )
+  })
+
+  it('resets cumulative usage with the selected UUID key control version', async () => {
+    const key = createApiKey({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      control_version: 7,
+      quota: 10,
+      quota_used: 2.5,
+    })
+    listKeys.mockResolvedValueOnce({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    updateKey.mockResolvedValueOnce({ ...key, quota_used: 0, control_version: 8 })
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Edit').trigger('click')
+    const reset = wrapper.get('[data-test="base-dialog"]').findAll('button')
+      .find((button) => button.text() === 'Reset')
+    expect(reset).toBeDefined()
+    await reset!.trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      { reset_quota: true },
+      7
+    )
+  })
+
+  it('resets rolling-window usage from the table with UUID CAS', async () => {
+    localStorage.setItem(
+      'api-key-hidden-columns',
+      JSON.stringify(['id', 'last_used_at', 'last_used_ip'])
+    )
+    localStorage.setItem('api-key-column-settings-version', '3')
+    const key = createApiKey({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      control_version: 9,
+      rate_limit_5h: 5,
+      usage_5h: 1,
+    })
+    listKeys.mockResolvedValue({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    updateKey.mockResolvedValueOnce({ ...key, usage_5h: 0, control_version: 10 })
+    const wrapper = await mountView()
+
+    await wrapper.get('button[title="Reset Rate Limit Usage"]').trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      { reset_rate_limit_usage: true },
+      9
     )
   })
 })

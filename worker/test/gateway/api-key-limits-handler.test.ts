@@ -17,6 +17,7 @@ class StateStub {
   ) {}
 
   admissionResponse: Response | null = null
+  monetaryReserveResponse: Response | null = null
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname
@@ -28,6 +29,22 @@ class StateStub {
         admitted: true,
         lease: { request_id: body.request_id, status: 'active' },
       })
+    }
+    if (this.kind === 'admission' && path === '/monetary/settle') {
+      return Response.json({ usage: {
+        api_key_id: 'key-1',
+        quota_reset_epoch: 0,
+        rate_limit_reset_epoch: 0,
+        total_settled_micros: 10,
+        active_reserved_micros: 0,
+        windows: (['5h', '1d', '7d'] as const).map((kind) => ({
+          api_key_id: 'key-1', kind, window_started_at_ms: 1,
+          settled_micros: 10, updated_at_ms: 1,
+        })),
+      } })
+    }
+    if (this.kind === 'admission' && path === '/monetary/reserve' && this.monetaryReserveResponse !== null) {
+      return this.monetaryReserveResponse.clone()
     }
     if (this.kind === 'pool' && path === '/reserve') {
       return Response.json({ lease: { account_id: 'account-1', status: 'active' } })
@@ -174,6 +191,32 @@ describe('gateway API key admission lifecycle', () => {
       error: { code: 'user_rpm_limit_exceeded' },
     })
     expect(state.user.calls).toEqual([])
+    expect(state.pool.calls).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+    state.close()
+  })
+
+  it('compensates primary billing and rejects before pool/fetch when the key budget is exhausted', async () => {
+    const state = await harness()
+    state.admission.monetaryReserveResponse = Response.json({
+      error: { code: 'api_key_rate_limit_5h_exceeded', message: '5h spend exhausted' },
+      retry_after_seconds: 23,
+    }, { status: 429, headers: { 'retry-after': '23' } })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    const response = await createApp().request('/v1/responses', gatewayRequest(), state.env)
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('23')
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'api_key_rate_limit_5h_exceeded' },
+    })
+    expect(state.user.calls.map((call) => call.path)).toEqual([
+      '/configure', '/authorize', '/reserve', '/cancel',
+    ])
+    expect(state.admission.calls.map((call) => call.path)).toEqual([
+      '/admit', '/monetary/configure', '/monetary/reserve', '/monetary/cancel', '/release',
+    ])
     expect(state.pool.calls).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
     state.close()
@@ -383,7 +426,63 @@ describe('gateway API key admission lifecycle', () => {
     const response = await createApp().request(path, gatewayRequest(path, body), state.env)
 
     expect(response.status).toBe(200)
-    expect(state.admission.calls.map((call) => call.path)).toEqual(['/admit', '/release'])
+    expect(state.user.calls.map((call) => call.path)).toEqual([
+      '/configure', '/authorize', '/reserve', '/cancel',
+    ])
+    expect(state.admission.calls.map((call) => call.path)).toEqual([
+      '/admit', '/monetary/configure', '/monetary/reserve', '/monetary/cancel', '/release',
+    ])
+    expect(state.events.indexOf('admission:/admit')).toBeLessThan(state.events.indexOf('user:/reserve'))
+    expect(state.events.indexOf('user:/reserve')).toBeLessThan(state.events.indexOf('admission:/monetary/reserve'))
+    expect(state.events.indexOf('admission:/monetary/reserve')).toBeLessThan(state.events.indexOf('pool:/reserve'))
+    state.close()
+  })
+
+  it.each([
+    {
+      path: '/v1/responses/input_tokens',
+      body: { model: 'gpt-public', input: 'hello' },
+      expected: { error: { code: 'api_key_rate_limit_5h_exceeded' } },
+      nativeCodeHeader: false,
+    },
+    {
+      path: '/v1/messages/count_tokens',
+      body: { model: 'gpt-public', messages: [{ role: 'user', content: 'hello' }] },
+      expected: { error: { code: 'api_key_rate_limit_5h_exceeded' } },
+      nativeCodeHeader: true,
+    },
+    {
+      path: '/v1beta/models/gpt-public:countTokens',
+      body: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+      expected: { error: { gateway_code: 'api_key_rate_limit_5h_exceeded' } },
+      nativeCodeHeader: true,
+    },
+  ])('blocks token-count upstream fetch for exhausted key budget on $path', async ({
+    path, body, expected, nativeCodeHeader,
+  }) => {
+    const state = await harness()
+    state.admission.monetaryReserveResponse = Response.json({
+      error: { code: 'api_key_rate_limit_5h_exceeded', message: '5h spend exhausted' },
+      retry_after_seconds: 23,
+    }, { status: 429, headers: { 'retry-after': '23' } })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    const response = await createApp().request(path, gatewayRequest(path, body), state.env)
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('23')
+    if (nativeCodeHeader) {
+      expect(response.headers.get('x-error-code')).toBe('api_key_rate_limit_5h_exceeded')
+    }
+    await expect(response.json()).resolves.toMatchObject(expected)
+    expect(state.user.calls.map((call) => call.path)).toEqual([
+      '/configure', '/authorize', '/reserve', '/cancel',
+    ])
+    expect(state.admission.calls.map((call) => call.path)).toEqual([
+      '/admit', '/monetary/configure', '/monetary/reserve', '/monetary/cancel', '/release',
+    ])
+    expect(state.pool.calls).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
     state.close()
   })
 })

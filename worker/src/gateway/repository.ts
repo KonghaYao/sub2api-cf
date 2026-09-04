@@ -30,6 +30,20 @@ interface PrincipalRow {
   concurrency_limit?: number
   user_rpm_limit?: number
   group_rpm_limit?: number
+  api_key_control_version?: number
+  quota_micros?: number
+  quota_used_micros?: number
+  rate_limit_5h_micros?: number
+  rate_limit_1d_micros?: number
+  rate_limit_7d_micros?: number
+  usage_5h_micros?: number
+  usage_1d_micros?: number
+  usage_7d_micros?: number
+  window_5h_start_ms?: number | null
+  window_1d_start_ms?: number | null
+  window_7d_start_ms?: number | null
+  api_key_quota_reset_epoch?: number
+  api_key_rate_limit_reset_epoch?: number
   group_id: string
   group_enabled: number
   group_accessible: number
@@ -81,6 +95,15 @@ export async function authenticateGatewayRequest(
             u.concurrency AS concurrency_limit,
             u.rpm_limit AS user_rpm_limit,
             COALESCE(rpm_override.rpm_override, g.rpm_limit) AS group_rpm_limit,
+            k.control_version AS api_key_control_version,
+            k.quota_micros, k.quota_used_micros,
+            k.rate_limit_5h_micros, k.rate_limit_1d_micros,
+            k.rate_limit_7d_micros, k.usage_5h_micros,
+            k.usage_1d_micros, k.usage_7d_micros,
+            k.window_5h_start_ms, k.window_1d_start_ms,
+            k.window_7d_start_ms,
+            k.quota_reset_epoch AS api_key_quota_reset_epoch,
+            k.rate_limit_reset_epoch AS api_key_rate_limit_reset_epoch,
             g.id AS group_id, g.enabled AS group_enabled, g.platform, g.group_type,
             subscription.id AS subscription_id,
             subscription.starts_at_ms AS subscription_starts_at_ms,
@@ -166,7 +189,63 @@ export async function authenticateGatewayRequest(
     concurrency_limit: concurrencyLimit!,
     user_rpm_limit: userRpmLimit!,
     group_rpm_limit: groupRpmLimit!,
+    api_key_monetary: apiKeyMonetaryPolicy(row, now),
     billing,
+  }
+}
+
+function apiKeyMonetaryPolicy(
+  row: PrincipalRow,
+  now: number,
+): GatewayPrincipal['api_key_monetary'] {
+  const integerFields = [
+    'api_key_control_version',
+    'quota_micros',
+    'quota_used_micros',
+    'rate_limit_5h_micros',
+    'rate_limit_1d_micros',
+    'rate_limit_7d_micros',
+    'usage_5h_micros',
+    'usage_1d_micros',
+    'usage_7d_micros',
+    'api_key_quota_reset_epoch',
+    'api_key_rate_limit_reset_epoch',
+  ] as const
+  const windowFields = [
+    ['window_5h_start_ms', 'usage_5h_micros'],
+    ['window_1d_start_ms', 'usage_1d_micros'],
+    ['window_7d_start_ms', 'usage_7d_micros'],
+  ] as const
+  if (
+    integerFields.some((field) => !Number.isSafeInteger(row[field]) || (row[field] as number) < 0) ||
+    windowFields.some(([startField, usageField]) => {
+      const start = row[startField]
+      return start !== null && (!Number.isSafeInteger(start) || (start as number) < 0 || (start as number) > now) ||
+        (start === null && row[usageField] !== 0)
+    })
+  ) {
+    throw new GatewayError(
+      500,
+      'invalid_api_key_monetary_limits',
+      'API key monetary limit projection is invalid',
+      'server_error',
+    )
+  }
+  return {
+    control_version: row.api_key_control_version!,
+    quota_micros: row.quota_micros!,
+    quota_used_micros: row.quota_used_micros!,
+    rate_limit_5h_micros: row.rate_limit_5h_micros!,
+    rate_limit_1d_micros: row.rate_limit_1d_micros!,
+    rate_limit_7d_micros: row.rate_limit_7d_micros!,
+    usage_5h_micros: row.usage_5h_micros!,
+    usage_1d_micros: row.usage_1d_micros!,
+    usage_7d_micros: row.usage_7d_micros!,
+    window_5h_start_ms: row.window_5h_start_ms!,
+    window_1d_start_ms: row.window_1d_start_ms!,
+    window_7d_start_ms: row.window_7d_start_ms!,
+    quota_reset_epoch: row.api_key_quota_reset_epoch!,
+    rate_limit_reset_epoch: row.api_key_rate_limit_reset_epoch!,
   }
 }
 

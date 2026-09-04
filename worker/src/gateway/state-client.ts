@@ -2,7 +2,13 @@ import type { Env } from '../env'
 import type { PlatformEvent, UsageSettledPayload } from '../env'
 import { GatewayError } from './errors'
 import { sha256Hex } from './crypto'
-import type { AccountCandidate, GatewayEndpoint, GatewayPrincipal } from './types'
+import type {
+  AccountCandidate,
+  ApiKeyMonetaryUsageSnapshot,
+  ApiKeyMonetaryWindowSnapshot,
+  GatewayEndpoint,
+  GatewayPrincipal,
+} from './types'
 
 export const STATE_SCHEMA_VERSION = 1
 export const RESERVATION_TTL_MS = 10 * 60_000
@@ -38,9 +44,7 @@ export async function acquireApiKeyAdmission(
   if (env.API_KEY_LIMIT_STATE === undefined) {
     throw new GatewayError(503, 'api_key_limits_unavailable', 'API key admission state is unavailable', 'server_error')
   }
-  const stub = env.API_KEY_LIMIT_STATE.get(
-    env.API_KEY_LIMIT_STATE.idFromName(`user:${principal.user_id}`),
-  )
+  const stub = apiKeyLimitStub(env, principal.user_id)
   let response: Response
   try {
     response = await post(stub, '/admit', {
@@ -99,6 +103,159 @@ export async function releaseApiKeyAdmission(
 export interface BillingReference {
   user_id: string
   billing: { type: 'balance' } | { type: 'subscription'; subscription_id: string }
+}
+
+export interface ApiKeyMonetaryReference {
+  user_id: string
+  api_key_id: string
+}
+
+export async function prepareApiKeyMonetaryReservation(
+  env: Env,
+  principal: GatewayPrincipal,
+  requestId: string,
+  amountMicros: number,
+): Promise<void> {
+  const stub = apiKeyLimitStub(env, principal.user_id)
+  const policy = principal.api_key_monetary
+  await requireStateOk(post(stub, '/monetary/configure', {
+    schema_version: STATE_SCHEMA_VERSION,
+    api_key_id: principal.api_key_id,
+    control_version: policy.control_version,
+    total_limit_micros: policy.quota_micros,
+    limit_5h_micros: policy.rate_limit_5h_micros,
+    limit_1d_micros: policy.rate_limit_1d_micros,
+    limit_7d_micros: policy.rate_limit_7d_micros,
+    total_used_micros: policy.quota_used_micros,
+    usage_5h_micros: policy.usage_5h_micros,
+    usage_1d_micros: policy.usage_1d_micros,
+    usage_7d_micros: policy.usage_7d_micros,
+    window_5h_start_ms: policy.window_5h_start_ms,
+    window_1d_start_ms: policy.window_1d_start_ms,
+    window_7d_start_ms: policy.window_7d_start_ms,
+    quota_reset_epoch: policy.quota_reset_epoch,
+    rate_limit_reset_epoch: policy.rate_limit_reset_epoch,
+  }))
+  await requireStateOk(post(stub, '/monetary/reserve', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    api_key_id: principal.api_key_id,
+    control_version: policy.control_version,
+    amount_micros: amountMicros,
+    reservation_ttl_ms: RESERVATION_TTL_MS,
+  }))
+}
+
+export async function renewApiKeyMonetaryReservation(
+  env: Env,
+  reference: ApiKeyMonetaryReference,
+  requestId: string,
+  renewalSequence: number,
+): Promise<void> {
+  await requireStateOk(post(apiKeyLimitStub(env, reference.user_id), '/monetary/renew', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    api_key_id: reference.api_key_id,
+    renewal_sequence: renewalSequence,
+    reservation_ttl_ms: RESERVATION_TTL_MS,
+  }))
+}
+
+/** Settles only the API-key Durable Object. D1 projection is a separate recovery stage. */
+export async function settleApiKeyMonetaryReservation(
+  env: Env,
+  reference: ApiKeyMonetaryReference,
+  requestId: string,
+  amountMicros: number,
+): Promise<ApiKeyMonetaryUsageSnapshot> {
+  const response = await requireStateOk(post(
+    apiKeyLimitStub(env, reference.user_id),
+    '/monetary/settle',
+    {
+      schema_version: STATE_SCHEMA_VERSION,
+      request_id: requestId,
+      api_key_id: reference.api_key_id,
+      amount_micros: amountMicros,
+    },
+  ))
+  let body: { usage?: unknown }
+  try {
+    body = await response.json() as { usage?: unknown }
+  } catch {
+    throw new GatewayError(503, 'invalid_api_key_monetary_state', 'API key monetary state returned invalid usage', 'server_error')
+  }
+  return parseApiKeyMonetaryUsage(body.usage, reference.api_key_id)
+}
+
+/** Monotonically projects an authoritative DO snapshot without crossing an admin reset epoch. */
+export async function projectApiKeyMonetaryUsage(
+  env: Env,
+  snapshot: ApiKeyMonetaryUsageSnapshot,
+): Promise<void> {
+  const windows = Object.fromEntries(snapshot.windows.map((window) => [window.kind, window])) as Record<
+    ApiKeyMonetaryWindowSnapshot['kind'],
+    ApiKeyMonetaryWindowSnapshot
+  >
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE api_keys
+          SET quota_used_micros = CASE
+                WHEN quota_reset_epoch < ? THEN ?
+                WHEN quota_reset_epoch = ? THEN MAX(quota_used_micros, ?)
+                ELSE quota_used_micros END,
+              quota_reset_epoch = MAX(quota_reset_epoch, ?),
+              updated_at_ms = MAX(updated_at_ms, ?)
+        WHERE id = ? AND quota_reset_epoch <= ?`,
+    ).bind(
+      snapshot.quota_reset_epoch,
+      snapshot.total_settled_micros,
+      snapshot.quota_reset_epoch,
+      snapshot.total_settled_micros,
+      snapshot.quota_reset_epoch,
+      now,
+      snapshot.api_key_id,
+      snapshot.quota_reset_epoch,
+    ),
+    env.DB.prepare(
+      `UPDATE api_keys
+          SET usage_5h_micros = ${windowUsageProjection('5h')},
+              window_5h_start_ms = ${windowStartProjection('5h')},
+              usage_1d_micros = ${windowUsageProjection('1d')},
+              window_1d_start_ms = ${windowStartProjection('1d')},
+              usage_7d_micros = ${windowUsageProjection('7d')},
+              window_7d_start_ms = ${windowStartProjection('7d')},
+              rate_limit_reset_epoch = MAX(rate_limit_reset_epoch, ?),
+              updated_at_ms = MAX(updated_at_ms, ?)
+        WHERE id = ? AND rate_limit_reset_epoch <= ?`,
+    ).bind(
+      ...windowProjectionBindings(snapshot.rate_limit_reset_epoch, windows['5h']),
+      ...windowProjectionBindings(snapshot.rate_limit_reset_epoch, windows['1d']),
+      ...windowProjectionBindings(snapshot.rate_limit_reset_epoch, windows['7d']),
+      snapshot.rate_limit_reset_epoch,
+      now,
+      snapshot.api_key_id,
+      snapshot.rate_limit_reset_epoch,
+    ),
+  ])
+}
+
+export async function cancelApiKeyMonetaryReservation(
+  env: Env,
+  reference: ApiKeyMonetaryReference,
+  requestId: string,
+): Promise<void> {
+  const response = await post(apiKeyLimitStub(env, reference.user_id), '/monetary/cancel', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    api_key_id: reference.api_key_id,
+  })
+  if (!response.ok) {
+    const code = await stateErrorCode(response)
+    if (code !== 'api_key_monetary_invalid_transition') {
+      throw await stateResponseError(response)
+    }
+  }
 }
 
 export async function prepareBillingReservation(
@@ -353,6 +510,13 @@ function userStub(env: Env, userId: string): DurableObjectStub {
   return env.USER_STATE.get(env.USER_STATE.idFromName(userId))
 }
 
+function apiKeyLimitStub(env: Env, userId: string): DurableObjectStub {
+  if (env.API_KEY_LIMIT_STATE === undefined) {
+    throw new GatewayError(503, 'api_key_limits_unavailable', 'API key limit state is unavailable', 'server_error')
+  }
+  return env.API_KEY_LIMIT_STATE.get(env.API_KEY_LIMIT_STATE.idFromName(`user:${userId}`))
+}
+
 function subscriptionStub(env: Env, subscriptionId: string): DurableObjectStub {
   if (env.SUBSCRIPTION_STATE === undefined) {
     throw new GatewayError(503, 'subscription_billing_unavailable', 'Subscription billing state is unavailable', 'server_error')
@@ -390,6 +554,107 @@ function post(
     body: JSON.stringify(body),
   })
   return stub.fetch(request)
+}
+
+export function parseApiKeyMonetaryUsage(
+  value: unknown,
+  apiKeyId: string,
+): ApiKeyMonetaryUsageSnapshot {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return invalidApiKeyMonetaryUsage()
+  }
+  const candidate = value as Partial<ApiKeyMonetaryUsageSnapshot>
+  if (
+    candidate.api_key_id !== apiKeyId ||
+    !nonNegativeSafeInteger(candidate.quota_reset_epoch) ||
+    !nonNegativeSafeInteger(candidate.rate_limit_reset_epoch) ||
+    !nonNegativeSafeInteger(candidate.total_settled_micros) ||
+    !nonNegativeSafeInteger(candidate.active_reserved_micros) ||
+    !Array.isArray(candidate.windows) ||
+    candidate.windows.length !== 3
+  ) return invalidApiKeyMonetaryUsage()
+  const byKind = new Map<ApiKeyMonetaryWindowSnapshot['kind'], ApiKeyMonetaryWindowSnapshot>()
+  for (const raw of candidate.windows) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return invalidApiKeyMonetaryUsage()
+    }
+    const window = raw as Partial<ApiKeyMonetaryWindowSnapshot>
+    if (
+      window.api_key_id !== apiKeyId ||
+      (window.kind !== '5h' && window.kind !== '1d' && window.kind !== '7d') ||
+      !nonNegativeSafeInteger(window.window_started_at_ms) ||
+      !nonNegativeSafeInteger(window.settled_micros) ||
+      !nonNegativeSafeInteger(window.updated_at_ms) ||
+      byKind.has(window.kind)
+    ) return invalidApiKeyMonetaryUsage()
+    byKind.set(window.kind, window as ApiKeyMonetaryWindowSnapshot)
+  }
+  const window5h = byKind.get('5h')
+  const window1d = byKind.get('1d')
+  const window7d = byKind.get('7d')
+  if (window5h === undefined || window1d === undefined || window7d === undefined) {
+    return invalidApiKeyMonetaryUsage()
+  }
+  return {
+    api_key_id: candidate.api_key_id,
+    quota_reset_epoch: candidate.quota_reset_epoch,
+    rate_limit_reset_epoch: candidate.rate_limit_reset_epoch,
+    total_settled_micros: candidate.total_settled_micros,
+    active_reserved_micros: candidate.active_reserved_micros,
+    windows: [window5h, window1d, window7d],
+  }
+}
+
+function invalidApiKeyMonetaryUsage(): never {
+  throw new GatewayError(
+    503,
+    'invalid_api_key_monetary_state',
+    'API key monetary state returned invalid usage',
+    'server_error',
+  )
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+function windowUsageProjection(kind: ApiKeyMonetaryWindowSnapshot['kind']): string {
+  const usage = `usage_${kind}_micros`
+  const start = `window_${kind}_start_ms`
+  return `CASE
+    WHEN rate_limit_reset_epoch < ? THEN ?
+    WHEN rate_limit_reset_epoch = ? AND (${start} IS NULL OR ${start} < ?) THEN ?
+    WHEN rate_limit_reset_epoch = ? AND ${start} = ? THEN MAX(${usage}, ?)
+    ELSE ${usage} END`
+}
+
+function windowStartProjection(kind: ApiKeyMonetaryWindowSnapshot['kind']): string {
+  const start = `window_${kind}_start_ms`
+  return `CASE
+    WHEN rate_limit_reset_epoch < ? THEN ?
+    WHEN rate_limit_reset_epoch = ? AND (${start} IS NULL OR ${start} < ?) THEN ?
+    ELSE ${start} END`
+}
+
+function windowProjectionBindings(
+  epoch: number,
+  window: ApiKeyMonetaryWindowSnapshot,
+): readonly number[] {
+  return [
+    epoch,
+    window.settled_micros,
+    epoch,
+    window.window_started_at_ms,
+    window.settled_micros,
+    epoch,
+    window.window_started_at_ms,
+    window.settled_micros,
+    epoch,
+    window.window_started_at_ms,
+    epoch,
+    window.window_started_at_ms,
+    window.window_started_at_ms,
+  ]
 }
 
 async function requireStateOk(responsePromise: Promise<Response>): Promise<Response> {

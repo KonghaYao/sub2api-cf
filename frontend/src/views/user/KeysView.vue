@@ -598,13 +598,12 @@
         </div>
 
         <!-- Quota Limit Section -->
-        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
-          <label class="input-label">{{ t('keys.quotaLimit') }}</label>
-          <!-- Switch commented out - always show input, 0 = unlimited
+        <div class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.quotaLimit') }}</label>
             <button
               type="button"
+              data-testid="api-key-quota-toggle"
               @click="formData.enable_quota = !formData.enable_quota"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -619,16 +618,15 @@
               />
             </button>
           </div>
-          -->
 
-          <div class="space-y-4">
+          <div v-if="formData.enable_quota" class="space-y-4">
             <div>
               <div class="relative">
                 <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">$</span>
                 <input
                   v-model.number="formData.quota"
                   type="number"
-                  step="0.01"
+                  step="0.000001"
                   min="0"
                   class="input pl-7"
                   :placeholder="t('keys.quotaAmountPlaceholder')"
@@ -664,11 +662,12 @@
         </div>
 
         <!-- Rate Limit Section -->
-        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
+        <div class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.rateLimitSection') }}</label>
             <button
               type="button"
+              data-testid="api-key-rate-limit-toggle"
               @click="formData.enable_rate_limit = !formData.enable_rate_limit"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -694,7 +693,7 @@
                 <input
                   v-model.number="formData.rate_limit_5h"
                   type="number"
-                  step="0.01"
+                  step="0.000001"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -740,7 +739,7 @@
                 <input
                   v-model.number="formData.rate_limit_1d"
                   type="number"
-                  step="0.01"
+                  step="0.000001"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -786,7 +785,7 @@
                 <input
                   v-model.number="formData.rate_limit_7d"
                   type="number"
-                  step="0.01"
+                  step="0.000001"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -1172,6 +1171,7 @@ import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1201,7 +1201,7 @@ interface GroupOption {
 const appStore = useAppStore()
 const onboardingStore = useOnboardingStore()
 const { copyToClipboard: clipboardCopy } = useClipboard()
-const legacyKeyControlsAvailable = false
+const legacyKeyControlsAvailable = !isCloudflareWorkerContractActive()
 
 const allColumns = computed<Column[]>(() => [
   { key: 'name', label: t('common.name'), sortable: true },
@@ -1613,7 +1613,7 @@ const editKey = (key: ApiKey) => {
 const toggleKeyStatus = async (key: ApiKey) => {
   const newStatus = key.status === 'active' ? 'inactive' : 'active'
   try {
-    await keysAPI.toggleStatus(String(key.id), newStatus)
+    await keysAPI.toggleStatus(String(key.id), newStatus, key.control_version)
     appStore.showSuccess(
       newStatus === 'active' ? t('keys.keyEnabledSuccess') : t('keys.keyDisabledSuccess')
     )
@@ -1663,7 +1663,7 @@ const changeGroup = async (key: ApiKey, newGroupId: string | null) => {
   if (key.group_id === newGroupId) return
 
   try {
-    await keysAPI.update(String(key.id), { group_id: newGroupId })
+    await keysAPI.update(String(key.id), { group_id: newGroupId }, key.control_version)
     appStore.showSuccess(t('keys.groupChangedSuccess'))
     loadApiKeys()
   } catch (error) {
@@ -1707,6 +1707,27 @@ const handleSubmit = async () => {
     }
   }
 
+  const parseIPList = (text: string): string[] =>
+    text.split('\n').map((ip) => ip.trim()).filter((ip) => ip.length > 0)
+  const ipWhitelist = formData.value.enable_ip_restriction
+    ? parseIPList(formData.value.ip_whitelist)
+    : []
+  const ipBlacklist = formData.value.enable_ip_restriction
+    ? parseIPList(formData.value.ip_blacklist)
+    : []
+  // The Worker persists integer micros. The adapter performs the exact conversion
+  // and rejects values that cannot be represented without rounding.
+  const amountOrUnlimited = (value: number | null): number =>
+    typeof value === 'number' ? value : 0
+  const quota = formData.value.enable_quota ? amountOrUnlimited(formData.value.quota) : 0
+  const rateLimitData = formData.value.enable_rate_limit
+    ? {
+        rate_limit_5h: amountOrUnlimited(formData.value.rate_limit_5h),
+        rate_limit_1d: amountOrUnlimited(formData.value.rate_limit_1d),
+        rate_limit_7d: amountOrUnlimited(formData.value.rate_limit_7d),
+      }
+    : { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
+
   // Calculate expiration
   let expiresInDays: number | undefined
   let expiresAt: string | null | undefined
@@ -1732,22 +1753,37 @@ const handleSubmit = async () => {
       const updates: UpdateApiKeyRequest = {
         name: formData.value.name,
         group_id: formData.value.group_id,
+        ...(legacyKeyControlsAvailable
+          ? { ip_whitelist: ipWhitelist, ip_blacklist: ipBlacklist }
+          : {}),
+        quota,
         expires_at: expiresAt,
+        rate_limit_5h: rateLimitData.rate_limit_5h,
+        rate_limit_1d: rateLimitData.rate_limit_1d,
+        rate_limit_7d: rateLimitData.rate_limit_7d,
       }
       if (shouldSubmitEditStatus(selectedKey.value, formData.value.status)) {
         updates.status = formData.value.status
       }
-      await keysAPI.update(String(selectedKey.value.id), updates)
+      await keysAPI.update(
+        String(selectedKey.value.id),
+        updates,
+        {
+          expectedControlVersion: selectedKey.value.control_version,
+          monetaryBaseline: selectedKey.value
+        }
+      )
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
     } else {
       const created = await keysAPI.create(
         formData.value.name,
         String(formData.value.group_id),
-        undefined,
-        undefined,
-        undefined,
-        undefined,
+        formData.value.use_custom_key ? formData.value.custom_key : undefined,
+        ipWhitelist,
+        ipBlacklist,
+        quota,
         expiresInDays,
+        rateLimitData,
       )
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded
@@ -1766,7 +1802,7 @@ const handleSubmit = async () => {
     closeModals()
     loadApiKeys()
   } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToSave')
+    const errorMsg = error.response?.data?.detail || error?.message || t('keys.failedToSave')
     appStore.showError(errorMsg)
     // Don't advance tour on error
   } finally {
@@ -1837,14 +1873,18 @@ const resetQuotaUsed = async () => {
   if (!selectedKey.value) return
   showResetQuotaDialog.value = false
   try {
-    await keysAPI.update(String(selectedKey.value.id), { reset_quota: true })
+    const updated = await keysAPI.update(
+      String(selectedKey.value.id),
+      { reset_quota: true },
+      selectedKey.value.control_version
+    )
     appStore.showSuccess(t('keys.quotaResetSuccess'))
     // Update local state
     if (selectedKey.value) {
-      selectedKey.value.quota_used = 0
+      Object.assign(selectedKey.value, updated, { quota_used: 0 })
     }
   } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToResetQuota')
+    const errorMsg = error.response?.data?.detail || error?.message || t('keys.failedToResetQuota')
     appStore.showError(errorMsg)
   }
 }
@@ -1865,7 +1905,12 @@ const resetRateLimitUsage = async () => {
   if (!selectedKey.value) return
   showResetRateLimitDialog.value = false
   try {
-    await keysAPI.update(String(selectedKey.value.id), { reset_rate_limit_usage: true })
+    const updated = await keysAPI.update(
+      String(selectedKey.value.id),
+      { reset_rate_limit_usage: true },
+      selectedKey.value.control_version
+    )
+    selectedKey.value = { ...selectedKey.value, ...updated }
     appStore.showSuccess(t('keys.rateLimitResetSuccess'))
     // Refresh key data
     await loadApiKeys()
@@ -1875,7 +1920,7 @@ const resetRateLimitUsage = async () => {
       selectedKey.value = refreshedKey
     }
   } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToResetRateLimit')
+    const errorMsg = error.response?.data?.detail || error?.message || t('keys.failedToResetRateLimit')
     appStore.showError(errorMsg)
   }
 }

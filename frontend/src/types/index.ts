@@ -725,8 +725,10 @@ export interface ApiKey {
   ip_blacklist: string[]
   last_used_at: string | null
   last_used_ip: string | null
-  quota: number // Quota limit in USD (legacy deployment only)
-  quota_used: number // Used quota amount in USD (legacy deployment only)
+  /** Normalized quota limit in USD. 0 means unlimited. */
+  quota: number
+  /** Normalized cumulative usage in USD. */
+  quota_used: number
   expires_at: string | null // Expiration time (null = never expires)
   created_at: string
   updated_at: string
@@ -745,6 +747,23 @@ export interface ApiKey {
   reset_5h_at: string | null
   reset_1d_at: string | null
   reset_7d_at: string | null
+  /** Worker control-plane version used for compare-and-swap updates. */
+  control_version?: number
+  /** Raw Worker monetary fields. UI code should normally use the USD fields above. */
+  quota_micros?: number
+  quota_used_micros?: number
+  rate_limit_5h_micros?: number
+  rate_limit_1d_micros?: number
+  rate_limit_7d_micros?: number
+  usage_5h_micros?: number
+  usage_1d_micros?: number
+  usage_7d_micros?: number
+  window_5h_start_ms?: number | null
+  window_1d_start_ms?: number | null
+  window_7d_start_ms?: number | null
+  reset_5h_at_ms?: number | null
+  reset_1d_at_ms?: number | null
+  reset_7d_at_ms?: number | null
 }
 
 export interface CreateApiKeyRequest {

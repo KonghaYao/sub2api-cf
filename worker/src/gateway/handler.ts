@@ -33,6 +33,7 @@ import {
 } from './protocols/responses'
 import {
   persistSettlementRecovery,
+  settleRecoveryRequest,
   signalSettlementRecovery,
 } from './recovery'
 import {
@@ -47,9 +48,11 @@ import type { ProviderPlatform } from './providers'
 import { readGatewayJsonBody } from './request-body'
 import {
   acquireApiKeyAdmission,
+  cancelApiKeyMonetaryReservation,
   cancelBillingReservation,
   disablePoolAccount,
   prepareBillingReservation,
+  prepareApiKeyMonetaryReservation,
   recordPoolFailure,
   releaseApiKeyAdmission,
   releasePoolLease,
@@ -57,8 +60,8 @@ import {
   renewPoolLease,
   renewApiKeyAdmission,
   renewBillingReservation,
+  renewApiKeyMonetaryReservation,
   reservePoolAccount,
-  settleBillingReservation,
   syncPoolAccounts,
   type ApiKeyAdmissionLease,
 } from './state-client'
@@ -308,8 +311,10 @@ async function handleGeminiCountTokens(
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
   let admission: ApiKeyAdmissionLease | null = null
+  let principal: Awaited<ReturnType<typeof authenticateGatewayRequest>> | null = null
+  let reservationsPrepared = false
   try {
-    const principal = await authenticateGatewayRequest(context.req.raw, context.env)
+    principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     convertGeminiGenerateContentToResponsesRequest(parsed.body, {
@@ -343,6 +348,8 @@ async function handleGeminiCountTokens(
       }
     }
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
+    await prepareGatewayReservations(context.env, principal, requestId, 0)
+    reservationsPrepared = true
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -395,6 +402,9 @@ async function handleGeminiCountTokens(
   } finally {
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
+    }
+    if (principal !== null && reservationsPrepared) {
+      await bestEffort(() => cancelGatewayReservations(context.env, principal!, requestId))
     }
     await bestEffort(() => releaseApiKeyAdmission(admission))
   }
@@ -466,8 +476,10 @@ export async function handleAnthropicCountTokens(
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
   let admission: ApiKeyAdmissionLease | null = null
+  let principal: Awaited<ReturnType<typeof authenticateGatewayRequest>> | null = null
+  let reservationsPrepared = false
   try {
-    const principal = await authenticateGatewayRequest(context.req.raw, context.env)
+    principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     const request = parseAnthropicCountTokensRequest(parsed.body)
@@ -490,6 +502,8 @@ export async function handleAnthropicCountTokens(
       upstreamBody = toOpenAIResponsesInputTokensRequest(request, route.model.upstream_name)
     }
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
+    await prepareGatewayReservations(context.env, principal, requestId, 0)
+    reservationsPrepared = true
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -559,6 +573,9 @@ export async function handleAnthropicCountTokens(
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
     }
+    if (principal !== null && reservationsPrepared) {
+      await bestEffort(() => cancelGatewayReservations(context.env, principal!, requestId))
+    }
     await bestEffort(() => releaseApiKeyAdmission(admission))
   }
 }
@@ -571,8 +588,10 @@ export async function handleResponsesInputTokens(
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
   let admission: ApiKeyAdmissionLease | null = null
+  let principal: Awaited<ReturnType<typeof authenticateGatewayRequest>> | null = null
+  let reservationsPrepared = false
   try {
-    const principal = await authenticateGatewayRequest(context.req.raw, context.env)
+    principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     const requestedModel = requiredModel(parsed.body)
@@ -595,6 +614,8 @@ export async function handleResponsesInputTokens(
       model: route.model.upstream_name,
     }
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
+    await prepareGatewayReservations(context.env, principal, requestId, 0)
+    reservationsPrepared = true
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -660,6 +681,9 @@ export async function handleResponsesInputTokens(
   } finally {
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
+    }
+    if (principal !== null && reservationsPrepared) {
+      await bestEffort(() => cancelGatewayReservations(context.env, principal!, requestId))
     }
     await bestEffort(() => releaseApiKeyAdmission(admission))
   }
@@ -959,7 +983,7 @@ async function dispatchGateway(
     const candidates = route.candidates
 
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
-    await prepareBillingReservation(context.env, principal, requestId, reservationMicros)
+    await prepareGatewayReservations(context.env, principal, requestId, reservationMicros)
     let pool: DurableObjectStub
     try {
       pool = await syncPoolAccounts(
@@ -970,7 +994,7 @@ async function dispatchGateway(
         candidates,
       )
     } catch (error) {
-      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
+      await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
     }
 
@@ -988,7 +1012,7 @@ async function dispatchGateway(
       providerDispatch.operation,
       model.upstream_name,
     ).catch(async (error) => {
-      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
+      await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
     })
 
@@ -1005,7 +1029,7 @@ async function dispatchGateway(
       }
       await bestEffort(async () => acquired.response.body?.cancel())
       await bestEffort(() => releasePoolLease(pool, acquired.leaseId))
-      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
+      await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw mapUpstreamStatus(acquired.response)
     }
 
@@ -1017,7 +1041,7 @@ async function dispatchGateway(
     ) {
       if (acquired.response.body === null) {
         await bestEffort(() => releasePoolLease(pool, acquired.leaseId))
-        await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
+        await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
         throw new GatewayError(502, 'empty_upstream_stream', 'Upstream returned an empty stream', 'server_error')
       }
       admissionHandedOff = true
@@ -1087,7 +1111,12 @@ function anthropicErrorResponse(error: GatewayError, requestId?: string): Respon
   })
   if (requestId) headers.set('request-id', requestId)
   if (error.retryAfter) headers.set('retry-after', error.retryAfter)
-  return new Response(JSON.stringify(mapOpenAIErrorToAnthropic(error.status)), {
+  headers.set('x-error-code', error.code)
+  const mapped = mapOpenAIErrorToAnthropic(error.status)
+  return new Response(JSON.stringify({
+    ...mapped,
+    error: { ...mapped.error, code: error.code },
+  }), {
     status: error.status,
     headers,
   })
@@ -1100,6 +1129,7 @@ function geminiErrorResponse(error: GatewayError, requestId?: string): Response 
   })
   if (requestId) headers.set('x-request-id', requestId)
   if (error.retryAfter) headers.set('retry-after', error.retryAfter)
+  headers.set('x-error-code', error.code)
   const status = error.status === 400
     ? 'INVALID_ARGUMENT'
     : error.status === 401
@@ -1114,7 +1144,7 @@ function geminiErrorResponse(error: GatewayError, requestId?: string): Response 
               ? 'UNAVAILABLE'
               : 'INTERNAL'
   return new Response(JSON.stringify({
-    error: { code: error.status, message: error.message, status },
+    error: { code: error.status, message: error.message, status, gateway_code: error.code },
   }), { status: error.status, headers })
 }
 
@@ -1802,7 +1832,7 @@ function createStreamingResponse(input: FinalizeInput & {
             outcome,
           )
         } else {
-          await cancelBillingReservation(input.env, input.principal, input.requestId)
+          await cancelGatewayReservations(input.env, input.principal, input.requestId)
         }
       } finally {
         await Promise.all([
@@ -1831,7 +1861,10 @@ function createStreamingResponse(input: FinalizeInput & {
     }
     if (now - lastBillingRenewedAt >= BILLING_RENEW_AFTER_MS) {
       userRenewal += 1
-      await renewBillingReservation(input.env, input.principal, input.requestId, userRenewal)
+      await Promise.all([
+        renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
+        renewApiKeyMonetaryReservation(input.env, input.principal, input.requestId, userRenewal),
+      ])
       lastBillingRenewedAt = Date.now()
     }
   }
@@ -2030,7 +2063,6 @@ async function settleAndProject(
     estimated: usage.estimated,
   }
   const event = createUsageEvent(payload, Date.now())
-  let recoveryPersisted = false
   try {
     await persistSettlementRecovery(
       input.env,
@@ -2039,43 +2071,65 @@ async function settleAndProject(
       cost.amount_micros,
       event,
     )
-    recoveryPersisted = true
   } catch (error) {
     console.error('failed to persist settlement recovery', {
       request_id: input.requestId,
       name: error instanceof Error ? error.name : 'unknown',
     })
+    // No durable command exists, so do not leave either hold consuming quota
+    // until TTL. Cancellation is idempotent and must happen before surfacing
+    // the durability failure to synchronous callers.
+    await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
+    throw new GatewayError(
+      503,
+      'settlement_recovery_unavailable',
+      'Usage settlement could not be durably recorded',
+      'server_error',
+    )
   }
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await settleBillingReservation(
-        input.env,
-        input.principal,
-        input.requestId,
-        cost.amount_micros,
-        event,
-      )
-      if (recoveryPersisted) {
-        await input.env.DB.prepare('DELETE FROM settlement_recovery WHERE request_id = ?')
-          .bind(input.requestId)
-          .run()
-      }
-      return
+      if (await settleRecoveryRequest(input.env, input.requestId, true)) return
+      lastError = new Error('Settlement recovery did not complete every stage')
     } catch (error) {
       lastError = error
-      if (attempt < 2) await delay(50 * 2 ** attempt)
     }
+    if (attempt < 2) await delay(50 * 2 ** attempt)
   }
-  if (recoveryPersisted) {
-    await bestEffort(() => signalSettlementRecovery(input.env, input.requestId))
-    console.error('settlement deferred to recovery', {
-      request_id: input.requestId,
-      name: lastError instanceof Error ? lastError.name : 'unknown',
-    })
-    return
+  await bestEffort(() => signalSettlementRecovery(input.env, input.requestId))
+  console.error('settlement deferred to recovery', {
+    request_id: input.requestId,
+    name: lastError instanceof Error ? lastError.name : 'unknown',
+  })
+}
+
+async function cancelGatewayReservations(
+  env: Env,
+  principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>,
+  requestId: string,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    cancelBillingReservation(env, principal, requestId),
+    cancelApiKeyMonetaryReservation(env, principal, requestId),
+  ])
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failed !== undefined) throw failed.reason
+}
+
+async function prepareGatewayReservations(
+  env: Env,
+  principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>,
+  requestId: string,
+  amountMicros: number,
+): Promise<void> {
+  try {
+    await prepareBillingReservation(env, principal, requestId, amountMicros)
+    await prepareApiKeyMonetaryReservation(env, principal, requestId, amountMicros)
+  } catch (error) {
+    await bestEffort(() => cancelGatewayReservations(env, principal, requestId))
+    throw error
   }
-  throw lastError
 }
 
 function validateClientControls(body: Record<string, unknown>): void {

@@ -175,7 +175,11 @@ describe('admin API key D1 authorization', () => {
     ).run(Date.now() - 1)
     const reenabled = await createApp().request(`/api/v1/admin/api-keys/${keyId}`, {
       method: 'PUT',
-      headers: { ...test.headers, 'idempotency-key': 'sqlite-subscription-reenable' },
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'sqlite-subscription-reenable',
+        'if-match': '"0"',
+      },
       body: JSON.stringify({ status: 'active' }),
     }, test.env)
     expect(reenabled.status).toBe(409)
@@ -204,5 +208,239 @@ describe('admin API key D1 authorization', () => {
       .toEqual({ total: 0 })
     expect(test.raw.prepare('SELECT COUNT(*) AS total FROM control_idempotency').get())
       .toEqual({ total: 0 })
+  })
+
+  it('creates and lists a complete integer monetary policy projection', async () => {
+    const test = await fixture()
+    const response = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      method: 'POST',
+      headers: { ...test.headers, 'idempotency-key': 'admin-monetary-create-0001' },
+      body: JSON.stringify({
+        name: 'Budgeted',
+        group_id: EXCLUSIVE_GROUP_ID,
+        quota_micros: 10_000_000,
+        rate_limit_5h_micros: 1_000_000,
+        rate_limit_1d_micros: 2_000_000,
+        rate_limit_7d_micros: 3_000_000,
+      }),
+    }, test.env)
+
+    expect(response.status).toBe(201)
+    const body = await response.json() as { data: { id: string } & Record<string, unknown> }
+    expect(body.data).toMatchObject({
+      status: 'active',
+      control_version: 0,
+      quota_micros: 10_000_000,
+      quota_used_micros: 0,
+      rate_limit_5h_micros: 1_000_000,
+      rate_limit_1d_micros: 2_000_000,
+      rate_limit_7d_micros: 3_000_000,
+      usage_5h_micros: 0,
+      usage_1d_micros: 0,
+      usage_7d_micros: 0,
+      window_5h_start_ms: null,
+      window_1d_start_ms: null,
+      window_7d_start_ms: null,
+      reset_5h_at_ms: null,
+      reset_1d_at_ms: null,
+      reset_7d_at_ms: null,
+      quota_reset_epoch: 0,
+      rate_limit_reset_epoch: 0,
+    })
+    expect(test.raw.prepare(
+      `SELECT quota_micros, quota_used_micros,
+              rate_limit_5h_micros, rate_limit_1d_micros, rate_limit_7d_micros
+         FROM api_keys WHERE id = ?`,
+    ).get(body.data.id)).toEqual({
+      quota_micros: 10_000_000,
+      quota_used_micros: 0,
+      rate_limit_5h_micros: 1_000_000,
+      rate_limit_1d_micros: 2_000_000,
+      rate_limit_7d_micros: 3_000_000,
+    })
+
+    const listed = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      headers: { authorization: test.headers.authorization },
+    }, test.env)
+    await expect(listed.json()).resolves.toMatchObject({
+      data: { items: [{ id: body.data.id, quota_micros: 10_000_000, control_version: 0 }] },
+    })
+  })
+
+  it('rejects unsafe and legacy float monetary contracts', async () => {
+    const test = await fixture()
+    for (const [index, monetary] of [
+      { quota_micros: -1 },
+      { rate_limit_5h_micros: 0.5 },
+      { rate_limit_7d_micros: Number.MAX_SAFE_INTEGER + 1 },
+      { quota: 1.25 },
+      { quota_used_micros: 1 },
+    ].entries()) {
+      const response = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+        method: 'POST',
+        headers: { ...test.headers, 'idempotency-key': `admin-invalid-monetary-${index}` },
+        body: JSON.stringify({ name: 'Invalid', group_id: EXCLUSIVE_GROUP_ID, ...monetary }),
+      }, test.env)
+      expect(response.status).toBe(400)
+    }
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM api_keys').get()).toEqual({ total: 0 })
+  })
+
+  it('preserves racing hot usage, then resets counters and epochs through idempotent CAS', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-monetary-update-create')
+    const keyId = ((await created.json()) as { data: { id: string } }).data.id
+    const now = Date.now()
+    test.raw.prepare(
+      `UPDATE api_keys
+          SET quota_micros = 100, quota_used_micros = 70,
+              rate_limit_5h_micros = 200, rate_limit_1d_micros = 300,
+              rate_limit_7d_micros = 400,
+              usage_5h_micros = 20, usage_1d_micros = 30, usage_7d_micros = 40,
+              window_5h_start_ms = ?, window_1d_start_ms = ?, window_7d_start_ms = ?
+        WHERE id = ?`,
+    ).run(now, now, now, keyId)
+
+    const racingEnv = env(failSafeDatabase(test.d1, () => {
+      test.raw.prepare(
+        `UPDATE api_keys
+            SET quota_used_micros = quota_used_micros + 30,
+                usage_5h_micros = usage_5h_micros + 22,
+                usage_1d_micros = usage_1d_micros + 22,
+                usage_7d_micros = usage_7d_micros + 22
+          WHERE id = ?`,
+      ).run(keyId)
+    }))
+    const renamed = await createApp().request(`/api/v1/admin/api-keys/${keyId}`, {
+      method: 'PUT',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-monetary-name-update',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ name: 'After hot charge' }),
+    }, racingEnv)
+    expect(renamed.status).toBe(200)
+    expect(test.raw.prepare(
+      `SELECT name, quota_used_micros, usage_5h_micros, usage_1d_micros, usage_7d_micros
+         FROM api_keys WHERE id = ?`,
+    ).get(keyId)).toEqual({
+      name: 'After hot charge',
+      quota_used_micros: 100,
+      usage_5h_micros: 42,
+      usage_1d_micros: 52,
+      usage_7d_micros: 62,
+    })
+
+    const resetRequest = {
+      method: 'PUT',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-monetary-reset-0001',
+        'if-match': '"1"',
+      },
+      body: JSON.stringify({
+        quota_micros: 50,
+        reset_quota: true,
+        reset_rate_limit_usage: true,
+      }),
+    }
+    const reset = await createApp().request(`/api/v1/admin/api-keys/${keyId}`, resetRequest, test.env)
+    const replay = await createApp().request(`/api/v1/admin/api-keys/${keyId}`, resetRequest, test.env)
+    expect(reset.status).toBe(200)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({
+      data: {
+        api_key: {
+          id: keyId,
+          status: 'active',
+          quota_micros: 50,
+          quota_used_micros: 0,
+          usage_5h_micros: 0,
+          usage_1d_micros: 0,
+          usage_7d_micros: 0,
+          window_5h_start_ms: null,
+          window_1d_start_ms: null,
+          window_7d_start_ms: null,
+          quota_reset_epoch: 1,
+          rate_limit_reset_epoch: 1,
+          control_version: 2,
+        },
+      },
+    })
+    expect(test.raw.prepare(
+      `SELECT enabled, auth_version, quota_micros, quota_used_micros,
+              usage_5h_micros, usage_1d_micros, usage_7d_micros,
+              window_5h_start_ms, window_1d_start_ms, window_7d_start_ms,
+              quota_reset_epoch, rate_limit_reset_epoch, control_version
+         FROM api_keys WHERE id = ?`,
+    ).get(keyId)).toEqual({
+      enabled: 1,
+      auth_version: 1,
+      quota_micros: 50,
+      quota_used_micros: 0,
+      usage_5h_micros: 0,
+      usage_1d_micros: 0,
+      usage_7d_micros: 0,
+      window_5h_start_ms: null,
+      window_1d_start_ms: null,
+      window_7d_start_ms: null,
+      quota_reset_epoch: 1,
+      rate_limit_reset_epoch: 1,
+      control_version: 2,
+    })
+  })
+
+  it('reports quota exhaustion without mutating authentication state', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-quota-status-create')
+    const keyId = ((await created.json()) as { data: { id: string } }).data.id
+    test.raw.prepare(
+      'UPDATE api_keys SET quota_micros = 100, quota_used_micros = 100 WHERE id = ?',
+    ).run(keyId)
+
+    const listed = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      headers: { authorization: test.headers.authorization },
+    }, test.env)
+    await expect(listed.json()).resolves.toMatchObject({
+      data: { items: [{ id: keyId, status: 'quota_exhausted', enabled: 1, auth_version: 1 }] },
+    })
+
+    const expanded = await createApp().request(`/api/v1/admin/api-keys/${keyId}`, {
+      method: 'PUT',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-quota-expand-0001',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ quota_micros: 101 }),
+    }, test.env)
+    await expect(expanded.json()).resolves.toMatchObject({
+      data: { api_key: { status: 'active', enabled: 1, auth_version: 1, control_version: 1 } },
+    })
+  })
+
+  it('requires an If-Match control version and rejects a stale admin edit', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-cas-create-0001')
+    const keyId = ((await created.json()) as { data: { id: string } }).data.id
+    const request = (ifMatch?: string) => createApp().request(`/api/v1/admin/api-keys/${keyId}`, {
+      method: 'PUT',
+      headers: {
+        ...test.headers,
+        'idempotency-key': `admin-cas-update-${ifMatch ?? 'missing'}`,
+        ...(ifMatch === undefined ? {} : { 'if-match': ifMatch }),
+      },
+      body: JSON.stringify({ name: 'Renamed' }),
+    }, test.env)
+
+    const missing = await request()
+    const stale = await request('"1"')
+    expect(missing.status).toBe(428)
+    await expect(missing.json()).resolves.toMatchObject({ code: 'control_version_required' })
+    expect(stale.status).toBe(412)
+    await expect(stale.json()).resolves.toMatchObject({ code: 'control_version_conflict' })
+    expect(test.raw.prepare('SELECT name, control_version FROM api_keys WHERE id = ?').get(keyId))
+      .toEqual({ name: 'automation', control_version: 0 })
   })
 })
