@@ -3,6 +3,7 @@ import type {
   CreateOrderResult,
   MethodLimit,
   OrderType,
+  PaymentResourceId,
   WechatJSAPIPayload,
   WechatOAuthInfo,
 } from '@/types/payment'
@@ -32,7 +33,7 @@ export type PaymentLaunchKind =
   | 'unhandled'
 
 export interface PaymentRecoverySnapshot {
-  orderId: number
+  orderId: PaymentResourceId
   amount: number
   qrCode: string
   expiresAt: string
@@ -280,7 +281,10 @@ export function readPaymentRecoverySnapshot(
   try {
     const parsed = JSON.parse(raw) as Partial<PaymentRecoverySnapshot>
     if (
-      typeof parsed.orderId !== 'number'
+      !(
+        (typeof parsed.orderId === 'number' && Number.isFinite(parsed.orderId) && parsed.orderId > 0)
+        || (typeof parsed.orderId === 'string' && parsed.orderId.trim() !== '')
+      )
       || typeof parsed.amount !== 'number'
       || typeof parsed.qrCode !== 'string'
       || typeof parsed.expiresAt !== 'string'

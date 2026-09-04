@@ -131,4 +131,29 @@ describe('AirwallexPaymentView', () => {
     expect(airwallexInit).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('payment.airwallexMissingParams')
   })
+
+  it('matches an opaque route order ID to the recovery snapshot without coercion', async () => {
+    const orderId = '01JORDER-airwallex-view'
+    routeState.query = {
+      order_id: orderId,
+      out_trade_no: 'sub2_awx_uuid',
+      resume_token: 'resume-awx-uuid',
+    }
+    window.localStorage.setItem(
+      PAYMENT_RECOVERY_STORAGE_KEY,
+      JSON.stringify(airwallexSnapshot({
+        orderId,
+        outTradeNo: 'sub2_awx_uuid',
+        resumeToken: 'resume-awx-uuid',
+      })),
+    )
+
+    mountView()
+    await flushPromises()
+    await flushPromises()
+
+    expect(redirectToCheckout).toHaveBeenCalledTimes(1)
+    const successUrl = new URL(redirectToCheckout.mock.calls[0][0].successUrl)
+    expect(successUrl.searchParams.get('order_id')).toBe(orderId)
+  })
 })

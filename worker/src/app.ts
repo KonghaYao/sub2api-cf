@@ -145,6 +145,41 @@ import {
   usageErrorDetail,
   usageStats,
 } from './user/usage'
+import {
+  createPaymentProvider,
+  deletePaymentProvider,
+  getAdminPaymentConfig,
+  getPaymentCheckoutInfo,
+  getPaymentConfig,
+  getPaymentLimits,
+  isPaymentEnabled,
+  listPaymentProviders,
+  updateAdminPaymentConfig,
+  updatePaymentProvider,
+} from './payment/config'
+import {
+  cancelMyPaymentOrder,
+  createPaymentOrder,
+  getMyPaymentOrder,
+  handleStripeWebhook,
+  listMyPaymentOrders,
+  resolvePaymentOrderPublic,
+  verifyMyPaymentOrder,
+  verifyPaymentOrderPublic,
+} from './payment/orders'
+import {
+  cancelAdminPaymentOrder,
+  getAdminPaymentDashboard,
+  getAdminPaymentOrder,
+  listAdminPaymentOrders,
+  retryAdminPaymentFulfillment,
+} from './payment/admin'
+import {
+  getRefundEligibleProviders,
+  processAdminRefund,
+  queryAdminRefund,
+  requestPaymentRefund,
+} from './payment/refunds'
 
 type AppBindings = {
   Bindings: Env
@@ -174,6 +209,7 @@ function defaultPublicSettings() {
     email_verify_enabled: false,
     turnstile_enabled: false,
     turnstile_site_key: '',
+    payment_enabled: false,
   }
 }
 
@@ -215,12 +251,16 @@ export function createApp() {
     const key = `${context.env.ENVIRONMENT}:public-settings:v1`
     const settings = await context.env.CONFIG_KV.get<Record<string, unknown>>(key, 'json')
     const resolved = settings ?? defaultPublicSettings()
+    const paymentEnabled = typeof context.env.DB.prepare === 'function'
+      ? await isPaymentEnabled(context.env)
+      : Boolean(resolved.payment_enabled)
     return context.json({
       code: 0,
       data: {
         ...resolved,
         email_verify_enabled:
           resolved.email_verify_enabled ?? resolved.email_verification_enabled ?? false,
+        payment_enabled: paymentEnabled,
       },
     })
   })
@@ -298,6 +338,19 @@ export function createApp() {
   app.get('/api/v1/admin/payment/plans/:id', getAdminSubscriptionPlan)
   app.put('/api/v1/admin/payment/plans/:id', updateAdminSubscriptionPlan)
   app.delete('/api/v1/admin/payment/plans/:id', disableAdminSubscriptionPlan)
+  app.get('/api/v1/admin/payment/config', getAdminPaymentConfig)
+  app.put('/api/v1/admin/payment/config', updateAdminPaymentConfig)
+  app.get('/api/v1/admin/payment/providers', listPaymentProviders)
+  app.post('/api/v1/admin/payment/providers', createPaymentProvider)
+  app.put('/api/v1/admin/payment/providers/:id', updatePaymentProvider)
+  app.delete('/api/v1/admin/payment/providers/:id', deletePaymentProvider)
+  app.get('/api/v1/admin/payment/dashboard', getAdminPaymentDashboard)
+  app.get('/api/v1/admin/payment/orders', listAdminPaymentOrders)
+  app.get('/api/v1/admin/payment/orders/:id', getAdminPaymentOrder)
+  app.post('/api/v1/admin/payment/orders/:id/cancel', cancelAdminPaymentOrder)
+  app.post('/api/v1/admin/payment/orders/:id/retry', retryAdminPaymentFulfillment)
+  app.post('/api/v1/admin/payment/orders/:id/refund', processAdminRefund)
+  app.post('/api/v1/admin/payment/orders/:id/refund/query', queryAdminRefund)
   app.get('/api/v1/admin/subscriptions', listAdminSubscriptions)
   app.post('/api/v1/admin/subscriptions/assign', assignAdminSubscription)
   app.post('/api/v1/admin/subscriptions/bulk-assign', bulkAssignAdminSubscriptions)
@@ -334,6 +387,19 @@ export function createApp() {
   app.get('/api/v1/redeem/history', listUserRedemptions)
   app.get('/api/v1/payment/plans', listPublicSubscriptionPlans)
   app.get('/api/v1/payment/plans/:id', getPublicSubscriptionPlan)
+  app.get('/api/v1/payment/config', getPaymentConfig)
+  app.get('/api/v1/payment/checkout-info', getPaymentCheckoutInfo)
+  app.get('/api/v1/payment/limits', getPaymentLimits)
+  app.post('/api/v1/payment/orders', createPaymentOrder)
+  app.post('/api/v1/payment/orders/verify', verifyMyPaymentOrder)
+  app.get('/api/v1/payment/orders/my', listMyPaymentOrders)
+  app.get('/api/v1/payment/orders/refund-eligible-providers', getRefundEligibleProviders)
+  app.get('/api/v1/payment/orders/:id', getMyPaymentOrder)
+  app.post('/api/v1/payment/orders/:id/cancel', cancelMyPaymentOrder)
+  app.post('/api/v1/payment/orders/:id/refund-request', requestPaymentRefund)
+  app.post('/api/v1/payment/public/orders/verify', verifyPaymentOrderPublic)
+  app.post('/api/v1/payment/public/orders/resolve', resolvePaymentOrderPublic)
+  app.post('/api/v1/payment/webhook/stripe', handleStripeWebhook)
 
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)

@@ -87,7 +87,7 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentOrder, PaymentResourceId } from '@/types/payment'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -104,7 +104,7 @@ const actionLoading = ref(false)
 const orders = ref<PaymentOrder[]>([])
 const refundEligibleProviders = ref<Set<string>>(new Set())
 const currentFilter = ref('')
-const cancelTargetId = ref<number | null>(null)
+const cancelTargetId = ref<PaymentResourceId | null>(null)
 const refundTarget = ref<PaymentOrder | null>(null)
 const refundReason = ref('')
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
@@ -137,7 +137,7 @@ async function fetchOrders() {
 function handlePageChange(page: number) { pagination.page = page; fetchOrders() }
 function handlePageSizeChange(size: number) { pagination.page_size = size; pagination.page = 1; fetchOrders() }
 
-function handleCancel(orderId: number) { cancelTargetId.value = orderId }
+function handleCancel(orderId: PaymentResourceId) { cancelTargetId.value = orderId }
 
 async function confirmCancel() {
   if (!cancelTargetId.value) return
@@ -174,6 +174,9 @@ async function confirmRefund() {
 
 function canRequestRefund(order: PaymentOrder): boolean {
   if (order.status !== 'COMPLETED') return false
+  // Worker user-initiated refunds require an atomic balance clawback. Paid
+  // subscriptions are admin-reviewed until the entitlement saga is added.
+  if (order.order_type !== 'balance') return false
   if (!order.provider_instance_id) return false
   return refundEligibleProviders.value.has(order.provider_instance_id)
 }

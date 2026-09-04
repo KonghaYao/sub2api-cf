@@ -73,12 +73,17 @@ describe('PaymentStatusPanel', () => {
     vi.useRealTimers()
   })
 
-  it('treats RECHARGING as a successful terminal state', async () => {
-    pollOrderStatus.mockResolvedValue(orderFactory('RECHARGING'))
+  it('keeps polling PAID, RECHARGING and PROCESSING until fulfillment is COMPLETED', async () => {
+    const orderId = '01JORDER-status-panel'
+    pollOrderStatus
+      .mockResolvedValueOnce({ ...orderFactory('PAID'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('RECHARGING'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('PROCESSING'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('COMPLETED'), id: orderId })
 
     const wrapper = mount(PaymentStatusPanel, {
       props: {
-        orderId: 42,
+        orderId,
         qrCode: 'https://pay.example.com/qr/42',
         expiresAt: '2099-01-01T12:30:00Z',
         paymentType: 'alipay',
@@ -92,10 +97,17 @@ describe('PaymentStatusPanel', () => {
     })
 
     await flushPromises()
+    for (let index = 0; index < 3; index += 1) {
+      await vi.advanceTimersByTimeAsync(3000)
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('payment.result.success')
+      expect(wrapper.emitted('success')).toBeUndefined()
+    }
+
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
 
-    expect(pollOrderStatus).toHaveBeenCalledWith(42)
+    expect(pollOrderStatus).toHaveBeenCalledWith(orderId)
     expect(wrapper.text()).toContain('payment.result.success')
     expect(wrapper.emitted('success')).toHaveLength(1)
   })

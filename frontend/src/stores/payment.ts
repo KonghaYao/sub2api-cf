@@ -6,7 +6,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { paymentAPI } from '@/api/payment'
-import type { PaymentConfig, PaymentOrder, SubscriptionPlan, CreateOrderRequest } from '@/types/payment'
+import type { PaymentConfig, PaymentOrder, PaymentResourceId, SubscriptionPlan, CreateOrderRequest } from '@/types/payment'
 
 export const usePaymentStore = defineStore('payment', () => {
   // ==================== State ====================
@@ -67,11 +67,11 @@ export const usePaymentStore = defineStore('payment', () => {
   }
 
   /** Poll order status by ID (read-only, no upstream check) */
-  async function pollOrderStatus(orderId: number): Promise<PaymentOrder | null> {
+  async function pollOrderStatus(orderId: PaymentResourceId): Promise<PaymentOrder | null> {
     try {
       const response = await paymentAPI.getOrder(orderId)
       const order = response.data
-      if (currentOrder.value?.id === orderId) {
+      if (currentOrder.value && String(currentOrder.value.id) === String(orderId)) {
         currentOrder.value = order
       }
       return order

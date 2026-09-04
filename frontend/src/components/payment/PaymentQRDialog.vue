@@ -80,7 +80,7 @@ import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentOrder, PaymentResourceId } from '@/types/payment'
 import { currencySymbol } from '@/components/payment/currency'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
@@ -88,7 +88,7 @@ import wxpayIcon from '@/assets/icons/wxpay.svg'
 
 const props = defineProps<{
   show: boolean
-  orderId: number
+  orderId: PaymentResourceId
   qrCode: string
   expiresAt: string
   paymentType: string
@@ -200,7 +200,7 @@ async function pollStatus() {
   let order = await paymentStore.pollOrderStatus(props.orderId)
   if (!order) return
   order = await tryRecoverPendingOrder(order)
-  if (order.status === 'COMPLETED' || order.status === 'PAID') {
+  if (order.status === 'COMPLETED') {
     cleanup()
     paidOrder.value = order
     success.value = true

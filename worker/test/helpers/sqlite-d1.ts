@@ -33,6 +33,8 @@ class SqliteD1Statement {
 }
 
 class SqliteD1Database {
+  private batchTail: Promise<void> = Promise.resolve()
+
   constructor(private readonly database: any) {}
 
   prepare(sql: string): SqliteD1Statement {
@@ -40,18 +42,23 @@ class SqliteD1Database {
   }
 
   async batch(statements: SqliteD1Statement[]): Promise<D1Result<unknown>[]> {
-    const results: D1Result<unknown>[] = []
-    this.database.exec('BEGIN')
-    try {
-      for (const statement of statements) {
-        results.push(await statement.all())
+    const execute = async (): Promise<D1Result<unknown>[]> => {
+      const results: D1Result<unknown>[] = []
+      this.database.exec('BEGIN')
+      try {
+        for (const statement of statements) {
+          results.push(await statement.all())
+        }
+        this.database.exec('COMMIT')
+        return results
+      } catch (error) {
+        this.database.exec('ROLLBACK')
+        throw error
       }
-      this.database.exec('COMMIT')
-      return results
-    } catch (error) {
-      this.database.exec('ROLLBACK')
-      throw error
     }
+    const current = this.batchTail.then(execute, execute)
+    this.batchTail = current.then(() => undefined, () => undefined)
+    return current
   }
 }
 

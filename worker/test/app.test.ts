@@ -50,6 +50,7 @@ describe('worker app', () => {
         email_verify_enabled: false,
         turnstile_enabled: false,
         turnstile_site_key: '',
+        payment_enabled: false,
       },
     })
   })
@@ -70,7 +71,7 @@ describe('worker app', () => {
     expect(requestedKey).toBe('test:public-settings:v1')
     await expect(response.json()).resolves.toEqual({
       code: 0,
-      data: { site_name: 'Edge Sub2API', email_verify_enabled: false },
+      data: { site_name: 'Edge Sub2API', email_verify_enabled: false, payment_enabled: false },
     })
   })
 

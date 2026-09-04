@@ -160,6 +160,28 @@ describe('decidePaymentLaunch', () => {
     expect(decision.recovery.resumeToken).toBe('resume-2')
   })
 
+  it('keeps a Worker UUID order ID through hosted Checkout launch and recovery', () => {
+    const orderId = '01JORDER-159a-4409-8645-opaque'
+    const decision = decidePaymentLaunch(createOrderResult({
+      order_id: orderId,
+      pay_url: 'https://checkout.stripe.com/c/pay/cs_test_hosted',
+      payment_mode: 'redirect',
+    }), {
+      visibleMethod: 'stripe',
+      orderType: 'subscription',
+      isMobile: false,
+    })
+
+    expect(decision.kind).toBe('redirect_waiting')
+    expect(decision.paymentState.payUrl).toBe('https://checkout.stripe.com/c/pay/cs_test_hosted')
+    expect(decision.recovery.orderId).toBe(orderId)
+
+    const restored = readPaymentRecoverySnapshot(JSON.stringify(decision.recovery), {
+      now: decision.recovery.createdAt + 1000,
+    })
+    expect(restored?.orderId).toBe(orderId)
+  })
+
   it('prefers redirect on mobile when both pay_url and qr_code are present', () => {
     const decision = decidePaymentLaunch(createOrderResult({
       pay_url: 'https://pay.example.com/mobile/session',

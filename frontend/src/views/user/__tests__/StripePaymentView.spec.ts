@@ -118,16 +118,21 @@ describe('StripePaymentView', () => {
     window.localStorage.clear()
   })
 
-  it('本地恢复快照缺失时使用订单接口返回的 Stripe 币种展示金额', async () => {
+  it('keeps a UUID order ID intact while loading Stripe order details', async () => {
+    const orderId = '01JORDER-stripe-view'
+    routeState.query = {
+      order_id: orderId,
+      client_secret: 'pi_secret_uuid',
+    }
     getOrder.mockResolvedValue({
-      data: orderFactory({ currency: 'HKD', pay_amount: 103 }),
+      data: orderFactory({ id: orderId, currency: 'HKD', pay_amount: 103 }),
     })
 
     const wrapper = mountView()
     await flushPromises()
     await flushPromises()
 
-    expect(getOrder).toHaveBeenCalledWith(42)
+    expect(getOrder).toHaveBeenCalledWith(orderId)
     expect(loadStripe).toHaveBeenCalledWith('pk_test')
     expect(wrapper.text()).toContain(formatPaymentAmount(103, 'HKD', 'zh-CN'))
   })

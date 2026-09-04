@@ -226,7 +226,7 @@ import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import { currencySymbol, formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentOrder, PaymentResourceId } from '@/types/payment'
 import Icon from '@/components/icons/Icon.vue'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
@@ -239,7 +239,7 @@ import {
 } from './alipayDeepLink'
 
 const props = defineProps<{
-  orderId: number
+  orderId: PaymentResourceId
   amount?: number
   payAmount?: number
   qrCode: string
@@ -340,7 +340,7 @@ function formatGatewayAmount(value: number, currency?: string | null): string {
 }
 
 function isSuccessStatus(status: string | null | undefined): boolean {
-  return status === 'COMPLETED' || status === 'PAID' || status === 'RECHARGING'
+  return status === 'COMPLETED'
 }
 
 function reopenPopup() {

@@ -11,7 +11,8 @@ import type {
   CheckoutInfoResponse,
   CreateOrderRequest,
   CreateOrderResult,
-  PaymentOrder
+  PaymentOrder,
+  PaymentResourceId,
 } from '@/types/payment'
 import type { BasePaginationResponse } from '@/types'
 
@@ -21,6 +22,12 @@ export interface PublicOrderVerifyResult {
   paid: boolean
   created_at: string
   expires_at: string
+}
+
+function orderOperationKey(scope: string): string {
+  const requestID = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${scope}-${requestID}`
 }
 
 export const paymentAPI = {
@@ -51,7 +58,9 @@ export const paymentAPI = {
 
   /** Create a new payment order */
   createOrder(data: CreateOrderRequest) {
-    return apiClient.post<CreateOrderResult>('/payment/orders', data)
+    return apiClient.post<CreateOrderResult>('/payment/orders', data, {
+      headers: { 'Idempotency-Key': orderOperationKey('payment-order-create') },
+    })
   },
 
   /** Get current user's orders */
@@ -60,12 +69,12 @@ export const paymentAPI = {
   },
 
   /** Get a specific order by ID */
-  getOrder(id: number) {
+  getOrder(id: PaymentResourceId) {
     return apiClient.get<PaymentOrder>(`/payment/orders/${id}`)
   },
 
   /** Cancel a pending order */
-  cancelOrder(id: number) {
+  cancelOrder(id: PaymentResourceId) {
     return apiClient.post(`/payment/orders/${id}/cancel`)
   },
 
@@ -85,7 +94,7 @@ export const paymentAPI = {
   },
 
   /** Request a refund for a completed order */
-  requestRefund(id: number, data: { reason: string }) {
+  requestRefund(id: PaymentResourceId, data: { reason: string }) {
     return apiClient.post(`/payment/orders/${id}/refund-request`, data)
   },
 

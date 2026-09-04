@@ -45,6 +45,7 @@ import { isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/paymen
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
 import wxpayIcon from '@/assets/icons/wxpay.svg'
+import type { PaymentResourceId } from '@/types/payment'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -55,7 +56,7 @@ const appStore = useAppStore()
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const qrUrl = ref('')
 const payUrl = ref('')
-const orderId = ref(0)
+const orderId = ref<PaymentResourceId | ''>('')
 const remainingSeconds = ref(0)
 const expired = ref(false)
 const cancelling = ref(false)
@@ -143,7 +144,7 @@ async function pollStatus() {
     if (!order) return
     // 定时器已被 cleanup 清除时不再执行终态跳转（响应可能在 cleanup 后才回来）。
     if (!pollTimer) return
-    if (order.status === 'COMPLETED' || order.status === 'PAID') {
+    if (order.status === 'COMPLETED') {
       cleanup()
       router.push({ path: '/payment/result', query: { order_id: String(orderId.value), status: 'success' } })
     } else if (order.status === 'EXPIRED' || order.status === 'CANCELLED' || order.status === 'FAILED') {
@@ -192,7 +193,7 @@ function cleanup() {
 watch(qrUrl, () => renderQR())
 
 onMounted(() => {
-  orderId.value = Number(route.query.order_id) || 0
+  orderId.value = typeof route.query.order_id === 'string' ? route.query.order_id.trim() : ''
   qrUrl.value = String(route.query.qr || '')
   payUrl.value = String(route.query.pay_url || '')
   paymentType.value = String(route.query.payment_type || '')

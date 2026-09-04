@@ -41,7 +41,7 @@
                 {{ t('payment.admin.approveRefund') }}
               </button>
             </template>
-            <button v-else-if="row.status === 'REFUND_FAILED'" @click="openRefundDialog(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-purple-600 hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-900/20">
+            <button v-else-if="row.status === 'REFUND_FAILED'" :disabled="refundQueryingIds.has(row.id)" @click="handleQueryRefund(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-purple-600 hover:bg-purple-50 disabled:opacity-60 dark:text-purple-400 dark:hover:bg-purple-900/20">
               <Icon name="refresh" size="sm" />
               {{ t('payment.admin.retryRefund') }}
             </button>
@@ -49,7 +49,7 @@
               <Icon name="refresh" size="sm" :class="refundQueryingIds.has(row.id) ? 'animate-spin' : ''" />
               {{ t('payment.admin.queryRefundStatus') }}
             </button>
-            <button v-else-if="row.status === 'COMPLETED' || row.status === 'PARTIALLY_REFUNDED'" @click="openRefundDialog(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20">
+            <button v-else-if="row.status === 'COMPLETED'" @click="openRefundDialog(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20">
               <Icon name="dollar" size="sm" />
               {{ t('payment.admin.refund') }}
             </button>
@@ -103,7 +103,7 @@
                 <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{ log.action }}</span>
                 <span class="text-xs text-gray-400">{{ formatDateTime(log.created_at) }}</span>
               </div>
-              <div v-if="log.detail" class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">{{ log.detail }}</div>
+              <div v-if="log.detail" class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">{{ formatAuditDetail(log.detail) }}</div>
               <div v-if="log.operator" class="mt-1 text-xs text-gray-400">{{ t('payment.admin.operator') }}: {{ log.operator }}</div>
             </div>
           </div>
@@ -122,7 +122,7 @@ import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { formatOrderDateTime } from '@/components/payment/orderUtils'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentOrder, PaymentResourceId } from '@/types/payment'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -134,9 +134,9 @@ import OrderTable from '@/components/payment/OrderTable.vue'
 import { currencySymbol } from '@/components/payment/currency'
 
 interface AuditLog {
-  id: number
+  id: PaymentResourceId
   action: string
-  detail: string | null
+  detail: unknown
   operator: string | null
   created_at: string
 }
@@ -155,7 +155,7 @@ const showRefundDialog = ref(false)
 const refundSubmitting = ref(false)
 const refundRequireForce = ref(false)
 const refundWarning = ref('')
-const refundQueryingIds = ref(new Set<number>())
+const refundQueryingIds = ref(new Set<PaymentResourceId>())
 const orderAuditLogs = ref<AuditLog[]>([])
 const creditedAmountSymbol = currencySymbol('USD')
 
@@ -306,6 +306,12 @@ async function handleQueryRefund(order: PaymentOrder) {
 }
 
 function formatDateTime(dateStr: string): string { return formatOrderDateTime(dateStr) }
+
+function formatAuditDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  try { return JSON.stringify(detail) }
+  catch { return String(detail) }
+}
 
 onMounted(() => loadOrders())
 </script>

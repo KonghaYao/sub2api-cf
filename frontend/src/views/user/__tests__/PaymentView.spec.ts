@@ -294,6 +294,30 @@ describe('PaymentView subscription plan grid', () => {
       'lg:grid-cols-3',
     ]))
   })
+
+  it('opens a renewal plan selected by an opaque group ID', async () => {
+    const groupId = '01JGROUP-renewal-uuid'
+    routeState.path = '/purchase'
+    routeState.query = { tab: 'subscription', group: groupId }
+    getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoWithPlansFixture({
+      plan: { group_id: groupId, name: 'UUID Renewal Plan' },
+    }))
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.findAllComponents(SubscriptionPlanCard)).toHaveLength(0)
+    expect(wrapper.text()).toContain('UUID Renewal Plan')
+  })
 })
 
 describe('PaymentView recharge rate preview', () => {

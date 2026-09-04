@@ -10,7 +10,8 @@ import type {
   PaymentOrder,
   PaymentChannel,
   SubscriptionPlan,
-  ProviderInstance
+  ProviderInstance,
+  PaymentResourceId,
 } from '@/types/payment'
 import type { BasePaginationResponse } from '@/types'
 
@@ -32,6 +33,8 @@ export interface AdminPaymentConfig {
   product_name_suffix: string
   help_image_url: string
   help_text: string
+  version?: number
+  control_version?: number
 }
 
 /** Fields accepted by PUT /admin/payment/config (all optional via pointer semantics) */
@@ -72,6 +75,8 @@ type WorkerSubscriptionPlan = SubscriptionPlan & {
 }
 
 const planControlVersions = new Map<string, number>()
+const providerControlVersions = new Map<string, number>()
+let paymentConfigVersion: number | undefined
 
 function planOperationKey(scope: string): string {
   const requestID = globalThis.crypto?.randomUUID?.()
@@ -83,6 +88,33 @@ function rememberPlan(plan: WorkerSubscriptionPlan): void {
   if (Number.isSafeInteger(plan.control_version) && plan.control_version! >= 0) {
     planControlVersions.set(String(plan.id), plan.control_version!)
   }
+}
+
+function rememberPaymentConfig(config: AdminPaymentConfig): void {
+  const version = config.control_version ?? config.version
+  if (Number.isSafeInteger(version) && version! >= 0) paymentConfigVersion = version
+}
+
+function rememberProvider(provider: ProviderInstance): void {
+  const version = provider.control_version ?? provider.version
+  if (Number.isSafeInteger(version) && version! >= 0) {
+    providerControlVersions.set(String(provider.id), version!)
+  }
+}
+
+async function expectedProviderVersion(id: PaymentResourceId): Promise<number> {
+  let version = providerControlVersions.get(String(id))
+  if (version === undefined) {
+    const response = await adminPaymentAPI.getProviders()
+    const provider = response.data.find((item) => String(item.id) === String(id))
+    version = provider?.control_version ?? provider?.version
+  }
+  if (!Number.isSafeInteger(version) || version! < 0) {
+    throw Object.assign(new Error('Reload this provider before changing it'), {
+      code: 'provider_version_not_loaded',
+    })
+  }
+  return version!
 }
 
 function adaptWorkerPlan(plan: WorkerSubscriptionPlan): SubscriptionPlan {
@@ -114,13 +146,23 @@ export const adminPaymentAPI = {
   // ==================== Config ====================
 
   /** Get payment configuration (admin view) */
-  getConfig() {
-    return apiClient.get<AdminPaymentConfig>('/admin/payment/config')
+  async getConfig() {
+    const response = await apiClient.get<AdminPaymentConfig>('/admin/payment/config')
+    rememberPaymentConfig(response.data)
+    return response
   },
 
   /** Update payment configuration */
-  updateConfig(data: UpdatePaymentConfigRequest) {
-    return apiClient.put('/admin/payment/config', data)
+  async updateConfig(data: UpdatePaymentConfigRequest) {
+    if (paymentConfigVersion === undefined) await adminPaymentAPI.getConfig()
+    const expected = paymentConfigVersion!
+    const response = await apiClient.put<AdminPaymentConfig>(
+      '/admin/payment/config',
+      { ...data, expected_control_version: expected },
+      { headers: { 'If-Match': `"${expected}"`, 'Idempotency-Key': planOperationKey('admin-payment-config-update') } },
+    )
+    rememberPaymentConfig(response.data)
+    return response
   },
 
   // ==================== Dashboard ====================
@@ -140,7 +182,7 @@ export const adminPaymentAPI = {
     page_size?: number
     status?: string
     payment_type?: string
-    user_id?: number
+    user_id?: PaymentResourceId
     keyword?: string
     start_date?: string
     end_date?: string
@@ -150,27 +192,29 @@ export const adminPaymentAPI = {
   },
 
   /** Get a specific order by ID */
-  getOrder(id: number) {
+  getOrder(id: PaymentResourceId) {
     return apiClient.get<PaymentOrder>(`/admin/payment/orders/${id}`)
   },
 
   /** Cancel an order (admin) */
-  cancelOrder(id: number) {
+  cancelOrder(id: PaymentResourceId) {
     return apiClient.post(`/admin/payment/orders/${id}/cancel`)
   },
 
   /** Retry recharge for a failed order */
-  retryRecharge(id: number) {
+  retryRecharge(id: PaymentResourceId) {
     return apiClient.post(`/admin/payment/orders/${id}/retry`)
   },
 
   /** Process a refund */
-  refundOrder(id: number, data: { amount: number; reason: string; deduct_balance?: boolean; force?: boolean }) {
-    return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund`, data)
+  refundOrder(id: PaymentResourceId, data: { amount: number; reason: string; deduct_balance?: boolean; force?: boolean }) {
+    return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund`, data, {
+      headers: { 'Idempotency-Key': planOperationKey('admin-payment-refund') },
+    })
   },
 
   /** Query and finalize a pending refund */
-  queryRefund(id: number) {
+  queryRefund(id: PaymentResourceId) {
     return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund/query`)
   },
 
@@ -247,23 +291,42 @@ export const adminPaymentAPI = {
   // ==================== Provider Instances ====================
 
   /** Get all provider instances */
-  getProviders() {
-    return apiClient.get<ProviderInstance[]>('/admin/payment/providers')
+  async getProviders() {
+    const response = await apiClient.get<ProviderInstance[]>('/admin/payment/providers')
+    response.data.forEach(rememberProvider)
+    return response
   },
 
   /** Create a provider instance */
-  createProvider(data: Partial<ProviderInstance>) {
-    return apiClient.post<ProviderInstance>('/admin/payment/providers', data)
+  async createProvider(data: Partial<ProviderInstance>) {
+    const response = await apiClient.post<ProviderInstance>('/admin/payment/providers', data, {
+      headers: { 'Idempotency-Key': planOperationKey('admin-payment-provider-create') },
+    })
+    rememberProvider(response.data)
+    return response
   },
 
   /** Update a provider instance */
-  updateProvider(id: number, data: Partial<ProviderInstance>) {
-    return apiClient.put<ProviderInstance>(`/admin/payment/providers/${id}`, data)
+  async updateProvider(id: PaymentResourceId, data: Partial<ProviderInstance>) {
+    const expected = await expectedProviderVersion(id)
+    const response = await apiClient.put<ProviderInstance>(
+      `/admin/payment/providers/${id}`,
+      { ...data, expected_control_version: expected },
+      { headers: { 'If-Match': `"${expected}"`, 'Idempotency-Key': planOperationKey('admin-payment-provider-update') } },
+    )
+    rememberProvider(response.data)
+    return response
   },
 
   /** Delete a provider instance */
-  deleteProvider(id: number) {
-    return apiClient.delete(`/admin/payment/providers/${id}`)
+  async deleteProvider(id: PaymentResourceId) {
+    const expected = await expectedProviderVersion(id)
+    const response = await apiClient.delete<ProviderInstance>(`/admin/payment/providers/${id}`, {
+      headers: { 'If-Match': `"${expected}"`, 'Idempotency-Key': planOperationKey('admin-payment-provider-disable') },
+      data: { expected_control_version: expected },
+    })
+    rememberProvider(response.data)
+    return response
   }
 }
 

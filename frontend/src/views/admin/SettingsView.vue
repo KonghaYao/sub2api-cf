@@ -50,6 +50,63 @@
               />
             </div>
           </div>
+          <div class="space-y-5 border-t border-gray-100 p-6 dark:border-dark-700">
+            <div>
+              <h3 class="font-medium text-gray-900 dark:text-white">Stripe payments</h3>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Worker-native checkout, signed webhooks, Queue fulfillment, and D1 order history.
+              </p>
+            </div>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+                <span class="text-sm text-gray-700 dark:text-gray-300">Enable payments</span>
+                <Toggle v-model="form.payment_enabled" />
+              </div>
+              <div>
+                <label class="input-label">Minimum amount</label>
+                <input v-model.number="form.payment_min_amount" type="number" min="0" step="0.01" class="input" />
+              </div>
+              <div>
+                <label class="input-label">Maximum amount (0 = unlimited)</label>
+                <input v-model.number="form.payment_max_amount" type="number" min="0" step="0.01" class="input" />
+              </div>
+              <div>
+                <label class="input-label">Daily amount limit (0 = unlimited)</label>
+                <input v-model.number="form.payment_daily_limit" type="number" min="0" step="0.01" class="input" />
+              </div>
+              <div>
+                <label class="input-label">Checkout timeout (minutes)</label>
+                <input v-model.number="form.payment_order_timeout_minutes" type="number" min="1" max="1440" class="input" />
+              </div>
+              <div>
+                <label class="input-label">Maximum pending orders</label>
+                <input v-model.number="form.payment_max_pending_orders" type="number" min="1" max="100" class="input" />
+              </div>
+              <div>
+                <label class="input-label">Processing fee (%)</label>
+                <input v-model.number="form.payment_recharge_fee_rate" type="number" min="0" max="100" step="0.01" class="input" />
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+                <span class="text-sm text-gray-700 dark:text-gray-300">Disable balance checkout</span>
+                <Toggle v-model="form.payment_balance_disabled" />
+              </div>
+            </div>
+            <PaymentProviderList
+              :providers="providers"
+              :loading="providersLoading"
+              :can-create="true"
+              :enabled-payment-types="['stripe']"
+              :all-payment-types="allPaymentTypes.filter((type) => type.value === 'stripe')"
+              :redirect-label="t('admin.settings.payment.easypayRedirect')"
+              @refresh="loadProviders"
+              @create="openCreateProvider"
+              @edit="openEditProvider"
+              @delete="confirmDeleteProvider"
+              @toggle-field="handleToggleField"
+              @toggle-type="handleToggleType"
+              @reorder="handleReorderProviders"
+            />
+          </div>
         </div>
 
         <!-- Tab Navigation -->
@@ -8840,7 +8897,7 @@ import type {
   NotifyEmailEntry,
   Proxy,
 } from "@/types";
-import type { ProviderInstance } from "@/types/payment";
+import type { PaymentResourceId, ProviderInstance } from "@/types/payment";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
 import Select from "@/components/common/Select.vue";
@@ -10994,6 +11051,34 @@ async function loadSettings() {
   }
 }
 
+async function loadWorkerPaymentSettings() {
+  try {
+    const response = await adminAPI.payment.getConfig();
+    const payment = response.data;
+    form.payment_enabled = payment.enabled;
+    form.payment_min_amount = payment.min_amount;
+    form.payment_max_amount = payment.max_amount;
+    form.payment_daily_limit = payment.daily_limit;
+    form.payment_order_timeout_minutes = payment.order_timeout_minutes;
+    form.payment_max_pending_orders = payment.max_pending_orders;
+    form.payment_balance_disabled = payment.balance_disabled;
+    form.payment_balance_recharge_multiplier = payment.balance_recharge_multiplier;
+    form.payment_subscription_usd_to_cny_rate = payment.subscription_usd_to_cny_rate;
+    form.payment_recharge_fee_rate = payment.recharge_fee_rate;
+    form.payment_product_name_prefix = payment.product_name_prefix;
+    form.payment_product_name_suffix = payment.product_name_suffix;
+    form.payment_help_image_url = payment.help_image_url;
+    form.payment_help_text = payment.help_text;
+    form.payment_enabled_types = payment.enabled_payment_types.length > 0
+      ? payment.enabled_payment_types
+      : ["stripe"];
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(error, t("admin.settings.failedToLoad")),
+    );
+  }
+}
+
 async function loadSubscriptionGroups() {
   try {
     const groups = await adminAPI.groups.getAll();
@@ -11076,6 +11161,24 @@ async function saveSettings() {
       });
       form.turnstile_secret_key_configured = updated.turnstile_secret_key_configured;
       form.turnstile_secret_key = "";
+      await adminAPI.payment.updateConfig({
+        enabled: form.payment_enabled,
+        min_amount: Number(form.payment_min_amount) || 0,
+        max_amount: Number(form.payment_max_amount) || 0,
+        daily_limit: Number(form.payment_daily_limit) || 0,
+        order_timeout_minutes: Number(form.payment_order_timeout_minutes) || 30,
+        max_pending_orders: Number(form.payment_max_pending_orders) || 3,
+        balance_disabled: form.payment_balance_disabled,
+        balance_recharge_multiplier:
+          Number(form.payment_balance_recharge_multiplier) || 1,
+        subscription_usd_to_cny_rate:
+          Number(form.payment_subscription_usd_to_cny_rate) || 0,
+        recharge_fee_rate: Number(form.payment_recharge_fee_rate) || 0,
+        product_name_prefix: form.payment_product_name_prefix,
+        product_name_suffix: form.payment_product_name_suffix,
+        help_image_url: form.payment_help_image_url,
+        help_text: form.payment_help_text,
+      });
       await appStore.fetchPublicSettings(true);
       appStore.showSuccess(t("admin.settings.settingsSaved"));
       return;
@@ -12310,7 +12413,7 @@ const providers = ref<ProviderInstance[]>([]);
 const showProviderDialog = ref(false);
 const showDeleteProviderDialog = ref(false);
 const editingProvider = ref<ProviderInstance | null>(null);
-const deletingProviderId = ref<number | null>(null);
+const deletingProviderId = ref<PaymentResourceId | null>(null);
 const providerDialogRef = ref<InstanceType<
   typeof PaymentProviderDialog
 > | null>(null);
@@ -12588,7 +12691,7 @@ function confirmDeleteProvider(provider: ProviderInstance) {
 }
 
 async function handleReorderProviders(
-  updates: { id: number; sort_order: number }[],
+  updates: { id: PaymentResourceId; sort_order: number }[],
 ) {
   try {
     await Promise.all(
@@ -12619,7 +12722,10 @@ async function handleDeleteProvider() {
 
 onMounted(async () => {
   await loadSettings();
-  if (cloudflareWorkerSettings.value) return;
+  if (cloudflareWorkerSettings.value) {
+    await Promise.all([loadWorkerPaymentSettings(), loadProviders()]);
+    return;
+  }
   loadSubscriptionGroups();
   loadAdminApiKey();
   loadUpstreamBillingProbeSettings();

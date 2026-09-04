@@ -248,6 +248,51 @@ describe('PaymentResultView', () => {
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
   })
 
+  it('preserves a UUID order ID and keeps recovery while paid fulfillment is progressing', async () => {
+    vi.useFakeTimers()
+    const orderId = '01JORDER-result-uuid'
+    routeState.query = { order_id: orderId }
+    window.localStorage.setItem(PAYMENT_RECOVERY_STORAGE_KEY, JSON.stringify({
+      ...recoverySnapshotFactory(''),
+      orderId,
+    }))
+    pollOrderStatus
+      .mockResolvedValueOnce({ ...orderFactory('PAID'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('RECHARGING'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('PROCESSING'), id: orderId })
+      .mockResolvedValueOnce({ ...orderFactory('COMPLETED'), id: orderId })
+
+    const wrapper = mount(PaymentResultView, {
+      global: {
+        stubs: {
+          OrderStatusBadge: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    expect(pollOrderStatus).toHaveBeenNthCalledWith(1, orderId)
+    expect(wrapper.text()).toContain('payment.result.processing')
+    expect(refreshUser).not.toHaveBeenCalled()
+    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).not.toBeNull()
+
+    for (let call = 2; call <= 3; call += 1) {
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+      expect(pollOrderStatus).toHaveBeenNthCalledWith(call, orderId)
+      expect(wrapper.text()).toContain('payment.result.processing')
+      expect(refreshUser).not.toHaveBeenCalled()
+      expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).not.toBeNull()
+    }
+
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(pollOrderStatus).toHaveBeenNthCalledWith(4, orderId)
+    expect(wrapper.text()).toContain('payment.result.success')
+    expect(refreshUser).toHaveBeenCalledTimes(1)
+    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
+  })
+
   it('keeps the successful result when refreshing the user balance fails', async () => {
     routeState.query = {
       resume_token: 'resume-refresh-failure',
@@ -286,7 +331,7 @@ describe('PaymentResultView', () => {
     )
     resolveOrderPublicByResumeToken.mockRejectedValueOnce(new Error('resume failed'))
     pollOrderStatus.mockResolvedValueOnce({
-      ...orderFactory('PAID'),
+      ...orderFactory('COMPLETED'),
       id: 77,
     })
 
@@ -301,7 +346,7 @@ describe('PaymentResultView', () => {
     await flushPromises()
 
     expect(resolveOrderPublicByResumeToken).toHaveBeenCalledWith('resume-fail')
-    expect(pollOrderStatus).toHaveBeenCalledWith(77)
+    expect(pollOrderStatus).toHaveBeenCalledWith('77')
     expect(verifyOrderPublic).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('payment.result.success')
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
@@ -316,7 +361,7 @@ describe('PaymentResultView', () => {
     resolveOrderPublicByResumeToken.mockRejectedValueOnce(new Error('resume failed'))
     verifyOrderPublic.mockResolvedValueOnce({
       data: {
-        ...orderFactory('PAID'),
+        ...orderFactory('COMPLETED'),
         out_trade_no: 'legacy-should-not-run',
       },
     })
@@ -370,7 +415,7 @@ describe('PaymentResultView', () => {
     }
     verifyOrder.mockRejectedValue(new Error('auth required'))
     verifyOrderPublic.mockResolvedValue({
-      data: orderFactory('PAID'),
+      data: orderFactory('COMPLETED'),
     })
 
     const wrapper = mount(PaymentResultView, {
@@ -398,7 +443,7 @@ describe('PaymentResultView', () => {
     verifyOrderPublic.mockResolvedValue({
       data: {
         out_trade_no: 'legacy-minimal',
-        status: 'PAID',
+        status: 'COMPLETED',
         paid: true,
         created_at: '2026-04-20T12:00:00Z',
         expires_at: '2026-04-20T12:30:00Z',
@@ -467,7 +512,7 @@ describe('PaymentResultView', () => {
       resume_token: 'resume-77',
     }
     resolveOrderPublicByResumeToken.mockResolvedValue({
-      data: orderFactory('PAID'),
+      data: orderFactory('COMPLETED'),
     })
 
     const wrapper = mount(PaymentResultView, {
@@ -490,7 +535,7 @@ describe('PaymentResultView', () => {
     }
     resolveOrderPublicByResumeToken.mockResolvedValue({
       data: {
-        ...orderFactory('PAID'),
+        ...orderFactory('COMPLETED'),
         currency: 'HKD',
         amount: 100,
         pay_amount: 103,
@@ -517,7 +562,7 @@ describe('PaymentResultView', () => {
     }
     resolveOrderPublicByResumeToken.mockResolvedValueOnce({
       data: {
-        ...orderFactory('PAID'),
+        ...orderFactory('COMPLETED'),
         payment_type: 'alipay_direct',
       },
     })

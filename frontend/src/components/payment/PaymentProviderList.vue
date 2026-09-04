@@ -97,7 +97,7 @@ import { useI18n } from 'vue-i18n'
 import { VueDraggable } from 'vue-draggable-plus'
 import Icon from '@/components/icons/Icon.vue'
 import ProviderCard from './ProviderCard.vue'
-import type { ProviderInstance } from '@/types/payment'
+import type { PaymentResourceId, ProviderInstance } from '@/types/payment'
 import type { TypeOption } from './providerConfig'
 import { getAvailableTypes } from './providerConfig'
 
@@ -117,7 +117,7 @@ const emit = defineEmits<{
   delete: [provider: ProviderInstance]
   toggleField: [provider: ProviderInstance, field: 'enabled' | 'refund_enabled' | 'allow_user_refund']
   toggleType: [provider: ProviderInstance, type: string]
-  reorder: [providers: { id: number; sort_order: number }[]]
+  reorder: [providers: { id: PaymentResourceId; sort_order: number }[]]
 }>()
 
 const { t } = useI18n()

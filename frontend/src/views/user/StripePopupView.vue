@@ -185,7 +185,7 @@ function startPolling() {
       if (!res.ok) return
       const data = await res.json()
       const status = data?.data?.status
-      if (status === 'COMPLETED' || status === 'PAID') {
+      if (status === 'COMPLETED') {
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         success.value = true
         setTimeout(closeWindow, 2000)

@@ -8,6 +8,7 @@ export type OrderStatus =
   | 'PENDING'
   | 'PAID'
   | 'RECHARGING'
+  | 'PROCESSING'
   | 'COMPLETED'
   | 'EXPIRED'
   | 'CANCELLED'
@@ -22,6 +23,9 @@ export type OrderStatus =
 export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay' | 'airwallex'
 
 export type OrderType = 'balance' | 'subscription'
+
+/** IDs are opaque in the Worker API; legacy deployments may still return numbers. */
+export type PaymentResourceId = string | number
 
 // ==================== Configuration ====================
 
@@ -83,8 +87,8 @@ export interface CheckoutInfoResponse {
 // ==================== Orders ====================
 
 export interface PaymentOrder {
-  id: number
-  user_id: number
+  id: PaymentResourceId
+  user_id: PaymentResourceId
   amount: number
   pay_amount: number
   currency?: string
@@ -100,7 +104,7 @@ export interface PaymentOrder {
   refund_amount: number
   refund_reason?: string
   refund_requested_at?: string
-  refund_requested_by?: number
+  refund_requested_by?: PaymentResourceId
   refund_request_reason?: string
   plan_id?: string | number
   provider_instance_id?: string
@@ -152,7 +156,7 @@ export interface PaymentChannel {
 // ==================== Providers ====================
 
 export interface ProviderInstance {
-  id: number
+  id: PaymentResourceId
   provider_key: string
   name: string
   config: Record<string, string>
@@ -163,6 +167,8 @@ export interface ProviderInstance {
   allow_user_refund: boolean
   limits: string
   sort_order: number
+  version?: number
+  control_version?: number
 }
 
 // ==================== Request / Response ====================
@@ -200,7 +206,7 @@ export interface WechatJSAPIPayload {
 }
 
 export interface CreateOrderResult {
-  order_id: number
+  order_id: PaymentResourceId
   amount: number
   pay_url?: string
   qr_code?: string
@@ -238,7 +244,7 @@ export interface PaymentMethodStats {
 }
 
 export interface TopUserPaymentStats {
-  user_id: number
+  user_id: PaymentResourceId
   email: string
   amount: number
 }

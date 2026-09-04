@@ -5,6 +5,7 @@ import type {
   UserStateChangedPayload,
   SubscriptionStateChangedPayload,
 } from '../env'
+import { fulfillPaymentOrder, isPaymentFulfillmentEvent } from '../payment/fulfillment'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
 
@@ -47,6 +48,11 @@ export async function consumeEvents(
 ): Promise<void> {
   for (const message of batch.messages) {
     try {
+      if (isPaymentFulfillmentEvent(message.body)) {
+        await fulfillPaymentOrder(env, message.body.payload.order_id)
+        message.ack()
+        continue
+      }
       if (isSettlementRetryEvent(message.body)) {
         await settleRecoveryRequest(env, message.body.payload.request_id)
         message.ack()

@@ -103,7 +103,7 @@ import { extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
 import { formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
 import { PAYMENT_RECOVERY_STORAGE_KEY, readPaymentRecoverySnapshot } from '@/components/payment/paymentFlow'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentOrder, PaymentResourceId } from '@/types/payment'
 import type { Stripe, StripeElements } from '@stripe/stripe-js'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -134,7 +134,7 @@ let elementsInstance: StripeElements | null = null
 let redirectTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(async () => {
-  const orderId = Number(route.query.order_id)
+  const orderId = typeof route.query.order_id === 'string' ? route.query.order_id.trim() : ''
   const clientSecret = String(route.query.client_secret || '')
   const method = String(route.query.method || '')
   const resumeToken = typeof route.query.resume_token === 'string' ? route.query.resume_token : undefined
@@ -151,7 +151,7 @@ onMounted(async () => {
         window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY),
         { resumeToken },
       )
-      if (restored?.orderId === orderId) {
+      if (restored && String(restored.orderId) === orderId) {
         currency.value = normalizePaymentCurrency(restored.currency)
       }
     }
@@ -203,7 +203,7 @@ function formatGatewayAmount(value: number): string {
   return formatPaymentAmount(value, currency.value, localeCode.value)
 }
 
-async function confirmAlipay(stripe: Stripe, clientSecret: string, orderId: number) {
+async function confirmAlipay(stripe: Stripe, clientSecret: string, orderId: PaymentResourceId) {
   redirecting.value = true
   const returnUrl = window.location.origin + '/payment/result?order_id=' + orderId + '&status=success'
   const { error } = await stripe.confirmAlipayPayment(clientSecret, { return_url: returnUrl })
@@ -283,12 +283,12 @@ async function handleGenericPay() {
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function startPolling() {
-  const orderId = Number(route.query.order_id)
+  const orderId = typeof route.query.order_id === 'string' ? route.query.order_id.trim() : ''
   if (!orderId) return
   pollTimer = setInterval(async () => {
     const o = await paymentStore.pollOrderStatus(orderId)
     if (!o) return
-    if (o.status === 'COMPLETED' || o.status === 'PAID') {
+    if (o.status === 'COMPLETED') {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
       stripeSuccess.value = true
       wechatQrUrl.value = ''

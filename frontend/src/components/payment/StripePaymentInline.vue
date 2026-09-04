@@ -73,13 +73,14 @@ import { useAppStore } from '@/stores'
 import { getPaymentPopupFeatures } from '@/components/payment/providerConfig'
 import { currencySymbol } from '@/components/payment/currency'
 import type { Stripe, StripeElements } from '@stripe/stripe-js'
+import type { PaymentResourceId } from '@/types/payment'
 import Icon from '@/components/icons/Icon.vue'
 
 // Stripe payment methods that open a popup (redirect or QR code)
 const POPUP_METHODS = new Set(['alipay', 'wechat_pay'])
 
 const props = defineProps<{
-  orderId: number
+  orderId: PaymentResourceId
   amount: number
   clientSecret: string
   orderType?: 'balance' | 'subscription'
@@ -88,7 +89,7 @@ const props = defineProps<{
   currency?: string
 }>()
 
-const emit = defineEmits<{ success: []; done: []; back: []; redirect: [orderId: number, payUrl: string] }>()
+const emit = defineEmits<{ success: []; done: []; back: []; redirect: [orderId: PaymentResourceId, payUrl: string] }>()
 
 const { t } = useI18n()
 const router = useRouter()

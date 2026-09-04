@@ -55,7 +55,7 @@ function buildSuccessUrl(snapshot: PaymentRecoverySnapshot): string {
   const outTradeNo = queryString('out_trade_no')
   const resumeToken = queryString('resume_token')
 
-  if (orderId || snapshot.orderId > 0) url.searchParams.set('order_id', orderId || String(snapshot.orderId))
+  if (orderId || snapshot.orderId) url.searchParams.set('order_id', orderId || String(snapshot.orderId))
   if (outTradeNo || snapshot.outTradeNo) url.searchParams.set('out_trade_no', outTradeNo || snapshot.outTradeNo)
   if (resumeToken || snapshot.resumeToken) url.searchParams.set('resume_token', resumeToken || snapshot.resumeToken)
   return url.toString()
@@ -66,7 +66,7 @@ function restoreAirwallexSnapshot(): PaymentRecoverySnapshot | null {
     return null
   }
 
-  const orderId = Number(queryString('order_id')) || 0
+  const orderId = queryString('order_id').trim()
   const outTradeNo = queryString('out_trade_no')
   const resumeToken = queryString('resume_token')
   const snapshot = readPaymentRecoverySnapshot(
@@ -77,7 +77,7 @@ function restoreAirwallexSnapshot(): PaymentRecoverySnapshot | null {
   if (!snapshot || snapshot.paymentType !== 'airwallex') {
     return null
   }
-  if (orderId > 0 && snapshot.orderId !== orderId) {
+  if (orderId && String(snapshot.orderId) !== orderId) {
     return null
   }
   if (outTradeNo && snapshot.outTradeNo !== outTradeNo) {

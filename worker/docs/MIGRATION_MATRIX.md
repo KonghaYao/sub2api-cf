@@ -65,7 +65,7 @@ Status meanings:
 | Subscription plans | Plans, user subscriptions, renewals and usage windows | Partial | Public/admin plan CRUD, user list/progress, redeem assignment/extension and gateway quota enforcement pass; payment renewal remains |
 | Redemption/invitations | Atomic redeem, administrative lifecycle, invitation rewards, exhaustion and expiry | Partial | Balance/subscription redemption plus hashed one-time admin generation, CAS batch lifecycle, idempotency, expiry and race tests pass; invitation rewards remain |
 | Promotions | Promo validation, applicability and one-time consumption | Planned | Promo boundary and idempotency tests |
-| Payments | Orders, provider config, signed webhooks, idempotent fulfillment and refunds | Planned | Port webhook, fulfillment and refund suites |
+| Payments | D1 orders/provider config, Stripe signed webhooks, R2 evidence, Queue/DO subscription fulfillment and Stripe refunds | Partial | Worker order/config/currency/Stripe/webhook/fulfillment/refund/admin suites pass. v0.7 checkout is USD-plan-only, balance top-up stays effectively disabled, D1 atomically admits pending/daily limits, Stripe and D1 share a >=30m expiry, cron expires sessions, and late authoritative payments enter refund reconciliation. Add receipts, entitlement clawback and remaining providers |
 | Affiliate | Referral attribution, commission ledger and payout views | Planned | Port affiliate service suites |
 | Announcements | Published audience-aware announcements and acknowledgement | Planned | Visibility and acknowledgement tests |
 
@@ -80,7 +80,12 @@ Commercial storage rules:
 - D1 is the persistent source for identities, orders, subscriptions, plans, and query projections.
 - A per-user Durable Object serializes balance, quota, and redemption mutations; D1 row-version CAS
   protects API-key auth-version updates without adding a Durable Object round trip.
-- A per-order Durable Object serializes webhook and refund state transitions.
+- D1 CAS and immutable event rows serialize order, webhook, and refund transitions; the
+  per-subscription Durable Object remains the authority for entitlement and quota state.
+- Payment order admission rechecks pending-count and daily-spend limits inside the same conditional
+  D1 insert that atomically records `order.created`; application-level preflight reads are not an
+  authority. A paid callback after expiry/cancellation is recorded in R2 and D1 as a recoverable
+  refund request and never creates fulfillment work.
 - KV contains disposable public/config caches only; it is never financial truth.
 - Queue consumers deliver email and project fulfillment/refund/affiliate events idempotently.
 - R2 stores exports, receipts, avatars, and long-lived audit artifacts where appropriate.
@@ -98,12 +103,12 @@ Commercial storage rules:
 | Usage/finance | Request ledger, aggregates, reconciliation and corrective workflows | Partial | Owner-scoped user aggregates and subscription projections exist; admin reconciliation and corrective workflows remain |
 | Settings | Typed versioned settings, audit and KV invalidation | Done | Versioned read/write, optimistic concurrency, idempotency, secret redaction and KV invalidation tests |
 | Announcements/compliance | Editorial lifecycle, audit views and risk actions | Planned | RBAC and lifecycle tests |
-| Admin dashboard | Hourly/daily materialized facts and operational summaries | Planned | Aggregation and timezone tests |
+| Admin dashboard | Payment summaries exist; broader hourly/daily operational facts remain | Partial | Cross-currency payment dashboard, filters and UTC-series tests pass |
 | Request/error explorer | D1 metadata index, R2 payload/archive, redaction and retention | Planned | Search, authorization, redaction and expiry tests |
 | Alerts/silences/reports | Scheduled rules, HTTP/email/webhook delivery, retries and silences | Planned | Scheduler and delivery fixtures |
 | Channel monitor | Scheduled account/model tests and bounded failure actions | Planned | Due-job and state-transition tests |
 | Account lifecycle | Token refresh, quota sync, cooldown and reactivation | Planned | Provider adapter and alarm/Queue tests |
-| Maintenance jobs | Cursorized cleanup, aggregation, backfill and recovery | Partial | Recovery exists; add due-job/retention suites |
+| Maintenance jobs | Cursorized cleanup, aggregation, backfill and recovery | Partial | Settlement, subscription-state and payment-fulfillment recovery exist; add due-job/retention suites |
 | Prompt audit | Policy events and protected payload storage | Planned | Redaction and retention tests |
 | Backup/restore | Export versioned D1 records and R2 manifests; verified restore workflow | Planned | Round-trip restore test |
 
@@ -158,10 +163,12 @@ remaining API or UI affordance.
 The remaining work is ordered by end-user value. Each milestone must keep the guarded release order
 of tests, asset build, target D1 migrations, Worker deployment, and production smoke checks.
 
-1. **Payment closure**: orders, payment-provider configuration, signed webhook ingestion,
-   idempotent subscription fulfilment, refunds, receipts, and the matching user/admin screens.
-   The first slice may support one provider, but its order state machine and webhook verification
-   cannot be stubbed.
+1. **Payment closure**: the first Stripe slice now has server-priced hosted checkout, encrypted
+   provider configuration, signed webhook ingestion, R2 evidence, idempotent subscription
+   fulfilment, refund state recovery, and matching user/admin screens. Remaining work is receipts,
+   balance/entitlement clawback during refunds, reconciliation, and the retained non-Stripe
+   providers. The order state machine and webhook verification are production implementations,
+   not stubs.
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
    request/error/stream conversion fixtures; rate and concurrency integration; failover, cooldown,
    request-size policy, and accounting reconciliation.

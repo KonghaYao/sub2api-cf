@@ -424,7 +424,7 @@ function resetPayment() {
 
 async function redirectToPaymentResult(state: PaymentRecoverySnapshot): Promise<void> {
   const query: Record<string, string | undefined> = {}
-  if (state.orderId > 0) {
+  if (state.orderId) {
     query.order_id = String(state.orderId)
   }
   if (state.outTradeNo) {
@@ -718,10 +718,10 @@ const planTextClass = computed(() => platformTextClass(selectedPlan.value?.group
 
 // Renewal modal state
 const showRenewalModal = ref(false)
-const renewGroupId = ref<number | null>(null)
+const renewGroupId = ref<string | number | null>(null)
 const renewalPlans = computed(() => {
   if (renewGroupId.value == null) return []
-  return checkout.value.plans.filter(p => p.group_id === renewGroupId.value)
+  return checkout.value.plans.filter(p => String(p.group_id) === String(renewGroupId.value))
 })
 
 const planValiditySuffix = computed(() => {
@@ -1142,8 +1142,8 @@ onMounted(async () => {
     if (route.query.tab === 'subscription') {
       activeTab.value = 'subscription'
       if (route.query.group) {
-        const groupId = Number(route.query.group)
-        const groupPlans = checkout.value.plans.filter(p => p.group_id === groupId)
+        const groupId = String(route.query.group)
+        const groupPlans = checkout.value.plans.filter(p => String(p.group_id) === groupId)
         if (groupPlans.length === 1) {
           selectedPlan.value = groupPlans[0]
         } else if (groupPlans.length > 1) {

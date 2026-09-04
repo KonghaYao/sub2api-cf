@@ -29,6 +29,8 @@ const {
   getGroups,
   listProxies,
   getProviders,
+  getPaymentConfig,
+  updatePaymentConfig,
   updateProvider,
   createProvider,
   deleteProvider,
@@ -70,6 +72,8 @@ const {
   getGroups: vi.fn(),
   listProxies: vi.fn(),
   getProviders: vi.fn(),
+  getPaymentConfig: vi.fn(),
+  updatePaymentConfig: vi.fn(),
   updateProvider: vi.fn(),
   createProvider: vi.fn(),
   deleteProvider: vi.fn(),
@@ -111,6 +115,8 @@ vi.mock("@/api", () => ({
       list: listProxies,
     },
     payment: {
+      getConfig: getPaymentConfig,
+      updateConfig: updatePaymentConfig,
       getProviders,
       updateProvider,
       createProvider,
@@ -646,6 +652,8 @@ describe("admin SettingsView payment visible method controls", () => {
     getGroups.mockReset();
     listProxies.mockReset();
     getProviders.mockReset();
+    getPaymentConfig.mockReset();
+    updatePaymentConfig.mockReset();
     updateProvider.mockReset();
     createProvider.mockReset();
     deleteProvider.mockReset();
@@ -716,6 +724,26 @@ describe("admin SettingsView payment visible method controls", () => {
     getProviders.mockResolvedValue({
       data: [],
     });
+    getPaymentConfig.mockResolvedValue({
+      data: {
+        enabled: false,
+        min_amount: 1,
+        max_amount: 1000,
+        daily_limit: 0,
+        order_timeout_minutes: 30,
+        max_pending_orders: 3,
+        enabled_payment_types: [],
+        balance_disabled: true,
+        balance_recharge_multiplier: 1,
+        subscription_usd_to_cny_rate: 0,
+        recharge_fee_rate: 0,
+        product_name_prefix: "",
+        product_name_suffix: "",
+        help_image_url: "",
+        help_text: "",
+      },
+    });
+    updatePaymentConfig.mockImplementation(async (payload) => ({ data: payload }));
     fetchPublicSettings.mockResolvedValue(undefined);
     adminSettingsFetch.mockResolvedValue(undefined);
   });
@@ -734,6 +762,53 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({ compact_home_enabled: true }),
     );
+  });
+
+  it("loads and saves the Worker-native Stripe payment controls", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+    });
+    getPaymentConfig.mockResolvedValue({
+      data: {
+        enabled: true,
+        min_amount: 2,
+        max_amount: 200,
+        daily_limit: 500,
+        order_timeout_minutes: 45,
+        max_pending_orders: 4,
+        enabled_payment_types: ["stripe"],
+        balance_disabled: true,
+        balance_recharge_multiplier: 1,
+        subscription_usd_to_cny_rate: 0,
+        recharge_fee_rate: 1.5,
+        product_name_prefix: "Sub2 ",
+        product_name_suffix: "",
+        help_image_url: "",
+        help_text: "Checkout help",
+      },
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Stripe payments");
+    expect(getPaymentConfig).toHaveBeenCalledTimes(1);
+    expect(getProviders).toHaveBeenCalledTimes(1);
+
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updatePaymentConfig).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      min_amount: 2,
+      max_amount: 200,
+      daily_limit: 500,
+      order_timeout_minutes: 45,
+      max_pending_orders: 4,
+      balance_disabled: true,
+      recharge_fee_rate: 1.5,
+    }));
   });
 
   it("renders panel rate limit card and saves settings", async () => {

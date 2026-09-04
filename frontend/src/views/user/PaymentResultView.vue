@@ -110,7 +110,7 @@ import { usePaymentStore } from '@/stores/payment'
 import { useAuthStore } from '@/stores/auth'
 import { paymentAPI } from '@/api/payment'
 import type { PublicOrderVerifyResult } from '@/api/payment'
-import type { OrderStatus, PaymentOrder } from '@/types/payment'
+import type { OrderStatus, PaymentOrder, PaymentResourceId } from '@/types/payment'
 import { formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
 import { normalizePaymentMethodForDisplay, paymentMethodI18nKey } from './paymentUx'
 
@@ -135,8 +135,8 @@ interface ReturnInfo {
 }
 const returnInfo = ref<ReturnInfo | null>(null)
 
-const SUCCESS_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
-const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PROCESSING'])
+const SUCCESS_STATUSES = new Set(['COMPLETED'])
+const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PAID', 'RECHARGING', 'PROCESSING'])
 const STATUS_REFRESH_INTERVAL_MS = 2000
 const STATUS_REFRESH_MAX_ATTEMPTS = 15
 
@@ -218,7 +218,10 @@ function refreshUserBalanceForSuccessfulOrder(nextOrder: ResolvedOrder | null): 
 }
 
 function hasOrderId(nextOrder: ResolvedOrder | null): nextOrder is PaymentOrder {
-  return !!nextOrder && 'id' in nextOrder && typeof nextOrder.id === 'number'
+  return !!nextOrder && 'id' in nextOrder && (
+    (typeof nextOrder.id === 'number' && Number.isFinite(nextOrder.id) && nextOrder.id > 0)
+    || (typeof nextOrder.id === 'string' && nextOrder.id.trim() !== '')
+  )
 }
 
 function hasAmountFields(nextOrder: ResolvedOrder | null): nextOrder is PaymentOrder {
@@ -255,7 +258,7 @@ function readRouteQueryString(key: string): string {
 
 function restoreRecoverySnapshot(context: {
   resumeToken: string
-  routeOrderId: number
+  routeOrderId: string
   routeOutTradeNo: string
 }) {
   if (typeof window === 'undefined') {
@@ -282,7 +285,7 @@ function restoreRecoverySnapshot(context: {
     return null
   }
 
-  if (context.routeOrderId > 0 && restored.orderId !== context.routeOrderId) {
+  if (context.routeOrderId && String(restored.orderId) !== context.routeOrderId) {
     return null
   }
 
@@ -357,9 +360,9 @@ function scheduleStatusRefresh(refreshOrder: (() => Promise<ResolvedOrder | null
 
 onMounted(async () => {
   const resumeToken = readRouteQueryString('resume_token')
-  const routeOrderId = Number(readRouteQueryString('order_id')) || 0
+  const routeOrderId = readRouteQueryString('order_id').trim()
   let outTradeNo = readRouteQueryString('out_trade_no')
-  let orderId = 0
+  let orderId: PaymentResourceId | '' = ''
   let resumeTokenLookupFailed = false
 
   const restored = restoreRecoverySnapshot({
@@ -382,22 +385,22 @@ onMounted(async () => {
     if (resolvedOrder) {
       setResolvedOrder(resolvedOrder)
       if (!orderId) {
-        orderId = hasOrderId(resolvedOrder) ? resolvedOrder.id : 0
+        orderId = hasOrderId(resolvedOrder) ? resolvedOrder.id : ''
       }
-    } else if (routeOrderId > 0) {
+    } else if (routeOrderId) {
       resumeTokenLookupFailed = true
       orderId = routeOrderId
     } else {
       resumeTokenLookupFailed = true
     }
-  } else if (routeOrderId > 0) {
+  } else if (routeOrderId) {
     orderId = routeOrderId
   }
 
   const hasLegacyFallbackContext = readRouteQueryString('trade_status').trim() !== ''
-  const shouldUsePublicOutTradeNo = outTradeNo !== '' && (hasLegacyFallbackContext || routeOrderId > 0 || orderId > 0)
+  const shouldUsePublicOutTradeNo = outTradeNo !== '' && (hasLegacyFallbackContext || !!routeOrderId || !!orderId)
 
-  if (!order.value && orderId && (!resumeToken || routeOrderId > 0)) {
+  if (!order.value && orderId && (!resumeToken || !!routeOrderId)) {
     try {
       setResolvedOrder(await paymentStore.pollOrderStatus(orderId))
     } catch (_err: unknown) {
@@ -410,7 +413,7 @@ onMounted(async () => {
     if (legacyOrder) {
       setResolvedOrder(legacyOrder)
       if (!orderId) {
-        orderId = hasOrderId(legacyOrder) ? legacyOrder.id : 0
+        orderId = hasOrderId(legacyOrder) ? legacyOrder.id : ''
       }
     }
   }

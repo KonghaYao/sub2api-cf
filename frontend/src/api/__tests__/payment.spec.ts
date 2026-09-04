@@ -37,4 +37,40 @@ describe('payment api', () => {
       resume_token: 'resume-token-123',
     })
   })
+
+  it('adds a unique idempotency key to every create-order request', async () => {
+    const payload = {
+      amount: 20,
+      payment_type: 'stripe',
+      order_type: 'balance',
+    }
+
+    await paymentAPI.createOrder(payload)
+    await paymentAPI.createOrder(payload)
+
+    const firstConfig = post.mock.calls[0]?.[2]
+    const secondConfig = post.mock.calls[1]?.[2]
+    const firstKey = firstConfig?.headers?.['Idempotency-Key']
+    const secondKey = secondConfig?.headers?.['Idempotency-Key']
+
+    expect(post).toHaveBeenNthCalledWith(1, '/payment/orders', payload, expect.any(Object))
+    expect(firstKey).toEqual(expect.any(String))
+    expect(firstKey).not.toBe('')
+    expect(secondKey).toEqual(expect.any(String))
+    expect(secondKey).not.toBe(firstKey)
+  })
+
+  it('keeps opaque UUID order IDs intact in user order routes', async () => {
+    const orderId = '01JORDER-8c0f-4d4f-a062-opaque'
+
+    await paymentAPI.getOrder(orderId)
+    await paymentAPI.cancelOrder(orderId)
+    await paymentAPI.requestRefund(orderId, { reason: 'duplicate' })
+
+    expect(get).toHaveBeenCalledWith(`/payment/orders/${orderId}`)
+    expect(post).toHaveBeenCalledWith(`/payment/orders/${orderId}/cancel`)
+    expect(post).toHaveBeenCalledWith(`/payment/orders/${orderId}/refund-request`, {
+      reason: 'duplicate',
+    })
+  })
 })
