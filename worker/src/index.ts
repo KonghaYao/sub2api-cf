@@ -7,6 +7,7 @@ import { recoverPendingSettlements } from './gateway/recovery'
 import { recoverPendingPaymentFulfillments } from './payment/fulfillment'
 import { recoverExpiredPaymentOrders } from './payment/orders'
 import { recoverPendingRefundClawbacks } from './payment/refunds'
+import { cleanupExpiredOAuthState } from './auth/oauth-identities'
 
 export { ApiKeyLimitDO, AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
 
@@ -18,6 +19,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverExpiredPaymentOrders(env),
     recoverPendingRefundClawbacks(env),
     scheduleAccountHealthLifecycle(env),
+    cleanupExpiredOAuthState(env),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -29,6 +31,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'payment_order_expiry',
           'refund_clawbacks',
           'account_health_lifecycle',
+          'oauth_state_cleanup',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

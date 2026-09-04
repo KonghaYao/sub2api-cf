@@ -19,6 +19,7 @@ import {
   readJsonObject,
   requireIdempotencyKey,
 } from './http'
+import { passkeyDeploymentConfiguration } from '../auth/passkey-config'
 
 type ControlBindings = { Bindings: Env }
 
@@ -30,13 +31,19 @@ export interface PublicSystemSettings {
   email_verification_enabled: boolean
   turnstile_enabled: boolean
   turnstile_site_key: string
+  passkey_enabled?: boolean
 }
 
 export interface AdminSystemSettings {
   schema_version: typeof PUBLIC_SETTINGS_SCHEMA_VERSION
   control_version: number
   public: PublicSystemSettings
-  security: { step_up_enabled: boolean }
+  security: {
+    step_up_enabled: boolean
+    passkey_configured: boolean
+    passkey_rp_id: string
+    passkey_rp_origins: string[]
+  }
   secrets: { turnstile_secret_key_configured: boolean }
   updated_at_ms: number
 }
@@ -47,6 +54,7 @@ interface PublicSettingsPatch {
   email_verification_enabled?: boolean
   turnstile_enabled?: boolean
   turnstile_site_key?: string
+  passkey_enabled?: boolean
 }
 
 interface SecretSettingsPatch {
@@ -92,7 +100,7 @@ export function publicSettingsKey(environment: string): string {
 
 export async function getAdminSettings(context: Context<ControlBindings>): Promise<Response> {
   try {
-    const settings = publicAdminSettings(await requireSettingsRow(context.env))
+    const settings = publicAdminSettings(await requireSettingsRow(context.env), context.env)
     return settingsResponse(settings)
   } catch (error) {
     return controlError(asGatewayError(error))
@@ -117,7 +125,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
     }
 
     const currentRow = await requireSettingsRow(context.env)
-    const current = publicAdminSettings(currentRow)
+    const current = publicAdminSettings(currentRow, context.env)
     if (current.control_version !== expectedVersion) {
       throw settingsVersionConflict()
     }
@@ -147,7 +155,12 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
       schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
       control_version: nextVersion,
       public: nextPublic,
-      security: { step_up_enabled: nextStepUpEnabled },
+      security: {
+        step_up_enabled: nextStepUpEnabled,
+        passkey_configured: current.security.passkey_configured,
+        passkey_rp_id: current.security.passkey_rp_id,
+        passkey_rp_origins: current.security.passkey_rp_origins,
+      },
       secrets: {
         turnstile_secret_key_configured:
           patch.secrets?.turnstile_secret_key === undefined
@@ -289,7 +302,7 @@ async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   return row
 }
 
-function publicAdminSettings(row: SettingsRow): AdminSystemSettings {
+function publicAdminSettings(row: SettingsRow, env: Env): AdminSystemSettings {
   if (
     row.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(row.control_version) ||
@@ -309,11 +322,17 @@ function publicAdminSettings(row: SettingsRow): AdminSystemSettings {
   if (!isPublicSystemSettings(publicSettings)) {
     throw new GatewayError(503, 'invalid_settings_record', 'System settings record is invalid', 'server_error')
   }
+  const passkey = passkeyDeploymentConfiguration(env)
   return {
     schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
     control_version: row.control_version,
     public: publicSettings,
-    security: { step_up_enabled: row.step_up_enabled === 1 },
+    security: {
+      step_up_enabled: row.step_up_enabled === 1,
+      passkey_configured: passkey.configured,
+      passkey_rp_id: passkey.rpId,
+      passkey_rp_origins: passkey.rpOrigins,
+    },
     secrets: { turnstile_secret_key_configured: row.turnstile_secret_key_configured === 1 },
     updated_at_ms: row.updated_at_ms,
   }
@@ -364,6 +383,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'email_verification_enabled',
       'turnstile_enabled',
       'turnstile_site_key',
+      'passkey_enabled',
     ])
     const publicPatch: PublicSettingsPatch = {}
     if (value.site_name !== undefined) {
@@ -383,6 +403,9 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (value.turnstile_site_key !== undefined) {
       publicPatch.turnstile_site_key = settingString(value.turnstile_site_key, 'turnstile_site_key', 2_048, true)
+    }
+    if (value.passkey_enabled !== undefined) {
+      publicPatch.passkey_enabled = settingBoolean(value.passkey_enabled, 'passkey_enabled')
     }
     if (Object.keys(publicPatch).length > 0) patch.public = publicPatch
   }
@@ -506,7 +529,7 @@ async function requireAdminActor(context: Context<ControlBindings>): Promise<Adm
 async function publishLatestPublicSettings(env: Env): Promise<void> {
   try {
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const candidate = publicAdminSettings(await requireSettingsRow(env))
+      const candidate = publicAdminSettings(await requireSettingsRow(env), env)
       await env.CONFIG_KV.put(publicSettingsKey(env.ENVIRONMENT), JSON.stringify(publicProjection(candidate)))
       const after = await requireSettingsRow(env)
       if (after.control_version === candidate.control_version) return

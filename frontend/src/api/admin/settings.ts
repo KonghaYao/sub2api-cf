@@ -1058,8 +1058,14 @@ interface WorkerAdminSettings {
     email_verification_enabled: boolean;
     turnstile_enabled: boolean;
     turnstile_site_key: string;
+    passkey_enabled?: boolean;
   };
-  security?: { step_up_enabled: boolean };
+  security?: {
+    step_up_enabled: boolean;
+    passkey_configured?: boolean;
+    passkey_rp_id?: string;
+    passkey_rp_origins?: string[];
+  };
   secrets: { turnstile_secret_key_configured: boolean };
   updated_at_ms: number;
 }
@@ -1097,6 +1103,10 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     email_verify_enabled: settings.public.email_verification_enabled,
     turnstile_enabled: settings.public.turnstile_enabled,
     turnstile_site_key: settings.public.turnstile_site_key,
+    passkey_enabled: settings.public.passkey_enabled ?? false,
+    passkey_configured: settings.security?.passkey_configured ?? false,
+    passkey_rp_id: settings.security?.passkey_rp_id ?? "",
+    passkey_rp_origins: settings.security?.passkey_rp_origins ?? [],
     step_up_enabled: settings.security?.step_up_enabled ?? false,
     turnstile_secret_key_configured: settings.secrets.turnstile_secret_key_configured,
   } as SystemSettings;
@@ -1155,6 +1165,9 @@ export async function updateSettings(
   if (settings.turnstile_site_key !== undefined) {
     publicPatch.turnstile_site_key = settings.turnstile_site_key;
   }
+  if (settings.passkey_enabled !== undefined) {
+    publicPatch.passkey_enabled = settings.passkey_enabled;
+  }
 
   const patch: WorkerSettingsPatch = {};
   if (Object.keys(publicPatch).length > 0) patch.public = publicPatch;
@@ -1164,7 +1177,7 @@ export async function updateSettings(
   if (settings.turnstile_secret_key !== undefined && settings.turnstile_secret_key !== "") {
     patch.secrets = { turnstile_secret_key: settings.turnstile_secret_key };
   }
-  if (patch.public === undefined && patch.secrets === undefined) {
+  if (patch.public === undefined && patch.security === undefined && patch.secrets === undefined) {
     throw settingsContractError(
       "worker_feature_not_supported",
       "None of these settings are supported by the Cloudflare Worker version",

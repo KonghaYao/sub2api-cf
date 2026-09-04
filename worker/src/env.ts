@@ -1,6 +1,8 @@
 export interface Env {
   APP_VERSION: string
   ENVIRONMENT: string
+  /** Canonical externally reachable origin for OAuth callbacks and public links. */
+  PUBLIC_ORIGIN?: string
 
   ASSETS: Fetcher
   DB: D1Database
@@ -30,6 +32,12 @@ export interface Env {
   ADMIN_TOKEN?: string
   /** Cloudflare Turnstile secret used when public authentication enables captcha checks. */
   TURNSTILE_SECRET_KEY?: string
+
+  /** Explicit WebAuthn relying-party boundary. Never infer this from an incoming Host header. */
+  WEBAUTHN_RP_ID?: string
+  WEBAUTHN_RP_NAME?: string
+  /** JSON array (preferred) or comma-separated allow-list of exact HTTPS origins. */
+  WEBAUTHN_RP_ORIGINS?: string
 }
 
 export interface PlatformEvent<TPayload = unknown> {

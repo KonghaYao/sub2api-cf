@@ -6,6 +6,7 @@ import {
   logoutUserSession,
   refreshUserSession,
   registerWithPassword,
+  requirePublicAuthStartCaptcha,
 } from './auth/handler'
 import {
   confirmEmailVerification,
@@ -20,6 +21,10 @@ import {
   revokeOtherUserSessions,
   revokeUserSession,
 } from './auth/sessions'
+import { isPasskeyDeploymentConfigured, resolvePasskeyConfiguration } from './auth/passkey-config'
+import { createPasskeyHandlers } from './auth/passkeys'
+import { registerOAuthIdentityRoutes } from './auth/oauth-identities'
+import { oauthPublicSettings } from './auth/oauth-public-settings'
 import {
   createAdminApiKey,
   listAdminApiKeys,
@@ -86,6 +91,12 @@ import {
   updateAdminModel,
 } from './control/catalog'
 import { getAdminSettings, updateAdminSettings } from './control/settings'
+import {
+  disableAdminOAuthProvider,
+  getAdminOAuthProvider,
+  listAdminOAuthProviders,
+  upsertAdminOAuthProvider,
+} from './control/oauth-providers'
 import {
   clearAdminGroupRpmOverrides,
   listAdminGroupRpmOverrides,
@@ -254,12 +265,14 @@ function defaultPublicSettings() {
     email_verify_enabled: false,
     turnstile_enabled: false,
     turnstile_site_key: '',
+    passkey_enabled: false,
     payment_enabled: false,
   }
 }
 
 export function createApp() {
   const app = new Hono<AppBindings>()
+  const passkeys = createPasskeyHandlers(resolvePasskeyConfiguration)
 
   app.use('*', async (context, next) => {
     await next()
@@ -299,12 +312,16 @@ export function createApp() {
     const paymentEnabled = typeof context.env.DB.prepare === 'function'
       ? await isPaymentEnabled(context.env)
       : Boolean(resolved.payment_enabled)
+    const oauth = await oauthPublicSettings(context.env)
     return context.json({
       code: 0,
       data: {
         ...resolved,
         email_verify_enabled:
           resolved.email_verify_enabled ?? resolved.email_verification_enabled ?? false,
+        passkey_enabled:
+          resolved.passkey_enabled === true && isPasskeyDeploymentConfigured(context.env),
+        ...oauth,
         payment_enabled: paymentEnabled,
       },
     })
@@ -326,6 +343,15 @@ export function createApp() {
   app.post('/api/v1/auth/sessions/revoke-all', revokeAllUserSessions)
   app.post('/api/v1/auth/revoke-all-sessions', revokeAllUserSessions)
   app.delete('/api/v1/auth/sessions/:id', revokeUserSession)
+  app.post('/api/v1/auth/passkey/login/begin', requirePublicAuthStartCaptcha, passkeys.beginLogin)
+  app.post('/api/v1/auth/passkey/login/finish', passkeys.finishLogin)
+  app.post('/api/v1/user/passkeys/register/begin', passkeys.beginRegistration)
+  app.post('/api/v1/user/passkeys/register/finish', passkeys.finishRegistration)
+  app.get('/api/v1/user/passkeys', passkeys.list)
+  app.patch('/api/v1/user/passkeys/:id', passkeys.rename)
+  app.delete('/api/v1/user/passkeys/:id', passkeys.remove)
+  app.use('/api/v1/auth/oauth/:provider/start', requirePublicAuthStartCaptcha)
+  registerOAuthIdentityRoutes(app)
 
   app.get('/api/v1/user/profile', getUserProfile)
   app.put('/api/v1/user', updateCurrentUser)
@@ -365,6 +391,10 @@ export function createApp() {
   )
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  app.get('/api/v1/admin/oauth-providers', listAdminOAuthProviders)
+  app.get('/api/v1/admin/oauth-providers/:provider', getAdminOAuthProvider)
+  app.put('/api/v1/admin/oauth-providers/:provider', upsertAdminOAuthProvider)
+  app.post('/api/v1/admin/oauth-providers/:provider/disable', disableAdminOAuthProvider)
   app.get('/api/v1/admin/users', listAdminUsers)
   app.post('/api/v1/admin/users', createAdminUser)
   app.get('/api/v1/admin/users/:id', getAdminUser)

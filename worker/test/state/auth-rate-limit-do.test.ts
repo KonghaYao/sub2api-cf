@@ -175,6 +175,14 @@ function post(
   }))
 }
 
+function anonymousPost(object: AuthRateLimitDO, ipDigest = IP_DIGEST): Promise<Response> {
+  return object.fetch(new Request('https://auth-rate-limit.test/anonymous-attempt', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ schema_version: 1, ip_digest: ipDigest }),
+  }))
+}
+
 describe('AuthRateLimitDO contract', () => {
   beforeEach(() => vi.useFakeTimers({ now: new Date('2026-09-03T00:00:00.000Z') }))
   afterEach(() => {
@@ -239,6 +247,19 @@ describe('AuthRateLimitDO contract', () => {
 
     expect(responses.filter((response) => response.status === 200)).toHaveLength(10)
     expect(responses.filter((response) => response.status === 429)).toHaveLength(10)
+  })
+
+  it('caps anonymous passwordless starts by IP without requiring an account identifier', async () => {
+    const { object } = createHarness()
+
+    const responses = await Promise.all(
+      Array.from({ length: 55 }, () => anonymousPost(object)),
+    )
+
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(50)
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(5)
+    const otherAddress = await anonymousPost(object, OTHER_IP_DIGEST)
+    expect(otherAddress.status).toBe(200)
   })
 
   it('checks both dimensions without consuming either attempt budget', async () => {

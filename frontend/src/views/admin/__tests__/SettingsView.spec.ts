@@ -811,6 +811,38 @@ describe("admin SettingsView payment visible method controls", () => {
     }));
   });
 
+  it("shows the Worker Passkey projection and persists its sign-in toggle", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+      passkey_enabled: true,
+      passkey_configured: true,
+      passkey_rp_id: "login.example.com",
+      passkey_rp_origins: [
+        "https://login.example.com",
+        "https://admin.example.com",
+      ],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    const card = wrapper.get('[data-testid="worker-passkey-settings"]');
+    const toggle = card.get('[data-testid="worker-passkey-toggle"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    expect(toggle.attributes("disabled")).toBeUndefined();
+    expect(card.text()).toContain("login.example.com");
+    expect(card.text()).toContain("https://login.example.com");
+    expect(card.text()).toContain("https://admin.example.com");
+
+    await toggle.setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ passkey_enabled: false }),
+    );
+  });
+
   it("renders panel rate limit card and saves settings", async () => {
     getPanelRateLimitSettings.mockClear();
     updatePanelRateLimitSettings.mockClear();

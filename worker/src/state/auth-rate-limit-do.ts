@@ -96,6 +96,7 @@ export class AuthRateLimitDO {
       }
       const body = await readJsonObject(request)
       requireSchemaVersion(body)
+      if (pathname === '/anonymous-attempt') return this.anonymousAttempt(body)
       const subjects = parseSubjects(body)
       if (pathname === '/check') return this.admission(subjects, false)
       if (pathname === '/attempt') return this.attempt(subjects)
@@ -105,6 +106,43 @@ export class AuthRateLimitDO {
     } catch (error) {
       return errorResponse(error)
     }
+  }
+
+  private anonymousAttempt(body: Record<string, unknown>): Response {
+    const now = Date.now()
+    const ipDigest = requireDigest(body, 'ip_digest')
+    const result = this.state.storage.transactionSync(() => {
+      this.cleanup(now)
+      const state = this.load('login', 'ip', ipDigest, now)
+      const rule = RULES.login.ip
+      if (state.blocked_until_ms > now || state.attempts >= rule.maxAttempts) {
+        const blockedUntilMs = Math.max(
+          state.blocked_until_ms,
+          state.window_started_at_ms + rule.windowMs,
+          now + 1_000,
+        )
+        state.blocked_until_ms = blockedUntilMs
+        state.updated_at_ms = now
+        this.persist(state)
+        return blockedUntilMs
+      }
+      state.attempts += 1
+      state.updated_at_ms = now
+      this.persist(state)
+      return 0
+    })
+    if (result === 0) {
+      return json({ schema_version: 1, allowed: true, retry_after_seconds: 0, blocked_by: [] })
+    }
+    const retryAfterSeconds = Math.max(1, Math.ceil((result - now) / 1_000))
+    const response = json({
+      schema_version: 1,
+      allowed: false,
+      retry_after_seconds: retryAfterSeconds,
+      blocked_by: ['ip'],
+    }, 429)
+    response.headers.set('retry-after', String(retryAfterSeconds))
+    return response
   }
 
   private attempt(subjects: LimitSubjects): Response {

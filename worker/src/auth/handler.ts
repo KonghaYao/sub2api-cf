@@ -1,4 +1,4 @@
-import type { Context } from 'hono'
+import type { Context, Next } from 'hono'
 import type { Env } from '../env'
 import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { readSystemSettingSecret } from '../control/settings'
@@ -15,6 +15,7 @@ import {
   checkAuthRateLimit,
   clearAuthAccountRateLimit,
   commitAuthRateLimitAttempt,
+  commitPublicAuthStartRateLimit,
   recordAuthRateLimitFailure,
 } from './rate-limit'
 import {
@@ -292,6 +293,25 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
   }
 }
 
+/** Apply the same public captcha policy before a passwordless Passkey ceremony starts. */
+export async function requirePublicAuthStartCaptcha(
+  context: Context<AuthBindings>,
+  next: Next,
+): Promise<Response | void> {
+  try {
+    const request = context.req.raw
+    await commitPublicAuthStartRateLimit(context.env, request)
+    const body = request.body === null
+      ? {}
+      : await readJsonObject(request.clone() as unknown as Request)
+    const settings = await publicAuthSettings(context.env)
+    await verifyTurnstile(context, settings, body.turnstile_token)
+    await next()
+  } catch (error) {
+    return authControlError(normalizeAuthError(error))
+  }
+}
+
 /** Completes the password-login challenge and creates the first real session. */
 export async function loginWithTotp(context: Context<AuthBindings>): Promise<Response> {
   try {
@@ -542,7 +562,12 @@ export async function logoutUserSession(context: Context<AuthBindings>): Promise
 export async function currentUser(context: Context<AuthBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
-    return controlSuccess(publicUser(user))
+    const { projectOAuthIdentityBindings } = await import('./oauth-identities')
+    return controlSuccess(await projectOAuthIdentityBindings(
+      context.env,
+      user,
+      publicUser(user),
+    ))
   } catch (error) {
     return controlError(normalizeAuthError(error))
   }
@@ -567,6 +592,102 @@ export async function authenticateUserRequest(request: Request, env: Env): Promi
     throw new GatewayError(401, 'invalid_access_token', 'Invalid or expired access token', 'authentication_error')
   }
   return session
+}
+
+/**
+ * Issue the same first-party session used by password and passkey login after an
+ * external identity has already been verified. The conditional insert keeps a
+ * concurrent disable/auth-version change from minting a usable session.
+ */
+export async function issueOAuthUserSession(
+  env: Env,
+  user: UserRow,
+  userAgent: string,
+): Promise<Record<string, unknown>> {
+  const prepared = await prepareOAuthUserSession(env, user, userAgent)
+  await env.DB.batch(prepared.statements)
+  const persisted = await env.DB.prepare(
+    'SELECT 1 AS present FROM user_sessions WHERE id = ? LIMIT 1',
+  ).bind(prepared.sessionId).first<{ present: number }>()
+  if (persisted === null) {
+    throw new GatewayError(
+      409,
+      'concurrent_security_update',
+      'Account security changed; restart sign-in',
+      'authentication_error',
+    )
+  }
+  return prepared.payload
+}
+
+export interface PreparedOAuthUserSession {
+  /** Append after a new user INSERT, or execute together for an existing user. */
+  statements: D1PreparedStatement[]
+  payload: Record<string, unknown>
+  sessionId: string
+}
+
+/** Prepare session writes so first-time OAuth user, identity and session can commit atomically. */
+export async function prepareOAuthUserSession(
+  env: Env,
+  user: UserRow,
+  userAgent: string,
+): Promise<PreparedOAuthUserSession> {
+  const now = Date.now()
+  const issued = await issueSession(env, user, now)
+  const boundedUserAgent = userAgent.slice(0, MAX_USER_AGENT_LENGTH)
+  const emailHash = await sha256Hex(user.email)
+  const session = env.DB.prepare(
+    `INSERT INTO user_sessions (
+       id, family_id, user_id, auth_version,
+       access_token_hash, refresh_token_hash,
+       created_at_ms, access_expires_at_ms, refresh_expires_at_ms,
+       previous_refresh_token_hash, rotated_at_ms, last_seen_at_ms,
+       revoked_at_ms, revoke_reason, user_agent, ip_hash
+     )
+     SELECT ?, ?, id, auth_version, ?, ?, ?, ?, ?,
+            NULL, NULL, NULL, NULL, NULL, ?, NULL
+       FROM users
+      WHERE id = ? AND status = 'active' AND auth_version = ?
+     RETURNING id`,
+  ).bind(
+    issued.sessionId,
+    issued.familyId,
+    issued.accessHash,
+    issued.refreshHash,
+    now,
+    issued.accessExpiresAtMs,
+    issued.refreshExpiresAtMs,
+    boundedUserAgent,
+    user.id,
+    user.auth_version,
+  )
+  const updateLogin = env.DB.prepare(
+    `UPDATE users
+        SET last_login_at_ms = ?, updated_at_ms = CASE WHEN updated_at_ms < ? THEN ? ELSE updated_at_ms END
+      WHERE id = ? AND status = 'active' AND auth_version = ?
+        AND EXISTS (SELECT 1 FROM user_sessions WHERE id = ?)`,
+  ).bind(now, now, now, user.id, user.auth_version, issued.sessionId)
+  const audit = env.DB.prepare(
+    `INSERT INTO auth_audit_events (
+       id, user_id, event_type, outcome, email_hash, ip_hash,
+       session_id, metadata_json, occurred_at_ms
+     )
+     SELECT ?, ?, 'auth.oauth.login', 'succeeded', ?, NULL, ?, '{}', ?
+      WHERE EXISTS (SELECT 1 FROM user_sessions WHERE id = ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    user.id,
+    emailHash,
+    issued.sessionId,
+    now,
+    issued.sessionId,
+  )
+  return {
+    statements: [session, updateLogin, audit],
+    payload: authPayload({ ...user, last_login_at_ms: now }, issued),
+    sessionId: issued.sessionId,
+  }
 }
 
 function sessionUserSelect(): string {

@@ -6,6 +6,7 @@ function testEnv(overrides: Partial<Env> = {}): Env {
   return {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',
+    API_KEY_PEPPER: 'p'.repeat(32),
     ASSETS: {
       fetch: async () => new Response('asset'),
       connect: () => {
@@ -20,6 +21,12 @@ function testEnv(overrides: Partial<Env> = {}): Env {
     EVENTS_QUEUE: {} as Queue,
     USER_STATE: {} as DurableObjectNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
+    AUTH_RATE_LIMIT: {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => ({
+        fetch: async () => Response.json({ schema_version: 1, allowed: true }),
+      }) as unknown as DurableObjectStub,
+    } as unknown as DurableObjectNamespace,
     ...overrides,
   }
 }
@@ -50,6 +57,17 @@ describe('worker app', () => {
         email_verify_enabled: false,
         turnstile_enabled: false,
         turnstile_site_key: '',
+        passkey_enabled: false,
+        github_oauth_enabled: false,
+        google_oauth_enabled: false,
+        linuxdo_oauth_enabled: false,
+        dingtalk_oauth_enabled: false,
+        wechat_oauth_enabled: false,
+        wechat_oauth_open_enabled: false,
+        wechat_oauth_mp_enabled: false,
+        wechat_oauth_mobile_enabled: false,
+        oidc_oauth_enabled: false,
+        oidc_oauth_provider_name: 'OIDC',
         payment_enabled: false,
       },
     })
@@ -71,8 +89,43 @@ describe('worker app', () => {
     expect(requestedKey).toBe('test:public-settings:v1')
     await expect(response.json()).resolves.toEqual({
       code: 0,
-      data: { site_name: 'Edge Sub2API', email_verify_enabled: false, payment_enabled: false },
+      data: {
+        site_name: 'Edge Sub2API',
+        email_verify_enabled: false,
+        passkey_enabled: false,
+        github_oauth_enabled: false,
+        google_oauth_enabled: false,
+        linuxdo_oauth_enabled: false,
+        dingtalk_oauth_enabled: false,
+        wechat_oauth_enabled: false,
+        wechat_oauth_open_enabled: false,
+        wechat_oauth_mp_enabled: false,
+        wechat_oauth_mobile_enabled: false,
+        oidc_oauth_enabled: false,
+        oidc_oauth_provider_name: 'OIDC',
+        payment_enabled: false,
+      },
     })
+  })
+
+  it.each([
+    '/api/v1/auth/passkey/login/begin',
+    '/api/v1/auth/oauth/github/start',
+  ])('enforces the shared Turnstile policy before starting passwordless auth at %s', async (path) => {
+    const response = await createApp().request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }, testEnv({
+      CONFIG_KV: {
+        get: async () => ({ turnstile_enabled: true, passkey_enabled: true }),
+      } as unknown as KVNamespace,
+      WEBAUTHN_RP_ID: 'login.example.test',
+      WEBAUTHN_RP_ORIGINS: '["https://login.example.test"]',
+    }))
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ code: 'captcha_required' })
   })
 
   it.each(['/api', '/api/v1/not-migrated', '/v1', '/backend-api']) (

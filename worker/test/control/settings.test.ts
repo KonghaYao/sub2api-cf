@@ -28,8 +28,14 @@ interface SettingsResponse {
       email_verification_enabled: boolean
       turnstile_enabled: boolean
       turnstile_site_key: string
+      passkey_enabled?: boolean
     }
-    security: { step_up_enabled: boolean }
+    security: {
+      step_up_enabled: boolean
+      passkey_configured: boolean
+      passkey_rp_id: string
+      passkey_rp_origins: string[]
+    }
     secrets: { turnstile_secret_key_configured: boolean }
     updated_at_ms: number
   }
@@ -141,12 +147,42 @@ describe('admin system settings', () => {
           turnstile_enabled: false,
           turnstile_site_key: '',
         },
-        security: { step_up_enabled: false },
+        security: {
+          step_up_enabled: false,
+          passkey_configured: false,
+          passkey_rp_id: '',
+          passkey_rp_origins: [],
+        },
         secrets: { turnstile_secret_key_configured: false },
         updated_at_ms: expect.any(Number),
       },
     })
     expect(JSON.stringify(body)).not.toContain('turnstile_secret_key"')
+  })
+
+  it('projects deployment-owned passkey RP readiness without trusting request headers', async () => {
+    subject.env.WEBAUTHN_RP_ID = 'example.com'
+    subject.env.WEBAUTHN_RP_NAME = 'Sub2API'
+    subject.env.WEBAUTHN_RP_ORIGINS = 'https://example.com,https://admin.example.com'
+
+    const response = await subject.app.request('/settings', {
+      headers: {
+        authorization: `Bearer ${SESSION_TOKEN}`,
+        host: 'attacker.invalid',
+        origin: 'https://attacker.invalid',
+      },
+    }, subject.env)
+
+    expect(response.status).toBe(200)
+    await expect(responseJson(response)).resolves.toMatchObject({
+      data: {
+        security: {
+          passkey_configured: true,
+          passkey_rp_id: 'example.com',
+          passkey_rp_origins: ['https://example.com', 'https://admin.example.com'],
+        },
+      },
+    })
   })
 
   it('atomically updates public and encrypted secret settings, projects KV, and audits the administrator', async () => {
@@ -160,6 +196,7 @@ describe('admin system settings', () => {
           email_verification_enabled: true,
           turnstile_enabled: true,
           turnstile_site_key: 'site-key-public',
+          passkey_enabled: true,
         },
         secrets: { turnstile_secret_key: 'turnstile-secret-private' },
       }),
@@ -177,6 +214,7 @@ describe('admin system settings', () => {
         email_verification_enabled: true,
         turnstile_enabled: true,
         turnstile_site_key: 'site-key-public',
+        passkey_enabled: true,
       },
       secrets: { turnstile_secret_key_configured: true },
     })
@@ -190,6 +228,7 @@ describe('admin system settings', () => {
       email_verification_enabled: true,
       turnstile_enabled: true,
       turnstile_site_key: 'site-key-public',
+      passkey_enabled: true,
     }
     expect(subject.kv.puts).toEqual([{
       key: publicSettingsKey('test'),
@@ -216,6 +255,7 @@ describe('admin system settings', () => {
     })
     expect(JSON.parse(String(audit.changed_fields_json))).toEqual([
       'public.email_verification_enabled',
+      'public.passkey_enabled',
       'public.registration_enabled',
       'public.site_name',
       'public.turnstile_enabled',

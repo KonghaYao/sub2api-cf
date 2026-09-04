@@ -197,7 +197,7 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   if (/^\/api\/v1\/admin\/audit(?:\/|$)/.test(pathname)) {
     return ['admin.audit.read']
   }
-  if (/^\/api\/v1\/admin\/settings$/.test(pathname)) {
+  if (/^\/api\/v1\/admin\/(?:settings$|oauth-providers(?:\/|$))/.test(pathname)) {
     return [category('admin.settings.read', 'admin.settings.write')]
   }
   if (

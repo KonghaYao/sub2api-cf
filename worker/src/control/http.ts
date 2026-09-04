@@ -3,12 +3,18 @@ import { GatewayError } from '../gateway/errors'
 
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 
-export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
-  return parseJsonObject(await readBoundedText(request))
+export async function readJsonObject(
+  request: Request,
+  maximumBytes = MAX_JSON_BODY_BYTES,
+): Promise<Record<string, unknown>> {
+  return parseJsonObject(await readBoundedText(request, maximumBytes))
 }
 
-export async function readOptionalJsonObject(request: Request): Promise<Record<string, unknown>> {
-  const text = await readBoundedText(request)
+export async function readOptionalJsonObject(
+  request: Request,
+  maximumBytes = MAX_JSON_BODY_BYTES,
+): Promise<Record<string, unknown>> {
+  const text = await readBoundedText(request, maximumBytes)
   return text.trim() === '' ? {} : parseJsonObject(text)
 }
 
@@ -23,10 +29,10 @@ function parseJsonObject(text: string): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-async function readBoundedText(request: Request): Promise<string> {
+async function readBoundedText(request: Request, maximumBytes: number): Promise<string> {
   const declaredLength = request.headers.get('content-length')
-  if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > MAX_JSON_BODY_BYTES) {
-    throw requestTooLarge()
+  if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > maximumBytes) {
+    throw requestTooLarge(maximumBytes)
   }
   if (request.body === null) return ''
 
@@ -39,9 +45,9 @@ async function readBoundedText(request: Request): Promise<string> {
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > MAX_JSON_BODY_BYTES) {
+      if (total > maximumBytes) {
         await reader.cancel()
-        throw requestTooLarge()
+        throw requestTooLarge(maximumBytes)
       }
       text += decoder.decode(value, { stream: true })
     }
@@ -51,8 +57,9 @@ async function readBoundedText(request: Request): Promise<string> {
   }
 }
 
-function requestTooLarge(): GatewayError {
-  return new GatewayError(413, 'request_too_large', 'Request body exceeds the 2 MiB limit')
+function requestTooLarge(maximumBytes: number): GatewayError {
+  const limit = maximumBytes === MAX_JSON_BODY_BYTES ? '2 MiB' : `${maximumBytes} byte`
+  return new GatewayError(413, 'request_too_large', `Request body exceeds the ${limit} limit`)
 }
 
 export function requireIdempotencyKey(request: Request): string {

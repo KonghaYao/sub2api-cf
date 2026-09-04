@@ -37,6 +37,7 @@ import adminComplianceAPI from './compliance'
 import auditAPI from './audit'
 import pluginsAPI from './plugins'
 import modelsAPI from './models'
+import oauthProvidersAPI from './oauthProviders'
 
 /**
  * Unified admin API object for convenient access
@@ -75,7 +76,8 @@ export const adminAPI = {
   compliance: adminComplianceAPI,
   audit: auditAPI,
   plugins: pluginsAPI,
-  models: modelsAPI
+  models: modelsAPI,
+  oauthProviders: oauthProvidersAPI
 }
 
 export {
@@ -112,10 +114,19 @@ export {
   adminComplianceAPI,
   auditAPI,
   pluginsAPI,
-  modelsAPI
+  modelsAPI,
+  oauthProvidersAPI
 }
 
 export type { WorkerAdminModel } from './models'
+export type {
+  AdminOAuthProvider,
+  AdminOAuthAdapter,
+  AdminOAuthProviderConfig,
+  AdminOAuthProviderListResponse,
+  UpsertAdminOAuthProviderInput,
+  OAuthProviderMutationOptions,
+} from './oauthProviders'
 
 export default adminAPI
 

@@ -54,6 +54,14 @@ class AuthStatement {
     return this.database.first(this.query, this.values) as T | null
   }
 
+  async all<T>(): Promise<D1Result<T>> {
+    return {
+      success: true,
+      results: this.database.all(this.query) as T[],
+      meta: {} as D1Meta & Record<string, unknown>,
+    }
+  }
+
   async run(): Promise<D1Result<unknown>> {
     const changes = this.database.run(this.query, this.values)
     return {
@@ -106,6 +114,12 @@ class AuthDatabase {
       return session === undefined ? null : this.joinSession(session)
     }
     throw new Error(`Unexpected first query: ${query}`)
+  }
+
+  all(query: string): Record<string, unknown>[] {
+    this.reads.push({ query, values: [] })
+    if (query.includes('FROM auth_identities') || query.includes('FROM oauth_providers')) return []
+    throw new Error(`Unexpected all query: ${query}`)
   }
 
   run(query: string, values: unknown[]): number {

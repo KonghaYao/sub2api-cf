@@ -46,6 +46,36 @@ export async function commitAuthRateLimitAttempt(
   await requireAllowed(response)
 }
 
+/** Consume an IP-only budget for public passwordless auth ceremony starts. */
+export async function commitPublicAuthStartRateLimit(env: Env, request: Request): Promise<void> {
+  const pepper = requirePepper(env)
+  const ipDigest = await apiKeyDigest(
+    `sub2api/auth-rate-limit/public-start/ip/v1\0${normalizedClientAddress(request)}`,
+    pepper,
+  )
+  const namespace = env.AUTH_RATE_LIMIT
+  if (namespace === undefined) throw unavailable()
+  let response: Response
+  try {
+    const id = namespace.idFromName(`${env.ENVIRONMENT}:auth-rate-limit:v1`)
+    response = await namespace.get(id).fetch(new Request(
+      'https://auth-rate-limit.internal/anonymous-attempt',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ schema_version: SCHEMA_VERSION, ip_digest: ipDigest }),
+      },
+    ))
+  } catch (error) {
+    if (error instanceof GatewayError) throw error
+    console.error('public authentication rate limiter request failed', {
+      name: error instanceof Error ? error.name : 'unknown',
+    })
+    throw unavailable()
+  }
+  await requireAllowed(response)
+}
+
 async function requireAllowed(response: Response): Promise<void> {
   const result = await parseResponse(response)
   requireResponseSchema(result)

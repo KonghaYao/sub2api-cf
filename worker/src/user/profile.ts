@@ -4,6 +4,7 @@ import type { Env } from '../env'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { authenticateUserRequest, publicUser, type UserRow } from '../auth/handler'
+import { projectOAuthIdentityBindings } from '../auth/oauth-identities'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from '../auth/password'
 import {
   prepareUserNotificationPreferencesUpdate,
@@ -32,11 +33,12 @@ type AvatarContentType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 export async function getUserProfile(context: Context<UserBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
-    return controlSuccess(await projectUserNotificationPreferences(
+    const profile = await projectUserNotificationPreferences(
       context.env,
       user.id,
       publicUser(user),
-    ))
+    )
+    return controlSuccess(await projectOAuthIdentityBindings(context.env, user, profile))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -118,11 +120,12 @@ export async function updateCurrentUser(context: Context<UserBindings>): Promise
     if (profileChanged && user.avatar_object_key !== null && user.avatar_object_key !== avatarObjectKey) {
       await deleteAvatarObject(context.env, user.avatar_object_key)
     }
-    return controlSuccess(await projectUserNotificationPreferences(
+    const profile = await projectUserNotificationPreferences(
       context.env,
       next.id,
       publicUser(next),
-    ))
+    )
+    return controlSuccess(await projectOAuthIdentityBindings(context.env, next, profile))
   } catch (error) {
     if (uploadedObjectKey !== null) await deleteAvatarObject(context.env, uploadedObjectKey)
     return controlError(normalizeProfileError(error))
