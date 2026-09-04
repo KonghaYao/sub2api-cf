@@ -154,6 +154,36 @@ function mountModal(groups: any[] = []) {
   })
 }
 
+function mountWorkerModal(groups: any[] = [
+  { id: 'group-1', name: 'Primary', platform: 'openai', status: 'active' },
+]) {
+  return mount(CreateAccountModal, {
+    props: {
+      show: true,
+      proxies: [],
+      groups,
+      cloudflareWorker: true,
+      workerModels: [{
+        id: 'model-1',
+        platform: 'openai',
+        public_name: 'gpt-test',
+        upstream_name: 'gpt-test',
+        endpoint: 'both',
+        embeddings: false,
+        enabled: true,
+        control_version: 0,
+      }],
+    },
+    global: {
+      stubs: {
+        BaseDialog: BaseDialogStub,
+        ConfirmDialog: true,
+        Icon: true,
+      },
+    },
+  })
+}
+
 async function selectButtonByText(wrapper: ReturnType<typeof mountModal>, text: string) {
   const button = wrapper.findAll('button').find((candidate) => candidate.text().includes(text))
   expect(button).toBeDefined()
@@ -210,6 +240,45 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       warnings: [],
     })
     createOpenAICodexPATMock.mockReset().mockResolvedValue({})
+  })
+
+  it('uses only routable OpenAI bearer fields in Worker mode', async () => {
+    const wrapper = mountWorkerModal()
+    await wrapper.get('[data-testid="worker-account-name"]').setValue('Worker account')
+    await wrapper.get('[data-testid="worker-account-api-key"]').setValue('worker-secret')
+    await wrapper.get('form#create-worker-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledWith({
+      name: 'Worker account',
+      platform: 'openai',
+      protocol: 'openai',
+      auth_scheme: 'bearer',
+      type: 'apikey',
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'worker-secret',
+      enabled: true,
+      max_concurrency: 4,
+      group_links: [{ group_id: 'group-1', priority: 0, weight: 1 }],
+      model_capabilities: [{
+        model_id: 'model-1',
+        chat_completions: true,
+        responses: true,
+        embeddings: false,
+      }],
+    })
+    expect(wrapper.text()).not.toContain('Anthropic')
+    expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
+  })
+
+  it('refuses to create a Worker account without a routable group', async () => {
+    const wrapper = mountWorkerModal([])
+    await wrapper.get('[data-testid="worker-account-name"]').setValue('Unroutable')
+    await wrapper.get('[data-testid="worker-account-api-key"]').setValue('worker-secret')
+    await wrapper.get('form#create-worker-account-form').trigger('submit.prevent')
+
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Create at least one enabled OpenAI group')
   })
 
   it('hides only the redundant account toggle when every selected group enables tier pricing', async () => {

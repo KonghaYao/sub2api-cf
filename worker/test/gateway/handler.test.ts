@@ -236,6 +236,40 @@ async function compressGatewayBody(
   return new Response(stream).arrayBuffer()
 }
 
+async function readStreamToTextWithin(response: Response, milliseconds = 250): Promise<string> {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let output = ''
+  try {
+    while (true) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error('response stream did not finish')), milliseconds)
+        }),
+      ])
+      if (result.done) return output + decoder.decode()
+      output += decoder.decode(result.value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function captureExecutionContext(): {
+  executionCtx: ExecutionContext
+  tasks: Promise<unknown>[]
+} {
+  const tasks: Promise<unknown>[] = []
+  const executionCtx = {
+    waitUntil(task: Promise<unknown>) {
+      tasks.push(task)
+    },
+    passThroughOnException() {},
+  } as unknown as ExecutionContext
+  return { executionCtx, tasks }
+}
+
 describe('OpenAI-compatible gateway', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
@@ -838,6 +872,389 @@ describe('OpenAI-compatible gateway', () => {
       amount_micros: 24,
       usage_event: { payload: { stream: true, input_tokens: 8, output_tokens: 2 } },
     })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('finishes a Responses stream at its terminal event without waiting for upstream EOF', async () => {
+    const { env, user, pool } = await harness()
+    let upstreamCancelled = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
+            ))
+          },
+          cancel() {
+            upstreamCancelled = true
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )),
+    )
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+      },
+      env,
+    )
+    const text = await readStreamToTextWithin(response)
+
+    expect(text).toContain('event: response.completed')
+    expect(upstreamCancelled).toBe(true)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { input_tokens: 5, output_tokens: 2, outcome: 'completed' } },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('recognizes an event-named Responses terminal when data omits type', async () => {
+    const { env, user, pool } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":6,"output_tokens":2}}}\n\n',
+          ))
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+      },
+      env,
+    )
+    const text = await readStreamToTextWithin(response)
+
+    expect(text).toContain('event: response.completed')
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { input_tokens: 6, output_tokens: 2, outcome: 'completed' } },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it.each([
+    {
+      protocol: 'Chat Completions',
+      path: '/v1/chat/completions',
+      headers: new Headers({ authorization: 'Bearer sk-customer', 'content-type': 'application/json' }),
+      body: { model: 'gpt-public', stream: true, messages: [] },
+      upstream: 'data: {"model":"gpt-upstream","usage":{"prompt_tokens":3,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+      terminal: 'data: [DONE]',
+    },
+    {
+      protocol: 'Anthropic Messages',
+      path: '/v1/messages',
+      headers: new Headers({ 'x-api-key': 'sk-customer', 'content-type': 'application/json' }),
+      body: {
+        model: 'gpt-public',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hello' }],
+      },
+      upstream: 'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}\n\n',
+      terminal: 'event: message_stop',
+    },
+    {
+      protocol: 'Responses-from-Chat bridge',
+      path: '/v1/responses',
+      headers: new Headers({ authorization: 'Bearer sk-customer', 'content-type': 'application/json' }),
+      body: { model: 'gpt-public', stream: true, input: 'Hello' },
+      upstream: [
+        'data: {"id":"chatcmpl-terminal","model":"gpt-upstream","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n',
+        'data: [DONE]\n\n',
+      ].join(''),
+      terminal: 'event: response.completed',
+      chatOnly: true,
+    },
+    {
+      protocol: 'Gemini generateContent',
+      path: '/v1beta/models/gpt-public:streamGenerateContent?alt=sse',
+      headers: new Headers({ 'x-goog-api-key': 'sk-customer', 'content-type': 'application/json' }),
+      body: { contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] },
+      upstream: 'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}\n\n',
+      terminal: '"finishReason":"STOP"',
+    },
+  ])('finishes $protocol output at the protocol terminal without upstream EOF', async ({
+    path,
+    headers,
+    body,
+    upstream,
+    terminal,
+    chatOnly,
+  }) => {
+    const { env, database, user, pool } = await harness()
+    database.chatOnly = chatOnly === true
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(upstream))
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request(
+      path,
+      { method: 'POST', headers, body: JSON.stringify(body) },
+      env,
+    )
+    const text = await readStreamToTextWithin(response)
+
+    expect(text).toContain(terminal)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('drains a cancelled client stream in waitUntil and settles terminal usage exactly', async () => {
+    const { env, user, pool } = await harness()
+    const background = captureExecutionContext()
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let upstreamCancelled = false
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstreamController = controller
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+          ))
+        },
+        cancel() {
+          upstreamCancelled = true
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+      },
+      env,
+      background.executionCtx,
+    )
+    const reader = response.body!.getReader()
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toContain('partial')
+
+    await reader.cancel('client disconnected')
+    expect(background.tasks).toHaveLength(1)
+    upstreamController!.enqueue(new TextEncoder().encode(
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":13,"output_tokens":5}}}\n\n',
+    ))
+    await Promise.all(background.tasks)
+
+    expect(upstreamCancelled).toBe(true)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 13,
+          output_tokens: 5,
+          estimated: false,
+          outcome: 'cancelled',
+        },
+      },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('bounds a cancelled-stream drain and falls back to estimated usage', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-04T00:00:00.000Z') })
+    try {
+      const { env, user, pool } = await harness()
+      const background = captureExecutionContext()
+      let upstreamCancelled = false
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(
+              'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            ))
+          },
+          cancel() {
+            upstreamCancelled = true
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )))
+
+      const response = await createApp().request(
+        '/v1/responses',
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+        },
+        env,
+        background.executionCtx,
+      )
+      const reader = response.body!.getReader()
+      await reader.read()
+      const pendingClientRead = reader.read()
+      await Promise.resolve()
+      await reader.cancel('client disconnected')
+      await expect(pendingClientRead).resolves.toMatchObject({ done: true })
+
+      expect(background.tasks).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(user.calls.some((call) => call.path === '/settle')).toBe(false)
+      expect(pool.calls.some((call) => call.path === '/release')).toBe(false)
+      await vi.advanceTimersByTimeAsync(2)
+      await Promise.all(background.tasks)
+
+      expect(upstreamCancelled).toBe(true)
+      expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        usage_event: { payload: { estimated: true, outcome: 'cancelled' } },
+      })
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('caps disconnect draining at its total timeout even while upstream keeps emitting', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-04T00:00:00.000Z') })
+    try {
+      const { env, user, pool } = await harness()
+      const background = captureExecutionContext()
+      let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            upstreamController = controller
+            controller.enqueue(new TextEncoder().encode(
+              'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"first"}\n\n',
+            ))
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )))
+
+      const response = await createApp().request(
+        '/v1/responses',
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+        },
+        env,
+        background.executionCtx,
+      )
+      const reader = response.body!.getReader()
+      await reader.read()
+      const pendingClientRead = reader.read()
+      await Promise.resolve()
+      await reader.cancel('client disconnected')
+      await pendingClientRead
+
+      for (const delta of ['second', 'third', 'fourth']) {
+        await vi.advanceTimersByTimeAsync(9_000)
+        upstreamController!.enqueue(new TextEncoder().encode(
+          `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"${delta}"}\n\n`,
+        ))
+        await Promise.resolve()
+      }
+      expect(user.calls.some((call) => call.path === '/settle')).toBe(false)
+      await vi.advanceTimersByTimeAsync(3_001)
+      await Promise.all(background.tasks)
+
+      expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        usage_event: { payload: { estimated: true, outcome: 'cancelled' } },
+      })
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('finishes and fails accounting at response.failed without waiting for upstream EOF', async () => {
+    const { env, user, pool } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","usage":{"input_tokens":7,"output_tokens":1}}}\n\n',
+          ))
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+      },
+      env,
+    )
+    const text = await readStreamToTextWithin(response)
+
+    expect(text).toContain('event: response.failed')
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { input_tokens: 7, output_tokens: 1, outcome: 'failed' } },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('settles and releases once when client cancellation races duplicate terminal events', async () => {
+    const { env, user, pool } = await harness()
+    const background = captureExecutionContext()
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstreamController = controller
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+          ))
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', stream: true, input: 'hello' }),
+      },
+      env,
+      background.executionCtx,
+    )
+    const reader = response.body!.getReader()
+    await reader.read()
+    await reader.cancel('client disconnected')
+    upstreamController!.enqueue(new TextEncoder().encode([
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":11,"output_tokens":4}}}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":11,"output_tokens":4}}}\n\n',
+    ].join('')))
+    await Promise.all(background.tasks)
+
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 

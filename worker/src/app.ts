@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import {
   currentUser,
+  loginWithTotp,
   loginWithPassword,
   logoutUserSession,
   refreshUserSession,
@@ -161,6 +162,15 @@ import {
   verifyNotificationEmail,
 } from './user/notification-preferences'
 import {
+  disableTotp,
+  enableTotp,
+  getTotpStatus,
+  getTotpVerificationMethod,
+  grantTotpStepUp,
+  initiateTotpSetup,
+  sendTotpVerificationCode,
+} from './user/totp'
+import {
   dashboardApiKeysUsage,
   dashboardModels,
   dashboardSnapshot,
@@ -300,6 +310,7 @@ export function createApp() {
   app.post('/api/v1/auth/email-verification/request', requestEmailVerification)
   app.post('/api/v1/auth/email-verification/confirm', confirmEmailVerification)
   app.post('/api/v1/auth/login', loginWithPassword)
+  app.post('/api/v1/auth/login/2fa', loginWithTotp)
   app.post('/api/v1/auth/refresh', refreshUserSession)
   app.post('/api/v1/auth/logout', logoutUserSession)
   app.get('/api/v1/auth/me', currentUser)
@@ -317,6 +328,13 @@ export function createApp() {
   app.post('/api/v1/user/notify-email/verify', verifyNotificationEmail)
   app.delete('/api/v1/user/notify-email', removeNotificationEmail)
   app.put('/api/v1/user/notify-email/toggle', toggleNotificationEmail)
+  app.get('/api/v1/user/totp/status', getTotpStatus)
+  app.get('/api/v1/user/totp/verification-method', getTotpVerificationMethod)
+  app.post('/api/v1/user/totp/send-code', sendTotpVerificationCode)
+  app.post('/api/v1/user/totp/setup', initiateTotpSetup)
+  app.post('/api/v1/user/totp/enable', enableTotp)
+  app.post('/api/v1/user/totp/disable', disableTotp)
+  app.post('/api/v1/user/totp/step-up', grantTotpStepUp)
   app.get('/api/v1/user/api-keys/:id/usage/daily', getUserApiKeyDailyUsage)
   app.get('/api/v1/usage/stats', usageStats)
   app.get('/api/v1/usage/dashboard/stats', dashboardStats)

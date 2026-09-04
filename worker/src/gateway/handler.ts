@@ -79,6 +79,8 @@ const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const HEADER_TIMEOUT_MS = 30_000
 const BODY_IDLE_TIMEOUT_MS = 120_000
 const TOTAL_STREAM_TIMEOUT_MS = 15 * 60_000
+const DISCONNECT_DRAIN_IDLE_TIMEOUT_MS = 10_000
+const DISCONNECT_DRAIN_TOTAL_TIMEOUT_MS = 30_000
 const FAILURE_COOLDOWN_MS = 30_000
 const encoder = new TextEncoder()
 
@@ -822,6 +824,7 @@ async function dispatchGateway(
         responseProtocol: usesResponsesBridge
           ? 'responses_from_chat'
           : prepared.responseProtocol,
+        waitUntil: optionalWaitUntil(context),
       })
     }
 
@@ -1053,6 +1056,18 @@ interface GatewayStreamTransformer {
   outputBytes(): number
   terminal(): 'completed' | 'failed' | 'missing'
   errorFrame(message: string): Uint8Array
+}
+
+type WaitUntil = (task: Promise<unknown>) => void
+
+function optionalWaitUntil(context: Context<GatewayBindings>): WaitUntil | undefined {
+  try {
+    const executionCtx = context.executionCtx
+    return (task) => executionCtx.waitUntil(task)
+  } catch {
+    // Hono's in-process request helper has no ExecutionContext. Cloudflare fetches do.
+    return undefined
+  }
 }
 
 class OpenAiStreamTransformer implements GatewayStreamTransformer {
@@ -1319,11 +1334,13 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
   }
 
   private transformFrame(frame: string): Uint8Array[] {
-    const data = frame
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trimStart())
-      .join('\n')
+    let eventName: string | undefined
+    const dataLines: string[] = []
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    const data = dataLines.join('\n')
     if (data === '' || data === '[DONE]') return []
 
     let parsed: unknown
@@ -1337,6 +1354,15 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
         'server_error',
       )
     }
+    if (
+      eventName !== undefined &&
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).type !== 'string'
+    ) {
+      parsed = { ...(parsed as Record<string, unknown>), type: eventName }
+    }
     return this.codec.push(parsed).map((event) => {
       const encoded = encoder.encode(formatAnthropicSseEvent(event))
       this.emittedBytes += encoded.byteLength
@@ -1349,6 +1375,7 @@ function createStreamingResponse(input: FinalizeInput & {
   response: Response
   endpoint: GenerativeGatewayEndpoint
   responseProtocol: 'openai' | 'anthropic' | 'gemini' | 'responses_from_chat'
+  waitUntil?: WaitUntil
 }): Response {
   const reader = input.response.body!.getReader()
   const tracker: GatewayStreamTransformer = input.responseProtocol === 'anthropic'
@@ -1364,6 +1391,11 @@ function createStreamingResponse(input: FinalizeInput & {
   let lastRenewedAt = Date.now()
   let lastChunkAt = Date.now()
   let emitted = false
+  let downstreamCancelled = false
+  let disconnectStartedAt: number | null = null
+  const disconnectSignal = new AbortController()
+  let finished = false
+  let operationChain: Promise<void> = Promise.resolve()
 
   const finalize = (outcome: 'completed' | 'failed' | 'cancelled'): Promise<void> => {
     if (finalized !== null) return finalized
@@ -1386,77 +1418,179 @@ function createStreamingResponse(input: FinalizeInput & {
     return finalized
   }
 
+  const serialize = (operation: () => Promise<void>): Promise<void> => {
+    const next = operationChain.then(operation, operation)
+    operationChain = next.catch(() => undefined)
+    return next
+  }
+
+  const renewIfDue = async (): Promise<void> => {
+    if (Date.now() - lastRenewedAt < RENEW_AFTER_MS) return
+    userRenewal += 1
+    poolRenewal += 1
+    await Promise.all([
+      renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
+      renewPoolLease(input.pool, input.leaseId, poolRenewal),
+    ])
+    lastRenewedAt = Date.now()
+  }
+
+  const readNext = async (
+    idleTimeoutMs: number,
+    deadlineMs: number,
+  ): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    const pendingRead = reader.read().then((result) => ({ kind: 'read' as const, result }))
+    while (true) {
+      const now = Date.now()
+      const activeIdleTimeoutMs = downstreamCancelled
+        ? DISCONNECT_DRAIN_IDLE_TIMEOUT_MS
+        : idleTimeoutMs
+      const activeDeadlineMs = disconnectStartedAt === null
+        ? deadlineMs
+        : Math.min(deadlineMs, disconnectStartedAt + DISCONNECT_DRAIN_TOTAL_TIMEOUT_MS)
+      if (now >= activeDeadlineMs) {
+        throw new GatewayError(504, 'upstream_timeout', 'Upstream stream exceeded the maximum duration', 'server_error')
+      }
+      await renewIfDue()
+      const raced = await readOrTickOrAbort(
+        pendingRead,
+        Math.max(1, Math.min(RENEW_AFTER_MS, activeIdleTimeoutMs, activeDeadlineMs - now)),
+        downstreamCancelled ? undefined : disconnectSignal.signal,
+      )
+      if (raced.kind === 'read') return raced.result
+      if (raced.kind === 'abort') continue
+      if (Date.now() - lastChunkAt >= activeIdleTimeoutMs) {
+        throw new GatewayError(504, 'upstream_idle_timeout', 'Upstream stream timed out', 'server_error')
+      }
+    }
+  }
+
+  const enqueue = (
+    controller: ReadableStreamDefaultController<Uint8Array> | null,
+    chunks: Uint8Array[],
+  ): void => {
+    if (controller === null || downstreamCancelled) return
+    for (const chunk of chunks) {
+      emitted ||= chunk.byteLength > 0
+      controller.enqueue(chunk)
+    }
+  }
+
+  const finishAtTerminal = async (
+    controller: ReadableStreamDefaultController<Uint8Array> | null,
+    terminal: 'completed' | 'failed',
+  ): Promise<void> => {
+    finished = true
+    // Fetch-body cancellation is initiated immediately but never delays billing or downstream EOF.
+    void bestEffort(() => reader.cancel('upstream terminal event received'))
+    await bestEffort(() => finalize(
+      downstreamCancelled
+        ? 'cancelled'
+        : terminal === 'completed'
+          ? 'completed'
+          : 'failed',
+    ))
+    if (controller !== null && !downstreamCancelled) controller.close()
+  }
+
+  const processRead = async (
+    result: ReadableStreamReadResult<Uint8Array>,
+    controller: ReadableStreamDefaultController<Uint8Array> | null,
+  ): Promise<void> => {
+    if (result.done) {
+      enqueue(controller, tracker.finish())
+      const terminal = tracker.terminal()
+      if (terminal === 'missing' && controller !== null && !downstreamCancelled) {
+        controller.enqueue(tracker.errorFrame('Upstream stream ended before a terminal event'))
+      }
+      finished = true
+      await bestEffort(() => finalize(
+        downstreamCancelled
+          ? 'cancelled'
+          : terminal === 'completed'
+            ? 'completed'
+            : 'failed',
+      ))
+      if (controller !== null && !downstreamCancelled) controller.close()
+      return
+    }
+
+    lastChunkAt = Date.now()
+    enqueue(controller, tracker.push(result.value))
+    const terminal = tracker.terminal()
+    if (terminal !== 'missing') await finishAtTerminal(controller, terminal)
+  }
+
+  const drainAfterCancellation = async (): Promise<void> => {
+    if (finished) {
+      await bestEffort(() => finalize('cancelled'))
+      return
+    }
+    lastChunkAt = Date.now()
+    const deadline = Math.min(
+      input.startedAt + TOTAL_STREAM_TIMEOUT_MS,
+      (disconnectStartedAt ?? Date.now()) + DISCONNECT_DRAIN_TOTAL_TIMEOUT_MS,
+    )
+    try {
+      while (!finished) {
+        const result = await readNext(DISCONNECT_DRAIN_IDLE_TIMEOUT_MS, deadline)
+        await processRead(result, null)
+      }
+    } catch (error) {
+      finished = true
+      void bestEffort(() => reader.cancel(error))
+      await bestEffort(() => finalize('cancelled'))
+    }
+  }
+
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      try {
-        while (true) {
-          const now = Date.now()
-          if (now - input.startedAt >= TOTAL_STREAM_TIMEOUT_MS) {
-            throw new GatewayError(504, 'upstream_timeout', 'Upstream stream exceeded the maximum duration', 'server_error')
+      return serialize(async () => {
+        if (finished || downstreamCancelled) return
+        try {
+          await processRead(
+            await readNext(BODY_IDLE_TIMEOUT_MS, input.startedAt + TOTAL_STREAM_TIMEOUT_MS),
+            controller,
+          )
+        } catch (error) {
+          finished = true
+          void bestEffort(() => reader.cancel(error))
+          if (!downstreamCancelled && emitted) {
+            controller.enqueue(tracker.errorFrame('Upstream stream terminated unexpectedly'))
           }
-          if (now - lastRenewedAt >= RENEW_AFTER_MS) {
-            userRenewal += 1
-            poolRenewal += 1
-            await Promise.all([
-              renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
-              renewPoolLease(input.pool, input.leaseId, poolRenewal),
-            ])
-            lastRenewedAt = Date.now()
+          if (!downstreamCancelled) {
+            await bestEffort(() => recordPoolFailure(
+              input.pool,
+              input.accountId,
+              `${input.requestId}:stream-failure`,
+              FAILURE_COOLDOWN_MS,
+            ))
           }
-
-          const pendingRead = reader.read().then((result) => ({ kind: 'read' as const, result }))
-          let raced: { kind: 'read'; result: ReadableStreamReadResult<Uint8Array> } | { kind: 'tick' }
-          while (true) {
-            raced = await readOrTick(
-              pendingRead,
-              Math.min(RENEW_AFTER_MS, BODY_IDLE_TIMEOUT_MS),
-            )
-            if (raced.kind === 'read') break
-            if (Date.now() - lastChunkAt >= BODY_IDLE_TIMEOUT_MS) {
-              throw new GatewayError(504, 'upstream_idle_timeout', 'Upstream stream timed out', 'server_error')
-            }
-            userRenewal += 1
-            poolRenewal += 1
-            await Promise.all([
-              renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
-              renewPoolLease(input.pool, input.leaseId, poolRenewal),
-            ])
-            lastRenewedAt = Date.now()
+          await bestEffort(() => finalize(downstreamCancelled ? 'cancelled' : 'failed'))
+          if (!downstreamCancelled) {
+            if (emitted) controller.close()
+            else controller.error(error)
           }
-          if (raced.result.done) {
-            for (const chunk of tracker.finish()) {
-              emitted ||= chunk.byteLength > 0
-              controller.enqueue(chunk)
-            }
-            const terminal = tracker.terminal()
-            if (terminal === 'missing') {
-              controller.enqueue(tracker.errorFrame('Upstream stream ended before a terminal event'))
-            }
-            await bestEffort(() =>
-              finalize(terminal === 'completed' ? 'completed' : 'failed'),
-            )
-            controller.close()
-            return
-          }
-          lastChunkAt = Date.now()
-          for (const chunk of tracker.push(raced.result.value)) {
-            emitted ||= chunk.byteLength > 0
-            controller.enqueue(chunk)
-          }
-          return
         }
-      } catch (error) {
-        await bestEffort(() => reader.cancel(error))
-        if (emitted) controller.enqueue(tracker.errorFrame('Upstream stream terminated unexpectedly'))
-        await bestEffort(() => recordPoolFailure(input.pool, input.accountId, `${input.requestId}:stream-failure`, FAILURE_COOLDOWN_MS))
-        await bestEffort(() => finalize('failed'))
-        if (emitted) controller.close()
-        else controller.error(error)
-      }
+      })
     },
-    async cancel(reason) {
-      await bestEffort(() => reader.cancel(reason))
-      await bestEffort(() => finalize('cancelled'))
+    cancel() {
+      if (!downstreamCancelled) {
+        downstreamCancelled = true
+        disconnectStartedAt = Date.now()
+        lastChunkAt = disconnectStartedAt
+        disconnectSignal.abort()
+      }
+      const task = serialize(drainAfterCancellation)
+      if (input.waitUntil !== undefined) {
+        try {
+          input.waitUntil(task)
+          return
+        } catch {
+          // Fall back to making stream cancellation await the bounded drain.
+        }
+      }
+      return task
     },
   })
 
@@ -1869,6 +2003,47 @@ function readOrTick<T>(
         reject(error)
       },
     )
+  })
+}
+
+function readOrTickOrAbort<T>(
+  read: Promise<{ kind: 'read'; result: ReadableStreamReadResult<T> }>,
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<
+  | { kind: 'read'; result: ReadableStreamReadResult<T> }
+  | { kind: 'tick' }
+  | { kind: 'abort' }
+> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (
+      result:
+        | { kind: 'read'; result: ReadableStreamReadResult<T> }
+        | { kind: 'tick' }
+        | { kind: 'abort' },
+    ) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      resolve(result)
+    }
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(error)
+    }
+    const onAbort = () => finish({ kind: 'abort' })
+    const timer = setTimeout(() => finish({ kind: 'tick' }), milliseconds)
+    if (signal?.aborted) {
+      finish({ kind: 'abort' })
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    read.then(finish, fail)
   })
 }
 

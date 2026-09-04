@@ -169,7 +169,12 @@ export class SseEventTransformer {
   }
 
   private transformFrame(frame: string, delimiter: string): Uint8Array {
-    const lines = frame.split(/\r?\n/).map((line) => {
+    const sourceLines = frame.split(/\r?\n/)
+    const eventName = sourceLines
+      .find((line) => line.startsWith('event:'))
+      ?.slice(6)
+      .trim()
+    const lines = sourceLines.map((line) => {
       if (!line.startsWith('data:')) return line
       const data = line.slice(5).trimStart()
       if (data === '') return line
@@ -182,7 +187,8 @@ export class SseEventTransformer {
         const usage = extractUsage(parsed)
         if (usage !== null) this.latestUsage = usage
         if (parsed !== null && typeof parsed === 'object') {
-          const type = (parsed as Record<string, unknown>).type
+          const parsedType = (parsed as Record<string, unknown>).type
+          const type = typeof parsedType === 'string' ? parsedType : eventName
           if (type === 'response.completed') this.responsesTerminal = 'completed'
           if (type === 'response.failed' || type === 'response.incomplete') {
             this.responsesTerminal = 'failed'

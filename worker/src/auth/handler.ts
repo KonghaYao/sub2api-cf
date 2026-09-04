@@ -25,6 +25,17 @@ import {
   TokenValidationError,
 } from './tokens'
 import type { RegistrationEmailChallengeConsumption } from './email-challenges'
+import {
+  claimTotpVerificationAttempt,
+  createTotpLoginChallenge,
+  findTotpCredential,
+  findTotpLoginChallenge,
+  isTotpLoginToken,
+  TOTP_MAX_ATTEMPTS,
+  totpFeatureAvailable,
+  totpTokenDigest,
+  verifyStoredTotpCode,
+} from './totp'
 
 type AuthBindings = { Bindings: Env }
 
@@ -68,6 +79,7 @@ interface SessionUserRow extends UserRow {
   access_expires_at_ms: number
   refresh_expires_at_ms: number
   revoked_at_ms: number | null
+  step_up_expires_at_ms: number | null
 }
 
 interface IssuedSession {
@@ -231,6 +243,22 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
 
     await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     const now = Date.now()
+    const totpCredential = await findTotpCredential(context.env, user.id)
+    if (totpCredential !== null) {
+      if (!totpFeatureAvailable(context.env)) {
+        throw new GatewayError(
+          503,
+          'TOTP_NOT_CONFIGURED',
+          'TOTP encryption is not configured',
+          'server_error',
+        )
+      }
+      return controlSuccess({
+        requires_2fa: true,
+        temp_token: await createTotpLoginChallenge(context.env, user.id, now),
+        user_email_masked: maskEmail(user.email),
+      })
+    }
     const issued = await issueSession(context.env, user, now)
     const emailHash = await sha256Hex(email)
     await context.env.DB.batch([
@@ -250,6 +278,143 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
         now,
       ),
     ])
+    user.last_login_at_ms = now
+    user.updated_at_ms = now
+    return controlSuccess(authPayload(user, issued))
+  } catch (error) {
+    return authControlError(normalizeAuthError(error))
+  }
+}
+
+/** Completes the password-login challenge and creates the first real session. */
+export async function loginWithTotp(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const tempToken = body.temp_token
+    const code = body.totp_code
+    if (!isTotpLoginToken(tempToken) || typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+      throw invalidTotpLogin()
+    }
+    const tokenHash = await totpTokenDigest(tempToken)
+    const rateLimitSubject = await checkAuthRateLimit(
+      context.env,
+      context.req.raw,
+      `totp:${tokenHash}`,
+      'login',
+    )
+    await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
+    const now = Date.now()
+    const challenge = await findTotpLoginChallenge(context.env, tempToken)
+    if (
+      challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now
+    ) {
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
+      throw invalidTotpLogin()
+    }
+    if (challenge.verification_attempts >= TOTP_MAX_ATTEMPTS) {
+      throw new GatewayError(429, 'TOTP_TOO_MANY_ATTEMPTS', 'Too many verification attempts')
+    }
+    const user = await findUserById(context.env, challenge.user_id)
+    const credential = await findTotpCredential(context.env, challenge.user_id)
+    if (user === null || user.status !== 'active' || credential === null) {
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
+      throw invalidTotpLogin()
+    }
+    await claimTotpVerificationAttempt(context.env, user.id, now)
+    const reservedAttempt = await context.env.DB.prepare(
+      `UPDATE user_totp_login_challenges
+          SET verification_attempts = verification_attempts + 1,
+              version = version + 1, updated_at_ms = ?
+        WHERE id = ? AND user_id = ? AND token_hash = ? AND status = 'pending'
+          AND expires_at_ms > ? AND verification_attempts < ?
+        RETURNING verification_attempts`,
+    ).bind(
+      now,
+      challenge.id,
+      challenge.user_id,
+      tokenHash,
+      now,
+      TOTP_MAX_ATTEMPTS,
+    ).all<{ verification_attempts: number }>()
+    if (reservedAttempt.results.length !== 1) {
+      throw new GatewayError(429, 'TOTP_TOO_MANY_ATTEMPTS', 'Too many verification attempts')
+    }
+    if (!(await verifyStoredTotpCode(context.env, credential, code, now))) {
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
+      throw new GatewayError(400, 'TOTP_INVALID_CODE', 'Invalid TOTP code')
+    }
+
+    const issued = await issueSession(context.env, user, now)
+    const consumeNonce = crypto.randomUUID()
+    const emailHash = await sha256Hex(user.email)
+    const writes = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `UPDATE user_totp_login_challenges
+            SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?,
+                version = version + 1, updated_at_ms = ?
+          WHERE id = ? AND user_id = ? AND token_hash = ?
+            AND status = 'pending' AND expires_at_ms > ?
+            AND verification_attempts <= ?
+          RETURNING id`,
+      ).bind(
+        now,
+        consumeNonce,
+        now,
+        challenge.id,
+        user.id,
+        tokenHash,
+        now,
+        TOTP_MAX_ATTEMPTS,
+      ),
+      conditionalSessionInsert(
+        context.env,
+        user,
+        issued,
+        requestUserAgent(context.req.raw),
+        challenge.id,
+        consumeNonce,
+        now,
+      ),
+      context.env.DB.prepare(
+        `UPDATE users SET last_login_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND status = 'active' AND auth_version = ?
+            AND EXISTS (
+              SELECT 1 FROM user_totp_login_challenges
+               WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+            )
+          RETURNING id`,
+      ).bind(now, now, user.id, user.auth_version, challenge.id, user.id, consumeNonce),
+      context.env.DB.prepare(
+        `INSERT INTO auth_audit_events (
+           id, user_id, event_type, outcome, email_hash, ip_hash,
+           session_id, metadata_json, occurred_at_ms
+         )
+         SELECT ?, ?, 'auth.login.2fa', 'succeeded', ?, NULL, ?, '{}', ?
+           FROM user_totp_login_challenges
+          WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+         RETURNING id`,
+      ).bind(
+        crypto.randomUUID(),
+        user.id,
+        emailHash,
+        issued.sessionId,
+        now,
+        challenge.id,
+        user.id,
+        consumeNonce,
+      ),
+      context.env.DB.prepare(
+        `DELETE FROM user_totp_verification_budgets
+          WHERE user_id = ?
+            AND EXISTS (
+              SELECT 1 FROM user_totp_login_challenges
+               WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+            )
+          RETURNING user_id`,
+      ).bind(user.id, challenge.id, user.id, consumeNonce),
+    ])
+    if (writes.some((result) => result.results.length !== 1)) throw invalidTotpLogin()
+    await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     user.last_login_at_ms = now
     user.updated_at_ms = now
     return controlSuccess(authPayload(user, issued))
@@ -382,7 +547,7 @@ function sessionUserSelect(): string {
                  s.auth_version AS session_auth_version,
                  s.access_token_hash, s.refresh_token_hash,
                  s.previous_refresh_token_hash, s.access_expires_at_ms,
-                 s.refresh_expires_at_ms, s.revoked_at_ms,
+                 s.refresh_expires_at_ms, s.revoked_at_ms, s.step_up_expires_at_ms,
                  u.id, u.email, u.display_name, u.role, u.status,
                  u.balance_micros, u.state_version, u.auth_version,
                  u.password_credential, u.email_verified_at_ms,
@@ -404,6 +569,17 @@ async function findUserByEmail(env: Env, email: string): Promise<UserRow | null>
       WHERE email = ?
       LIMIT 1`,
   ).bind(email).first<UserRow>()
+}
+
+async function findUserById(env: Env, id: string): Promise<UserRow | null> {
+  return env.DB.prepare(
+    `SELECT id, email, display_name, role, status, balance_micros,
+            state_version, auth_version, password_credential,
+            email_verified_at_ms, password_changed_at_ms,
+            last_login_at_ms, avatar_object_key, avatar_content_type, avatar_updated_at_ms,
+            created_at_ms, updated_at_ms
+       FROM users WHERE id = ? LIMIT 1`,
+  ).bind(id).first<UserRow>()
 }
 
 async function issueSession(
@@ -455,6 +631,49 @@ function sessionInsert(
     issued.accessExpiresAtMs,
     issued.refreshExpiresAtMs,
     userAgent,
+  )
+}
+
+function conditionalSessionInsert(
+  env: Env,
+  user: UserRow,
+  issued: IssuedSession,
+  userAgent: string,
+  challengeId: string,
+  consumeNonce: string,
+  now: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO user_sessions (
+       id, family_id, user_id, auth_version,
+       access_token_hash, refresh_token_hash,
+       created_at_ms, access_expires_at_ms, refresh_expires_at_ms,
+       previous_refresh_token_hash, rotated_at_ms, last_seen_at_ms,
+       revoked_at_ms, revoke_reason, user_agent, ip_hash, step_up_expires_at_ms
+     )
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL
+       FROM user_totp_login_challenges
+      WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+        AND EXISTS (
+          SELECT 1 FROM users WHERE id = ? AND status = 'active' AND auth_version = ?
+        )
+     RETURNING id`,
+  ).bind(
+    issued.sessionId,
+    issued.familyId,
+    user.id,
+    user.auth_version,
+    issued.accessHash,
+    issued.refreshHash,
+    now,
+    issued.accessExpiresAtMs,
+    issued.refreshExpiresAtMs,
+    userAgent,
+    challengeId,
+    user.id,
+    consumeNonce,
+    user.id,
+    user.auth_version,
   )
 }
 
@@ -621,6 +840,24 @@ function invalidCredentials(): GatewayError {
 
 function invalidRefreshToken(): GatewayError {
   return new GatewayError(401, 'invalid_refresh_token', 'Invalid or expired refresh token', 'authentication_error')
+}
+
+function invalidTotpLogin(): GatewayError {
+  return new GatewayError(
+    400,
+    'TOTP_LOGIN_EXPIRED',
+    'Invalid or expired 2FA session',
+  )
+}
+
+function maskEmail(email: string): string {
+  const separator = email.indexOf('@')
+  if (separator < 1) return `${email.slice(0, 1)}***`
+  const local = email.slice(0, separator)
+  const domain = email.slice(separator)
+  return local.length <= 2
+    ? `${local.slice(0, 1)}***${domain}`
+    : `${local.slice(0, 1)}***${local.slice(-1)}${domain}`
 }
 
 function resultChanges(result: D1Result<unknown>): number {

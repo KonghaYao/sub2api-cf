@@ -5,6 +5,104 @@
     width="wide"
     @close="handleClose"
   >
+    <form
+      v-if="cloudflareWorker"
+      id="create-worker-account-form"
+      class="space-y-5"
+      @submit.prevent="handleWorkerCreate"
+    >
+      <div class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
+        OpenAI · Bearer API key
+      </div>
+      <div>
+        <label class="input-label">{{ t('admin.accounts.accountName') }}</label>
+        <input v-model="workerForm.name" data-testid="worker-account-name" type="text" required class="input" />
+      </div>
+      <div>
+        <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
+        <input
+          v-model="workerForm.base_url"
+          type="url"
+          required
+          class="input"
+          data-testid="worker-account-base-url"
+          placeholder="https://api.openai.com/v1"
+        />
+      </div>
+      <div>
+        <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
+        <input
+          v-model="workerForm.api_key"
+          type="password"
+          required
+          autocomplete="new-password"
+          class="input"
+          data-testid="worker-account-api-key"
+        />
+      </div>
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
+          <input
+            v-model.number="workerForm.max_concurrency"
+            type="number"
+            min="1"
+            max="1000"
+            required
+            class="input"
+          />
+        </div>
+        <label class="flex items-center gap-3 pt-7 text-sm text-gray-700 dark:text-gray-300">
+          <input v-model="workerForm.enabled" type="checkbox" class="rounded border-gray-300" />
+          {{ t('common.enabled') }}
+        </label>
+      </div>
+      <div>
+        <label class="input-label">{{ t('admin.accounts.groups') }}</label>
+        <p v-if="workerGroups.length === 0" class="text-sm text-amber-600">
+          Create at least one enabled OpenAI group before adding an account.
+        </p>
+        <div v-else class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label
+            v-for="group in workerGroups"
+            :key="String(group.id)"
+            class="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-sm dark:border-dark-600"
+          >
+            <input
+              v-model="workerForm.group_ids"
+              type="checkbox"
+              :value="String(group.id)"
+              class="rounded border-gray-300"
+            />
+            {{ group.name }}
+          </label>
+        </div>
+      </div>
+      <div>
+        <label class="input-label">Models</label>
+        <p v-if="workerModels.length === 0" class="text-sm text-amber-600">
+          Create at least one OpenAI model before adding an account.
+        </p>
+        <div v-else class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label
+            v-for="model in workerModels.filter((item) => item.enabled)"
+            :key="model.id"
+            class="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-sm dark:border-dark-600"
+          >
+            <input
+              v-model="workerForm.model_ids"
+              type="checkbox"
+              :value="model.id"
+              class="rounded border-gray-300"
+              :data-testid="`worker-account-model-${model.id}`"
+            />
+            {{ model.public_name }}
+          </label>
+        </div>
+      </div>
+    </form>
+
+    <template v-else>
     <!-- Step Indicator for OAuth accounts -->
     <div v-if="isOAuthFlow" class="mb-6 flex items-center justify-center">
       <div class="flex items-center space-x-4">
@@ -2777,7 +2875,7 @@
         </div>
 
         <!-- TLS Fingerprint -->
-        <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+        <div v-if="!cloudflareWorker" class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
           <div class="flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.tlsFingerprint.label') }}</label>
@@ -2914,7 +3012,7 @@
         </div>
       </div>
 
-      <div>
+      <div v-if="!cloudflareWorker">
         <div class="mb-1 flex items-center gap-2">
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
           <ProxyAdBanner />
@@ -3444,9 +3542,23 @@
       />
 
     </div>
+    </template>
 
     <template #footer>
-      <div v-if="step === 1" class="flex justify-end gap-3">
+      <div v-if="cloudflareWorker" class="flex justify-end gap-3">
+        <button @click="handleClose" type="button" class="btn btn-secondary">
+          {{ t('common.cancel') }}
+        </button>
+        <button
+          type="submit"
+          form="create-worker-account-form"
+          :disabled="submitting"
+          class="btn btn-primary"
+        >
+          {{ submitting ? t('admin.accounts.creating') : t('common.create') }}
+        </button>
+      </div>
+      <div v-else-if="step === 1" class="flex justify-end gap-3">
         <button @click="handleClose" type="button" class="btn btn-secondary">
           {{ t('common.cancel') }}
         </button>
@@ -3831,6 +3943,7 @@ import {
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import type { WorkerAdminModel } from '@/api/admin/models'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3925,13 +4038,45 @@ interface Props {
   show: boolean
   proxies: Proxy[]
   groups: AdminGroup[]
+  workerModels?: WorkerAdminModel[]
+  cloudflareWorker?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  workerModels: () => [],
+  cloudflareWorker: false,
+})
 const emit = defineEmits<{
   close: []
   created: []
 }>()
+
+const workerForm = reactive({
+  name: '',
+  base_url: 'https://api.openai.com/v1',
+  api_key: '',
+  enabled: true,
+  max_concurrency: 4,
+  group_ids: [] as string[],
+  model_ids: [] as string[],
+})
+const workerGroups = computed(() =>
+  props.groups.filter((group) => group.platform === 'openai' && group.status !== 'inactive')
+)
+
+watch(
+  [() => props.show, () => props.workerModels, workerGroups],
+  ([show, models, groups]) => {
+    if (!show || !props.cloudflareWorker) return
+    if (workerForm.model_ids.length === 0) {
+      workerForm.model_ids = models.filter((model) => model.enabled).map((model) => model.id)
+    }
+    if (workerForm.group_ids.length === 0) {
+      workerForm.group_ids = groups.map((group) => String(group.id))
+    }
+  },
+  { immediate: true }
+)
 
 const appStore = useAppStore()
 
@@ -4577,9 +4722,11 @@ watch(
   (newVal) => {
     if (newVal) {
       // Load TLS fingerprint profiles
-      adminAPI.tlsFingerprintProfiles.list()
-        .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
-        .catch(() => { tlsFingerprintProfiles.value = [] })
+      if (!props.cloudflareWorker) {
+        adminAPI.tlsFingerprintProfiles.list()
+          .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
+          .catch(() => { tlsFingerprintProfiles.value = [] })
+      }
       // Modal opened - fill related models
       allowedModels.value = [...getModelsByPlatform(form.platform)]
       // Antigravity: 默认使用映射模式并填充默认映射
@@ -5083,8 +5230,63 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
   }
 }
 
+const handleWorkerCreate = async () => {
+  if (workerForm.group_ids.length === 0) {
+    appStore.showError('Select at least one group')
+    return
+  }
+  if (workerForm.model_ids.length === 0) {
+    appStore.showError('Select at least one model')
+    return
+  }
+  submitting.value = true
+  try {
+    await adminAPI.accounts.create({
+      name: workerForm.name.trim(),
+      platform: 'openai',
+      protocol: 'openai',
+      auth_scheme: 'bearer',
+      type: 'apikey',
+      base_url: workerForm.base_url.trim(),
+      api_key: workerForm.api_key.trim(),
+      enabled: workerForm.enabled,
+      max_concurrency: workerForm.max_concurrency,
+      group_links: workerForm.group_ids.map((groupId) => ({
+        group_id: groupId,
+        priority: 0,
+        weight: 1,
+      })),
+      model_capabilities: workerForm.model_ids.map((modelId) => {
+        const model = props.workerModels.find((item) => item.id === modelId)
+        return {
+          model_id: modelId,
+          chat_completions: model?.endpoint === 'chat_completions' || model?.endpoint === 'both',
+          responses: model?.endpoint === 'responses' || model?.endpoint === 'both',
+          embeddings: model?.embeddings === true,
+        }
+      }),
+    } as unknown as CreateAccountRequest)
+    appStore.showSuccess(t('admin.accounts.accountCreated'))
+    emit('created')
+    handleClose()
+  } catch (error: any) {
+    appStore.showError(
+      error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate')
+    )
+  } finally {
+    submitting.value = false
+  }
+}
+
 // Methods
 const resetForm = () => {
+  workerForm.name = ''
+  workerForm.base_url = 'https://api.openai.com/v1'
+  workerForm.api_key = ''
+  workerForm.enabled = true
+  workerForm.max_concurrency = 4
+  workerForm.group_ids = []
+  workerForm.model_ids = []
   step.value = 1
   form.name = ''
   form.notes = ''

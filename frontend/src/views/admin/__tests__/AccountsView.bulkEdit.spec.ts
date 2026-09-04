@@ -29,6 +29,11 @@ const {
   showSuccess: vi.fn()
 }))
 
+const workerSettings = vi.hoisted(() => ({
+  cloudflareWorkerContract: false,
+  fetch: vi.fn().mockResolvedValue(undefined),
+}))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
@@ -49,6 +54,20 @@ vi.mock('@/api/admin', () => ({
     },
     groups: {
       getAll: getAllGroups
+    },
+    models: {
+      list: vi.fn().mockResolvedValue({
+        items: [{
+          id: 'model-1',
+          platform: 'openai',
+          public_name: 'gpt-test',
+          upstream_name: 'gpt-test',
+          endpoint: 'both',
+          embeddings: false,
+          enabled: true,
+          control_version: 0
+        }]
+      })
     }
   }
 }))
@@ -65,6 +84,10 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({
     token: 'test-token'
   })
+}))
+
+vi.mock('@/stores/adminSettings', () => ({
+  useAdminSettingsStore: () => workerSettings
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -124,6 +147,43 @@ const BulkEditAccountModalStub = {
   template: '<div data-test="bulk-edit-modal" :data-show="String(show)" :data-target-mode="target?.mode ?? \'\'"></div>'
 }
 
+const mountWorkerView = () => mount(AccountsView, {
+  global: {
+    stubs: {
+      AppLayout: { template: '<div><slot /></div>' },
+      TablePageLayout: {
+        template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+      },
+      DataTable: DataTableStub,
+      AccountTableActions: { template: '<div><slot name="after" /></div>' },
+      AccountTableFilters: { template: '<div data-test="account-filters"></div>' },
+      AccountBulkActionsBar: AccountBulkActionsBarStub,
+      Pagination: true,
+      ConfirmDialog: true,
+      AccountActionMenu: true,
+      ImportDataModal: true,
+      ReAuthAccountModal: true,
+      AccountTestModal: true,
+      AccountStatsModal: true,
+      ScheduledTestsPanel: true,
+      SyncFromCrsModal: true,
+      TempUnschedStatusModal: true,
+      ErrorPassthroughRulesModal: true,
+      TLSFingerprintProfilesModal: true,
+      CreateAccountModal: true,
+      EditAccountModal: true,
+      BulkEditAccountModal: true,
+      PlatformTypeBadge: true,
+      AccountCapacityCell: true,
+      AccountStatusIndicator: true,
+      AccountTodayStatsCell: true,
+      AccountGroupsCell: true,
+      AccountUsageCell: true,
+      Icon: true
+    }
+  }
+})
+
 describe('admin AccountsView bulk edit scope', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -139,6 +199,8 @@ describe('admin AccountsView bulk edit scope', () => {
     probeUpstreamBillingBatch.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
+    workerSettings.cloudflareWorkerContract = false
+    workerSettings.fetch.mockClear()
 
     listAccounts.mockResolvedValue({
       items: [],
@@ -163,6 +225,30 @@ describe('admin AccountsView bulk edit scope', () => {
     getAllGroups.mockResolvedValue([])
     probeUpstreamBilling.mockResolvedValue({})
     probeUpstreamBillingBatch.mockResolvedValue([])
+  })
+
+  it('does not load host proxy, today-stats, or upstream billing APIs in Worker mode', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    const wrapper = mountWorkerView()
+    await flushPromises()
+
+    expect(workerSettings.fetch).toHaveBeenCalledOnce()
+    expect(listAccounts).toHaveBeenCalled()
+    expect(getAllGroups).toHaveBeenCalledOnce()
+    expect(getAllProxies).not.toHaveBeenCalled()
+    expect(getBatchTodayStats).not.toHaveBeenCalled()
+    expect(getUpstreamBillingProbeSettings).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="edit-filtered"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="account-filters"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="column-key"]').map((node) => node.text())).toEqual([
+      'name',
+      'id',
+      'platform_type',
+      'capacity',
+      'status',
+      'created_at',
+      'actions',
+    ])
   })
 
   it('opens bulk edit in filtered-results mode from the bulk actions dropdown', async () => {

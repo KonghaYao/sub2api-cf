@@ -53,3 +53,11 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
   })
 })
+
+describe('AppSidebar Worker capabilities', () => {
+  it('filters admin navigation through the centralized Worker allowlist', () => {
+    expect(componentSource).toContain("from '@/utils/adminCapabilities'")
+    expect(componentSource).toContain('filterCloudflareAdminNavigation(baseItems)')
+    expect(componentSource).toContain('adminSettingsStore.cloudflareWorkerContract')
+  })
+})

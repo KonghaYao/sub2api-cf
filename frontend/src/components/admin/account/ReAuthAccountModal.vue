@@ -222,9 +222,12 @@ interface OAuthFlowExposed {
 interface Props {
   show: boolean
   account: Account | null
+  cloudflareWorker?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  cloudflareWorker: false,
+})
 const emit = defineEmits<{
   close: []
   reauthorized: [account: Account]
@@ -232,6 +235,9 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const { t } = useI18n()
+const accountProxyId = computed(() =>
+  props.cloudflareWorker ? null : (props.account?.proxy_id ?? null)
+)
 
 // OAuth composables
 const claudeOAuth = useAccountOAuth()
@@ -370,18 +376,18 @@ const handleGenerateUrl = async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    await openaiOAuth.generateAuthUrl(accountProxyId.value)
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined
     const projectId = geminiOAuthType.value === 'code_assist' ? oauthFlowRef.value?.projectId : undefined
-    await geminiOAuth.generateAuthUrl(props.account.proxy_id, projectId, geminiOAuthType.value, tierId)
+    await geminiOAuth.generateAuthUrl(accountProxyId.value, projectId, geminiOAuthType.value, tierId)
   } else if (isAntigravity.value) {
-    await antigravityOAuth.generateAuthUrl(props.account.proxy_id)
+    await antigravityOAuth.generateAuthUrl(accountProxyId.value)
   } else if (isGrok.value) {
-    await grokOAuth.generateAuthUrl(props.account.proxy_id)
+    await grokOAuth.generateAuthUrl(accountProxyId.value)
   } else {
-    await claudeOAuth.generateAuthUrl(addMethod.value, props.account.proxy_id)
+    await claudeOAuth.generateAuthUrl(addMethod.value, accountProxyId.value)
   }
 }
 
@@ -407,7 +413,7 @@ const handleExchangeCode = async () => {
       authCode.trim(),
       sessionId,
       stateToUse,
-      props.account.proxy_id
+      accountProxyId.value
     )
     if (!tokenInfo) return
 
@@ -441,7 +447,7 @@ const handleExchangeCode = async () => {
       code: authCode.trim(),
       sessionId,
       state: stateToUse,
-      proxyId: props.account.proxy_id,
+      proxyId: accountProxyId.value,
       oauthType: geminiOAuthType.value,
       tierId: typeof (props.account.credentials as any)?.tier_id === 'string' ? ((props.account.credentials as any).tier_id as string) : undefined
     })
@@ -475,7 +481,7 @@ const handleExchangeCode = async () => {
       code: authCode.trim(),
       sessionId,
       state: stateToUse,
-      proxyId: props.account.proxy_id
+      proxyId: accountProxyId.value
     })
     if (!tokenInfo) return
 
@@ -506,7 +512,7 @@ const handleExchangeCode = async () => {
       code: authCode.trim(),
       sessionId,
       state: stateToUse,
-      proxyId: props.account.proxy_id
+      proxyId: accountProxyId.value
     })
     if (!tokenInfo) return
 
@@ -536,7 +542,7 @@ const handleExchangeCode = async () => {
     claudeOAuth.error.value = ''
 
     try {
-      const proxyConfig = props.account.proxy_id ? { proxy_id: props.account.proxy_id } : {}
+      const proxyConfig = accountProxyId.value ? { proxy_id: accountProxyId.value } : {}
       const endpoint =
         addMethod.value === 'oauth'
           ? '/admin/accounts/exchange-code'
@@ -575,7 +581,7 @@ const handleCookieAuth = async (sessionKey: string) => {
   claudeOAuth.error.value = ''
 
   try {
-    const proxyConfig = props.account.proxy_id ? { proxy_id: props.account.proxy_id } : {}
+    const proxyConfig = accountProxyId.value ? { proxy_id: accountProxyId.value } : {}
     const endpoint =
       addMethod.value === 'oauth'
         ? '/admin/accounts/cookie-auth'
@@ -644,7 +650,7 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
     openaiOAuth.loading.value = true
     openaiOAuth.error.value = ''
     try {
-      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
+      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, accountProxyId.value)
       if (!tokenInfo) return
 
       const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
@@ -672,7 +678,7 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
   antigravityOAuth.loading.value = true
   antigravityOAuth.error.value = ''
   try {
-    const tokenInfo = await antigravityOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
+    const tokenInfo = await antigravityOAuth.validateRefreshToken(refreshToken, accountProxyId.value)
     if (!tokenInfo) return
 
     const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
@@ -706,7 +712,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   grokOAuth.loading.value = true
   grokOAuth.error.value = ''
   try {
-    const tokenInfo = await grokOAuth.validateSSOToken(ssoToken, props.account.proxy_id)
+    const tokenInfo = await grokOAuth.validateSSOToken(ssoToken, accountProxyId.value)
     if (!tokenInfo) return
     await applyGrokReauthTokenInfo(tokenInfo)
   } catch (error: any) {
@@ -735,7 +741,7 @@ const handleGrokValidateRefreshToken = async (refreshTokenInput: string) => {
   grokOAuth.loading.value = true
   grokOAuth.error.value = ''
   try {
-    const tokenInfo = await grokOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
+    const tokenInfo = await grokOAuth.validateRefreshToken(refreshToken, accountProxyId.value)
     if (!tokenInfo) return
     await applyGrokReauthTokenInfo(tokenInfo)
   } catch (error: any) {

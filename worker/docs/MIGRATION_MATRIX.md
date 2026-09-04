@@ -30,7 +30,7 @@ Status meanings:
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
 | OpenAI model list | D1-backed group/model catalog at `/v1/models` and `/models` | Partial | Worker handler tests and root alias; add deployed-binding contract |
-| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Existing gateway tests and alias; add SSE termination and disconnect tests |
+| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Worker gateway fixtures cover terminal-without-EOF for Chat/Responses/Anthropic/Gemini, exact-usage disconnect draining, 10s idle/30s total drain bounds, and single settlement/release; remaining native-provider stream fixtures remain |
 | Responses | `/v1/responses`, `/responses`, compact and input-token subroutes | Partial | Existing core tests; add subroute fixtures |
 | Embeddings | OpenAI-compatible request/response and token billing | Partial | Worker protocol/handler fixtures pass; port the remaining original embedding handler/service fixtures |
 | Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Partial | Worker protocol/handler fixtures pass; port the remaining `apicompat` and Anthropic gateway suites |
@@ -57,7 +57,7 @@ Status meanings:
 | Sessions | Hashed refresh tokens, rotation, logout/revoke, device/session list | Done | Rotation/replay/logout plus current-device list, selective/family, other-device and all-device revocation race tests |
 | Email challenges | Queue-delivered registration verification, authenticated email verification, and password reset challenges with expiry and attempt limits | Partial | Atomic consumption/replay, address binding, expiry, concurrent reset, rate-limit, delivery lease, tamper and retry tests pass; native `SEND_EMAIL` and compatibility `EMAIL_DELIVERY` paths are covered, while a verified production sender and deployed delivery E2E remain required |
 | OAuth identities | Provider adapters and safe identity linking | Planned | Callback/link-conflict tests |
-| TOTP and step-up | Encrypted TOTP secret, recovery codes and privileged-action challenge | Planned | TOTP and recovery-code tests |
+| TOTP and step-up | Encrypted TOTP secret, recovery codes and privileged-action challenge | Partial | Worker-native RFC 6238 setup/login/disable and session-bound 15-minute step-up pass owner, expiry, attempt-limit, replay, CAS, Queue delivery and encrypted-secret tests; recovery codes remain |
 | Passkeys | WebAuthn challenge state and credential lifecycle | Planned | Port passkey handler tests |
 | User profile | Profile, password security, R2 avatar, linked identities and notification preferences | Partial | Profile/update/password/avatar routes plus D1-versioned notification settings and verified notification-email lifecycle have owner, CAS, bounded-rate, Queue lease and native/compatibility delivery tests; linked identities remain |
 | User API keys | Create/list/update/revoke; raw token returned once | Done | Hashing, redaction, expiry, revocation, owner isolation and private/subscription-group access tests |

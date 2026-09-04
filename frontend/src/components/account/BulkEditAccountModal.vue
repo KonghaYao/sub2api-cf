@@ -666,7 +666,7 @@
       </div>
 
       <!-- Proxy -->
-      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="!cloudflareWorker" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-proxy-label"
@@ -1530,9 +1530,12 @@ interface Props {
   }
   proxies: ProxyConfig[]
   groups: AdminGroup[]
+  cloudflareWorker?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  cloudflareWorker: false,
+})
 const emit = defineEmits<{
   close: []
   updated: []

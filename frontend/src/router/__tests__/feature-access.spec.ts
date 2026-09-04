@@ -8,6 +8,7 @@ type NavigationGuard = (
 
 const routerHarness = vi.hoisted(() => ({
   guard: null as NavigationGuard | null,
+  routes: [] as Array<Record<string, any>>,
 }))
 
 const authStore = vi.hoisted(() => ({
@@ -30,15 +31,24 @@ const appStore = vi.hoisted(() => ({
   fetchPublicSettings: vi.fn(),
 }))
 
+const adminSettingsStore = vi.hoisted(() => ({
+  customMenuItems: [],
+  cloudflareWorkerContract: false,
+  fetch: vi.fn(),
+}))
+
 vi.mock('vue-router', () => ({
   createWebHistory: vi.fn(() => ({})),
-  createRouter: vi.fn(() => ({
-    beforeEach: vi.fn((guard: NavigationGuard) => {
-      routerHarness.guard = guard
-    }),
-    afterEach: vi.fn(),
-    onError: vi.fn(),
-  })),
+  createRouter: vi.fn((options: { routes: Array<Record<string, any>> }) => {
+    routerHarness.routes = options.routes
+    return {
+      beforeEach: vi.fn((guard: NavigationGuard) => {
+        routerHarness.guard = guard
+      }),
+      afterEach: vi.fn(),
+      onError: vi.fn(),
+    }
+  }),
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -50,7 +60,7 @@ vi.mock('@/stores/app', () => ({
 }))
 
 vi.mock('@/stores/adminSettings', () => ({
-  useAdminSettingsStore: () => ({ customMenuItems: [] }),
+  useAdminSettingsStore: () => adminSettingsStore,
 }))
 
 vi.mock('@/stores/adminCompliance', () => ({
@@ -117,6 +127,18 @@ describe('feature route guard', () => {
     appStore.publicSettingsLoaded = false
     appStore.cachedPublicSettings = null
     appStore.fetchPublicSettings.mockReset()
+    adminSettingsStore.cloudflareWorkerContract = false
+    adminSettingsStore.fetch.mockReset()
+    adminSettingsStore.fetch.mockResolvedValue(undefined)
+  })
+
+  it('statically redirects the host setup wizard and admin root', () => {
+    expect(routerHarness.routes.find((route) => route.path === '/setup')).toMatchObject({
+      redirect: '/login',
+    })
+    expect(routerHarness.routes.find((route) => route.path === '/admin')).toMatchObject({
+      redirect: '/admin/accounts',
+    })
   })
 
   it('waits for the first public-settings request before deciding payment access', async () => {
@@ -173,5 +195,37 @@ describe('feature route guard', () => {
     expect(appStore.fetchPublicSettings).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledOnce()
     expect(next).toHaveBeenCalledWith(target)
+  })
+
+  it('redirects unsupported Worker admin routes to the supported admin home', async () => {
+    authStore.isAdmin = true
+    adminSettingsStore.cloudflareWorkerContract = true
+
+    const { navigation, next } = runGuard({ requiresAdmin: true }, '/admin/ops')
+    await navigation
+
+    expect(adminSettingsStore.fetch).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledWith('/admin/accounts')
+  })
+
+  it.each([
+    '/admin/settings',
+    '/admin/users',
+    '/admin/groups',
+    '/admin/accounts',
+    '/admin/subscriptions',
+    '/admin/redeem',
+    '/admin/orders/plans',
+    '/admin/audit-logs',
+  ])('keeps migrated Worker admin route %s reachable', async (path) => {
+    authStore.isAdmin = true
+    adminSettingsStore.cloudflareWorkerContract = true
+
+    const { navigation, next } = runGuard({ requiresAdmin: true }, path)
+    await navigation
+
+    expect(next).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledWith()
   })
 })

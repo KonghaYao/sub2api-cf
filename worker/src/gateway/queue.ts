@@ -14,6 +14,10 @@ import {
   consumeNotificationEmailVerificationDelivery,
   isNotificationEmailVerificationEvent,
 } from '../user/notification-preferences'
+import {
+  consumeTotpEmailVerificationDelivery,
+  isTotpEmailVerificationEvent,
+} from '../user/totp'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
 
@@ -63,6 +67,11 @@ export async function consumeEvents(
       }
       if (isNotificationEmailVerificationEvent(message.body)) {
         await consumeNotificationEmailVerificationDelivery(message.body, env)
+        message.ack()
+        continue
+      }
+      if (isTotpEmailVerificationEvent(message.body)) {
+        await consumeTotpEmailVerificationDelivery(message.body, env)
         message.ack()
         continue
       }

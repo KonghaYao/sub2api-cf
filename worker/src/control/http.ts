@@ -1,17 +1,58 @@
 import { sha256Hex } from '../gateway/crypto'
 import { GatewayError } from '../gateway/errors'
 
+const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+  return parseJsonObject(await readBoundedText(request))
+}
+
+export async function readOptionalJsonObject(request: Request): Promise<Record<string, unknown>> {
+  const text = await readBoundedText(request)
+  return text.trim() === '' ? {} : parseJsonObject(text)
+}
+
+function parseJsonObject(text: string): Record<string, unknown> {
   let value: unknown
-  try {
-    value = await request.json()
-  } catch {
+  try { value = JSON.parse(text) } catch {
     throw new GatewayError(400, 'invalid_json', 'Request body must be valid JSON')
   }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new GatewayError(400, 'invalid_body', 'Request body must be a JSON object')
   }
   return value as Record<string, unknown>
+}
+
+async function readBoundedText(request: Request): Promise<string> {
+  const declaredLength = request.headers.get('content-length')
+  if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > MAX_JSON_BODY_BYTES) {
+    throw requestTooLarge()
+  }
+  if (request.body === null) return ''
+
+  const reader = request.body.getReader()
+  const decoder = new TextDecoder()
+  let total = 0
+  let text = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_JSON_BODY_BYTES) {
+        await reader.cancel()
+        throw requestTooLarge()
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+    return text + decoder.decode()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function requestTooLarge(): GatewayError {
+  return new GatewayError(413, 'request_too_large', 'Request body exceeds the 2 MiB limit')
 }
 
 export function requireIdempotencyKey(request: Request): string {

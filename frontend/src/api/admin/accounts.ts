@@ -4,6 +4,12 @@
  */
 
 import { apiClient } from '../client'
+import {
+  isCloudflareWorkerContractActive,
+  sanitizeCloudflareAccountCreatePayload,
+  sanitizeCloudflareAccountPayload,
+  sanitizeCloudflareAccountUpdatePayload,
+} from '@/utils/adminCapabilities'
 import type {
   Account,
   CreateAccountRequest,
@@ -27,6 +33,94 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState
 } from '@/types'
+
+function operationKey(prefix: string): string {
+  const requestID = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${prefix}-${requestID}`
+}
+
+let pendingWorkerCreate: { fingerprint: string; key: string } | null = null
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+async function workerCreateOperationKey(payload: unknown): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(canonicalJson(payload))
+  )
+  const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  if (pendingWorkerCreate?.fingerprint === fingerprint) return pendingWorkerCreate.key
+  const key = operationKey('admin-account-create')
+  pendingWorkerCreate = { fingerprint, key }
+  return key
+}
+
+function workerAccountListParams(
+  page: number,
+  pageSize: number,
+  filters?: { platform?: string; status?: string; search?: string }
+): Record<string, string | number> {
+  if (!isCloudflareWorkerContractActive()) return { page, page_size: pageSize, ...filters }
+  const params: Record<string, string | number> = { page, page_size: pageSize }
+  if (filters?.platform === 'openai') params.platform = 'openai'
+  if (filters?.status === 'active' || filters?.status === 'inactive') params.status = filters.status
+  const search = filters?.search?.trim()
+  if (search) params.search = search
+  return params
+}
+
+function adaptAccount(account: Account): Account {
+  const value = account as unknown as Record<string, unknown>
+  if (typeof value.id !== 'string' || value.auth_scheme !== 'bearer') return account
+
+  const groupLinks = Array.isArray(value.group_links)
+    ? value.group_links as Array<{ group_id?: unknown; priority?: unknown }>
+    : []
+  const createdAt = Number(value.created_at_ms)
+  const updatedAt = Number(value.updated_at_ms)
+  const enabled = value.enabled === true
+
+  return {
+    ...value,
+    id: value.id as unknown as number,
+    type: 'apikey',
+    credentials: { base_url: value.base_url },
+    proxy_id: null,
+    concurrency: Number(value.max_concurrency) || 1,
+    priority: Number(groupLinks[0]?.priority) || 0,
+    status: enabled ? 'active' : 'inactive',
+    error_message: typeof value.last_health_error === 'string' ? value.last_health_error : null,
+    last_used_at: null,
+    expires_at: null,
+    auto_pause_on_expired: false,
+    created_at: Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : '',
+    updated_at: Number.isFinite(updatedAt) ? new Date(updatedAt).toISOString() : '',
+    group_ids: groupLinks.map((link) => String(link.group_id)) as unknown as number[],
+    schedulable: enabled,
+    rate_limited_at: null,
+    rate_limit_reset_at: null,
+    overload_until: null,
+    temp_unschedulable_until: null,
+    temp_unschedulable_reason: null,
+    session_window_start: null,
+    session_window_end: null,
+    session_window_status: null,
+  } as unknown as Account
+}
+
+function adaptAccountList(response: PaginatedResponse<Account>): PaginatedResponse<Account> {
+  return { ...response, items: response.items.map(adaptAccount) }
+}
 
 /**
  * List all accounts with pagination
@@ -55,14 +149,10 @@ export async function list(
   }
 ): Promise<PaginatedResponse<Account>> {
   const { data } = await apiClient.get<PaginatedResponse<Account>>('/admin/accounts', {
-    params: {
-      page,
-      page_size: pageSize,
-      ...filters
-    },
+    params: workerAccountListParams(page, pageSize, filters),
     signal: options?.signal
   })
-  return data
+  return adaptAccountList(data)
 }
 
 export interface AccountListWithEtagResult {
@@ -136,11 +226,7 @@ export async function listWithEtag(
   }
 
   const response = await apiClient.get<PaginatedResponse<Account>>('/admin/accounts', {
-    params: {
-      page,
-      page_size: pageSize,
-      ...filters
-    },
+    params: workerAccountListParams(page, pageSize, filters),
     headers,
     signal: options?.signal,
     validateStatus: (status) => (status >= 200 && status < 300) || status === 304
@@ -158,7 +244,7 @@ export async function listWithEtag(
   return {
     notModified: false,
     etag: etagHeader,
-    data: response.data
+    data: adaptAccountList(response.data)
   }
 }
 
@@ -167,9 +253,9 @@ export async function listWithEtag(
  * @param id - Account ID
  * @returns Account details
  */
-export async function getById(id: number): Promise<Account> {
+export async function getById(id: number | string): Promise<Account> {
   const { data } = await apiClient.get<Account>(`/admin/accounts/${id}`)
-  return data
+  return adaptAccount(data)
 }
 
 /**
@@ -178,8 +264,14 @@ export async function getById(id: number): Promise<Account> {
  * @returns Created account
  */
 export async function create(accountData: CreateAccountRequest): Promise<Account> {
-  const { data } = await apiClient.post<Account>('/admin/accounts', accountData)
-  return data
+  const workerContract = isCloudflareWorkerContractActive()
+  const payload = sanitizeCloudflareAccountCreatePayload(accountData)
+  const idempotencyKey = workerContract ? await workerCreateOperationKey(payload) : null
+  const { data } = await apiClient.post<Account>('/admin/accounts', payload, idempotencyKey
+    ? { headers: { 'Idempotency-Key': idempotencyKey } }
+    : undefined)
+  if (workerContract) pendingWorkerCreate = null
+  return adaptAccount(data)
 }
 
 /**
@@ -232,9 +324,17 @@ export async function duplicate(id: number): Promise<Account> {
  * @param updates - Fields to update
  * @returns Updated account
  */
-export async function update(id: number, updates: UpdateAccountRequest): Promise<Account> {
-  const { data } = await apiClient.put<Account>(`/admin/accounts/${id}`, updates)
-  return data
+export async function update(id: number | string, updates: UpdateAccountRequest): Promise<Account> {
+  const payload = sanitizeCloudflareAccountUpdatePayload(updates)
+  const expectedVersion = (payload as unknown as Record<string, unknown>).expected_control_version
+  const { data } = await apiClient.put<Account>(
+    `/admin/accounts/${id}`,
+    payload,
+    isCloudflareWorkerContractActive() && Number.isSafeInteger(expectedVersion)
+      ? { headers: { 'If-Match': `"${expectedVersion}"` } }
+      : undefined
+  )
+  return adaptAccount(data)
 }
 
 /**
@@ -252,9 +352,17 @@ export async function checkMixedChannelRisk(
  * @param id - Account ID
  * @returns Success confirmation
  */
-export async function deleteAccount(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/accounts/${id}`)
-  return data
+export async function deleteAccount(
+  id: number | string,
+  expectedControlVersion?: number
+): Promise<Account | { message: string }> {
+  const { data } = await apiClient.delete<Account | { message: string }>(
+    `/admin/accounts/${id}`,
+    isCloudflareWorkerContractActive() && Number.isSafeInteger(expectedControlVersion)
+      ? { headers: { 'If-Match': `"${expectedControlVersion}"` } }
+      : undefined
+  )
+  return 'id' in data ? adaptAccount(data as Account) : data
 }
 
 /**
@@ -452,7 +560,10 @@ export async function exchangeCode(
   endpoint: string,
   exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number }
 ): Promise<Record<string, unknown>> {
-  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, exchangeData)
+  const { data } = await apiClient.post<Record<string, unknown>>(
+    endpoint,
+    sanitizeCloudflareAccountPayload(exchangeData)
+  )
   return data
 }
 
@@ -470,7 +581,7 @@ export async function batchCreate(accounts: CreateAccountRequest[]): Promise<{
     success: number
     failed: number
     results: Array<{ success: boolean; account?: Account; error?: string }>
-  }>('/admin/accounts/batch', { accounts })
+  }>('/admin/accounts/batch', sanitizeCloudflareAccountPayload({ accounts }))
   return data
 }
 
@@ -513,12 +624,12 @@ export async function bulkUpdate(
   long_context_inherited_count?: number
   results: Array<{ account_id: number; success: boolean; error?: string }>
   }> {
-  const payload = Array.isArray(accountIdsOrPayload)
+  const payload = sanitizeCloudflareAccountPayload(Array.isArray(accountIdsOrPayload)
     ? {
         account_ids: accountIdsOrPayload,
         ...(updates ?? {})
       }
-    : accountIdsOrPayload
+    : accountIdsOrPayload)
   const { data } = await apiClient.post<{
     success: number
     failed: number

@@ -328,6 +328,50 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
+  it('uses the Worker update contract and preserves links by omission', async () => {
+    const account = {
+      ...buildAccount(),
+      id: 'account-uuid',
+      name: 'Worker account',
+      base_url: 'https://api.openai.com/v1',
+      enabled: true,
+      max_concurrency: 4,
+      control_version: 6,
+      group_links: [{ group_id: 'group-1', priority: 0, weight: 1 }],
+      model_capabilities: [{ model_id: 'model-1', responses: true }],
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mount(EditAccountModal, {
+      props: {
+        show: true,
+        account,
+        proxies: [],
+        groups: [],
+        cloudflareWorker: true,
+      },
+      global: {
+        stubs: {
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+        },
+      },
+    })
+
+    await wrapper.get('[data-testid="worker-account-edit-name"]').setValue('Updated worker')
+    await wrapper.get('[data-testid="worker-account-edit-api-key"]').setValue('replacement-key')
+    await wrapper.get('form#edit-worker-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledWith('account-uuid', {
+      name: 'Updated worker',
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'replacement-key',
+      enabled: true,
+      max_concurrency: 4,
+      expected_control_version: 6,
+    })
+    expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

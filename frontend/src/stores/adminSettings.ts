@@ -2,10 +2,14 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { adminAPI } from '@/api'
 import type { CustomMenuItem } from '@/types'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const loaded = ref(false)
   const loading = ref(false)
+  // This repository is deployed on Workers. Stay fail-closed until a legacy
+  // server explicitly identifies itself through a successful settings response.
+  const cloudflareWorkerContract = ref(true)
 
   const readCachedBool = (key: string, defaultValue: boolean): boolean => {
     try {
@@ -61,16 +65,26 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
         adminAPI.settings.getSettings(),
         adminAPI.payment.getConfig()
       ])
-      opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
+      cloudflareWorkerContract.value = settings.cloudflare_worker_contract === true
+      setCloudflareWorkerContractActive(cloudflareWorkerContract.value)
+      opsMonitoringEnabled.value = cloudflareWorkerContract.value
+        ? false
+        : (settings.ops_monitoring_enabled ?? true)
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
 
-      opsRealtimeMonitoringEnabled.value = settings.ops_realtime_monitoring_enabled ?? true
+      opsRealtimeMonitoringEnabled.value = cloudflareWorkerContract.value
+        ? false
+        : (settings.ops_realtime_monitoring_enabled ?? true)
       writeCachedBool('ops_realtime_monitoring_enabled_cached', opsRealtimeMonitoringEnabled.value)
 
       opsQueryModeDefault.value = settings.ops_query_mode_default || 'auto'
       writeCachedString('ops_query_mode_default_cached', opsQueryModeDefault.value)
 
-      customMenuItems.value = Array.isArray(settings.custom_menu_items) ? settings.custom_menu_items : []
+      customMenuItems.value = cloudflareWorkerContract.value
+        ? []
+        : Array.isArray(settings.custom_menu_items)
+          ? settings.custom_menu_items
+          : []
 
       paymentEnabled.value = paymentConfigResp.data?.enabled ?? false
       writeCachedBool('payment_enabled_cached', paymentEnabled.value)
@@ -136,6 +150,7 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   return {
     loaded,
     loading,
+    cloudflareWorkerContract,
     opsMonitoringEnabled,
     opsRealtimeMonitoringEnabled,
     opsQueryModeDefault,

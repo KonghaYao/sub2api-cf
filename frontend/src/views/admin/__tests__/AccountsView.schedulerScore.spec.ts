@@ -52,6 +52,13 @@ vi.mock('@/stores/auth', () => ({
   })
 }))
 
+vi.mock('@/stores/adminSettings', () => ({
+  useAdminSettingsStore: () => ({
+    cloudflareWorkerContract: false,
+    fetch: vi.fn().mockResolvedValue(undefined)
+  })
+}))
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {

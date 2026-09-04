@@ -1,7 +1,7 @@
 <template>
   <div class="relative">
     <!-- Admin: Full version badge with dropdown -->
-    <template v-if="isAdmin">
+    <template v-if="isAdmin && !cloudflareWorkerContract">
       <button
         @click="toggleDropdown"
         class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
@@ -640,7 +640,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useAuthStore, useAppStore } from '@/stores'
+import { useAdminSettingsStore, useAuthStore, useAppStore } from '@/stores'
 import {
   performUpdate,
   restartService,
@@ -663,8 +663,10 @@ const props = defineProps<{
 
 const authStore = useAuthStore()
 const appStore = useAppStore()
+const adminSettingsStore = useAdminSettingsStore()
 
 const isAdmin = computed(() => authStore.isAdmin)
+const cloudflareWorkerContract = computed(() => adminSettingsStore.cloudflareWorkerContract)
 
 const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
@@ -911,8 +913,12 @@ function handleClickOutside(event: MouseEvent) {
 
 onMounted(() => {
   if (isAdmin.value) {
-    // Use cached version if available, otherwise fetch
-    appStore.fetchVersion(false)
+    void adminSettingsStore.fetch().then(() => {
+      if (!cloudflareWorkerContract.value) {
+        // The legacy server owns update, rollback and restart lifecycle actions.
+        void appStore.fetchVersion(false)
+      }
+    })
   }
   document.addEventListener('click', handleClickOutside)
 })
