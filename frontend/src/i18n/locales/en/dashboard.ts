@@ -805,6 +805,7 @@ export default {
       setupTitle: 'Set Up Two-Factor Authentication',
       setupStep1: 'Scan the QR code below with your authenticator app',
       setupStep2: 'Enter the 6-digit code from your app',
+      setupStep3: 'Save your recovery codes',
       manualEntry: "Can't scan? Enter the key manually:",
       enterCode: 'Enter 6-digit code',
       verify: 'Verify',
@@ -827,7 +828,16 @@ export default {
       enterEmailCode: 'Enter 6-digit code',
       sendCode: 'Send Code',
       codeSent: 'Verification code sent to your email',
-      sendCodeFailed: 'Failed to send verification code'
+      sendCodeFailed: 'Failed to send verification code',
+      recoveryCodesWarning: 'Each recovery code can replace your authenticator once. They will not be shown again, so store them somewhere safe.',
+      copyRecoveryCodes: 'Copy all recovery codes',
+      recoveryCodesSavedConfirmation: 'I have stored these recovery codes safely.',
+      recoveryCodesRemaining: '{count} recovery codes remaining',
+      regenerateRecoveryCodes: 'Generate new recovery codes',
+      recoveryCodesRegenerated: 'New recovery codes generated. The previous codes are no longer valid.',
+      useRecoveryCode: 'Use a recovery code',
+      useAuthenticatorCode: 'Use authenticator code',
+      recoveryCodePlaceholder: 'XXXX-XXXX-XXXX-XXXX'
     },
     passkey: {
       title: 'Passkeys',

@@ -79,13 +79,30 @@ export interface TotpStepUpResponse {
   expires_in: number
 }
 
+export interface TotpRecoveryCodesResponse {
+  success: boolean
+  recovery_codes: string[]
+}
+
 /**
  * Verify a TOTP code to grant the current session a short-lived step-up
  * (sudo) window for sensitive operations (account export, DB backup download...).
  * @param code - 6-digit TOTP code
  */
 export async function stepUp(code: string): Promise<TotpStepUpResponse> {
-  const { data } = await apiClient.post<TotpStepUpResponse>('/user/totp/step-up', { code })
+  const payload = /^\d{6}$/.test(code)
+    ? { code }
+    : { recovery_code: code }
+  const { data } = await apiClient.post<TotpStepUpResponse>('/user/totp/step-up', payload)
+  return data
+}
+
+/** Rotates the recovery-code set after a recent step-up verification. */
+export async function regenerateRecoveryCodes(): Promise<TotpRecoveryCodesResponse> {
+  const { data } = await apiClient.post<TotpRecoveryCodesResponse>(
+    '/user/totp/recovery-codes/regenerate',
+    {},
+  )
   return data
 }
 
@@ -96,7 +113,8 @@ export const totpAPI = {
   initiateSetup,
   enable,
   disable,
-  stepUp
+  stepUp,
+  regenerateRecoveryCodes,
 }
 
 export default totpAPI

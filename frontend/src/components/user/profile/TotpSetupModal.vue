@@ -1,7 +1,11 @@
 <template>
-  <div class="fixed inset-0 z-50 overflow-y-auto" @click.self="$emit('close')">
+  <div class="fixed inset-0 z-50 overflow-y-auto" @click.self="handleCloseRequest">
     <div class="flex min-h-full items-center justify-center p-4">
-      <div class="fixed inset-0 bg-black/50 transition-opacity" @click="$emit('close')"></div>
+      <div
+        data-testid="totp-setup-backdrop"
+        class="fixed inset-0 bg-black/50 transition-opacity"
+        @click="handleCloseRequest"
+      ></div>
 
       <div class="relative w-full max-w-md transform rounded-xl bg-white p-6 shadow-xl transition-all dark:bg-dark-800">
         <!-- Header -->
@@ -161,6 +165,35 @@
             </div>
           </form>
         </div>
+
+        <!-- Step 3: Recovery codes are shown exactly once. -->
+        <div v-if="step === 3" class="space-y-5">
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">
+            {{ t('profile.totp.recoveryCodesWarning') }}
+          </div>
+          <div class="grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-4 dark:bg-dark-700">
+            <code
+              v-for="recoveryCode in recoveryCodes"
+              :key="recoveryCode"
+              class="select-all text-center font-mono text-sm text-gray-900 dark:text-white"
+            >{{ recoveryCode }}</code>
+          </div>
+          <button type="button" class="btn btn-secondary w-full" @click="copyRecoveryCodes">
+            {{ t('profile.totp.copyRecoveryCodes') }}
+          </button>
+          <label class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
+            <input v-model="recoveryCodesSaved" type="checkbox" class="mt-0.5 rounded border-gray-300" />
+            <span>{{ t('profile.totp.recoveryCodesSavedConfirmation') }}</span>
+          </label>
+          <button
+            type="button"
+            class="btn btn-primary w-full"
+            :disabled="!recoveryCodesSaved"
+            @click="finishSetup"
+          >
+            {{ t('common.confirm') }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -182,7 +215,8 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const appStore = useAppStore()
 
-// Step: 0 = verify identity, 1 = QR code, 2 = verify TOTP code
+// Step: 0 = verify identity, 1 = QR code, 2 = verify TOTP code,
+// 3 = one-time recovery-code handoff.
 const step = ref(0)
 const methodLoading = ref(true)
 const verificationMethod = ref<'email' | 'password'>('password')
@@ -197,6 +231,8 @@ const verifying = ref(false)
 const code = ref<string[]>(['', '', '', '', '', ''])
 const inputRefs = ref<(HTMLInputElement | null)[]>([])
 const qrCodeDataUrl = ref('')
+const recoveryCodes = ref<string[]>([])
+const recoveryCodesSaved = ref(false)
 
 const stepDescription = computed(() => {
   switch (step.value) {
@@ -208,6 +244,8 @@ const stepDescription = computed(() => {
       return t('profile.totp.setupStep1')
     case 2:
       return t('profile.totp.setupStep2')
+    case 3:
+      return t('profile.totp.setupStep3')
     default:
       return ''
   }
@@ -309,6 +347,29 @@ const copySecret = async () => {
   }
 }
 
+const copyRecoveryCodes = async () => {
+  try {
+    await navigator.clipboard.writeText(recoveryCodes.value.join('\n'))
+    appStore.showSuccess(t('common.copied'))
+  } catch {
+    appStore.showError(t('common.copyFailed'))
+  }
+}
+
+const finishSetup = () => {
+  if (!recoveryCodesSaved.value) return
+  appStore.showSuccess(t('profile.totp.enableSuccess'))
+  emit('success')
+}
+
+const handleCloseRequest = () => {
+  // Enabling TOTP has already committed by step 3, and these plaintext codes
+  // cannot be fetched again. Require the explicit handoff acknowledgement so
+  // an accidental backdrop click cannot strand the user without recovery.
+  if (step.value === 3) return
+  emit('close')
+}
+
 const loadVerificationMethod = async () => {
   methodLoading.value = true
   try {
@@ -373,12 +434,13 @@ const handleVerify = async () => {
   verifying.value = true
 
   try {
-    await totpAPI.enable({
+    const result = await totpAPI.enable({
       totp_code: totpCode,
       setup_token: setupData.value.setup_token
     })
-    appStore.showSuccess(t('profile.totp.enableSuccess'))
-    emit('success')
+    recoveryCodes.value = result.recovery_codes
+    recoveryCodesSaved.value = false
+    step.value = 3
   } catch (err: any) {
     appStore.showError(err.response?.data?.message || t('profile.totp.verifyFailed'))
     code.value = ['', '', '', '', '', '']

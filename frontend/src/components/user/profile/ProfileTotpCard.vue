@@ -46,15 +46,28 @@
             <p v-if="status.enabled_at" class="text-sm text-gray-500 dark:text-gray-400">
               {{ t('profile.totp.enabledAt') }}: {{ formatDate(status.enabled_at) }}
             </p>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+              {{ t('profile.totp.recoveryCodesRemaining', { count: status.recovery_codes_remaining }) }}
+            </p>
           </div>
         </div>
-        <button
-          type="button"
-          class="btn btn-outline-danger"
-          @click="showDisableDialog = true"
-        >
-          {{ t('profile.totp.disable') }}
-        </button>
+        <div class="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            :disabled="regeneratingCodes"
+            @click="handleRegenerateCodes"
+          >
+            {{ t('profile.totp.regenerateRecoveryCodes') }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-outline-danger"
+            @click="showDisableDialog = true"
+          >
+            {{ t('profile.totp.disable') }}
+          </button>
+        </div>
       </div>
 
       <!-- 2FA Not Enabled -->
@@ -97,6 +110,42 @@
       @close="showDisableDialog = false"
       @success="handleDisableSuccess"
     />
+
+    <TotpStepUpDialog :controller="recoveryStepUp" />
+
+    <div v-if="rotatedCodes.length > 0" class="fixed inset-0 z-[70] overflow-y-auto">
+      <div class="flex min-h-full items-center justify-center p-4">
+        <div class="fixed inset-0 bg-black/50"></div>
+        <div class="relative w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800">
+          <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+            {{ t('profile.totp.setupStep3') }}
+          </h3>
+          <p class="mt-2 text-sm text-amber-700 dark:text-amber-300">
+            {{ t('profile.totp.recoveryCodesRegenerated') }}
+          </p>
+          <div class="mt-4 grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-4 dark:bg-dark-700">
+            <code v-for="code in rotatedCodes" :key="code" class="select-all text-center font-mono text-sm">
+              {{ code }}
+            </code>
+          </div>
+          <button type="button" class="btn btn-secondary mt-4 w-full" @click="copyRotatedCodes">
+            {{ t('profile.totp.copyRecoveryCodes') }}
+          </button>
+          <label class="mt-4 flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
+            <input v-model="rotatedCodesSaved" type="checkbox" class="mt-0.5 rounded border-gray-300" />
+            <span>{{ t('profile.totp.recoveryCodesSavedConfirmation') }}</span>
+          </label>
+          <button
+            type="button"
+            class="btn btn-primary mt-4 w-full"
+            :disabled="!rotatedCodesSaved"
+            @click="closeRotatedCodes"
+          >
+            {{ t('common.confirm') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -104,16 +153,24 @@
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { totpAPI } from '@/api'
+import { useAppStore } from '@/stores'
+import { isStepUpCancelled, useStepUp } from '@/composables/useStepUp'
 import type { TotpStatus } from '@/types'
+import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 import TotpSetupModal from './TotpSetupModal.vue'
 import TotpDisableDialog from './TotpDisableDialog.vue'
 
 const { t } = useI18n()
+const appStore = useAppStore()
+const recoveryStepUp = useStepUp()
 
 const loading = ref(true)
 const status = ref<TotpStatus | null>(null)
 const showSetupModal = ref(false)
 const showDisableDialog = ref(false)
+const regeneratingCodes = ref(false)
+const rotatedCodes = ref<string[]>([])
+const rotatedCodesSaved = ref(false)
 
 const loadStatus = async () => {
   loading.value = true
@@ -134,6 +191,37 @@ const handleSetupSuccess = () => {
 const handleDisableSuccess = () => {
   showDisableDialog.value = false
   loadStatus()
+}
+
+const handleRegenerateCodes = async () => {
+  regeneratingCodes.value = true
+  try {
+    const result = await recoveryStepUp.run(() => totpAPI.regenerateRecoveryCodes())
+    rotatedCodes.value = result.recovery_codes
+    rotatedCodesSaved.value = false
+    await loadStatus()
+  } catch (error: any) {
+    if (!isStepUpCancelled(error)) {
+      appStore.showError(error?.message || t('common.error'))
+    }
+  } finally {
+    regeneratingCodes.value = false
+  }
+}
+
+const copyRotatedCodes = async () => {
+  try {
+    await navigator.clipboard.writeText(rotatedCodes.value.join('\n'))
+    appStore.showSuccess(t('common.copied'))
+  } catch {
+    appStore.showError(t('common.copyFailed'))
+  }
+}
+
+const closeRotatedCodes = () => {
+  if (!rotatedCodesSaved.value) return
+  rotatedCodes.value = []
+  rotatedCodesSaved.value = false
 }
 
 const formatDate = (timestamp: number) => {

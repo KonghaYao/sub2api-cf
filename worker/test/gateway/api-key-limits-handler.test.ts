@@ -421,6 +421,14 @@ describe('gateway API key admission lifecycle', () => {
     }],
   ])('protects upstream token-count path %s with the same admission', async (path, body) => {
     const state = await harness()
+    if (path === '/v1/responses/input_tokens') {
+      // Custom OpenAI-compatible relays intentionally count locally. Point this
+      // admission-order contract at the official endpoint so it continues to
+      // exercise the protected upstream token-count path named by the test.
+      await state.env.DB.prepare(
+        `UPDATE accounts SET base_url = 'https://api.openai.com/v1' WHERE id = 'account-1'`,
+      ).run()
+    }
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ input_tokens: 2 }))
 
     const response = await createApp().request(path, gatewayRequest(path, body), state.env)

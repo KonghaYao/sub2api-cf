@@ -359,4 +359,149 @@ describe('Chat Completions to Responses binding bridge', () => {
       )))
     expect(leases).toEqual([{ status: 'released' }])
   })
+
+  it('fails over a pre-output Responses semantic failure through real D1, DO, and Queue bindings', async () => {
+    const bootstrap = await jsonRequest('/api/v1/admin/bootstrap', {
+      user: {
+        email: 'bridge-failover-admin@binding-e2e.test',
+        display_name: 'Bridge Failover Admin',
+        balance_micros: 1_000_000,
+      },
+      group: { name: 'Bridge Failover Group' },
+      account: {
+        name: 'Failing Responses mock',
+        base_url: 'https://upstream.e2e.invalid/v1',
+        api_key: 'upstream-failing-e2e-secret',
+        max_concurrency: 2,
+      },
+      api_key: { name: 'Bridge failover key' },
+      models: [{
+        public_name: 'gpt-bridge-failover',
+        upstream_name: 'gpt-bridge-failover-upstream',
+        endpoint: 'both',
+        input_micros_per_million: 1_000_000,
+        output_micros_per_million: 2_000_000,
+        per_request_micros: 7,
+        minimum_reservation_micros: 100,
+      }],
+    }, {
+      authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    })
+    expect(bootstrap.status).toBe(201)
+    const bootstrapped = await responseData<{
+      user_id: string
+      group_id: string
+      account_id: string
+      api_key_id: string
+      api_key: string
+      admin_session: string
+    }>(bootstrap)
+    const routeModel = await env.DB.prepare(
+      'SELECT id FROM models WHERE public_name = ?',
+    ).bind('gpt-bridge-failover').first<{ id: string }>()
+    expect(routeModel).not.toBeNull()
+    // The E2E file intentionally shares one migrated D1 instance, so only its
+    // first bootstrapped administrator receives the one-time super-admin grant.
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO admin_user_roles (
+         user_id, role_id, active, control_version, assigned_by_user_id, assigned_at_ms
+       ) VALUES (?, 'admin', 1, 1, NULL, ?)`,
+    ).bind(bootstrapped.user_id, Date.now()).run()
+    await env.DB.prepare(
+      `UPDATE account_models
+          SET chat_completions = 0, responses = 1, updated_at_ms = ?
+        WHERE account_id = ? AND model_id = ?`,
+    ).bind(Date.now(), bootstrapped.account_id, routeModel!.id).run()
+
+    const fallback = await jsonRequest('/api/v1/admin/accounts', {
+      name: 'Successful Responses fallback',
+      platform: 'openai',
+      protocol: 'openai',
+      base_url: 'https://upstream-fallback.e2e.invalid/v1',
+      auth_scheme: 'bearer',
+      provider_config: {},
+      api_key: 'upstream-fallback-e2e-secret',
+      enabled: true,
+      max_concurrency: 2,
+      group_links: [{ group_id: bootstrapped.group_id, priority: 1, weight: 1 }],
+      model_capabilities: [{
+        model_id: routeModel!.id,
+        chat_completions: false,
+        responses: true,
+      }],
+    }, {
+      authorization: `Bearer ${bootstrapped.admin_session}`,
+      'idempotency-key': 'binding-e2e-create-fallback-account-0001',
+    })
+    expect(fallback.status, JSON.stringify(await fallback.clone().json())).toBe(201)
+    const fallbackAccount = await responseData<{ id: string }>(fallback)
+
+    const completion = await jsonRequest('/v1/chat/completions', {
+      model: 'gpt-bridge-failover',
+      messages: [{ role: 'user', content: 'Use the healthy fallback.' }],
+      stream: false,
+    }, {
+      authorization: `Bearer ${bootstrapped.api_key}`,
+    })
+
+    expect(completion.status, JSON.stringify(await completion.clone().json())).toBe(200)
+    await expect(completion.json()).resolves.toMatchObject({
+      id: 'resp-binding-failover',
+      object: 'chat.completion',
+      model: 'gpt-bridge-failover',
+      choices: [{ message: { role: 'assistant', content: 'binding-failover-ok' } }],
+      usage: { prompt_tokens: 9, completion_tokens: 3, total_tokens: 12 },
+    })
+
+    await expect.poll(async () => {
+      const projections = await env.DB.prepare(
+        `SELECT input_tokens, output_tokens, amount_micros, outcome, stream
+           FROM usage_projection WHERE api_key_id = ?`,
+      ).bind(bootstrapped.api_key_id).all()
+      const user = await env.DB.prepare(
+        'SELECT balance_micros FROM users WHERE id = ?',
+      ).bind(bootstrapped.user_id).first()
+      return { projections: projections.results, user }
+    }, { timeout: 10_000, interval: 25 }).toEqual({
+      projections: [{
+        input_tokens: 9,
+        output_tokens: 3,
+        amount_micros: 22,
+        outcome: 'completed',
+        stream: 0,
+      }],
+      user: { balance_micros: 999_978 },
+    })
+
+    const poolName = [
+      `group:${bootstrapped.group_id}`,
+      'platform:openai',
+      `model:${routeModel!.id}`,
+      'endpoint:responses',
+      'shard:0',
+    ].join(':')
+    const pool = env.POOL_STATE.get(env.POOL_STATE.idFromName(poolName))
+    const state = await runInDurableObject(pool, (_instance, storage) => ({
+      accounts: Array.from(storage.storage.sql.exec<{
+        account_id: string
+        consecutive_failures: number
+      }>(
+        'SELECT account_id, consecutive_failures FROM pool_accounts ORDER BY priority ASC',
+      )),
+      leases: Array.from(storage.storage.sql.exec<{
+        account_id: string
+        status: string
+      }>(
+        'SELECT account_id, status FROM pool_leases ORDER BY created_at_ms ASC',
+      )),
+    }))
+    expect(state.accounts).toEqual([
+      { account_id: bootstrapped.account_id, consecutive_failures: 1 },
+      { account_id: fallbackAccount.id, consecutive_failures: 0 },
+    ])
+    expect(state.leases).toEqual([
+      { account_id: bootstrapped.account_id, status: 'released' },
+      { account_id: fallbackAccount.id, status: 'released' },
+    ])
+  })
 })

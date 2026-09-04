@@ -37,11 +37,16 @@ import {
 } from './protocols/chat-responses'
 import {
   BufferedResponsesToChatCompletions,
+  isResponsesFailedTerminal,
   ResponsesToChatCompletionsEventCodec,
   ResponsesToChatError,
   responsesFailureDetails,
   responsesToChatCompletionsResponse,
 } from './protocols/chat-from-responses'
+import {
+  inspectResponsesSsePrelude,
+  isRetryableResponsesFailure,
+} from './protocols/responses-prelude'
 import {
   persistSettlementRecovery,
   settleRecoveryRequest,
@@ -464,14 +469,20 @@ export async function handleResponsesCompact(
     context,
     'responses',
     (body) => {
-      const prepared = prepareOpenAiRequest(body, 'responses', false)
+      validateClientControls(body)
+      const requestedModel = requiredModel(body)
+      const compactBody = normalizeResponsesCompactBody(body)
       return {
-        ...prepared,
+        requestedModel,
+        // The path-based compact contract is unary. Request-scoped stream
+        // signalling is deliberately stripped with the other transient fields.
+        stream: false,
         resolveUpstream: (model, upstreamEndpoint, platform) => {
           assertProviderOperation(platform, 'responses_compact')
           return {
-            ...prepared.resolveUpstream(model, upstreamEndpoint, platform),
+            body: { ...compactBody, model: model.upstream_name },
             operation: 'responses_compact' as const,
+            responseProtocol: 'openai' as const,
           }
         },
       }
@@ -628,6 +639,12 @@ export async function handleResponsesInputTokens(
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     await prepareGatewayReservations(context.env, principal, requestId, 0)
     reservationsPrepared = true
+    // The legacy service intentionally estimates locally for custom OpenAI-
+    // compatible relays: most implement /responses but not this preflight
+    // subroute. Preserve exact upstream counting for the official endpoint.
+    if (shouldEstimateResponsesInputTokensLocally(route.candidates)) {
+      return responsesInputTokensResponse(estimateInputTokens(upstreamBody), requestId)
+    }
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -648,6 +665,9 @@ export async function handleResponsesInputTokens(
       context.req.raw.signal,
       'responses_input_tokens',
       route.model.upstream_name,
+      undefined,
+      false,
+      true,
     )
 
     if (!acquired.response.ok) {
@@ -724,6 +744,44 @@ function responsesInputTokensResponse(inputTokens: number, requestId: string): R
       'x-request-id': requestId,
     },
   })
+}
+
+function normalizeResponsesCompactBody(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {}
+  for (const field of [
+    'model',
+    'input',
+    'instructions',
+    'tools',
+    'reasoning',
+    'service_tier',
+    'text',
+    'previous_response_id',
+  ] as const) {
+    if (body[field] !== undefined) normalized[field] = body[field]
+  }
+  if (Array.isArray(body.tools) && body.tools.length > 0 && body.parallel_tool_calls !== undefined) {
+    normalized.parallel_tool_calls = body.parallel_tool_calls
+  }
+  return normalized
+}
+
+function shouldEstimateResponsesInputTokensLocally(
+  candidates: Array<{ base_url: string }>,
+): boolean {
+  return candidates.every((candidate) => !isOfficialOpenAiBaseUrl(candidate.base_url))
+}
+
+function isOfficialOpenAiBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === 'api.openai.com'
+  } catch {
+    // Repository validation owns malformed-base-url errors. Avoid turning an
+    // invalid account projection into an unaudited local-success path.
+    return true
+  }
 }
 
 function geminiTokenCountResponse(inputTokens: number, requestId: string): Response {
@@ -1059,6 +1117,7 @@ async function dispatchGateway(
       providerDispatch.operation,
       model.upstream_name,
       affinityKey,
+      stream,
     ).catch(async (error) => {
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
@@ -1256,6 +1315,8 @@ async function acquireUpstream(
   operation: UpstreamOperation = endpoint,
   upstreamModel?: string,
   affinityKey?: string,
+  clientStream = true,
+  locallyEstimateCustomInputTokens = false,
 ): Promise<AcquiredUpstream> {
   let lastError: GatewayError | null = null
   const attempts = endpoint === 'embeddings'
@@ -1267,6 +1328,21 @@ async function acquireUpstream(
     try {
       accountId = await reservePoolAccount(pool, leaseId, affinityKey)
       const account = await getAccountCredential(env, groupId, modelId, endpoint, accountId)
+      if (
+        locallyEstimateCustomInputTokens && operation === 'responses_input_tokens' &&
+        account.platform === 'openai' &&
+        !isOfficialOpenAiBaseUrl(account.base_url)
+      ) {
+        return {
+          response: Response.json({
+            object: 'response.input_tokens',
+            input_tokens: estimateInputTokens(body),
+          }),
+          accountId,
+          leaseId,
+          retryableFailure: false,
+        }
+      }
       if (!env.CREDENTIALS_MASTER_KEY) {
         throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
       }
@@ -1284,7 +1360,7 @@ async function acquireUpstream(
         body,
         client_headers: inboundHeaders,
       })
-      const response = await fetchWithHeaderTimeout(new URL(plan.url), {
+      let response = await fetchWithHeaderTimeout(new URL(plan.url), {
         method: plan.method,
         headers: plan.headers,
         body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
@@ -1305,6 +1381,37 @@ async function acquireUpstream(
         await bestEffort(() => recordPoolFailure(pool, accountId!, `${requestId}:failure:${attempt}`, FAILURE_COOLDOWN_MS))
         await bestEffort(() => releasePoolLease(pool, leaseId))
         continue
+      }
+      if (
+        response.ok && operation === 'responses' &&
+        (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')
+      ) {
+        const inspected = await inspectResponsesSsePrelude(response, {
+          stopAtVisible: clientStream,
+        })
+        response = inspected.response
+        const semantic = inspected.decision
+        if (semantic.kind === 'failed') {
+          const semanticRetryable = isRetryableResponsesFailure(semantic.failure)
+          if (semanticRetryable && attempt + 1 < Math.min(4, candidateCount)) {
+            lastError = new GatewayError(
+              502,
+              semantic.failure.code,
+              semantic.failure.message,
+              'server_error',
+            )
+            await bestEffort(async () => response.body?.cancel())
+            await bestEffort(() => recordPoolFailure(
+              pool,
+              accountId!,
+              `${requestId}:semantic-failure:${attempt}`,
+              FAILURE_COOLDOWN_MS,
+            ))
+            await bestEffort(() => releasePoolLease(pool, leaseId))
+            continue
+          }
+          return { response, accountId, leaseId, retryableFailure: semanticRetryable }
+        }
       }
       return { response, accountId, leaseId, retryableFailure }
     } catch (error) {
@@ -1465,7 +1572,16 @@ async function createBufferedChatFromResponsesStream(
       cancelled ? 'cancelled' : 'failed',
       error instanceof ResponsesToChatError && error.upstreamCode === 'cyber_policy',
     ))
-    if (!upstreamResponseValid && !cancelled && !(error instanceof ResponsesToChatError)) {
+    const retryableSemanticFailure = error instanceof ResponsesToChatError &&
+      isRetryableResponsesFailure({
+        code: error.upstreamCode,
+        message: error.message,
+        cyberPolicy: error.upstreamCode === 'cyber_policy',
+      })
+    if (
+      !upstreamResponseValid && !cancelled &&
+      (!(error instanceof ResponsesToChatError) || retryableSemanticFailure)
+    ) {
       await bestEffort(() => recordPoolFailure(
         input.pool,
         input.accountId,
@@ -1579,6 +1695,7 @@ interface GatewayStreamTransformer {
   usage(): TokenUsage | null
   outputBytes(): number
   terminal(): 'completed' | 'failed' | 'missing'
+  failure?(): ReturnType<typeof responsesFailureDetails> | null
   errorFrame(message: string): Uint8Array
   zeroCost?(): boolean
 }
@@ -1624,6 +1741,10 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
 
   terminal(): 'completed' | 'failed' | 'missing' {
     return this.delegate.terminal(this.endpoint)
+  }
+
+  failure(): ReturnType<typeof responsesFailureDetails> | null {
+    return this.endpoint === 'responses' ? this.delegate.failure() : null
   }
 
   errorFrame(message: string): Uint8Array {
@@ -1738,6 +1859,7 @@ class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
   private emittedBytes = 0
   private doneSent = false
   private zeroBillableUsage = false
+  private failureValue: ReturnType<typeof responsesFailureDetails> | null = null
 
   constructor(
     upstreamModel: string,
@@ -1789,12 +1911,16 @@ class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
     return this.zeroBillableUsage
   }
 
+  failure(): ReturnType<typeof responsesFailureDetails> | null {
+    return this.failureValue
+  }
+
   outputBytes(): number {
     return this.emittedBytes
   }
 
   terminal(): 'completed' | 'failed' | 'missing' {
-    return this.accounting.terminal('responses')
+    return this.failureValue === null ? this.accounting.terminal('responses') : 'failed'
   }
 
   errorFrame(message: string): Uint8Array {
@@ -1850,13 +1976,9 @@ class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
       parsed = { ...(parsed as Record<string, unknown>), type: eventName }
     }
     const type = objectValue(parsed)?.type
-    const responseStatus = objectValue(objectValue(parsed)?.response)?.status
-    if (
-      type === 'response.failed' || type === 'response.canceled' ||
-      type === 'response.cancelled' || type === 'error' ||
-      (type === 'response.done' && responseStatus !== 'completed' && responseStatus !== 'incomplete')
-    ) {
+    if (isResponsesFailedTerminal(parsed)) {
       const failure = responsesFailureDetails(parsed)
+      this.failureValue = failure
       this.zeroBillableUsage = failure.cyberPolicy
       this.doneSent = true
       const error = streamErrorFrame(
@@ -1926,6 +2048,10 @@ class GeminiResponsesStreamTransformer implements GatewayStreamTransformer {
 
   terminal(): 'completed' | 'failed' | 'missing' {
     return this.accounting.terminal('responses')
+  }
+
+  failure(): ReturnType<typeof responsesFailureDetails> | null {
+    return this.accounting.failure()
   }
 
   errorFrame(message: string): Uint8Array {
@@ -2007,6 +2133,10 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
 
   terminal(): 'completed' | 'failed' | 'missing' {
     return this.accounting.terminal('responses')
+  }
+
+  failure(): ReturnType<typeof responsesFailureDetails> | null {
+    return this.accounting.failure()
   }
 
   errorFrame(_message: string): Uint8Array {
@@ -2352,6 +2482,18 @@ function createStreamingResponse(input: FinalizeInput & {
     finished = true
     // Fetch-body cancellation is initiated immediately but never delays billing or downstream EOF.
     void bestEffort(() => reader.cancel('upstream terminal event received'))
+    const semanticFailure = terminal === 'failed' ? tracker.failure?.() : null
+    if (
+      semanticFailure !== null && semanticFailure !== undefined &&
+      isRetryableResponsesFailure(semanticFailure)
+    ) {
+      await bestEffort(() => recordPoolFailure(
+        input.pool,
+        input.accountId,
+        `${input.requestId}:stream-semantic-failure`,
+        FAILURE_COOLDOWN_MS,
+      ))
+    }
     await bestEffort(() => finalize(
       downstreamCancelled
         ? 'cancelled'
@@ -2369,6 +2511,18 @@ function createStreamingResponse(input: FinalizeInput & {
     if (result.done) {
       enqueue(controller, tracker.finish())
       const terminal = tracker.terminal()
+      const semanticFailure = terminal === 'failed' ? tracker.failure?.() : null
+      if (
+        semanticFailure !== null && semanticFailure !== undefined &&
+        isRetryableResponsesFailure(semanticFailure)
+      ) {
+        await bestEffort(() => recordPoolFailure(
+          input.pool,
+          input.accountId,
+          `${input.requestId}:stream-semantic-failure:eof`,
+          FAILURE_COOLDOWN_MS,
+        ))
+      }
       if (terminal === 'missing' && controller !== null && !downstreamCancelled) {
         controller.enqueue(tracker.errorFrame('Upstream stream ended before a terminal event'))
       }

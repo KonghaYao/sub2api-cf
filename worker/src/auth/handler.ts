@@ -31,8 +31,10 @@ import {
   findTotpCredential,
   findTotpLoginChallenge,
   isTotpLoginToken,
+  isTotpRecoveryCode,
   TOTP_MAX_ATTEMPTS,
   totpFeatureAvailable,
+  totpRecoveryCodeDigest,
   totpTokenDigest,
   verifyStoredTotpCode,
 } from './totp'
@@ -296,7 +298,11 @@ export async function loginWithTotp(context: Context<AuthBindings>): Promise<Res
     const body = await readJsonObject(context.req.raw)
     const tempToken = body.temp_token
     const code = body.totp_code
-    if (!isTotpLoginToken(tempToken) || typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+    const recoveryCode = body.recovery_code
+    const useAuthenticatorCode = typeof code === 'string' && /^\d{6}$/.test(code) &&
+      recoveryCode === undefined
+    const useRecoveryCode = isTotpRecoveryCode(recoveryCode) && code === undefined
+    if (!isTotpLoginToken(tempToken) || (!useAuthenticatorCode && !useRecoveryCode)) {
       throw invalidTotpLogin()
     }
     const tokenHash = await totpTokenDigest(tempToken)
@@ -343,7 +349,18 @@ export async function loginWithTotp(context: Context<AuthBindings>): Promise<Res
     if (reservedAttempt.results.length !== 1) {
       throw new GatewayError(429, 'TOTP_TOO_MANY_ATTEMPTS', 'Too many verification attempts')
     }
-    if (!(await verifyStoredTotpCode(context.env, credential, code, now))) {
+    let recoveryHash: string | null = null
+    let valid = false
+    if (useRecoveryCode) {
+      recoveryHash = await totpRecoveryCodeDigest(context.env, user.id, recoveryCode)
+      valid = (await context.env.DB.prepare(
+        `SELECT 1 AS available FROM user_totp_recovery_codes
+          WHERE user_id = ? AND code_hash = ? AND consumed_at_ms IS NULL LIMIT 1`,
+      ).bind(user.id, recoveryHash).first()) !== null
+    } else {
+      valid = await verifyStoredTotpCode(context.env, credential, code, now)
+    }
+    if (!valid) {
       await recordAuthRateLimitFailure(context.env, rateLimitSubject)
       throw new GatewayError(400, 'TOTP_INVALID_CODE', 'Invalid TOTP code')
     }
@@ -352,24 +369,29 @@ export async function loginWithTotp(context: Context<AuthBindings>): Promise<Res
     const consumeNonce = crypto.randomUUID()
     const emailHash = await sha256Hex(user.email)
     const writes = await context.env.DB.batch([
-      context.env.DB.prepare(
-        `UPDATE user_totp_login_challenges
-            SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?,
-                version = version + 1, updated_at_ms = ?
-          WHERE id = ? AND user_id = ? AND token_hash = ?
-            AND status = 'pending' AND expires_at_ms > ?
-            AND verification_attempts <= ?
-          RETURNING id`,
-      ).bind(
-        now,
-        consumeNonce,
-        now,
+      consumeTotpLoginChallengeStatement(
+        context.env,
         challenge.id,
         user.id,
         tokenHash,
+        consumeNonce,
         now,
-        TOTP_MAX_ATTEMPTS,
+        recoveryHash,
+        user.auth_version,
       ),
+      ...(recoveryHash === null ? [] : [context.env.DB.prepare(
+        `UPDATE user_totp_recovery_codes
+            SET consumed_at_ms = ?, consume_nonce = ?
+          WHERE user_id = ? AND code_hash = ? AND consumed_at_ms IS NULL
+            AND EXISTS (
+              SELECT 1 FROM user_totp_login_challenges
+               WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+            )
+          RETURNING position`,
+      ).bind(
+        now, consumeNonce, user.id, recoveryHash,
+        challenge.id, user.id, consumeNonce,
+      )]),
       conditionalSessionInsert(
         context.env,
         user,
@@ -378,6 +400,7 @@ export async function loginWithTotp(context: Context<AuthBindings>): Promise<Res
         challenge.id,
         consumeNonce,
         now,
+        recoveryHash === null ? null : { codeHash: recoveryHash, consumeNonce },
       ),
       context.env.DB.prepare(
         `UPDATE users SET last_login_at_ms = ?, updated_at_ms = ?
@@ -647,7 +670,13 @@ function conditionalSessionInsert(
   challengeId: string,
   consumeNonce: string,
   now: number,
+  recovery: { codeHash: string; consumeNonce: string } | null = null,
 ): D1PreparedStatement {
+  const recoveryPredicate = recovery === null ? '' : `
+        AND EXISTS (
+          SELECT 1 FROM user_totp_recovery_codes
+           WHERE user_id = ? AND code_hash = ? AND consume_nonce = ?
+        )`
   return env.DB.prepare(
     `INSERT INTO user_sessions (
        id, family_id, user_id, auth_version,
@@ -661,7 +690,7 @@ function conditionalSessionInsert(
       WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
         AND EXISTS (
           SELECT 1 FROM users WHERE id = ? AND status = 'active' AND auth_version = ?
-        )
+        )${recoveryPredicate}
      RETURNING id`,
   ).bind(
     issued.sessionId,
@@ -679,6 +708,48 @@ function conditionalSessionInsert(
     consumeNonce,
     user.id,
     user.auth_version,
+    ...(recovery === null ? [] : [user.id, recovery.codeHash, recovery.consumeNonce]),
+  )
+}
+
+function consumeTotpLoginChallengeStatement(
+  env: Env,
+  challengeId: string,
+  userId: string,
+  tokenHash: string,
+  consumeNonce: string,
+  now: number,
+  recoveryHash: string | null,
+  authVersion: number,
+): D1PreparedStatement {
+  const recoveryPredicate = recoveryHash === null ? '' : `
+            AND EXISTS (
+              SELECT 1 FROM user_totp_recovery_codes
+               WHERE user_id = ? AND code_hash = ? AND consumed_at_ms IS NULL
+            )`
+  return env.DB.prepare(
+    `UPDATE user_totp_login_challenges
+        SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?,
+            version = version + 1, updated_at_ms = ?
+      WHERE id = ? AND user_id = ? AND token_hash = ?
+        AND status = 'pending' AND expires_at_ms > ?
+        AND verification_attempts <= ?
+        AND EXISTS (
+          SELECT 1 FROM users WHERE id = ? AND status = 'active' AND auth_version = ?
+        )${recoveryPredicate}
+      RETURNING id`,
+  ).bind(
+    now,
+    consumeNonce,
+    now,
+    challengeId,
+    userId,
+    tokenHash,
+    now,
+    TOTP_MAX_ATTEMPTS,
+    userId,
+    authVersion,
+    ...(recoveryHash === null ? [] : [userId, recoveryHash]),
   )
 }
 

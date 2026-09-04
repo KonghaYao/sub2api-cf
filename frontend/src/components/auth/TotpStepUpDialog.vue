@@ -14,11 +14,11 @@
             {{ t('stepUp.title') }}
           </h3>
           <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-            {{ t('stepUp.hint') }}
+            {{ useRecoveryCode ? t('profile.totp.recoveryCodesWarning') : t('stepUp.hint') }}
           </p>
         </div>
 
-        <div class="mb-6">
+        <div v-if="!useRecoveryCode" class="mb-6">
           <input
             ref="hiddenOtpInputRef"
             type="text"
@@ -53,6 +53,37 @@
           </div>
         </div>
 
+        <form v-else class="mb-6 space-y-3" @submit.prevent="submitRecoveryCode">
+          <input
+            ref="recoveryInputRef"
+            v-model="recoveryCode"
+            data-testid="step-up-recovery-code"
+            type="text"
+            autocomplete="one-time-code"
+            maxlength="19"
+            class="input w-full text-center font-mono uppercase tracking-wide"
+            :placeholder="t('profile.totp.recoveryCodePlaceholder')"
+            :disabled="verifying"
+            @input="normalizeRecoveryInput"
+          />
+          <button
+            type="submit"
+            class="btn btn-primary w-full"
+            :disabled="verifying || !validRecoveryCode"
+          >
+            {{ verifying ? t('common.verifying') : t('profile.totp.verify') }}
+          </button>
+        </form>
+
+        <button
+          type="button"
+          class="mb-4 w-full text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+          :disabled="verifying"
+          @click="toggleRecoveryMode"
+        >
+          {{ useRecoveryCode ? t('profile.totp.useAuthenticatorCode') : t('profile.totp.useRecoveryCode') }}
+        </button>
+
         <button
           type="button"
           class="btn btn-secondary w-full"
@@ -67,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores'
 import { totpAPI } from '@/api'
@@ -84,14 +115,21 @@ const verifying = ref(false)
 const code = ref<string[]>(['', '', '', '', '', ''])
 const inputRefs = ref<(HTMLInputElement | null)[]>([])
 const hiddenOtpInputRef = ref<HTMLInputElement | null>(null)
+const recoveryInputRef = ref<HTMLInputElement | null>(null)
+const useRecoveryCode = ref(false)
+const recoveryCode = ref('')
+const validRecoveryCode = computed(() => /^[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){3}$/.test(
+  recoveryCode.value,
+))
 
 // Focus the first cell whenever the dialog opens.
 watch(
   () => props.controller.visible.value,
   (open) => {
     if (open) {
+      useRecoveryCode.value = false
       resetInputs()
-      nextTick(() => inputRefs.value[0]?.focus())
+      nextTick(focusActiveInput)
     }
   }
 )
@@ -117,16 +155,25 @@ async function submit(otp: string) {
     verifying.value = false
     appStore.showError(err?.message || t('stepUp.verifyFailed'))
     resetInputs()
-    nextTick(() => inputRefs.value[0]?.focus())
+    nextTick(focusActiveInput)
   }
 }
 
 function resetInputs() {
   code.value = ['', '', '', '', '', '']
+  recoveryCode.value = ''
   inputRefs.value.forEach((input) => {
     if (input) input.value = ''
   })
   if (hiddenOtpInputRef.value) hiddenOtpInputRef.value.value = ''
+}
+
+function focusActiveInput() {
+  if (useRecoveryCode.value) {
+    recoveryInputRef.value?.focus()
+  } else {
+    inputRefs.value[0]?.focus()
+  }
 }
 
 function handleCancel() {
@@ -176,5 +223,20 @@ const handlePaste = (event: ClipboardEvent) => {
   }
   const focusIndex = Math.min(digits.length, 5)
   nextTick(() => inputRefs.value[focusIndex]?.focus())
+}
+
+function normalizeRecoveryInput() {
+  const compact = recoveryCode.value.toUpperCase().replace(/[^2-9A-HJ-NP-Z]/g, '').slice(0, 16)
+  recoveryCode.value = compact.match(/.{1,4}/g)?.join('-') || ''
+}
+
+function submitRecoveryCode() {
+  if (validRecoveryCode.value && !verifying.value) submit(recoveryCode.value)
+}
+
+function toggleRecoveryMode() {
+  useRecoveryCode.value = !useRecoveryCode.value
+  resetInputs()
+  nextTick(focusActiveInput)
 }
 </script>

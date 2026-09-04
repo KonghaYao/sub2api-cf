@@ -107,6 +107,20 @@ describe('gateway usage accounting', () => {
     ].join('\n')))
     expect(incomplete.terminal('responses')).toBe('completed')
 
+    const incompleteWithError = new SseEventTransformer('gpt-upstream', 'gpt-public')
+    incompleteWithError.push(new TextEncoder().encode([
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","error":{"code":"server_error","message":"provider failed"},"usage":{"input_tokens":4,"output_tokens":1}}}',
+      '',
+      '',
+    ].join('\n')))
+    expect(incompleteWithError.terminal('responses')).toBe('failed')
+    expect(incompleteWithError.failure()).toEqual({
+      code: 'server_error',
+      message: 'provider failed',
+      cyberPolicy: false,
+    })
+
     for (const type of ['response.failed', 'response.cancelled', 'error']) {
       const failed = new SseEventTransformer('gpt-upstream', 'gpt-public')
       failed.push(new TextEncoder().encode(`event: ${type}\ndata: {"type":"${type}"}\n\n`))

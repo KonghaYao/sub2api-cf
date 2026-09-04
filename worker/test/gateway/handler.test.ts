@@ -2143,6 +2143,77 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(3)
   })
 
+  it.each(['/v1/responses/compact', '/responses/compact'])(
+    'normalizes %s as a unary compact request and bills terminal usage',
+    async (path) => {
+      const { env, user, pool } = await harness()
+      const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({
+          id: 'resp_compact_contract',
+          object: 'response',
+          model: 'gpt-upstream',
+          status: 'completed',
+          output: [{ type: 'compaction', encrypted_content: 'opaque' }],
+          usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
+        }),
+      )
+      vi.stubGlobal('fetch', upstream)
+
+      const response = await createApp().request(path, {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-public',
+          input: [{ type: 'message', role: 'user', content: 'compact this' }],
+          instructions: 'Keep the important facts.',
+          tools: [{ type: 'function', name: 'lookup' }],
+          parallel_tool_calls: true,
+          reasoning: { effort: 'high' },
+          service_tier: 'default',
+          text: { verbosity: 'low' },
+          previous_response_id: 'resp_previous',
+          store: true,
+          stream: true,
+          prompt_cache_key: 'request-scoped-cache-key',
+          tool_choice: 'auto',
+        }),
+      }, env)
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        id: 'resp_compact_contract',
+        model: 'gpt-public',
+        output: [{ type: 'compaction', encrypted_content: 'opaque' }],
+      })
+      const [url, init] = upstream.mock.calls[0]
+      expect(String(url)).toBe('https://upstream.example/v1/responses/compact')
+      expect(new Headers(init?.headers).get('accept')).toBe('application/json')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model: 'gpt-upstream',
+        input: [{ type: 'message', role: 'user', content: 'compact this' }],
+        instructions: 'Keep the important facts.',
+        tools: [{ type: 'function', name: 'lookup' }],
+        parallel_tool_calls: true,
+        reasoning: { effort: 'high' },
+        service_tier: 'default',
+        text: { verbosity: 'low' },
+        previous_response_id: 'resp_previous',
+      })
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        amount_micros: 10,
+        usage_event: {
+          payload: {
+            input_tokens: 3,
+            output_tokens: 1,
+            amount_micros: 10,
+            stream: false,
+          },
+        },
+      })
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    },
+  )
+
   it('routes Codex Responses through the provider planner with Codex-owned authentication', async () => {
     const { env, database, user, pool } = await harness()
     Object.assign(database.principal, { platform: 'codex' })
@@ -2251,12 +2322,15 @@ describe('OpenAI-compatible gateway', () => {
     async (stream) => {
       const { env, database, user, pool } = await harness()
       database.responsesOnly = true
-      vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+      pool.reserveAccountIds.push('account-1', 'account-2')
+      const upstream = vi.fn(async () => new Response([
         'event: response.failed',
         'data: {"type":"response.failed","response":{"id":"resp_cyber","status":"failed","output":[],"error":{"code":"cyber_policy","message":"flagged by policy"},"usage":{"input_tokens":99,"output_tokens":3}}}',
         '',
         '',
-      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })))
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', upstream)
 
       const response = await createApp().request('/v1/chat/completions', {
         method: 'POST',
@@ -2297,8 +2371,339 @@ describe('OpenAI-compatible gateway', () => {
       })
       expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
       expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+      expect(upstream).toHaveBeenCalledOnce()
     },
   )
+
+  it('preserves a standard incomplete reason as buffered partial success without retrying', async () => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async () => new Response([
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"partial but buffered"}',
+      '',
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":7,"output_tokens":4}}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: false,
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      model: 'gpt-public',
+      choices: [{
+        message: { content: 'partial but buffered' },
+        finish_reason: 'length',
+      }],
+      usage: { prompt_tokens: 7, completion_tokens: 4, total_tokens: 11 },
+    })
+    expect(upstream).toHaveBeenCalledOnce()
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { input_tokens: 7, output_tokens: 4, outcome: 'completed' },
+      },
+    })
+  })
+
+  it.each(['failed', 'incomplete', 'canceled'] as const)(
+    'fails over a Responses 200 response.%s terminal before visible Chat output',
+    async (terminal) => {
+      const { env, database, user, pool, limit } = await harness()
+      database.responsesOnly = true
+      await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+      pool.reserveAccountIds.push('account-1', 'account-2')
+      const upstream = vi.fn(async (request: RequestInfo | URL) => {
+        if (String(request).includes('upstream-two')) {
+          return new Response([
+            'event: response.created',
+            'data: {"type":"response.created","response":{"id":"resp_semantic_fallback","model":"gpt-upstream"}}',
+            '',
+            'event: response.output_text.delta',
+            'data: {"type":"response.output_text.delta","delta":"semantic-fallback-ok"}',
+            '',
+            'event: response.completed',
+            'data: {"type":"response.completed","response":{"id":"resp_semantic_fallback","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":2}}}',
+            '',
+            '',
+          ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+        }
+        const status = terminal === 'incomplete' ? 'incomplete' : terminal
+        return new Response([
+          `event: response.${terminal}`,
+          `data: ${JSON.stringify({
+            type: `response.${terminal}`,
+            response: {
+              id: `resp_${terminal}_first`,
+              status,
+              output: [],
+              error: { code: 'server_error', message: `first ${terminal} account failed` },
+              usage: { input_tokens: 99, output_tokens: 7 },
+            },
+          })}`,
+          '',
+          '',
+        ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+      })
+      vi.stubGlobal('fetch', upstream)
+
+      const response = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-public',
+          messages: [{ role: 'user', content: 'Hello' }],
+          stream: true,
+        }),
+      }, env)
+      const wire = await readStreamToTextWithin(response)
+
+      expect(response.status).toBe(200)
+      expect(upstream.mock.calls.map(([request]) => String(request))).toEqual([
+        'https://upstream.example/v1/responses',
+        'https://upstream-two.example/v1/responses',
+      ])
+      expect(wire).toContain('semantic-fallback-ok')
+      expect(wire).not.toContain(`first ${terminal} account failed`)
+      expect(wire.match(/data: \[DONE\]/g)).toHaveLength(1)
+      expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+      expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+      expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        usage_event: {
+          payload: { input_tokens: 4, output_tokens: 2, outcome: 'completed' },
+        },
+      })
+      expect(limit.calls.filter((call) => call.path === '/monetary/reserve')).toHaveLength(1)
+      expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(1)
+    },
+  )
+
+  it('retries a buffered Chat bridge even when the failed Responses attempt produced deltas', async () => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).includes('upstream-two')) {
+        return new Response([
+          'event: response.completed',
+          'data: {"type":"response.completed","response":{"id":"resp_buffered_retry","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"buffered-retry-ok"}]}],"usage":{"input_tokens":5,"output_tokens":2}}}',
+          '',
+          '',
+        ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+      }
+      return new Response([
+        'event: response.output_text.delta',
+        'data: {"type":"response.output_text.delta","delta":"never exposed"}',
+        '',
+        'event: response.failed',
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"retry buffered account"},"usage":{"input_tokens":50,"output_tokens":4}}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: false,
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      id: 'resp_buffered_retry',
+      choices: [{ message: { content: 'buffered-retry-ok' } }],
+    })
+    expect(upstream).toHaveBeenCalledTimes(2)
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { input_tokens: 5, output_tokens: 2, outcome: 'completed' },
+      },
+    })
+  })
+
+  it('records the final retryable failure when buffered Responses failover is exhausted', async () => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async (request: RequestInfo | URL) => {
+      const second = String(request).includes('upstream-two')
+      return new Response([
+        'event: response.failed',
+        `data: ${JSON.stringify({
+          type: 'response.failed',
+          response: {
+            status: 'failed',
+            error: {
+              code: second ? 'buffered_final_code' : 'buffered_first_code',
+              message: second ? 'buffered final message' : 'buffered first message',
+            },
+            usage: second
+              ? { input_tokens: 6, output_tokens: 1 }
+              : { input_tokens: 60, output_tokens: 10 },
+          },
+        })}`,
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: false,
+      }),
+    }, env)
+
+    expect(response.status).toBe(502)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'buffered_final_code', message: 'buffered final message' },
+    })
+    expect(upstream).toHaveBeenCalledTimes(2)
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(2)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { input_tokens: 6, output_tokens: 1, outcome: 'failed' },
+      },
+    })
+  })
+
+  it.each(['failed', 'incomplete'] as const)(
+    'never retries a Responses semantic response.%s after visible Chat output',
+    async (terminal) => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async () => new Response([
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp_visible_failure","model":"gpt-upstream"}}',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"partial-visible"}',
+      '',
+      `event: response.${terminal}`,
+      `data: {"type":"response.${terminal}","response":{"id":"resp_visible_failure","status":"${terminal}","output":[],"error":{"code":"semantic_visible_failure","message":"failed after output"},"usage":{"input_tokens":3,"output_tokens":1}}}`,
+      ...(terminal === 'failed' ? ['', ''] : []),
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: true,
+      }),
+    }, env)
+    const wire = await readStreamToTextWithin(response)
+
+    expect(response.status).toBe(200)
+    expect(upstream).toHaveBeenCalledOnce()
+    expect(wire).toContain('partial-visible')
+    expect(wire.match(/semantic_visible_failure/g)).toHaveLength(1)
+    expect(wire.match(/failed after output/g)).toHaveLength(1)
+    expect(wire.match(/data: \[DONE\]/g)).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { input_tokens: 3, output_tokens: 1, outcome: 'failed' },
+      },
+    })
+    },
+  )
+
+  it('preserves the final Responses semantic code and message after failover is exhausted', async () => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async (request: RequestInfo | URL) => {
+      const second = String(request).includes('upstream-two')
+      return new Response([
+        'event: response.failed',
+        `data: ${JSON.stringify({
+          type: 'response.failed',
+          response: {
+            id: second ? 'resp_final_failure' : 'resp_first_failure',
+            status: 'failed',
+            output: [],
+            error: {
+              code: second ? 'final_semantic_code' : 'first_semantic_code',
+              message: second ? 'final semantic message' : 'first semantic message',
+            },
+            usage: second
+              ? { input_tokens: 8, output_tokens: 2 }
+              : { input_tokens: 80, output_tokens: 20 },
+          },
+        })}`,
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: true,
+      }),
+    }, env)
+    const wire = await readStreamToTextWithin(response)
+
+    expect(upstream).toHaveBeenCalledTimes(2)
+    expect(wire.match(/final_semantic_code/g)).toHaveLength(1)
+    expect(wire.match(/final semantic message/g)).toHaveLength(1)
+    expect(wire).not.toContain('first_semantic_code')
+    expect(wire).not.toContain('first semantic message')
+    expect(wire.match(/data: \[DONE\]/g)).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(2)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { input_tokens: 8, output_tokens: 2, outcome: 'failed' },
+      },
+    })
+  })
 
   it('preserves zero-billable cyber policy when a Responses fallback returns JSON', async () => {
     const originalBaseFee = model.per_request_micros
@@ -2420,15 +2825,18 @@ describe('OpenAI-compatible gateway', () => {
     expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
   })
 
-  it('serves native Responses input_tokens without reserving or charging balance', async () => {
-    const { env, user, pool } = await harness()
+  it.each(['/v1/responses/input_tokens', '/responses/input_tokens'])(
+    'serves native %s without charging balance',
+    async (path) => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.credential, { base_url: 'https://api.openai.com/v1' })
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
       Response.json({ object: 'response.input_tokens', input_tokens: 31 }),
     )
     vi.stubGlobal('fetch', upstream)
 
     const response = await createApp().request(
-      '/v1/responses/input_tokens',
+      path,
       {
         method: 'POST',
         headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
@@ -2448,11 +2856,85 @@ describe('OpenAI-compatible gateway', () => {
     })
     expect(upstream).toHaveBeenCalledOnce()
     const [url, init] = upstream.mock.calls[0]
-    expect(String(url)).toBe('https://upstream.example/v1/responses/input_tokens')
+    expect(String(url)).toBe('https://api.openai.com/v1/responses/input_tokens')
     expect(JSON.parse(String(init?.body))).toEqual({
       model: 'gpt-upstream',
       instructions: 'Be concise.',
       input: [{ role: 'user', content: 'Hello' }],
+    })
+    expectZeroCostBillingLifecycle(user)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    },
+  )
+
+  it('estimates Responses input_tokens locally for a custom relay without charging', async () => {
+    const { env, user, pool } = await harness()
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses/input_tokens', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        instructions: 'Be concise.',
+        input: 'hello world',
+        tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      object: 'response.input_tokens',
+      input_tokens: expect.any(Number),
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expectZeroCostBillingLifecycle(user)
+    expect(pool.calls).toEqual([])
+  })
+
+  it('estimates input_tokens locally when a mixed account pool selects a custom relay', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.credential, { base_url: 'https://api.openai.com/v1' })
+    await addGatewayAccount(database, 'account-2', 'https://custom-relay.example/v1')
+    pool.reserveAccountIds.push('account-2')
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses/input_tokens', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'mixed pool request' }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      object: 'response.input_tokens',
+      input_tokens: expect.any(Number),
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expectZeroCostBillingLifecycle(user)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('returns a stable error for malformed input_tokens usage without settling a charge', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.credential, { base_url: 'https://api.openai.com/v1' })
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ object: 'response.input_tokens' })))
+
+    const response = await createApp().request('/responses/input_tokens', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(502)
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        type: 'server_error',
+        code: 'invalid_upstream_response',
+        message: 'Upstream returned invalid token usage',
+      },
     })
     expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)

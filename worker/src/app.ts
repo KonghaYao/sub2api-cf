@@ -174,6 +174,7 @@ import {
   getTotpVerificationMethod,
   grantTotpStepUp,
   initiateTotpSetup,
+  regenerateTotpRecoveryCodes,
   sendTotpVerificationCode,
 } from './user/totp'
 import {
@@ -341,6 +342,7 @@ export function createApp() {
   app.post('/api/v1/user/totp/enable', enableTotp)
   app.post('/api/v1/user/totp/disable', disableTotp)
   app.post('/api/v1/user/totp/step-up', grantTotpStepUp)
+  app.post('/api/v1/user/totp/recovery-codes/regenerate', regenerateTotpRecoveryCodes)
   app.get('/api/v1/user/api-keys/:id/usage/daily', getUserApiKeyDailyUsage)
   app.get('/api/v1/usage/stats', usageStats)
   app.get('/api/v1/usage/dashboard/stats', dashboardStats)

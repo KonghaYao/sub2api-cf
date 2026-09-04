@@ -2344,6 +2344,7 @@ export interface TotpStatus {
   enabled: boolean
   enabled_at: number | null  // Unix timestamp in seconds
   feature_enabled: boolean
+  recovery_codes_remaining: number
 }
 
 export interface TotpSetupRequest {
@@ -2365,6 +2366,8 @@ export interface TotpEnableRequest {
 
 export interface TotpEnableResponse {
   success: boolean
+  /** Returned exactly once. The client must prompt the owner to store these now. */
+  recovery_codes: string[]
 }
 
 export interface TotpDisableRequest {
@@ -2382,10 +2385,9 @@ export interface TotpLoginResponse {
   user_email_masked?: string
 }
 
-export interface TotpLogin2FARequest {
-  temp_token: string
-  totp_code: string
-}
+export type TotpLogin2FARequest =
+  | { temp_token: string; totp_code: string; recovery_code?: never }
+  | { temp_token: string; recovery_code: string; totp_code?: never }
 
 // ==================== Scheduled Test Types ====================
 

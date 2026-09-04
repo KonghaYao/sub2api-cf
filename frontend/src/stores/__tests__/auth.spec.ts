@@ -131,6 +131,19 @@ describe('useAuthStore', () => {
       expect(store.token).toBeNull()
       expect(store.isAuthenticated).toBe(false)
     })
+
+    it('使用恢复码完成 2FA 时发送互斥 recovery_code 字段', async () => {
+      mockLogin2FA.mockResolvedValue(fakeAuthResponse)
+      const store = useAuthStore()
+
+      await store.login2FA('temp-123', 'ABCD-EFGH-JKMN-PQRS')
+
+      expect(mockLogin2FA).toHaveBeenCalledWith({
+        temp_token: 'temp-123',
+        recovery_code: 'ABCD-EFGH-JKMN-PQRS',
+      })
+      expect(store.isAuthenticated).toBe(true)
+    })
   })
 
   // --- logout ---

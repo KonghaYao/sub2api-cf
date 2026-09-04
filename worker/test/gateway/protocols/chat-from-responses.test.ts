@@ -184,6 +184,39 @@ describe('Responses to Chat Completions output bridge', () => {
     expect(codec.finish()).toEqual([])
   })
 
+  it('keeps a standard incomplete terminal as partial success for stream and buffer clients', () => {
+    const codec = new ResponsesToChatCompletionsEventCodec('public-model', true, 456)
+    codec.push({ type: 'response.created', response: { id: 'resp_incomplete' } })
+    codec.push({ type: 'response.output_text.delta', delta: 'partial' })
+    const terminal = codec.push({
+      type: 'response.incomplete',
+      response: {
+        id: 'resp_incomplete',
+        status: 'incomplete',
+        incomplete_details: { reason: 'content_filter' },
+        usage: { input_tokens: 4, output_tokens: 1 },
+      },
+    })
+    expect(terminal[0]?.choices[0]?.finish_reason).toBe('content_filter')
+    expect(terminal[1]?.usage).toEqual({
+      prompt_tokens: 4,
+      completion_tokens: 1,
+      total_tokens: 5,
+    })
+
+    expect(responsesSseToChatCompletionsResponse([
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"partial"}',
+      '',
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":4,"output_tokens":1}}}',
+      '',
+    ].join('\n'), 'public-model')).toMatchObject({
+      choices: [{ message: { content: 'partial' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+    })
+  })
+
   it('assembles forced upstream SSE for a non-streaming Chat client', () => {
     const response = responsesSseToChatCompletionsResponse([
       'event: response.created',

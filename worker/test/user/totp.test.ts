@@ -210,6 +210,7 @@ describe('Worker-native TOTP HTTP contract', () => {
       enabled: false,
       enabled_at: null,
       feature_enabled: true,
+      recovery_codes_remaining: 0,
     })
     const method = await api(test, '/api/v1/user/totp/verification-method', { user: 'alice' })
     await expect(data(method)).resolves.toEqual({ method: 'password' })
@@ -289,9 +290,228 @@ describe('Worker-native TOTP HTTP contract', () => {
       `SELECT COUNT(*) AS count FROM user_totp_credentials WHERE user_id = 'alice'`,
     ).get()).toEqual({ count: 0 })
     expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_code_sets WHERE user_id = 'alice'`,
+    ).get()).toEqual({ count: 0 })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_codes WHERE user_id = 'alice'`,
+    ).get()).toEqual({ count: 0 })
+    expect(test.raw.prepare(
       `SELECT COUNT(*) AS count FROM user_sessions
         WHERE user_id = 'alice' AND step_up_expires_at_ms IS NOT NULL`,
     ).get()).toEqual({ count: 0 })
+  })
+
+  it('returns recovery codes once, stores only digests, and consumes one atomically at login', async () => {
+    const test = await fixture()
+    const setup = await startPasswordSetup(test)
+    const enabled = await enableFromSetup(test, setup)
+    expect(enabled.status).toBe(200)
+    const enabledData = await data(enabled) as { success: boolean; recovery_codes: string[] }
+    expect(enabledData.success).toBe(true)
+    expect(enabledData.recovery_codes).toHaveLength(10)
+    expect(new Set(enabledData.recovery_codes).size).toBe(10)
+    for (const code of enabledData.recovery_codes) {
+      expect(code).toMatch(/^[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){3}$/)
+    }
+
+    const persisted = JSON.stringify(test.raw.prepare(
+      `SELECT * FROM user_totp_recovery_codes WHERE user_id = 'alice' ORDER BY position`,
+    ).all())
+    for (const code of enabledData.recovery_codes) expect(persisted).not.toContain(code)
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_codes
+        WHERE user_id = 'alice' AND consumed_at_ms IS NULL`,
+    ).get()).toEqual({ count: 10 })
+
+    const passwordLogin = await api(test, '/api/v1/auth/login', {
+      body: { email: 'alice@example.test', password: PASSWORD },
+    })
+    const pending = await data(passwordLogin) as { temp_token: string }
+    const recoveryCode = enabledData.recovery_codes[0]
+    const [first, second] = await Promise.all([
+      api(test, '/api/v1/auth/login/2fa', {
+        body: { temp_token: pending.temp_token, recovery_code: recoveryCode },
+      }),
+      api(test, '/api/v1/auth/login/2fa', {
+        body: { temp_token: pending.temp_token, recovery_code: recoveryCode },
+      }),
+    ])
+    expect([first.status, second.status].sort()).toEqual([200, 400])
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_codes
+        WHERE user_id = 'alice' AND consumed_at_ms IS NULL`,
+    ).get()).toEqual({ count: 9 })
+
+    const retryLogin = await api(test, '/api/v1/auth/login', {
+      body: { email: 'alice@example.test', password: PASSWORD },
+    })
+    const retryPending = await data(retryLogin) as { temp_token: string }
+    const replay = await api(test, '/api/v1/auth/login/2fa', {
+      body: { temp_token: retryPending.temp_token, recovery_code: recoveryCode },
+    })
+    expect(replay.status).toBe(400)
+    await expect(replay.json()).resolves.toMatchObject({ code: 'TOTP_INVALID_CODE' })
+
+    const status = await data(await api(test, '/api/v1/user/totp/status', { user: 'alice' }))
+    expect(status.recovery_codes_remaining).toBe(9)
+  })
+
+  it('allows only one concurrent recovery-code step-up', async () => {
+    const test = await fixture()
+    const setup = await startPasswordSetup(test)
+    const enabled = await data(await enableFromSetup(test, setup)) as { recovery_codes: string[] }
+
+    const responses = await Promise.all([
+      api(test, '/api/v1/user/totp/step-up', {
+        user: 'alice', body: { recovery_code: enabled.recovery_codes[0] },
+      }),
+      api(test, '/api/v1/user/totp/step-up', {
+        user: 'alice', body: { recovery_code: enabled.recovery_codes[0] },
+      }),
+    ])
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(1)
+    expect(responses.filter((response) => response.status !== 200)).toHaveLength(1)
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_codes
+        WHERE user_id = 'alice' AND consumed_at_ms IS NULL`,
+    ).get()).toEqual({ count: 9 })
+  })
+
+  it('backfills recovery codes for an upgraded TOTP user without an existing set', async () => {
+    const test = await fixture()
+    const setup = await startPasswordSetup(test)
+    expect((await enableFromSetup(test, setup)).status).toBe(200)
+    test.raw.prepare(
+      `DELETE FROM user_totp_recovery_code_sets WHERE user_id = 'alice'`,
+    ).run()
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_credentials WHERE user_id = 'alice'`,
+    ).get()).toEqual({ count: 1 })
+    await expect(data(await api(test, '/api/v1/user/totp/status', {
+      user: 'alice',
+    }))).resolves.toMatchObject({ enabled: true, recovery_codes_remaining: 0 })
+
+    const stepUp = await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice',
+      body: { code: await generateTotpCode(setup.secret, NOW) },
+    })
+    expect(stepUp.status).toBe(200)
+    const regenerated = await api(test, '/api/v1/user/totp/recovery-codes/regenerate', {
+      user: 'alice', body: {},
+    })
+    expect(regenerated.status).toBe(200)
+    const recovered = await data(regenerated) as { recovery_codes: string[] }
+    expect(recovered.recovery_codes).toHaveLength(10)
+
+    test.raw.prepare(
+      `UPDATE user_sessions SET step_up_expires_at_ms = NULL WHERE id = 'alice-session'`,
+    ).run()
+    expect((await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { recovery_code: recovered.recovery_codes[0] },
+    })).status).toBe(200)
+    expect((await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { recovery_code: recovered.recovery_codes[0] },
+    })).status).toBe(400)
+  })
+
+  it('does not disguise recovery storage failures as regeneration conflicts', async () => {
+    const test = await fixture()
+    const setup = await startPasswordSetup(test)
+    expect((await enableFromSetup(test, setup)).status).toBe(200)
+    expect((await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { code: await generateTotpCode(setup.secret, NOW) },
+    })).status).toBe(200)
+    const database = test.env.DB
+    const failures = [
+      'no such table: user_totp_recovery_codes',
+      'FOREIGN KEY constraint failed: user_totp_recovery_codes',
+      'CHECK constraint failed: user_totp_recovery_codes',
+      'UNIQUE constraint failed: user_sessions.id',
+    ]
+
+    for (const message of failures) {
+      test.env.DB = new Proxy(database, {
+        get(target, property) {
+          if (property === 'batch') return async () => { throw new Error(message) }
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      const response = await api(test, '/api/v1/user/totp/recovery-codes/regenerate', {
+        user: 'alice', body: {},
+      })
+      expect(response.status, message).toBe(500)
+      await expect(response.json()).resolves.toMatchObject({ code: 'internal_error', data: null })
+    }
+
+    test.env.DB = new Proxy(database, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async () => {
+            throw new Error('UNIQUE constraint failed: user_totp_recovery_code_sets.user_id')
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const conflict = await api(test, '/api/v1/user/totp/recovery-codes/regenerate', {
+      user: 'alice', body: {},
+    })
+    expect(conflict.status).toBe(409)
+    await expect(conflict.json()).resolves.toMatchObject({
+      code: 'TOTP_RECOVERY_CODES_CONFLICT', data: null,
+    })
+  })
+
+  it('uses a recovery code for session step-up and CAS-rotates the whole set', async () => {
+    const test = await fixture()
+    const setup = await startPasswordSetup(test)
+    const enabled = await data(await enableFromSetup(test, setup)) as { recovery_codes: string[] }
+
+    const stepUp = await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice',
+      body: { recovery_code: enabled.recovery_codes[0] },
+    })
+    expect(stepUp.status).toBe(200)
+    expect(test.raw.prepare(
+      `SELECT step_up_expires_at_ms FROM user_sessions WHERE id = 'alice-session'`,
+    ).get()).toEqual({ step_up_expires_at_ms: NOW + 15 * 60_000 })
+
+    const [first, second] = await Promise.all([
+      api(test, '/api/v1/user/totp/recovery-codes/regenerate', { user: 'alice', body: {} }),
+      api(test, '/api/v1/user/totp/recovery-codes/regenerate', { user: 'alice', body: {} }),
+    ])
+    expect([first.status, second.status].sort()).toEqual([200, 409])
+    const successful = first.status === 200 ? first : second
+    const losing = first.status === 409 ? first : second
+    const rotated = await data(successful) as { recovery_codes: string[] }
+    const losingPayload = await losing.json()
+    expect(losingPayload).toMatchObject({ code: 'TOTP_RECOVERY_CODES_CONFLICT', data: null })
+    expect(JSON.stringify(losingPayload)).not.toMatch(/[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){3}/)
+    expect(rotated.recovery_codes).toHaveLength(10)
+    expect(rotated.recovery_codes).not.toContain(enabled.recovery_codes[0])
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM user_totp_recovery_codes
+        WHERE user_id = 'alice' AND consumed_at_ms IS NULL`,
+    ).get()).toEqual({ count: 10 })
+
+    test.raw.prepare(
+      `UPDATE user_sessions SET step_up_expires_at_ms = NULL WHERE id = 'alice-session'`,
+    ).run()
+    const retired = await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { recovery_code: enabled.recovery_codes[1] },
+    })
+    expect(retired.status).toBe(400)
+    await expect(retired.json()).resolves.toMatchObject({ code: 'TOTP_INVALID_CODE' })
+    expect((await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { recovery_code: rotated.recovery_codes[0] },
+    })).status).toBe(200)
+    const replay = await api(test, '/api/v1/user/totp/step-up', {
+      user: 'alice', body: { recovery_code: rotated.recovery_codes[0] },
+    })
+    expect(replay.status).toBe(400)
+    await expect(replay.json()).resolves.toMatchObject({ code: 'TOTP_INVALID_CODE' })
   })
 
   it('enforces owner, expiry, replay, and bounded setup attempts', async () => {

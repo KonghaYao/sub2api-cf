@@ -149,6 +149,41 @@ describe('provider request adapters', () => {
     expect(input[3]?.call_id).toBe('fc_short')
   })
 
+  it('normalizes native custom and tool-search call ID families for Codex continuation', () => {
+    const oversized = `call_${'z'.repeat(100)}`
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        input: [
+          { type: 'custom_tool_call', call_id: 'call_shared', name: 'apply_patch', input: 'patch' },
+          { type: 'custom_tool_call_output', call_id: 'call_shared', output: 'done' },
+          { type: 'tool_search_call', call_id: 'call_shared', arguments: { query: 'git' } },
+          { type: 'tool_search_output', call_id: 'call_shared', output: { tools: [] } },
+          { type: 'function_call', call_id: 'ctc_legacy', name: 'lookup', arguments: '{}' },
+          { type: 'function_call_output', call_id: 'call_legacy', output: 'ok' },
+          { type: 'custom_tool_call', call_id: oversized, name: 'exec', input: 'pwd' },
+          { type: 'custom_tool_call_output', call_id: oversized, output: '/tmp' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<{ call_id: string }> }).input
+
+    expect(input.map((item) => item.call_id)).toEqual([
+      'ctc_shared',
+      'ctc_shared',
+      'tsc_shared',
+      'tsc_shared',
+      'fc_legacy',
+      'fc_legacy',
+      expect.stringMatching(/^ctc_[0-9a-f]{32}$/),
+      expect.stringMatching(/^ctc_[0-9a-f]{32}$/),
+    ])
+    expect(input[6]?.call_id).toBe(input[7]?.call_id)
+    expect(input[6]?.call_id.length).toBeLessThanOrEqual(64)
+  })
+
   it('preserves custom proxy prefixes without duplicating provider path segments', () => {
     const anthropic = buildProviderRequest({
       account: account('anthropic', { base_url: 'https://relay.test/anthropic/v1' }),

@@ -1,4 +1,9 @@
 import { GatewayError } from './errors'
+import {
+  isResponsesFailedTerminal,
+  responsesFailureDetails,
+  type ResponsesFailureDetails,
+} from './protocols/chat-from-responses'
 import type { CostBreakdown, GatewayEndpoint, ModelRoute, TokenUsage } from './types'
 
 const MAX_SSE_EVENT_CHARS = 256 * 1024
@@ -120,6 +125,7 @@ export class SseEventTransformer {
   private emittedBytes = 0
   private sawChatDone = false
   private responsesTerminal: 'completed' | 'failed' | null = null
+  private responsesFailure: ResponsesFailureDetails | null = null
 
   constructor(
     private readonly upstreamModel: string,
@@ -155,6 +161,10 @@ export class SseEventTransformer {
   terminal(endpoint: 'chat_completions' | 'responses'): 'completed' | 'failed' | 'missing' {
     if (endpoint === 'chat_completions') return this.sawChatDone ? 'completed' : 'missing'
     return this.responsesTerminal ?? 'missing'
+  }
+
+  failure(): ResponsesFailureDetails | null {
+    return this.responsesFailure
   }
 
   private drain(flush: boolean): Uint8Array[] {
@@ -194,17 +204,21 @@ export class SseEventTransformer {
         const object = objectRecord(parsed)
         if (object !== null) {
           const type = typeof object.type === 'string' ? object.type : eventName
-          if (type === 'response.completed' || type === 'response.incomplete') {
+          const terminalEvent = typeof object.type === 'string' || type === undefined
+            ? object
+            : { ...object, type }
+          if (isResponsesFailedTerminal(terminalEvent)) {
+            this.responsesTerminal = 'failed'
+            this.responsesFailure = responsesFailureDetails(terminalEvent)
+          } else if (type === 'response.completed' || type === 'response.incomplete') {
             this.responsesTerminal = 'completed'
-          }
-          if (type === 'response.done') {
+          } else if (type === 'response.done') {
             const response = objectRecord(object.response)
             const status = response?.status ?? object.status
             this.responsesTerminal = status === 'completed' || status === 'incomplete'
               ? 'completed'
               : 'failed'
-          }
-          if (
+          } else if (
             type === 'response.failed' || type === 'response.canceled' ||
             type === 'response.cancelled' || type === 'error'
           ) {

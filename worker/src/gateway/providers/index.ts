@@ -360,7 +360,7 @@ function normalizeCodexSystemInstructions(body: Record<string, unknown>): void {
     normalizedInput.push({ ...item, role: 'developer' })
   }
   body.input = normalizedInput
-  normalizeCodexFunctionCallIds(normalizedInput)
+  normalizeCodexToolCallIds(normalizedInput)
   body.instructions = promoted.length === 0
     ? existingInstructions
     : existingInstructions.trim() === ''
@@ -368,38 +368,30 @@ function normalizeCodexSystemInstructions(body: Record<string, unknown>): void {
       : `${promoted.join('\n\n')}\n\n${existingInstructions}`
 }
 
-function normalizeCodexFunctionCallIds(input: unknown[]): void {
-  const mappings = new Map<string, string>()
-  for (const value of input) {
-    const item = objectRecord(value)
-    if (item === null || !isCodexFunctionCallItem(item.type) || typeof item.call_id !== 'string') {
+function normalizeCodexToolCallIds(input: unknown[]): void {
+  for (let index = 0; index < input.length; index += 1) {
+    const item = objectRecord(input[index])
+    const prefix = codexToolCallIdPrefix(item?.type)
+    if (item === null || prefix === null || typeof item.call_id !== 'string') {
       continue
     }
     const raw = item.call_id.trim()
-    if (raw !== '' && !mappings.has(raw)) mappings.set(raw, normalizedCodexFunctionCallId(raw))
-  }
-  for (let index = 0; index < input.length; index += 1) {
-    const item = objectRecord(input[index])
-    if (item === null || !isCodexFunctionCallItem(item.type) || typeof item.call_id !== 'string') {
-      continue
-    }
-    const normalized = mappings.get(item.call_id.trim())
-    if (normalized !== undefined) input[index] = { ...item, call_id: normalized }
+    if (raw !== '') input[index] = { ...item, call_id: normalizedCodexToolCallId(raw, prefix) }
   }
 }
 
-function isCodexFunctionCallItem(value: unknown): boolean {
-  return value === 'function_call' || value === 'function_call_output'
+function codexToolCallIdPrefix(value: unknown): 'fc' | 'ctc' | 'tsc' | null {
+  if (value === 'custom_tool_call' || value === 'custom_tool_call_output') return 'ctc'
+  if (value === 'tool_search_call' || value === 'tool_search_output') return 'tsc'
+  if (value === 'function_call' || value === 'function_call_output') return 'fc'
+  return null
 }
 
-function normalizedCodexFunctionCallId(value: string): string {
-  const suffix = value.startsWith('call_')
-    ? value.slice('call_'.length)
-    : value.startsWith('fc_')
-      ? value.slice('fc_'.length)
-      : value
-  const candidate = `fc_${suffix}`
-  return candidate.length <= 64 ? candidate : `fc_${stableCodexCallIdDigest(candidate)}`
+function normalizedCodexToolCallId(value: string, prefix: 'fc' | 'ctc' | 'tsc'): string {
+  const knownPrefix = ['call_', 'fc_', 'ctc_', 'tsc_'].find((candidate) => value.startsWith(candidate))
+  const suffix = knownPrefix === undefined ? value : value.slice(knownPrefix.length)
+  const candidate = `${prefix}_${suffix}`
+  return candidate.length <= 64 ? candidate : `${prefix}_${stableCodexCallIdDigest(candidate)}`
 }
 
 function stableCodexCallIdDigest(value: string): string {

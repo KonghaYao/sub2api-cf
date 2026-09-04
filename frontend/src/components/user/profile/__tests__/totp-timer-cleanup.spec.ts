@@ -63,7 +63,12 @@ describe('TOTP 弹窗定时器清理', () => {
       secret: 'ABC123',
       setup_token: 'setup-token'
     })
-    mocks.enable.mockResolvedValue({ success: true })
+    mocks.enable.mockResolvedValue({
+      success: true,
+      recovery_codes: Array.from({ length: 10 }, (_, index) =>
+        `ABCD-EFGH-JKMN-${String(index).padStart(4, '2')}`,
+      ),
+    })
     mocks.disable.mockResolvedValue({ success: true })
 
     setIntervalSpy = vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler) => {
@@ -153,5 +158,40 @@ describe('TOTP 弹窗定时器清理', () => {
     expect(mocks.showError).toHaveBeenCalledWith('disable failed')
     expect(wrapper.text()).not.toContain('disable failed')
     expect(wrapper.find('.bg-red-50').exists()).toBe(false)
+  })
+
+  it('启用后只显示一次恢复码，并在用户确认保存前不关闭', async () => {
+    mocks.getVerificationMethod.mockResolvedValue({ method: 'password' })
+    const codes = [
+      'ABCD-EFGH-JKMN-PQRS', 'BCDE-FGHJ-KMNP-QRST', 'CDEF-GHJK-MNPQ-RSTU',
+      'DEFG-HJKM-NPQR-STUV', 'EFGH-JKMN-PQRS-TUVW', 'FGHJ-KMNP-QRST-UVWX',
+      'GHJK-MNPQ-RSTU-VWXY', 'HJKM-NPQR-STUV-WXYZ', 'JKMN-PQRS-TUVW-XYZ2',
+      'KMNP-QRST-UVWX-YZ23',
+    ]
+    mocks.enable.mockResolvedValue({ success: true, recovery_codes: codes })
+    const wrapper = mount(TotpSetupModal)
+    await flushPromises()
+
+    await wrapper.get('input[type="password"]').setValue('correct horse battery staple')
+    await wrapper.get('button.btn-primary').trigger('click')
+    await flushPromises()
+    await wrapper.get('button.btn-primary').trigger('click')
+    const inputs = wrapper.findAll('input[inputmode="numeric"]')
+    for (let index = 0; index < inputs.length; index += 1) {
+      await inputs[index].setValue(String(index + 1))
+    }
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(codes[0])
+    expect(wrapper.emitted('success')).toBeUndefined()
+    expect(mocks.showSuccess).not.toHaveBeenCalledWith('profile.totp.enableSuccess')
+    await wrapper.get('[data-testid="totp-setup-backdrop"]').trigger('click')
+    expect(wrapper.emitted('close')).toBeUndefined()
+    const confirm = wrapper.get('button.btn-primary')
+    expect(confirm.attributes('disabled')).toBeDefined()
+    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await confirm.trigger('click')
+    expect(wrapper.emitted('success')).toHaveLength(1)
   })
 })

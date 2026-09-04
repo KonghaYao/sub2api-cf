@@ -809,6 +809,7 @@ export default {
       setupTitle: '设置双因素认证',
       setupStep1: '使用认证器应用扫描下方二维码',
       setupStep2: '输入应用显示的 6 位验证码',
+      setupStep3: '保存恢复码',
       manualEntry: '无法扫码？手动输入密钥：',
       enterCode: '输入 6 位验证码',
       verify: '验证',
@@ -831,7 +832,16 @@ export default {
       enterEmailCode: '请输入 6 位验证码',
       sendCode: '发送验证码',
       codeSent: '验证码已发送到您的邮箱',
-      sendCodeFailed: '发送验证码失败'
+      sendCodeFailed: '发送验证码失败',
+      recoveryCodesWarning: '每个恢复码都可以代替认证器使用一次。恢复码不会再次显示，请立即妥善保存。',
+      copyRecoveryCodes: '复制全部恢复码',
+      recoveryCodesSavedConfirmation: '我已将这些恢复码安全保存。',
+      recoveryCodesRemaining: '剩余 {count} 个恢复码',
+      regenerateRecoveryCodes: '生成新的恢复码',
+      recoveryCodesRegenerated: '新恢复码已生成，旧恢复码已全部失效。',
+      useRecoveryCode: '使用恢复码',
+      useAuthenticatorCode: '使用认证器验证码',
+      recoveryCodePlaceholder: 'XXXX-XXXX-XXXX-XXXX'
     },
     passkey: {
       title: 'Passkey',

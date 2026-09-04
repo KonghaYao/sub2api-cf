@@ -12,11 +12,30 @@ export default defineConfig(async () => {
           bindings: { TEST_MIGRATIONS: migrations },
           outboundService: async (request) => {
             const url = new URL(request.url)
-            if (url.origin !== 'https://upstream.e2e.invalid') {
+            if (
+              url.origin !== 'https://upstream.e2e.invalid' &&
+              url.origin !== 'https://upstream-fallback.e2e.invalid'
+            ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
             }
             if (url.pathname === '/v1/responses') {
               const body = await request.json() as Record<string, unknown>
+              if (body.model === 'gpt-bridge-failover-upstream') {
+                if (url.origin === 'https://upstream.e2e.invalid') {
+                  return new Response([
+                    'event: response.failed',
+                    'data: {"type":"response.failed","response":{"id":"resp-binding-failed","status":"failed","output":[],"error":{"code":"server_error","message":"first binding account failed"},"usage":{"input_tokens":90,"output_tokens":9}}}',
+                    '',
+                    '',
+                  ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+                }
+                return new Response([
+                  'event: response.completed',
+                  'data: {"type":"response.completed","response":{"id":"resp-binding-failover","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"binding-failover-ok"}]}],"usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12}}}',
+                  '',
+                  '',
+                ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+              }
               if (body.model === 'gpt-bridge-stream-upstream') {
                 const valid = body.stream === true && body.store === false &&
                   body.max_output_tokens === 128 && body.stream_options === undefined &&

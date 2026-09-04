@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   generateTotpCode,
+  generateTotpRecoveryCodes,
+  isTotpRecoveryCode,
+  totpRecoveryCodeDigest,
   verifyTotpCode,
 } from '../../src/auth/totp'
 import { totpEmailCodeDigest } from '../../src/user/totp'
@@ -67,6 +70,33 @@ describe('TOTP email challenge digests', () => {
   })
 })
 
+describe('TOTP recovery codes', () => {
+  const base = {
+    CREDENTIALS_MASTER_KEY: 'm'.repeat(32),
+    ENVIRONMENT: 'production',
+  }
+
+  it('generates independent 80-bit codes and owner-bound keyed digests', async () => {
+    const codes = generateTotpRecoveryCodes()
+    expect(codes).toHaveLength(10)
+    expect(new Set(codes).size).toBe(10)
+    for (const code of codes) expect(isTotpRecoveryCode(code)).toBe(true)
+
+    const first = await totpRecoveryCodeDigest(base as any, 'alice', codes[0])
+    const compact = await totpRecoveryCodeDigest(base as any, 'alice', codes[0].replace(/-/g, ''))
+    const otherOwner = await totpRecoveryCodeDigest(base as any, 'bob', codes[0])
+    const otherEnvironment = await totpRecoveryCodeDigest(
+      { ...base, ENVIRONMENT: 'staging' } as any,
+      'alice',
+      codes[0],
+    )
+    expect(first).toMatch(/^[a-f0-9]{64}$/)
+    expect(compact).toBe(first)
+    expect(otherOwner).not.toBe(first)
+    expect(otherEnvironment).not.toBe(first)
+  })
+})
+
 describe('user TOTP migration', () => {
   it('upgrades v20 with encrypted owner state, hashed challenges, and session grants', () => {
     const { raw } = createSqliteD1()
@@ -110,6 +140,23 @@ describe('user TOTP migration', () => {
     expect(raw.prepare(
       `SELECT step_up_expires_at_ms FROM user_sessions WHERE id = 'alice-session'`,
     ).get()).toEqual({ step_up_expires_at_ms: now + 30_000 })
+  })
+
+  it('adds recovery-code sets without storing raw code material', () => {
+    const { raw } = createSqliteD1()
+    applyMigrations(raw, 27)
+    applyMigrations(raw, 28)
+
+    expect(raw.prepare('SELECT name FROM schema_migrations WHERE version = 28').get()).toEqual({
+      name: 'totp_recovery_codes',
+    })
+    const codeSql = raw.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_totp_recovery_codes'`,
+    ).get().sql as string
+    expect(codeSql).toContain('code_hash')
+    expect(codeSql).not.toMatch(/\bcode\s+TEXT/i)
+    expect(codeSql).toContain('consumed_at_ms')
+    expect(codeSql).toContain('FOREIGN KEY')
   })
 })
 

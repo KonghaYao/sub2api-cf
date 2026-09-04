@@ -8,12 +8,15 @@ const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 const TOTP_PERIOD_MS = 30_000
 const TOTP_SECRET_BYTES = 20
 const MASTER_KEY_MIN_BYTES = 32
+const TOTP_RECOVERY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+const TOTP_RECOVERY_CODE_CHARACTERS = 16
 
 export const TOTP_SETUP_TTL_MS = 5 * 60 * 1_000
 export const TOTP_LOGIN_TTL_MS = 5 * 60 * 1_000
 export const TOTP_STEP_UP_TTL_MS = 15 * 60 * 1_000
 export const TOTP_ATTEMPT_WINDOW_MS = 15 * 60 * 1_000
 export const TOTP_MAX_ATTEMPTS = 5
+export const TOTP_RECOVERY_CODE_COUNT = 10
 
 export interface EncryptedTotpSecret {
   secret_version: number
@@ -168,6 +171,47 @@ export async function verifyStoredTotpCode(
   return verifyTotpCode(code, await decryptTotpSecret(env, credential.user_id, credential), now)
 }
 
+/** Generates ten independently random, human-readable 80-bit recovery codes. */
+export function generateTotpRecoveryCodes(
+  count = TOTP_RECOVERY_CODE_COUNT,
+): string[] {
+  if (!Number.isSafeInteger(count) || count < 1 || count > TOTP_RECOVERY_CODE_COUNT) {
+    throw new TypeError('TOTP recovery-code count is invalid')
+  }
+  return Array.from({ length: count }, () => {
+    const random = crypto.getRandomValues(new Uint8Array(TOTP_RECOVERY_CODE_CHARACTERS))
+    let compact = ''
+    for (const byte of random) compact += TOTP_RECOVERY_ALPHABET[byte & 31]
+    return compact.match(/.{4}/g)!.join('-')
+  })
+}
+
+export function isTotpRecoveryCode(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  return new RegExp(`^[${TOTP_RECOVERY_ALPHABET}]{4}(?:-?[${TOTP_RECOVERY_ALPHABET}]{4}){3}$`, 'i')
+    .test(value.trim())
+}
+
+/**
+ * Produces an environment- and owner-bound keyed digest. A D1 leak therefore
+ * neither reveals the raw code nor permits an offline recovery-code lookup.
+ */
+export async function totpRecoveryCodeDigest(
+  env: Pick<Env, 'CREDENTIALS_MASTER_KEY' | 'ENVIRONMENT'>,
+  userId: string,
+  code: string,
+): Promise<string> {
+  if (!isTotpRecoveryCode(code)) throw new TypeError('TOTP recovery code is invalid')
+  const key = await deriveTotpRecoveryKey(requireMasterKey(env))
+  const normalized = code.trim().toUpperCase().replace(/-/g, '')
+  const digest = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode(`sub2api/user-totp-recovery/v1\0${env.ENVIRONMENT}\0${userId}\0${normalized}`),
+  )
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 export async function createTotpLoginChallenge(
   env: Env,
   userId: string,
@@ -295,6 +339,22 @@ async function deriveTotpKey(masterKey: string): Promise<CryptoKey> {
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt'],
+  )
+}
+
+async function deriveTotpRecoveryKey(masterKey: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey('raw', encoder.encode(masterKey), 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: encoder.encode('sub2api-totp-recovery-salt-v1'),
+      info: encoder.encode('user-totp-recovery/hmac-sha256'),
+    },
+    material,
+    { name: 'HMAC', hash: 'SHA-256', length: 256 },
+    false,
+    ['sign'],
   )
 }
 

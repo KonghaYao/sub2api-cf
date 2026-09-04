@@ -44,13 +44,14 @@ Status vocabulary:
 | Same: known GPT-5.6 reasoning choices/default and priority service tier | Retain | `test/gateway/legacy-codex-contract.test.ts` |
 | Same: dedicated image models are omitted and other model service tiers remain empty | Retain | `test/gateway/legacy-codex-contract.test.ts` |
 | `openai_codex_models_handler_test.go`: ETag is computed from the final client body and supports weak/comma validators | Retain | `test/gateway/legacy-codex-contract.test.ts`; authenticated route in `test/gateway/handler.test.ts` |
+| `openai_codex_function_call_id_test.go`: native function/custom/tool-search call IDs use the `fc_`/`ctc_`/`tsc_` family, keep call/output pairs aligned and compact oversized IDs deterministically | Retain | `test/gateway/providers/request.test.ts` — Codex provider plan normalization through the public request builder |
 
 ## Gateway routes, subroutes and embeddings
 
 | Go source and behavior | Decision | Worker evidence or gap |
 |---|---|---|
-| `server/routes/gateway_test.go`: Responses compact registration | Retain | `/v1`, root and `/backend-api/codex` aliases in `test/gateway/legacy-gateway-routes.test.ts`; billed forwarding in `test/gateway/handler.test.ts` |
-| Same: Responses input-token counting registration | Retain | aliases in `test/gateway/legacy-gateway-routes.test.ts`; exact upstream/no-billing behavior in `test/gateway/handler.test.ts` |
+| `server/routes/gateway_test.go`: Responses compact registration | Retain | `/v1`, root and `/backend-api/codex` aliases in `test/gateway/legacy-gateway-routes.test.ts`; both public aliases, compact whitelist normalization, unary forwarding and exact terminal billing in `test/gateway/handler.test.ts` |
+| Same: Responses input-token counting registration | Retain | aliases in `test/gateway/legacy-gateway-routes.test.ts`; both public aliases, official upstream/no-billing behavior, custom-relay local estimation and malformed-upstream error cleanup in `test/gateway/handler.test.ts` |
 | Same: unsupported Responses subpaths are rejected | Pending | Route allow-list exists, but a dedicated negative contract for every reserved subpath has not migrated |
 | Same: alpha search, synchronous/async images, video and custom voice routes | Pending | Media/search products require Queue/R2 task contracts and are not represented by the text gateway tests |
 | Chat request with only a Responses-capable account | Replace | `test/gateway/protocols/chat-from-responses.test.ts`, `test/gateway/repository.test.ts`, `test/gateway/handler.test.ts` and `test/e2e/chat-to-responses.e2e.ts` prove explicit OpenAI/Codex cohort fallback, forced Responses SSE, terminal-without-EOF return, buffered/streamed Chat output, failure fidelity, zero-billable cyber policy, Codex body normalization, public model restoration, interleaved tools, exact billing and one released Pool lease on real local bindings |
@@ -85,7 +86,7 @@ The following classifications apply test-by-test by behavioral family in
 | `chatcompletions_responses_bridge_test.go` | Retain | Developer/system roles, formats, parallel tools and invalid history are represented in Worker protocol tests |
 | `chatcompletions_responses_request_invariants_test.go` | Retain | Pairing behavior is represented; every original fixture sequence is not duplicated |
 | `chatcompletions_responses_stream_lifecycle_test.go` | Retain | Balanced text/reasoning/tool lifecycle and idempotent terminal behavior are represented |
-| `chatcompletions_responses_bridge_custom_tools_test.go` | Pending | Custom/freeform, namespace and client `tool_search` lowering/restoration is not complete |
+| `chatcompletions_responses_bridge_custom_tools_test.go` | Retain + Pending | Codex-native function/custom/tool-search call-ID family normalization is retained; custom/freeform, namespace and client `tool_search` lowering/restoration remains incomplete |
 | `chatcompletions_responses_reasoning_cache_test.go` | Replace + Pending | Stateless wire reasoning is retained; cross-request reasoning cache must be a DO/KV design and is not complete |
 | `chatcompletions_responses_tool_output_media_test.go` | Pending | Tool-output media extraction/reinjection is not complete |
 | `chatcompletions_x_search_test.go` | Pending | `x_search` request projection exists in Chat→Responses, but full round-trip and billing are not proven |

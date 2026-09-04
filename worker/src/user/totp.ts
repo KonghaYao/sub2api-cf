@@ -16,11 +16,14 @@ import {
   encryptTotpSecret,
   findTotpCredential,
   generateTotpSecret,
+  generateTotpRecoveryCodes,
   isTotpSetupToken,
+  isTotpRecoveryCode,
   TOTP_MAX_ATTEMPTS,
   TOTP_SETUP_TTL_MS,
   TOTP_STEP_UP_TTL_MS,
   totpFeatureAvailable,
+  totpRecoveryCodeDigest,
   totpTokenDigest,
   verifyStoredTotpCode,
   verifyTotpCode,
@@ -91,11 +94,18 @@ export type TotpEmailDeliveryResult = 'delivered' | 'already_delivered' | 'stale
 export async function getTotpStatus(context: Context<UserBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
-    const credential = await findTotpCredential(context.env, user.id)
+    const [credential, recoveryCount] = await Promise.all([
+      findTotpCredential(context.env, user.id),
+      context.env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM user_totp_recovery_codes
+          WHERE user_id = ? AND consumed_at_ms IS NULL`,
+      ).bind(user.id).first<{ count: number }>(),
+    ])
     return controlSuccess({
       enabled: credential !== null,
       enabled_at: credential === null ? null : Math.floor(credential.enabled_at_ms / 1_000),
       feature_enabled: totpFeatureAvailable(context.env),
+      recovery_codes_remaining: recoveryCount?.count ?? 0,
     })
   } catch (error) {
     return totpError(error)
@@ -304,6 +314,7 @@ export async function enableTotp(context: Context<UserBindings>): Promise<Respon
     }
 
     const consumeNonce = crypto.randomUUID()
+    const recovery = await prepareRecoveryCodeSet(context.env, user.id)
     let writes: D1Result<unknown>[]
     try {
       writes = await context.env.DB.batch([
@@ -326,9 +337,32 @@ export async function enableTotp(context: Context<UserBindings>): Promise<Respon
            )
            SELECT user_id, secret_version, nonce_b64, ciphertext_b64, 1, ?, ?, ?
              FROM user_totp_setup_challenges
-            WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+           WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
            RETURNING user_id`,
         ).bind(now, now, now, reservedChallenge.id, user.id, consumeNonce),
+        context.env.DB.prepare(
+          `INSERT INTO user_totp_recovery_code_sets (
+             user_id, set_id, version, created_at_ms, updated_at_ms
+           )
+           SELECT user_id, ?, 1, ?, ? FROM user_totp_credentials
+            WHERE user_id = ?
+              AND EXISTS (
+                SELECT 1 FROM user_totp_setup_challenges
+                 WHERE id = ? AND user_id = ? AND status = 'consumed' AND consume_nonce = ?
+              )
+           RETURNING user_id`,
+        ).bind(
+          recovery.setId, now, now, user.id,
+          reservedChallenge.id, user.id, consumeNonce,
+        ),
+        ...recovery.hashes.map((hash, position) => context.env.DB.prepare(
+          `INSERT INTO user_totp_recovery_codes (
+             user_id, set_id, position, code_hash, created_at_ms
+           )
+           SELECT user_id, set_id, ?, ?, ? FROM user_totp_recovery_code_sets
+            WHERE user_id = ? AND set_id = ?
+           RETURNING position`,
+        ).bind(position, hash, now, user.id, recovery.setId)),
       ])
     } catch (error) {
       if (/user_totp_credentials\.user_id/i.test(errorMessage(error))) {
@@ -336,8 +370,8 @@ export async function enableTotp(context: Context<UserBindings>): Promise<Respon
       }
       throw error
     }
-    if (writes[0]?.results.length !== 1 || writes[1]?.results.length !== 1) throw setupExpired()
-    return controlSuccess({ success: true })
+    if (writes.some((write) => write.results.length !== 1)) throw setupExpired()
+    return controlSuccess({ success: true, recovery_codes: recovery.codes })
   } catch (error) {
     return totpError(error)
   }
@@ -419,36 +453,191 @@ export async function grantTotpStepUp(context: Context<UserBindings>): Promise<R
     }
     const subject = await checkAuthRateLimit(context.env, context.req.raw, user.email, 'login')
     await commitAuthRateLimitAttempt(context.env, subject)
-    if (!(await verifyStoredTotpCode(context.env, credential, body.code))) {
+    const recoveryCode = body.recovery_code
+    const useRecoveryCode = isTotpRecoveryCode(recoveryCode) && body.code === undefined
+    const useAuthenticatorCode = typeof body.code === 'string' && /^\d{6}$/.test(body.code) &&
+      recoveryCode === undefined
+    let recoveryHash: string | null = null
+    let valid = false
+    if (useRecoveryCode) {
+      recoveryHash = await totpRecoveryCodeDigest(context.env, user.id, recoveryCode)
+      valid = (await context.env.DB.prepare(
+        `SELECT 1 AS available FROM user_totp_recovery_codes
+          WHERE user_id = ? AND code_hash = ? AND consumed_at_ms IS NULL LIMIT 1`,
+      ).bind(user.id, recoveryHash).first()) !== null
+    } else if (useAuthenticatorCode) {
+      valid = await verifyStoredTotpCode(context.env, credential, body.code)
+    }
+    if (!valid) {
       await recordAuthRateLimitFailure(context.env, subject)
       throw new GatewayError(400, 'TOTP_INVALID_CODE', 'Invalid TOTP code')
     }
-    await clearAuthAccountRateLimit(context.env, subject)
     const expiresAtMs = Date.now() + TOTP_STEP_UP_TTL_MS
-    const update = await context.env.DB.prepare(
-      `UPDATE user_sessions SET step_up_expires_at_ms = ?
-        WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
-          AND access_expires_at_ms > ?
-          AND EXISTS (
-            SELECT 1 FROM user_totp_credentials
-             WHERE user_id = ? AND version = ?
-          )
-        RETURNING id`,
-    ).bind(
-      expiresAtMs,
-      user.session_id,
-      user.id,
-      Date.now(),
-      user.id,
-      credential.version,
-    ).all<{ id: string }>()
-    if (update.results.length !== 1) {
+    const now = Date.now()
+    let updated = false
+    if (recoveryHash === null) {
+      const update = await context.env.DB.prepare(
+        `UPDATE user_sessions SET step_up_expires_at_ms = ?
+          WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+            AND access_expires_at_ms > ?
+            AND EXISTS (
+              SELECT 1 FROM user_totp_credentials
+               WHERE user_id = ? AND version = ?
+            )
+          RETURNING id`,
+      ).bind(
+        expiresAtMs, user.session_id, user.id, now, user.id, credential.version,
+      ).all<{ id: string }>()
+      updated = update.results.length === 1
+    } else {
+      const consumeNonce = crypto.randomUUID()
+      const writes = await context.env.DB.batch([
+        context.env.DB.prepare(
+          `UPDATE user_totp_recovery_codes
+              SET consumed_at_ms = ?, consume_nonce = ?
+            WHERE user_id = ? AND code_hash = ? AND consumed_at_ms IS NULL
+              AND EXISTS (
+                SELECT 1 FROM user_totp_credentials
+                 WHERE user_id = ? AND version = ?
+              )
+              AND EXISTS (
+                SELECT 1 FROM user_sessions
+                 WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+                   AND access_expires_at_ms > ?
+              )
+            RETURNING position`,
+        ).bind(
+          now, consumeNonce, user.id, recoveryHash, user.id, credential.version,
+          user.session_id, user.id, now,
+        ),
+        context.env.DB.prepare(
+          `UPDATE user_sessions SET step_up_expires_at_ms = ?
+            WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+              AND access_expires_at_ms > ?
+              AND EXISTS (
+                SELECT 1 FROM user_totp_recovery_codes
+                 WHERE user_id = ? AND code_hash = ? AND consume_nonce = ?
+              )
+            RETURNING id`,
+        ).bind(
+          expiresAtMs, user.session_id, user.id, now,
+          user.id, recoveryHash, consumeNonce,
+        ),
+      ])
+      updated = writes.every((write) => write.results.length === 1)
+    }
+    if (!updated) {
+      await recordAuthRateLimitFailure(context.env, subject)
       throw new GatewayError(401, 'invalid_access_token', 'Invalid or expired access token', 'authentication_error')
     }
+    await clearAuthAccountRateLimit(context.env, subject)
     return controlSuccess({
       verified: true,
       expires_in: Math.floor(TOTP_STEP_UP_TTL_MS / 1_000),
     })
+  } catch (error) {
+    return totpError(error)
+  }
+}
+
+export async function regenerateTotpRecoveryCodes(
+  context: Context<UserBindings>,
+): Promise<Response> {
+  try {
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    const credential = await findTotpCredential(context.env, user.id)
+    if (credential === null) {
+      throw new GatewayError(400, 'TOTP_NOT_SETUP', 'TOTP is not set up for this account')
+    }
+    const now = Date.now()
+    if (user.step_up_expires_at_ms === null || user.step_up_expires_at_ms <= now) {
+      throw new GatewayError(403, 'STEP_UP_REQUIRED', 'Recent two-factor verification is required', 'permission_error')
+    }
+    const current = await context.env.DB.prepare(
+      `SELECT set_id, version FROM user_totp_recovery_code_sets
+        WHERE user_id = ? LIMIT 1`,
+    ).bind(user.id).first<{ set_id: string; version: number }>()
+    const recovery = await prepareRecoveryCodeSet(context.env, user.id)
+    let writes: D1Result<unknown>[]
+    try {
+      if (current === null) {
+        writes = await context.env.DB.batch([
+          context.env.DB.prepare(
+            `INSERT INTO user_totp_recovery_code_sets (
+               user_id, set_id, version, created_at_ms, updated_at_ms
+             )
+             SELECT ?, ?, 1, ?, ?
+              WHERE EXISTS (
+                SELECT 1 FROM user_totp_credentials WHERE user_id = ? AND version = ?
+              ) AND EXISTS (
+                SELECT 1 FROM user_sessions
+                 WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+                   AND access_expires_at_ms > ? AND step_up_expires_at_ms > ?
+              )
+             RETURNING user_id`,
+          ).bind(
+            user.id, recovery.setId, now, now, user.id, credential.version,
+            user.session_id, user.id, now, now,
+          ),
+          ...recovery.hashes.map((hash, position) => recoveryCodeInsertStatement(
+            context.env, user.id, recovery.setId, position, hash, now,
+          )),
+        ])
+        if (writes.some((write) => write.results.length !== 1)) throw recoveryCodeConflict()
+      } else {
+        writes = await context.env.DB.batch([
+          context.env.DB.prepare(
+            `DELETE FROM user_totp_recovery_codes
+              WHERE user_id = ? AND set_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM user_totp_recovery_code_sets
+                   WHERE user_id = ? AND set_id = ? AND version = ?
+                )
+                AND EXISTS (
+                  SELECT 1 FROM user_sessions
+                   WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+                     AND access_expires_at_ms > ? AND step_up_expires_at_ms > ?
+                )
+              RETURNING position`,
+          ).bind(
+            user.id, current.set_id, user.id, current.set_id, current.version,
+            user.session_id, user.id, now, now,
+          ),
+          context.env.DB.prepare(
+            `UPDATE user_totp_recovery_code_sets
+                SET set_id = ?, version = version + 1, created_at_ms = ?, updated_at_ms = ?
+              WHERE user_id = ? AND set_id = ? AND version = ?
+                AND EXISTS (
+                  SELECT 1 FROM user_totp_credentials WHERE user_id = ? AND version = ?
+                )
+                AND EXISTS (
+                  SELECT 1 FROM user_sessions
+                   WHERE id = ? AND user_id = ? AND revoked_at_ms IS NULL
+                     AND access_expires_at_ms > ? AND step_up_expires_at_ms > ?
+                )
+              RETURNING version`,
+          ).bind(
+            recovery.setId, now, now, user.id, current.set_id, current.version,
+            user.id, credential.version, user.session_id, user.id, now, now,
+          ),
+          ...recovery.hashes.map((hash, position) => recoveryCodeInsertStatement(
+            context.env, user.id, recovery.setId, position, hash, now,
+          )),
+        ])
+        // The set-row CAS is the authority. Deleting zero old rows is valid for
+        // an upgraded or repaired account, while a losing concurrent rotation
+        // returns zero from the CAS and every conditional insert.
+        if (writes.slice(1).some((write) => write.results.length !== 1)) {
+          throw recoveryCodeConflict()
+        }
+      }
+    } catch (error) {
+      if (isRecoveryCodeUniqueConflict(error)) {
+        throw recoveryCodeConflict()
+      }
+      throw error
+    }
+    return controlSuccess({ success: true, recovery_codes: recovery.codes })
   } catch (error) {
     return totpError(error)
   }
@@ -757,6 +946,52 @@ function totpEmailRateLimitStatement(env: Env, userId: string, now: number): D1P
          WHEN window_started_at_ms <= ? THEN 1 ELSE send_count + 1 END,
        updated_at_ms = excluded.updated_at_ms`,
   ).bind(userId, now, now, now - EMAIL_RATE_WINDOW_MS, now - EMAIL_RATE_WINDOW_MS)
+}
+
+async function prepareRecoveryCodeSet(
+  env: Env,
+  userId: string,
+): Promise<{ setId: string; codes: string[]; hashes: string[] }> {
+  const codes = generateTotpRecoveryCodes()
+  return {
+    setId: crypto.randomUUID(),
+    codes,
+    hashes: await Promise.all(codes.map((code) => totpRecoveryCodeDigest(env, userId, code))),
+  }
+}
+
+function recoveryCodeInsertStatement(
+  env: Env,
+  userId: string,
+  setId: string,
+  position: number,
+  hash: string,
+  now: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO user_totp_recovery_codes (
+       user_id, set_id, position, code_hash, created_at_ms
+     )
+     SELECT user_id, set_id, ?, ?, ? FROM user_totp_recovery_code_sets
+      WHERE user_id = ? AND set_id = ?
+     RETURNING position`,
+  ).bind(position, hash, now, userId, setId)
+}
+
+function recoveryCodeConflict(): GatewayError {
+  return new GatewayError(
+    409,
+    'TOTP_RECOVERY_CODES_CONFLICT',
+    'TOTP recovery codes changed concurrently',
+  )
+}
+
+function isRecoveryCodeUniqueConflict(error: unknown): boolean {
+  const message = errorMessage(error)
+  return /\bUNIQUE constraint failed:\s*(?:main\.)?user_totp_recovery_code_sets\.(?:user_id|set_id)\b/i
+    .test(message) ||
+    /\bUNIQUE constraint failed:\s*(?:main\.)?user_totp_recovery_codes\.(?:user_id|set_id|position|code_hash)\b/i
+      .test(message)
 }
 
 async function readTotpSettings(env: Env): Promise<TotpSettings> {

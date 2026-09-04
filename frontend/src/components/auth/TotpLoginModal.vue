@@ -15,7 +15,7 @@
             {{ t('profile.totp.loginTitle') }}
           </h3>
           <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-            {{ t('profile.totp.loginHint') }}
+            {{ useRecoveryCode ? t('profile.totp.recoveryCodesWarning') : t('profile.totp.loginHint') }}
           </p>
           <p v-if="userEmailMasked" class="mt-1 text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ userEmailMasked }}
@@ -23,7 +23,7 @@
         </div>
 
         <!-- Code Input -->
-        <div class="mb-6">
+        <div v-if="!useRecoveryCode" class="mb-6">
           <!-- Hidden input for password manager autofill (autocomplete="one-time-code") -->
           <input
             ref="hiddenOtpInputRef"
@@ -60,6 +60,36 @@
           </div>
         </div>
 
+        <form v-else class="mb-6 space-y-3" @submit.prevent="submitRecoveryCode">
+          <input
+            v-model="recoveryCode"
+            data-testid="totp-recovery-code"
+            type="text"
+            autocomplete="one-time-code"
+            maxlength="19"
+            class="input w-full text-center font-mono uppercase tracking-wide"
+            :placeholder="t('profile.totp.recoveryCodePlaceholder')"
+            :disabled="verifying"
+            @input="normalizeRecoveryInput"
+          />
+          <button
+            type="submit"
+            class="btn btn-primary w-full"
+            :disabled="verifying || !validRecoveryCode"
+          >
+            {{ verifying ? t('common.verifying') : t('profile.totp.verify') }}
+          </button>
+        </form>
+
+        <button
+          type="button"
+          class="mb-4 w-full text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+          :disabled="verifying"
+          @click="toggleRecoveryMode"
+        >
+          {{ useRecoveryCode ? t('profile.totp.useAuthenticatorCode') : t('profile.totp.useRecoveryCode') }}
+        </button>
+
         <!-- Cancel button only -->
         <button
           type="button"
@@ -75,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted } from 'vue'
+import { computed, ref, watch, nextTick, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores'
 
@@ -96,6 +126,11 @@ const verifying = ref(false)
 const code = ref<string[]>(['', '', '', '', '', ''])
 const inputRefs = ref<(HTMLInputElement | null)[]>([])
 const hiddenOtpInputRef = ref<HTMLInputElement | null>(null)
+const useRecoveryCode = ref(false)
+const recoveryCode = ref('')
+const validRecoveryCode = computed(() => /^[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){3}$/.test(
+  recoveryCode.value,
+))
 
 // Watch for code changes and auto-submit when 6 digits are entered
 watch(
@@ -114,6 +149,7 @@ defineExpose({
       appStore.showError(message)
     }
     code.value = ['', '', '', '', '', '']
+    recoveryCode.value = ''
     // Clear input DOM values
     inputRefs.value.forEach(input => {
       if (input) input.value = ''
@@ -201,6 +237,24 @@ const handlePaste = (event: ClipboardEvent) => {
   const focusIndex = Math.min(digits.length, 5)
   nextTick(() => {
     inputRefs.value[focusIndex]?.focus()
+  })
+}
+
+const normalizeRecoveryInput = () => {
+  const compact = recoveryCode.value.toUpperCase().replace(/[^2-9A-HJ-NP-Z]/g, '').slice(0, 16)
+  recoveryCode.value = compact.match(/.{1,4}/g)?.join('-') || ''
+}
+
+const submitRecoveryCode = () => {
+  if (validRecoveryCode.value && !verifying.value) emit('verify', recoveryCode.value)
+}
+
+const toggleRecoveryMode = () => {
+  useRecoveryCode.value = !useRecoveryCode.value
+  recoveryCode.value = ''
+  code.value = ['', '', '', '', '', '']
+  nextTick(() => {
+    if (!useRecoveryCode.value) inputRefs.value[0]?.focus()
   })
 }
 

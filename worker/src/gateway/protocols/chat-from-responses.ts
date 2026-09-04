@@ -16,13 +16,43 @@ export interface ResponsesFailureDetails {
   cyberPolicy: boolean
 }
 
+/**
+ * A normal `response.incomplete` terminal carries partial success (for
+ * example max_output_tokens/content_filter). It is a failure only when the
+ * provider attached an actual error. The compact `response.done` alias uses
+ * the same distinction.
+ */
+export function isResponsesFailedTerminal(value: unknown): boolean {
+  const event = objectValue(value)
+  const type = optionalString(event?.type)
+  const response = objectValue(event?.response)
+  const hasError = objectValue(response?.error) !== null || objectValue(event?.error) !== null
+  if (
+    type === 'response.failed' || type === 'response.canceled' ||
+    type === 'response.cancelled' || type === 'error'
+  ) return true
+  if (type === 'response.incomplete') return hasError
+  if (type !== 'response.done') return false
+  const status = optionalString(response?.status)
+  return hasError || (status !== 'completed' && status !== 'incomplete')
+}
+
 export function responsesFailureDetails(value: unknown): ResponsesFailureDetails {
   const event = objectValue(value)
   const response = objectValue(event?.response) ?? event
   const error = objectValue(response?.error) ?? objectValue(event?.error)
-  const code = (optionalString(error?.code) ?? optionalString(error?.type) ?? 'upstream_error')
+  const incompleteReason = optionalString(objectValue(response?.incomplete_details)?.reason) ??
+    optionalString(objectValue(event?.incomplete_details)?.reason)
+  const code = (
+    optionalString(error?.code) ?? optionalString(error?.type) ?? incompleteReason ?? 'upstream_error'
+  )
     .slice(0, 128)
-  const message = (optionalString(error?.message) ?? 'Upstream Responses request failed')
+  const message = (
+    optionalString(error?.message) ??
+    (incompleteReason === undefined
+      ? 'Upstream Responses request failed'
+      : `Upstream Responses request incomplete: ${incompleteReason}`)
+  )
     .slice(0, 4_096)
   return { code, message, cyberPolicy: code === 'cyber_policy' }
 }
@@ -250,19 +280,13 @@ export class ResponsesToChatCompletionsEventCodec {
         tool_calls: [{ index: tool.index, function: { arguments: delta } }],
       })]
     }
-    if (
-      type === 'response.failed' || type === 'response.canceled' ||
-      type === 'response.cancelled' || type === 'error'
-    ) {
+    if (isResponsesFailedTerminal(event)) {
       const failure = responsesFailureDetails(event)
       throw new ResponsesToChatError(failure.message, failure.code)
     }
     if (type === 'response.done') {
       const status = objectValue(event.response)?.status
-      if (status !== 'completed' && status !== 'incomplete') {
-        const failure = responsesFailureDetails(event)
-        throw new ResponsesToChatError(failure.message, failure.code)
-      }
+      if (status !== 'completed' && status !== 'incomplete') return []
       return this.complete(event)
     }
     if (type === 'response.completed' || type === 'response.incomplete') {
@@ -448,7 +472,7 @@ export class BufferedResponsesToChatCompletions {
       const tool = this.tools.get(outputIndex)
       if (tool !== undefined && typeof event.delta === 'string') tool.arguments += event.delta
     }
-    if (type === 'response.completed' || type === 'response.incomplete') {
+    if (type === 'response.completed' || (type === 'response.incomplete' && !isResponsesFailedTerminal(event))) {
       this.terminalResponse = {
         ...(observed ?? {}),
         status: type === 'response.incomplete' ? 'incomplete' : 'completed',
@@ -466,13 +490,11 @@ export class BufferedResponsesToChatCompletions {
       if (this.terminalResponse.usage === undefined && event.usage !== undefined) {
         this.terminalResponse.usage = event.usage
       }
-      this.terminalValue = status === 'completed' || status === 'incomplete'
+      this.terminalValue = (status === 'completed' || status === 'incomplete') &&
+        !isResponsesFailedTerminal(event)
         ? 'completed'
         : 'failed'
-    } else if (
-      type === 'response.failed' || type === 'response.canceled' ||
-      type === 'response.cancelled' || type === 'error'
-    ) {
+    } else if (isResponsesFailedTerminal(event)) {
       this.terminalResponse = observed ?? {
         status: 'failed',
         ...(event.error === undefined ? {} : { error: event.error }),

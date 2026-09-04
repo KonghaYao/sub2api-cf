@@ -38,4 +38,22 @@ describe('TotpLoginModal', () => {
     expect(wrapper.text()).not.toContain('Invalid code')
     expect(wrapper.find('.bg-red-50').exists()).toBe(false)
   })
+
+  it('normalizes and submits a one-time recovery code', async () => {
+    const wrapper = mount(TotpLoginModal, {
+      props: { tempToken: 'temp-token' },
+    })
+
+    const toggle = wrapper.findAll('button').find((button) =>
+      button.text().includes('profile.totp.useRecoveryCode'),
+    )
+    expect(toggle).toBeTruthy()
+    await toggle!.trigger('click')
+    const input = wrapper.get('[data-testid="totp-recovery-code"]')
+    await input.setValue('abcd efgh jkmn pqrs')
+    expect((input.element as HTMLInputElement).value).toBe('ABCD-EFGH-JKMN-PQRS')
+    await wrapper.get('form').trigger('submit.prevent')
+
+    expect(wrapper.emitted('verify')).toEqual([['ABCD-EFGH-JKMN-PQRS']])
+  })
 })
