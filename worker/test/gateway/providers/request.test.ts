@@ -93,19 +93,60 @@ describe('provider request adapters', () => {
     expect(plan.headers.get('accept')).toBe('text/event-stream')
   })
 
-  it('uses the Codex backend contract and forces non-persistent Responses requests', () => {
+  it('normalizes Chat-compatible Responses input for the Codex backend contract', () => {
     const plan = buildProviderRequest({
       account: account('codex', { provider_config: { account_id: 'workspace_123' } }),
       credential,
       operation: 'responses',
-      body: { model: 'gpt-5-codex', store: true, input: [] },
+      body: {
+        model: 'gpt-5-codex',
+        store: true,
+        stream: true,
+        max_output_tokens: 128,
+        temperature: 0.5,
+        instructions: 'Existing instructions.',
+        input: [
+          { role: 'system', content: 'System instructions.' },
+          { role: 'user', content: 'Hello' },
+        ],
+      },
     })
 
     expect(plan.url).toBe('https://chatgpt.test/backend-api/codex/responses')
     expect(plan.headers.get('authorization')).toBe('Bearer provider-secret')
     expect(plan.headers.get('chatgpt-account-id')).toBe('workspace_123')
     expect(plan.headers.get('originator')).toBe('codex_cli_rs')
-    expect(plan.body).toEqual({ model: 'gpt-5-codex', store: false, input: [] })
+    expect(plan.body).toEqual({
+      model: 'gpt-5-codex',
+      store: false,
+      stream: true,
+      instructions: 'System instructions.\n\nExisting instructions.',
+      input: [{ role: 'user', content: 'Hello' }],
+    })
+  })
+
+  it('normalizes paired and oversized function call IDs for Codex tool continuation', () => {
+    const oversized = `call_${'x'.repeat(100)}`
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        input: [
+          { type: 'function_call', call_id: oversized, name: 'lookup', arguments: '{}' },
+          { type: 'function_call_output', call_id: oversized, output: 'ok' },
+          { type: 'function_call', call_id: 'call_short', name: 'lookup', arguments: '{}' },
+          { type: 'function_call_output', call_id: 'call_short', output: 'ok' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<{ call_id: string }> }).input
+
+    expect(input[0]?.call_id).toMatch(/^fc_[0-9a-f]{32}$/)
+    expect(input[0]?.call_id).toBe(input[1]?.call_id)
+    expect(input[0]?.call_id.length).toBeLessThanOrEqual(64)
+    expect(input[2]?.call_id).toBe('fc_short')
+    expect(input[3]?.call_id).toBe('fc_short')
   })
 
   it('preserves custom proxy prefixes without duplicating provider path segments', () => {

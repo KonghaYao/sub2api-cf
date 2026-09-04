@@ -128,15 +128,20 @@ export class SseEventTransformer {
 
   push(chunk: Uint8Array): Uint8Array[] {
     this.buffer += this.decoder.decode(chunk, { stream: true })
+    const chunks = this.drain(false)
     if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
       throw new GatewayError(502, 'invalid_upstream_stream', 'Upstream SSE event exceeded the size limit', 'server_error')
     }
-    return this.drain(false)
+    return chunks
   }
 
   finish(): Uint8Array[] {
     this.buffer += this.decoder.decode()
-    return this.drain(true)
+    const chunks = this.drain(false)
+    if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
+      throw new GatewayError(502, 'invalid_upstream_stream', 'Upstream SSE event exceeded the size limit', 'server_error')
+    }
+    return [...chunks, ...this.drain(true)]
   }
 
   usage(): TokenUsage | null {
@@ -174,30 +179,52 @@ export class SseEventTransformer {
       .find((line) => line.startsWith('event:'))
       ?.slice(6)
       .trim()
-    const lines = sourceLines.map((line) => {
-      if (!line.startsWith('data:')) return line
-      const data = line.slice(5).trimStart()
-      if (data === '') return line
-      if (data === '[DONE]') {
-        this.sawChatDone = true
-        return line
-      }
+    const dataLines = sourceLines
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+    const data = dataLines.join('\n')
+    let rewrittenData: string | null = null
+    if (data === '[DONE]') {
+      this.sawChatDone = true
+    } else if (data !== '') {
       try {
         const parsed: unknown = JSON.parse(data)
         const usage = extractUsage(parsed)
         if (usage !== null) this.latestUsage = usage
-        if (parsed !== null && typeof parsed === 'object') {
-          const parsedType = (parsed as Record<string, unknown>).type
-          const type = typeof parsedType === 'string' ? parsedType : eventName
-          if (type === 'response.completed') this.responsesTerminal = 'completed'
-          if (type === 'response.failed' || type === 'response.incomplete') {
+        const object = objectRecord(parsed)
+        if (object !== null) {
+          const type = typeof object.type === 'string' ? object.type : eventName
+          if (type === 'response.completed' || type === 'response.incomplete') {
+            this.responsesTerminal = 'completed'
+          }
+          if (type === 'response.done') {
+            const response = objectRecord(object.response)
+            const status = response?.status ?? object.status
+            this.responsesTerminal = status === 'completed' || status === 'incomplete'
+              ? 'completed'
+              : 'failed'
+          }
+          if (
+            type === 'response.failed' || type === 'response.canceled' ||
+            type === 'response.cancelled' || type === 'error'
+          ) {
             this.responsesTerminal = 'failed'
           }
         }
-        return `data: ${JSON.stringify(rewriteModelNames(parsed, this.upstreamModel, this.publicModel))}`
+        rewrittenData = JSON.stringify(
+          rewriteModelNames(parsed, this.upstreamModel, this.publicModel),
+        )
       } catch {
-        return line
+        // Preserve malformed data verbatim. The protocol-specific transformer
+        // decides whether it can be forwarded or must fail the request.
       }
+    }
+    let emittedData = false
+    const lines = sourceLines.flatMap((line) => {
+      if (!line.startsWith('data:') || rewrittenData === null) return [line]
+      if (emittedData) return []
+      emittedData = true
+      return [`data: ${rewrittenData}`]
     })
     const encoded = encoder.encode(lines.join('\n') + delimiter)
     this.emittedBytes += encoded.byteLength
@@ -205,10 +232,18 @@ export class SseEventTransformer {
   }
 }
 
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
 export function streamErrorFrame(
   endpoint: 'chat_completions' | 'responses',
   message: string,
   model = '',
+  code = 'upstream_stream_error',
+  type = 'server_error',
 ): Uint8Array {
   if (endpoint === 'responses') {
     return encoder.encode(
@@ -221,14 +256,14 @@ export function streamErrorFrame(
           model,
           status: 'failed',
           output: [],
-          error: { type: 'server_error', code: 'upstream_stream_error', message },
+          error: { type, code, message },
         },
       })}\n\n`,
     )
   }
   return encoder.encode(
     `event: error\ndata: ${JSON.stringify({
-      error: { type: 'server_error', code: 'upstream_stream_error', message },
+      error: { type, code, message },
     })}\n\n`,
   )
 }

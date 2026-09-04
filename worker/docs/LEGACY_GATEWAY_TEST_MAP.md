@@ -53,6 +53,7 @@ Status vocabulary:
 | Same: Responses input-token counting registration | Retain | aliases in `test/gateway/legacy-gateway-routes.test.ts`; exact upstream/no-billing behavior in `test/gateway/handler.test.ts` |
 | Same: unsupported Responses subpaths are rejected | Pending | Route allow-list exists, but a dedicated negative contract for every reserved subpath has not migrated |
 | Same: alpha search, synchronous/async images, video and custom voice routes | Pending | Media/search products require Queue/R2 task contracts and are not represented by the text gateway tests |
+| Chat request with only a Responses-capable account | Replace | `test/gateway/protocols/chat-from-responses.test.ts`, `test/gateway/repository.test.ts`, `test/gateway/handler.test.ts` and `test/e2e/chat-to-responses.e2e.ts` prove explicit OpenAI/Codex cohort fallback, forced Responses SSE, terminal-without-EOF return, buffered/streamed Chat output, failure fidelity, zero-billable cyber policy, Codex body normalization, public model restoration, interleaved tools, exact billing and one released Pool lease on real local bindings |
 | `integration/e2e_gateway_test.go`: Claude/Gemini model lists and normal generation | Replace | Local Worker request contracts in `test/gateway/handler.test.ts`; production-binding E2E remains Pending |
 | Same: complex Claude tools/thinking and cross-platform Claude↔Gemini routing | Pending | Pure codecs cover core tools, but there is no full deployed-binding cross-provider test yet |
 | `openai_embeddings_test.go`: upstream URL, batch input pass-through, public model restoration and input-only usage | Retain | `test/gateway/handler.test.ts` — embeddings success/billing contract |
@@ -121,9 +122,10 @@ The following classifications apply test-by-test by behavioral family in
 
 ## Remaining high-value protocol work
 
-1. Wire `chatCompletionsToResponsesRequest` into handler routing when a Chat
-   request resolves to a Responses-only account, then add a full request →
-   upstream → client integration test.
+1. Complete output-before-commit inspection so a retryable HTTP-200
+   `response.failed` can switch accounts only before any Chat bytes are exposed;
+   failure code/message, deterministic no-cooldown, cyber zero billing and exact
+   settlement are covered, while semantic failover and partial-output fixtures remain.
 2. Complete custom/freeform tools, namespace tools, `tool_search` and object
    arguments in both directions.
 3. Add native Anthropic→Responses SSE conversion (including signed thinking,

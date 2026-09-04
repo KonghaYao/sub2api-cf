@@ -32,6 +32,17 @@ import {
   responsesToChatCompletionsRequest,
 } from './protocols/responses'
 import {
+  ChatToResponsesError,
+  chatCompletionsToResponsesRequest,
+} from './protocols/chat-responses'
+import {
+  BufferedResponsesToChatCompletions,
+  ResponsesToChatCompletionsEventCodec,
+  ResponsesToChatError,
+  responsesFailureDetails,
+  responsesToChatCompletionsResponse,
+} from './protocols/chat-from-responses'
+import {
   persistSettlementRecovery,
   settleRecoveryRequest,
   signalSettlementRecovery,
@@ -84,6 +95,7 @@ import {
 type GatewayBindings = { Bindings: Env }
 
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
+const MAX_SSE_EVENT_CHARS = 256 * 1024
 const HEADER_TIMEOUT_MS = 30_000
 const BODY_IDLE_TIMEOUT_MS = 120_000
 const TOTAL_SYNC_TIMEOUT_MS = 120_000
@@ -860,7 +872,7 @@ interface PreparedGatewayRequest {
     upstreamEndpoint: GatewayEndpoint,
     platform: ProviderPlatform,
   ) => ProviderDispatch
-  protocolFallback?: 'responses_to_chat'
+  protocolFallback?: 'responses_to_chat' | 'chat_to_responses'
 }
 
 type ResponseProtocol =
@@ -868,6 +880,7 @@ type ResponseProtocol =
   | 'anthropic'
   | 'gemini'
   | 'responses_from_chat'
+  | 'chat_from_responses'
   | 'native_anthropic'
   | 'native_gemini'
 
@@ -876,6 +889,7 @@ interface ProviderDispatch {
   operation: ProviderOperation
   responseProtocol: ResponseProtocol
   transformResponse?: (value: unknown) => unknown
+  includeUsage?: boolean
 }
 
 type PrepareGatewayRequest = (body: Record<string, unknown>) => PreparedGatewayRequest
@@ -884,7 +898,7 @@ type GatewayErrorResponder = (error: GatewayError, requestId?: string) => Respon
 function prepareOpenAiRequest(
   body: Record<string, unknown>,
   endpoint: GatewayEndpoint,
-  allowProtocolFallback = endpoint === 'responses',
+  allowProtocolFallback = endpoint !== 'embeddings',
 ): PreparedGatewayRequest {
   validateClientControls(body)
   const requestedModel = requiredModel(body)
@@ -914,6 +928,25 @@ function prepareOpenAiRequest(
           responseProtocol: 'responses_from_chat',
         }
       }
+      if (endpoint === 'chat_completions' && upstreamEndpoint === 'responses') {
+        const fallbackBody = body.max_output_tokens === undefined &&
+          body.max_completion_tokens === undefined &&
+          body.max_tokens === undefined
+          ? { ...body, max_completion_tokens: model.default_max_output_tokens }
+          : body
+        return {
+          body: chatCompletionsToResponsesRequest(
+            fallbackBody,
+            model.upstream_name,
+          ) as unknown as Record<string, unknown>,
+          operation: 'responses',
+          responseProtocol: 'chat_from_responses',
+          // The bridge always exposes the terminal usage-only chunk. Besides
+          // legacy compatibility, this lets downstream gateways reconcile the
+          // exact Responses usage even when the Chat client omitted stream_options.
+          includeUsage: true,
+        }
+      }
       const upstreamBody: Record<string, unknown> = { ...body, model: model.upstream_name }
       if (
         upstreamBody.max_output_tokens === undefined &&
@@ -934,9 +967,11 @@ function prepareOpenAiRequest(
       }
       return { body: upstreamBody, operation, responseProtocol: 'openai' }
     },
-    ...(endpoint === 'responses' && allowProtocolFallback
+    ...(allowProtocolFallback && endpoint === 'responses'
       ? { protocolFallback: 'responses_to_chat' as const }
-      : {}),
+      : allowProtocolFallback && endpoint === 'chat_completions'
+        ? { protocolFallback: 'chat_to_responses' as const }
+        : {}),
   }
 }
 
@@ -961,7 +996,11 @@ async function dispatchGateway(
       requestedModel,
       endpoint,
       principal.user_id,
-      prepared.protocolFallback === 'responses_to_chat' ? 'chat_completions' : undefined,
+      prepared.protocolFallback === 'responses_to_chat'
+        ? 'chat_completions'
+        : prepared.protocolFallback === 'chat_to_responses'
+          ? 'responses'
+          : undefined,
     )
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint
@@ -1044,6 +1083,31 @@ async function dispatchGateway(
 
     const contentType = acquired.response.headers.get('content-type') ?? ''
     if (
+      !stream &&
+      providerDispatch.responseProtocol === 'chat_from_responses' &&
+      contentType.toLowerCase().includes('text/event-stream')
+    ) {
+      admissionHandedOff = true
+      return await createBufferedChatFromResponsesStream({
+        env: context.env,
+        endpoint,
+        response: acquired.response,
+        pool,
+        leaseId: acquired.leaseId,
+        accountId: acquired.accountId,
+        requestId,
+        principal,
+        model,
+        requestedModel,
+        inputBytes: parsed.bytes.byteLength,
+        clientSignal: context.req.raw.signal,
+        stream,
+        startedAt,
+        admission,
+        providerPlatform: provider,
+      })
+    }
+    if (
       endpoint !== 'embeddings' &&
       stream &&
       contentType.toLowerCase().includes('text/event-stream')
@@ -1071,6 +1135,7 @@ async function dispatchGateway(
         admission,
         providerPlatform: provider,
         responseProtocol: providerDispatch.responseProtocol,
+        includeUsage: providerDispatch.includeUsage,
         waitUntil: optionalWaitUntil(context),
       })
     }
@@ -1095,13 +1160,24 @@ async function dispatchGateway(
       providerPlatform: provider,
       transformResponse: providerDispatch.responseProtocol === 'responses_from_chat'
         ? (value) => chatCompletionsResponseToResponses(value, requestedModel)
+        : providerDispatch.responseProtocol === 'chat_from_responses'
+          ? (value) => responsesToChatCompletionsResponse(value, requestedModel)
         : providerDispatch.transformResponse,
     })
   } catch (error) {
     const normalized = error instanceof ProtocolValidationError
       ? new GatewayError(400, 'invalid_request_error', error.message)
+      : error instanceof ChatToResponsesError
+        ? new GatewayError(400, 'invalid_request_error', error.message)
       : error instanceof ResponsesBridgeError
         ? new GatewayError(400, 'invalid_request_error', error.message)
+      : error instanceof ResponsesToChatError
+        ? new GatewayError(
+          error.upstreamCode === 'cyber_policy' ? 400 : 502,
+          error.upstreamCode,
+          error.message,
+          error.upstreamCode === 'cyber_policy' ? 'invalid_request_error' : 'server_error',
+        )
       : error instanceof GeminiCodecError
         ? new GatewayError(400, 'invalid_argument', error.message)
         : asGatewayError(error)
@@ -1268,6 +1344,150 @@ interface FinalizeInput {
   providerPlatform: ProviderPlatform
 }
 
+async function createBufferedChatFromResponsesStream(
+  input: FinalizeInput & {
+    response: Response
+    clientSignal: AbortSignal
+  },
+): Promise<Response> {
+  const accounting = new SseEventTransformer(input.model.upstream_name, input.requestedModel)
+  const accumulator = new BufferedResponsesToChatCompletions(input.requestedModel)
+  const reader = input.response.body?.getReader()
+  let totalBytes = 0
+  let renewalSequence = 0
+  let lastRenewedAt = input.startedAt
+  let lastChunkAt = Date.now()
+  const deadlineAt = input.startedAt + TOTAL_SYNC_TIMEOUT_MS
+  let settled = false
+  let upstreamResponseValid = false
+
+  const settleOnce = async (
+    usage: TokenUsage,
+    outcome: 'completed' | 'failed' | 'cancelled',
+    zeroCost = false,
+  ) => {
+    if (settled) return
+    settled = true
+    await settleAndProject(input, usage, outcome, zeroCost)
+  }
+
+  try {
+    if (reader === undefined) {
+      throw new GatewayError(502, 'empty_upstream_stream', 'Upstream returned an empty stream', 'server_error')
+    }
+    while (accumulator.terminal() === 'missing') {
+      if (input.clientSignal.aborted) {
+        void bestEffort(() => reader.cancel('client cancelled'))
+        throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
+      }
+      const pending = reader.read().then((result) => ({ kind: 'read' as const, result }))
+      let result: ReadableStreamReadResult<Uint8Array>
+      while (true) {
+        const now = Date.now()
+        if (now >= deadlineAt) {
+          void bestEffort(() => reader.cancel('upstream response total timeout'))
+          throw new GatewayError(504, 'upstream_timeout', 'Upstream response exceeded the maximum duration', 'server_error')
+        }
+        if (now - lastRenewedAt >= RENEW_AFTER_MS) {
+          renewalSequence += 1
+          try {
+            await renewApiKeyAdmission(input.admission, renewalSequence)
+            await renewPoolLease(input.pool, input.leaseId, renewalSequence)
+          } catch (error) {
+            void bestEffort(() => reader.cancel('lease renewal failed'))
+            throw error
+          }
+          lastRenewedAt = Date.now()
+        }
+        const raced = await readOrTickOrAbort(
+          pending,
+          Math.max(1, Math.min(
+            RENEW_AFTER_MS,
+            BODY_IDLE_TIMEOUT_MS - (now - lastChunkAt),
+            deadlineAt - now,
+          )),
+          input.clientSignal,
+        )
+        if (raced.kind === 'abort') {
+          void bestEffort(() => reader.cancel('client cancelled'))
+          throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
+        }
+        if (raced.kind === 'read') {
+          result = raced.result
+          break
+        }
+        if (Date.now() - lastChunkAt >= BODY_IDLE_TIMEOUT_MS) {
+          void bestEffort(() => reader.cancel('upstream response idle timeout'))
+          throw new GatewayError(504, 'upstream_idle_timeout', 'Upstream response timed out', 'server_error')
+        }
+      }
+      if (result.done) {
+        accumulator.finish()
+        accounting.finish()
+        break
+      }
+      lastChunkAt = Date.now()
+      totalBytes += result.value.byteLength
+      if (totalBytes > MAX_SYNC_RESPONSE_BYTES) {
+        void bestEffort(() => reader.cancel('response too large'))
+        throw new GatewayError(502, 'upstream_response_too_large', 'Upstream response exceeded the size limit', 'server_error')
+      }
+      accumulator.push(result.value)
+      accounting.push(result.value)
+    }
+
+    const terminal = accumulator.terminal()
+    if (terminal !== 'missing') {
+      // A Responses terminal event is authoritative; do not wait for an upstream
+      // keep-alive connection to close before returning the buffered Chat reply.
+      void bestEffort(() => reader.cancel('upstream terminal event received'))
+    }
+    if (terminal === 'failed') accumulator.response()
+    if (terminal === 'missing') {
+      throw new ResponsesToChatError('Upstream stream ended before a terminal response event')
+    }
+    const downstream = accumulator.response()
+    const usage = accounting.usage() ?? estimatedUsage(input.inputBytes, totalBytes)
+    upstreamResponseValid = true
+    await settleOnce(usage, 'completed')
+    const output = encoder.encode(JSON.stringify(downstream))
+    const headers = responseHeaders(input.response.headers, false)
+    headers.set('content-type', 'application/json; charset=utf-8')
+    headers.set('content-length', String(output.byteLength))
+    return new Response(output.buffer as ArrayBuffer, { status: input.response.status, headers })
+  } catch (error) {
+    const cancelled = error instanceof GatewayError && error.code === 'client_cancelled'
+    const fallbackUsage = error instanceof ResponsesToChatError && error.upstreamCode === 'cyber_policy'
+      ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false }
+      : accounting.usage() ?? estimatedUsage(input.inputBytes, totalBytes)
+    await bestEffort(() => settleOnce(
+      fallbackUsage,
+      cancelled ? 'cancelled' : 'failed',
+      error instanceof ResponsesToChatError && error.upstreamCode === 'cyber_policy',
+    ))
+    if (!upstreamResponseValid && !cancelled && !(error instanceof ResponsesToChatError)) {
+      await bestEffort(() => recordPoolFailure(
+        input.pool,
+        input.accountId,
+        `${input.requestId}:buffered-stream-failure`,
+        FAILURE_COOLDOWN_MS,
+      ))
+    }
+    if (error instanceof ResponsesToChatError || error instanceof GatewayError) throw error
+    throw new GatewayError(
+      502,
+      'invalid_upstream_response',
+      'Upstream returned an invalid response stream',
+      'server_error',
+    )
+  } finally {
+    await Promise.all([
+      bestEffort(() => releasePoolLease(input.pool, input.leaseId)),
+      bestEffort(() => releaseApiKeyAdmission(input.admission)),
+    ])
+  }
+}
+
 async function createSynchronousResponse(
   input: FinalizeInput & {
     response: Response
@@ -1314,8 +1534,18 @@ async function createSynchronousResponse(
       try {
         if (parsed === null) throw new Error('upstream response is not JSON')
         downstreamValue = input.transformResponse(parsed)
-      } catch {
-        await bestEffort(() => settleAndProject(input, usage, 'failed'))
+      } catch (error) {
+        const failureUsage = error instanceof ResponsesToChatError &&
+          error.upstreamCode === 'cyber_policy'
+          ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false }
+          : usage
+        await bestEffort(() => settleAndProject(
+          input,
+          failureUsage,
+          'failed',
+          error instanceof ResponsesToChatError && error.upstreamCode === 'cyber_policy',
+        ))
+        if (error instanceof ResponsesToChatError || error instanceof GatewayError) throw error
         throw new GatewayError(
           502,
           'invalid_upstream_response',
@@ -1350,6 +1580,7 @@ interface GatewayStreamTransformer {
   outputBytes(): number
   terminal(): 'completed' | 'failed' | 'missing'
   errorFrame(message: string): Uint8Array
+  zeroCost?(): boolean
 }
 
 type WaitUntil = (task: Promise<unknown>) => void
@@ -1416,7 +1647,8 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
   push(chunk: Uint8Array): Uint8Array[] {
     this.accounting.push(chunk)
     this.buffer += this.decoder.decode(chunk, { stream: true })
-    if (this.buffer.length > MAX_SYNC_RESPONSE_BYTES) {
+    const chunks = this.drain(false)
+    if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
       throw new GatewayError(
         502,
         'invalid_upstream_stream',
@@ -1424,13 +1656,22 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
         'server_error',
       )
     }
-    return this.drain(false)
+    return chunks
   }
 
   finish(): Uint8Array[] {
     this.accounting.finish()
     this.buffer += this.decoder.decode()
-    return this.drain(true)
+    const chunks = this.drain(false)
+    if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
+      throw new GatewayError(
+        502,
+        'invalid_upstream_stream',
+        'Upstream SSE event exceeded the size limit',
+        'server_error',
+      )
+    }
+    return [...chunks, ...this.drain(true)]
   }
 
   usage(): TokenUsage | null {
@@ -1476,14 +1717,178 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
       ? this.codec.finish()
       : this.codec.push(JSON.parse(data) as unknown)
     return events.map((event) => {
-      if (event.type === 'response.completed') this.terminalValue = 'completed'
-      if (event.type === 'response.failed' || event.type === 'response.incomplete') {
+      if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+        this.terminalValue = 'completed'
+      }
+      if (event.type === 'response.failed') {
         this.terminalValue = 'failed'
       }
       const encoded = encoder.encode(formatResponsesSseEvent(event))
       this.emittedBytes += encoded.byteLength
       return encoded
     })
+  }
+}
+
+class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
+  private readonly decoder = new TextDecoder()
+  private readonly accounting: SseEventTransformer
+  private readonly codec: ResponsesToChatCompletionsEventCodec
+  private buffer = ''
+  private emittedBytes = 0
+  private doneSent = false
+  private zeroBillableUsage = false
+
+  constructor(
+    upstreamModel: string,
+    private readonly publicModel: string,
+    includeUsage: boolean,
+  ) {
+    this.accounting = new SseEventTransformer(upstreamModel, publicModel)
+    this.codec = new ResponsesToChatCompletionsEventCodec(publicModel, includeUsage)
+  }
+
+  push(chunk: Uint8Array): Uint8Array[] {
+    this.accounting.push(chunk)
+    this.buffer += this.decoder.decode(chunk, { stream: true })
+    const chunks = this.drain(false)
+    if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
+      throw new GatewayError(
+        502,
+        'invalid_upstream_stream',
+        'Upstream SSE event exceeded the size limit',
+        'server_error',
+      )
+    }
+    return chunks
+  }
+
+  finish(): Uint8Array[] {
+    this.accounting.finish()
+    this.buffer += this.decoder.decode()
+    const chunks = this.drain(false)
+    if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
+      throw new GatewayError(
+        502,
+        'invalid_upstream_stream',
+        'Upstream SSE event exceeded the size limit',
+        'server_error',
+      )
+    }
+    return [...chunks, ...this.drain(true)]
+  }
+
+  usage(): TokenUsage | null {
+    if (this.zeroBillableUsage) {
+      return { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false }
+    }
+    return this.accounting.usage()
+  }
+
+  zeroCost(): boolean {
+    return this.zeroBillableUsage
+  }
+
+  outputBytes(): number {
+    return this.emittedBytes
+  }
+
+  terminal(): 'completed' | 'failed' | 'missing' {
+    return this.accounting.terminal('responses')
+  }
+
+  errorFrame(message: string): Uint8Array {
+    const error = streamErrorFrame('chat_completions', message, this.publicModel)
+    const done = encoder.encode('data: [DONE]\n\n')
+    const combined = new Uint8Array(error.byteLength + done.byteLength)
+    combined.set(error, 0)
+    combined.set(done, error.byteLength)
+    return combined
+  }
+
+  private drain(flush: boolean): Uint8Array[] {
+    const chunks: Uint8Array[] = []
+    while (true) {
+      const match = /\r?\n\r?\n/.exec(this.buffer)
+      if (match === null) break
+      const frame = this.buffer.slice(0, match.index)
+      this.buffer = this.buffer.slice(match.index + match[0].length)
+      chunks.push(...this.transformFrame(frame))
+    }
+    if (flush && this.buffer.length > 0) {
+      chunks.push(...this.transformFrame(this.buffer))
+      this.buffer = ''
+    }
+    return chunks
+  }
+
+  private transformFrame(frame: string): Uint8Array[] {
+    let eventName: string | undefined
+    const dataLines: string[] = []
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    const data = dataLines.join('\n')
+    if (data === '' || data === '[DONE]') return []
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data)
+    } catch {
+      throw new GatewayError(
+        502,
+        'invalid_upstream_stream',
+        'Upstream returned an invalid event stream',
+        'server_error',
+      )
+    }
+    if (
+      eventName !== undefined &&
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).type !== 'string'
+    ) {
+      parsed = { ...(parsed as Record<string, unknown>), type: eventName }
+    }
+    const type = objectValue(parsed)?.type
+    const responseStatus = objectValue(objectValue(parsed)?.response)?.status
+    if (
+      type === 'response.failed' || type === 'response.canceled' ||
+      type === 'response.cancelled' || type === 'error' ||
+      (type === 'response.done' && responseStatus !== 'completed' && responseStatus !== 'incomplete')
+    ) {
+      const failure = responsesFailureDetails(parsed)
+      this.zeroBillableUsage = failure.cyberPolicy
+      this.doneSent = true
+      const error = streamErrorFrame(
+        'chat_completions',
+        failure.message,
+        this.publicModel,
+        failure.code,
+        failure.cyberPolicy ? 'invalid_request_error' : 'server_error',
+      )
+      const done = encoder.encode('data: [DONE]\n\n')
+      const frame = new Uint8Array(error.byteLength + done.byteLength)
+      frame.set(error, 0)
+      frame.set(done, error.byteLength)
+      this.emittedBytes += frame.byteLength
+      return [frame]
+    }
+    const output = this.codec.push(parsed).map((chunk) => this.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+    if (
+      !this.doneSent &&
+      (type === 'response.completed' || type === 'response.done' ||
+        type === 'response.incomplete' || type === 'response.failed')
+    ) {
+      this.doneSent = true
+      output.push(this.encode('data: [DONE]\n\n'))
+    }
+    return output
+  }
+
+  private encode(value: string): Uint8Array {
+    const encoded = encoder.encode(value)
+    this.emittedBytes += encoded.byteLength
+    return encoded
   }
 }
 
@@ -1814,6 +2219,7 @@ function createStreamingResponse(input: FinalizeInput & {
   response: Response
   endpoint: GenerativeGatewayEndpoint
   responseProtocol: ResponseProtocol
+  includeUsage?: boolean
   waitUntil?: WaitUntil
 }): Response {
   const reader = input.response.body!.getReader()
@@ -1827,6 +2233,12 @@ function createStreamingResponse(input: FinalizeInput & {
           ? new GeminiResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
           : input.responseProtocol === 'responses_from_chat'
             ? new ChatResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+            : input.responseProtocol === 'chat_from_responses'
+              ? new ResponsesChatStreamTransformer(
+                input.model.upstream_name,
+                input.requestedModel,
+                input.includeUsage === true,
+              )
             : new OpenAiStreamTransformer(input.model.upstream_name, input.requestedModel, input.endpoint)
   let finalized: Promise<void> | null = null
   let userRenewal = 0
@@ -1852,6 +2264,7 @@ function createStreamingResponse(input: FinalizeInput & {
             input,
             usage ?? estimatedUsage(input.inputBytes, tracker.outputBytes()),
             outcome,
+            tracker.zeroCost?.() === true,
           )
         } else {
           await cancelGatewayReservations(input.env, input.principal, input.requestId)
@@ -2060,8 +2473,17 @@ async function settleAndProject(
   input: FinalizeInput,
   usage: TokenUsage,
   outcome: UsageSettledPayload['outcome'],
+  zeroCost = false,
 ): Promise<void> {
-  const cost = calculateCost(input.model, usage)
+  const cost = zeroCost
+    ? {
+      input_amount_micros: 0,
+      output_amount_micros: 0,
+      cache_amount_micros: 0,
+      base_amount_micros: 0,
+      amount_micros: 0,
+    }
+    : calculateCost(input.model, usage)
   const payload: UsageSettledPayload = {
     request_id: input.requestId,
     user_id: input.principal.user_id,

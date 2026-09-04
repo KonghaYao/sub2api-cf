@@ -52,6 +52,7 @@ class FakeStatement {
     }
     if (this.query.includes('FROM accounts a') && this.query.includes('account_secrets')) {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) return null
+      if (this.database.responsesOnly && this.query.includes('am.chat_completions = 1')) return null
       const requestedAccountId = this.values[0]
       const credential = requestedAccountId === accountId
         ? this.database.credential
@@ -107,6 +108,9 @@ class FakeStatement {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) {
         return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
       }
+      if (this.database.responsesOnly && this.query.includes('am.chat_completions = 1')) {
+        return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
+      }
       const credentials = [
         this.database.credential,
         ...this.database.additionalCredentials.values(),
@@ -142,6 +146,7 @@ class FakeDatabase {
   recovery: Record<string, unknown> | null = null
   failRecoveryWrites = false
   chatOnly = false
+  responsesOnly = false
   readonly principal = {
     api_key_id: 'key-1',
     api_key_auth_version: 1,
@@ -2184,6 +2189,160 @@ describe('OpenAI-compatible gateway', () => {
     })
     expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('bridges Chat Completions through a Responses-only Codex account with Codex body rules', async () => {
+    const { env, database, user, pool } = await harness()
+    database.responsesOnly = true
+    Object.assign(database.principal, { platform: 'codex' })
+    Object.assign(database.credential, {
+      platform: 'codex',
+      protocol: 'codex',
+      auth_scheme: 'bearer',
+      provider_config_json: '{"account_id":"workspace-123"}',
+      base_url: 'https://chatgpt.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      new Response([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"id":"resp_codex_bridge","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [
+          { role: 'system', content: 'Be precise.' },
+          { role: 'user', content: 'Hello' },
+        ],
+        max_tokens: 64,
+        stream: false,
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      id: 'resp_codex_bridge',
+      model: 'gpt-public',
+      choices: [{ message: { role: 'assistant', content: 'ok' } }],
+    })
+    const [url, init] = upstream.mock.calls[0]
+    expect(String(url)).toBe('https://chatgpt.example/backend-api/codex/responses')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      model: 'gpt-upstream',
+      input: [{ role: 'user', content: 'Hello' }],
+      stream: true,
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      instructions: 'Be precise.',
+    })
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it.each([false, true])(
+    'preserves cyber-policy failures and settles zero usage through the Chat bridge (stream=%s)',
+    async (stream) => {
+      const { env, database, user, pool } = await harness()
+      database.responsesOnly = true
+      vi.stubGlobal('fetch', vi.fn(async () => new Response([
+        'event: response.failed',
+        'data: {"type":"response.failed","response":{"id":"resp_cyber","status":"failed","output":[],"error":{"code":"cyber_policy","message":"flagged by policy"},"usage":{"input_tokens":99,"output_tokens":3}}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })))
+
+      const response = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-public',
+          messages: [{ role: 'user', content: 'Hello' }],
+          stream,
+        }),
+      }, env)
+
+      if (stream) {
+        expect(response.status).toBe(200)
+        const wire = await response.text()
+        expect(wire).toContain('"code":"cyber_policy"')
+        expect(wire).toContain('flagged by policy')
+        expect(wire.match(/data: \[DONE\]/g)).toHaveLength(1)
+      } else {
+        expect(response.status).toBe(400)
+        await expect(response.json()).resolves.toMatchObject({
+          error: {
+            code: 'cyber_policy',
+            type: 'invalid_request_error',
+            message: 'flagged by policy',
+          },
+        })
+      }
+      expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        amount_micros: 0,
+        usage_event: {
+          payload: {
+            input_tokens: 0,
+            output_tokens: 0,
+            outcome: 'failed',
+          },
+        },
+      })
+      expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    },
+  )
+
+  it('preserves zero-billable cyber policy when a Responses fallback returns JSON', async () => {
+    const originalBaseFee = model.per_request_micros
+    model.per_request_micros = 19
+    try {
+      const { env, database, user, pool } = await harness()
+      database.responsesOnly = true
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+        id: 'resp_cyber_json',
+        status: 'failed',
+        output: [],
+        error: { code: 'cyber_policy', message: 'blocked in JSON' },
+        usage: { input_tokens: 88, output_tokens: 2 },
+      })))
+
+      const response = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-public',
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      }, env)
+
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: 'cyber_policy', message: 'blocked in JSON' },
+      })
+      expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        amount_micros: 0,
+        usage_event: {
+          payload: {
+            input_tokens: 0,
+            output_tokens: 0,
+            base_amount_micros: 0,
+            outcome: 'failed',
+          },
+        },
+      })
+      expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    } finally {
+      model.per_request_micros = originalBaseFee
+    }
   })
 
   it('rejects unsupported cross-protocol operations before state mutation or fetch', async () => {

@@ -132,6 +132,77 @@ describe('gateway repository embeddings routing', () => {
 })
 
 describe('gateway repository provider routing', () => {
+  it('keeps primary protocol cohorts separate and falls back from Chat to Responses explicitly', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    raw.prepare("UPDATE models SET endpoint = 'both' WHERE id = ?").run('model-openai')
+    const testEnv = { DB: d1 } as Env
+
+    await expect(listModels(testEnv, 'group-openai')).resolves.toEqual([
+      expect.objectContaining({ public_name: 'openai-public', endpoint: 'both' }),
+    ])
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'chat_completions',
+      'user-1',
+    )).rejects.toMatchObject({ status: 503, code: 'no_upstream_accounts' })
+
+    const bridged = await resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'chat_completions',
+      'user-1',
+      'responses',
+    )
+    expect(bridged.upstream_endpoint).toBe('responses')
+    expect(bridged.candidates.map((candidate) => candidate.account_id)).toEqual(['account-openai'])
+    await expect(getAccountCredential(
+      testEnv,
+      'group-openai',
+      'model-openai',
+      'responses',
+      'account-openai',
+    )).resolves.toMatchObject({ account_id: 'account-openai' })
+    await expect(getAccountCredential(
+      testEnv,
+      'group-openai',
+      'model-openai',
+      'chat_completions',
+      'account-openai',
+    )).rejects.toMatchObject({ status: 503, code: 'credential_unavailable' })
+
+    raw.exec(`
+      INSERT INTO accounts (
+        id, platform, name, credential_ref, enabled, max_concurrency,
+        created_at_ms, updated_at_ms, protocol, base_url, auth_scheme, config_version
+      ) VALUES (
+        'account-chat', 'openai', 'chat-primary', 'secret-chat', 1, 4,
+        1, 1, 'openai', 'https://chat.upstream.example/v1', 'bearer', 1
+      );
+      INSERT INTO account_groups (
+        account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+      ) VALUES ('account-chat', 'group-openai', 9, 1, 1, 1);
+      INSERT INTO account_models (
+        account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
+      ) VALUES ('account-chat', 'model-openai', 1, 0, 0, 1, 1);
+    `)
+    const primary = await resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'chat_completions',
+      'user-1',
+      'responses',
+    )
+    expect(primary.upstream_endpoint).toBe('chat_completions')
+    expect(primary.candidates.map((candidate) => candidate.account_id)).toEqual(['account-chat'])
+    raw.close()
+  })
+
   it.each([
     ['openai', 'openai', 'bearer', '{}'],
     ['anthropic', 'anthropic', 'x-api-key', '{}'],

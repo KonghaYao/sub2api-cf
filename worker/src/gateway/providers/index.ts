@@ -69,6 +69,22 @@ const CONTRACTS: Record<ProviderPlatform, ProviderContract> = {
 const HEADER_TIMEOUT_MS = 30_000
 const HEALTH_TIMEOUT_MS = 4_000
 const CODEX_ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/
+const CODEX_UNSUPPORTED_RESPONSE_FIELDS = [
+  'max_output_tokens',
+  'max_completion_tokens',
+  'temperature',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'chat_template_kwargs',
+  'user',
+  'metadata',
+  'prompt_cache_retention',
+  'safety_identifier',
+  'stream_options',
+  'truncation',
+  'stop_sequences',
+] as const
 
 export function providerContract(platform: ProviderPlatform): ProviderContract {
   return CONTRACTS[platform]
@@ -312,5 +328,115 @@ function providerBody(
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new GatewayError(400, 'invalid_provider_body', 'Codex Responses body must be an object')
   }
-  return { ...(body as Record<string, unknown>), store: false }
+  const normalized: Record<string, unknown> = {
+    ...(body as Record<string, unknown>),
+    store: false,
+  }
+  for (const key of CODEX_UNSUPPORTED_RESPONSE_FIELDS) delete normalized[key]
+  normalizeCodexSystemInstructions(normalized)
+  return normalized
+}
+
+function normalizeCodexSystemInstructions(body: Record<string, unknown>): void {
+  const input = body.input
+  const existingInstructions = typeof body.instructions === 'string' ? body.instructions : ''
+  if (!Array.isArray(input)) {
+    body.instructions = existingInstructions
+    return
+  }
+  const textFormat = objectRecord(objectRecord(body.text)?.format)?.type
+  const omitPromoted = textFormat !== 'json_object'
+  const promoted: string[] = []
+  const normalizedInput: unknown[] = []
+  for (const value of input) {
+    const item = objectRecord(value)
+    if (item === null || item.role !== 'system') {
+      normalizedInput.push(value)
+      continue
+    }
+    const extracted = codexInstructionContent(item.content)
+    if (extracted.text !== '') promoted.push(extracted.text)
+    if (omitPromoted && extracted.lossless) continue
+    normalizedInput.push({ ...item, role: 'developer' })
+  }
+  body.input = normalizedInput
+  normalizeCodexFunctionCallIds(normalizedInput)
+  body.instructions = promoted.length === 0
+    ? existingInstructions
+    : existingInstructions.trim() === ''
+      ? promoted.join('\n\n')
+      : `${promoted.join('\n\n')}\n\n${existingInstructions}`
+}
+
+function normalizeCodexFunctionCallIds(input: unknown[]): void {
+  const mappings = new Map<string, string>()
+  for (const value of input) {
+    const item = objectRecord(value)
+    if (item === null || !isCodexFunctionCallItem(item.type) || typeof item.call_id !== 'string') {
+      continue
+    }
+    const raw = item.call_id.trim()
+    if (raw !== '' && !mappings.has(raw)) mappings.set(raw, normalizedCodexFunctionCallId(raw))
+  }
+  for (let index = 0; index < input.length; index += 1) {
+    const item = objectRecord(input[index])
+    if (item === null || !isCodexFunctionCallItem(item.type) || typeof item.call_id !== 'string') {
+      continue
+    }
+    const normalized = mappings.get(item.call_id.trim())
+    if (normalized !== undefined) input[index] = { ...item, call_id: normalized }
+  }
+}
+
+function isCodexFunctionCallItem(value: unknown): boolean {
+  return value === 'function_call' || value === 'function_call_output'
+}
+
+function normalizedCodexFunctionCallId(value: string): string {
+  const suffix = value.startsWith('call_')
+    ? value.slice('call_'.length)
+    : value.startsWith('fc_')
+      ? value.slice('fc_'.length)
+      : value
+  const candidate = `fc_${suffix}`
+  return candidate.length <= 64 ? candidate : `fc_${stableCodexCallIdDigest(candidate)}`
+}
+
+function stableCodexCallIdDigest(value: string): string {
+  const mask = (1n << 64n) - 1n
+  let left = 0xcbf29ce484222325n
+  let right = 0x84222325cbf29ce4n
+  for (let index = 0; index < value.length; index += 1) {
+    const code = BigInt(value.charCodeAt(index))
+    left = ((left ^ code) * 0x100000001b3n) & mask
+    right = ((right ^ (code + BigInt(index))) * 0x100000001b3n) & mask
+  }
+  return left.toString(16).padStart(16, '0') + right.toString(16).padStart(16, '0')
+}
+
+function codexInstructionContent(value: unknown): { text: string; lossless: boolean } {
+  if (typeof value === 'string') return { text: value, lossless: true }
+  if (!Array.isArray(value)) return { text: '', lossless: false }
+  let text = ''
+  let lossless = true
+  for (const valuePart of value) {
+    const part = objectRecord(valuePart)
+    const type = part?.type
+    if (
+      part !== null &&
+      (type === 'text' || type === 'input_text' || type === 'output_text') &&
+      typeof part.text === 'string'
+    ) {
+      text += part.text
+    } else {
+      lossless = false
+    }
+  }
+  return { text, lossless }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
 }

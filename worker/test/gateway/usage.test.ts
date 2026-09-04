@@ -96,4 +96,64 @@ describe('gateway usage accounting', () => {
       estimated: false,
     })
   })
+
+  it('treats an incomplete Responses terminal as billable completion and real errors as failures', () => {
+    const incomplete = new SseEventTransformer('gpt-upstream', 'gpt-public')
+    incomplete.push(new TextEncoder().encode([
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":4,"output_tokens":2}}}',
+      '',
+      '',
+    ].join('\n')))
+    expect(incomplete.terminal('responses')).toBe('completed')
+
+    for (const type of ['response.failed', 'response.cancelled', 'error']) {
+      const failed = new SseEventTransformer('gpt-upstream', 'gpt-public')
+      failed.push(new TextEncoder().encode(`event: ${type}\ndata: {"type":"${type}"}\n\n`))
+      expect(failed.terminal('responses')).toBe('failed')
+    }
+  })
+
+  it('classifies response.done from its embedded final status', () => {
+    for (const status of ['completed', 'incomplete']) {
+      const successful = new SseEventTransformer('gpt-upstream', 'gpt-public')
+      successful.push(new TextEncoder().encode(
+        `event: response.done\ndata: {"type":"response.done","response":{"status":"${status}"}}\n\n`,
+      ))
+      expect(successful.terminal('responses')).toBe('completed')
+    }
+
+    const failed = new SseEventTransformer('gpt-upstream', 'gpt-public')
+    failed.push(new TextEncoder().encode(
+      'event: response.done\ndata: {"type":"response.done","response":{"status":"failed"}}\n\n',
+    ))
+    expect(failed.terminal('responses')).toBe('failed')
+  })
+
+  it('parses a terminal Responses event across multiple SSE data lines', () => {
+    const transformer = new SseEventTransformer('gpt-upstream', 'gpt-public')
+    transformer.push(new TextEncoder().encode([
+      'event:response.done',
+      'data:{"type":"response.done","response":{"status":',
+      'data:"completed","usage":{"input_tokens":7,"output_tokens":3}}}',
+      '',
+      '',
+    ].join('\n')))
+
+    expect(transformer.terminal('responses')).toBe('completed')
+    expect(transformer.usage()).toEqual({
+      input_tokens: 7,
+      output_tokens: 3,
+      cache_read_tokens: 0,
+      estimated: false,
+    })
+  })
+
+  it('recognizes both spellings of a canceled Responses terminal', () => {
+    for (const type of ['response.canceled', 'response.cancelled']) {
+      const transformer = new SseEventTransformer('gpt-upstream', 'gpt-public')
+      transformer.push(new TextEncoder().encode(`event:${type}\ndata:{"type":"${type}"}\n\n`))
+      expect(transformer.terminal('responses')).toBe('failed')
+    }
+  })
 })

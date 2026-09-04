@@ -312,8 +312,14 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
              AND a.health_status <> 'unhealthy'
              AND m.platform = g.platform AND a.platform = g.platform
              AND (
-               (m.endpoint = 'chat_completions' AND am.chat_completions = 1) OR
-               (m.endpoint = 'responses' AND am.responses = 1) OR
+               (m.endpoint = 'chat_completions' AND (
+                 am.chat_completions = 1 OR
+                 (a.platform IN ('openai', 'codex') AND am.responses = 1)
+               )) OR
+               (m.endpoint = 'responses' AND (
+                 am.responses = 1 OR
+                 (a.platform = 'openai' AND am.chat_completions = 1)
+               )) OR
                (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
                (m.embeddings = 1 AND am.embeddings = 1)
              )
@@ -356,8 +362,17 @@ export async function resolveGatewayRoute(
     ).bind(...modelBindings),
     accountCandidatesStatement(env, groupId, publicName, capabilityColumn),
   ]
-  if (endpoint === 'responses' && fallbackEndpoint === 'chat_completions') {
-    statements.push(accountCandidatesStatement(env, groupId, publicName, 'am.chat_completions'))
+  if (
+    (endpoint === 'responses' && fallbackEndpoint === 'chat_completions') ||
+    (endpoint === 'chat_completions' && fallbackEndpoint === 'responses')
+  ) {
+    statements.push(accountCandidatesStatement(
+      env,
+      groupId,
+      publicName,
+      accountCapabilityColumn(fallbackEndpoint),
+      endpoint === 'chat_completions' ? 'openai_or_codex' : 'openai',
+    ))
   }
   const [modelResult, candidateResult, fallbackCandidateResult] = await env.DB.batch(statements)
   const model = modelResult.results[0] as unknown as ModelRoute | undefined
@@ -368,12 +383,11 @@ export async function resolveGatewayRoute(
   let upstreamEndpoint = endpoint
   if (
     candidates.length === 0 &&
-    endpoint === 'responses' &&
-    fallbackEndpoint === 'chat_completions' &&
+    fallbackEndpoint !== undefined &&
     fallbackCandidateResult !== undefined
   ) {
     candidates = fallbackCandidateResult.results.map(parseAccountCandidate)
-    upstreamEndpoint = 'chat_completions'
+    upstreamEndpoint = fallbackEndpoint
   }
   if (
     candidates.length === 0 ||
@@ -389,7 +403,13 @@ function accountCandidatesStatement(
   groupId: string,
   publicName: string,
   capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings',
+  platformConstraint?: 'openai' | 'openai_or_codex',
 ): D1PreparedStatement {
+  const platformPredicate = platformConstraint === 'openai'
+    ? "AND a.platform = 'openai'"
+    : platformConstraint === 'openai_or_codex'
+      ? "AND a.platform IN ('openai', 'codex')"
+      : ''
   return env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.provider_config_json, a.base_url, a.max_concurrency,
@@ -405,6 +425,7 @@ function accountCandidatesStatement(
         AND a.health_status <> 'unhealthy'
         AND m.public_name = ?
         AND ${capabilityColumn} = 1
+        ${platformPredicate}
       ORDER BY ag.priority ASC, a.id ASC`,
   )
     .bind(groupId, publicName)
