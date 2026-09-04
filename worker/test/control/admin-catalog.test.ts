@@ -64,8 +64,8 @@ class CatalogStatement {
   async run(): Promise<D1Result<unknown>> {
     if (this.query.includes('INSERT INTO "groups"')) {
       const [
-        id, name, description, platform, enabled, sortOrder, multiplier, catalogMode,
-        groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota, createdAt, updatedAt,
+        id, name, description, platform, enabled, sortOrder, multiplier, rpmLimit,
+        catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota, createdAt, updatedAt,
       ] = this.values
       this.database.groups.set(String(id), {
         id: String(id),
@@ -75,6 +75,7 @@ class CatalogStatement {
         enabled: Number(enabled),
         sort_order: Number(sortOrder),
         rate_multiplier_ppm: Number(multiplier),
+        rpm_limit: Number(rpmLimit),
         catalog_mode: String(catalogMode),
         group_type: String(groupType),
         is_exclusive: Number(isExclusive),
@@ -96,8 +97,8 @@ class CatalogStatement {
     }
     if (this.query.includes('UPDATE "groups"')) {
       const [
-        name, description, platform, enabled, sortOrder, multiplier, catalogMode,
-        groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
+        name, description, platform, enabled, sortOrder, multiplier, rpmLimit,
+        catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
         expected, nextVersion, updatedAt, id,
       ] = this.values
       const group = this.database.requireRow(this.database.groups, String(id))
@@ -109,6 +110,7 @@ class CatalogStatement {
         enabled: Number(enabled),
         sort_order: Number(sortOrder),
         rate_multiplier_ppm: Number(multiplier),
+        rpm_limit: Number(rpmLimit),
         catalog_mode: String(catalogMode),
         group_type: String(groupType),
         is_exclusive: Number(isExclusive),
@@ -764,8 +766,8 @@ describe('admin catalog control plane', () => {
 
   it('rejects an enabled provider that the Worker gateway cannot consume', async () => {
     const response = await request(new CatalogDatabase(), '/api/v1/admin/groups', 'POST', 'catalog-create-2', {
-      name: 'claude',
-      platform: 'anthropic',
+      name: 'unsupported',
+      platform: 'grok',
     })
 
     expect(response.status).toBe(409)

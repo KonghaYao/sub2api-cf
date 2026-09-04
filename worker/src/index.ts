@@ -7,7 +7,7 @@ import { recoverPendingPaymentFulfillments } from './payment/fulfillment'
 import { recoverExpiredPaymentOrders } from './payment/orders'
 import { recoverPendingRefundClawbacks } from './payment/refunds'
 
-export { AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
+export { ApiKeyLimitDO, AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
 
 export async function runScheduledRecovery(env: Env): Promise<void> {
   const results = await Promise.allSettled([

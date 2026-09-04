@@ -11,6 +11,7 @@ const maxGatewayRequestBytes = 2 * 1024 * 1024
 
 const model: ModelRoute = {
   config_revision: 1,
+  platform: 'openai',
   model_id: 'model-1',
   public_name: 'gpt-public',
   upstream_name: 'gpt-upstream',
@@ -46,7 +47,9 @@ class FakeStatement {
 
   async first<T>(): Promise<T | null> {
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
-    if (this.query.includes('FROM group_models gm')) return model as T
+    if (this.query.includes('FROM group_models gm')) {
+      return { ...model, platform: this.database.principal.platform } as T
+    }
     if (this.query.includes('FROM accounts a') && this.query.includes('account_secrets')) {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) return null
       return this.database.credential as T
@@ -74,7 +77,11 @@ class FakeStatement {
 
   async all<T>(): Promise<D1Result<T>> {
     if (this.query.includes('FROM group_models gm')) {
-      return { success: true, results: [model as T], meta: {} as D1Meta & Record<string, unknown> }
+      return {
+        success: true,
+        results: [{ ...model, platform: this.database.principal.platform } as T],
+        meta: {} as D1Meta & Record<string, unknown>,
+      }
     }
     if (this.query.includes('FROM account_groups ag')) {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) {
@@ -85,7 +92,11 @@ class FakeStatement {
         results: [
           {
             account_id: accountId,
-            base_url: 'https://upstream.example/v1',
+            platform: this.database.credential.platform,
+            protocol: this.database.credential.protocol,
+            auth_scheme: this.database.credential.auth_scheme,
+            provider_config_json: this.database.credential.provider_config_json,
+            base_url: this.database.credential.base_url,
             max_concurrency: 4,
             priority: 0,
             weight: 1,
@@ -192,8 +203,11 @@ async function harness(): Promise<{
   )
   database.credential = {
     account_id: accountId,
+    platform: 'openai',
+    protocol: 'openai',
     base_url: 'https://upstream.example/v1',
     auth_scheme: 'bearer',
+    provider_config_json: '{}',
     secret_id: secretId,
     key_version: 1,
     ...encrypted,
@@ -1521,6 +1535,81 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('routes Anthropic Messages natively with x-api-key authentication and native usage', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'msg_native_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'gpt-upstream',
+        content: [{ type: 'text', text: 'native hello' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: {
+          input_tokens: 11,
+          output_tokens: 4,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 5,
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-customer',
+        'anthropic-version': 'attacker-version',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      id: 'msg_native_1',
+      model: 'gpt-public',
+      content: [{ type: 'text', text: 'native hello' }],
+    })
+    const [url, init] = upstream.mock.calls[0]
+    const headers = new Headers(init?.headers)
+    expect(String(url)).toBe('https://api.anthropic.example/v1/messages')
+    expect(headers.get('authorization')).toBeNull()
+    expect(headers.get('x-api-key')).toBe('sk-upstream-secret')
+    expect(headers.get('anthropic-version')).toBe('2023-06-01')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      model: 'gpt-upstream',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'Hello' }],
+      stream: false,
+    })
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 19,
+          output_tokens: 4,
+          cache_read_tokens: 3,
+          outcome: 'completed',
+        },
+      },
+      amount_micros: 50,
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
   it('returns Anthropic validation errors before reserving funds or upstream capacity', async () => {
     const { env, user, pool } = await harness()
 
@@ -1620,6 +1709,135 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('passes through native Anthropic SSE and settles only after message_stop', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const frames = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_stream_native',
+          type: 'message',
+          role: 'assistant',
+          model: 'gpt-upstream',
+          content: [],
+          usage: {
+            input_tokens: 8,
+            output_tokens: 0,
+            cache_creation_input_tokens: 5,
+            cache_read_input_tokens: 3,
+          },
+        },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(''),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        max_tokens: 32,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).toContain('event: message_stop')
+    expect(text).toContain('"model":"gpt-public"')
+    expect(text).not.toContain('gpt-upstream')
+    expect(text).not.toContain('response.failed')
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 16,
+          output_tokens: 2,
+          cache_read_tokens: 3,
+          outcome: 'completed',
+        },
+      },
+      amount_micros: 36,
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('drains a cancelled native Anthropic stream to terminal usage exactly once', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const background = captureExecutionContext()
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let upstreamCancelled = false
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstreamController = controller
+          controller.enqueue(new TextEncoder().encode(
+            'event: message_start\ndata: {"type":"message_start","message":{"model":"gpt-upstream","usage":{"input_tokens":13,"output_tokens":0}}}\n\n',
+          ))
+        },
+        cancel() {
+          upstreamCancelled = true
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )))
+
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        max_tokens: 32,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    }, env, background.executionCtx)
+    const reader = response.body!.getReader()
+    await reader.read()
+    await reader.cancel('client disconnected')
+    upstreamController!.enqueue(new TextEncoder().encode([
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join('')))
+    await Promise.all(background.tasks)
+
+    expect(upstreamCancelled).toBe(true)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 13,
+          output_tokens: 5,
+          estimated: false,
+          outcome: 'cancelled',
+        },
+      },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
   it('bridges Anthropic count_tokens to Responses input_tokens without billing the user', async () => {
     const { env, user, pool } = await harness()
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
@@ -1660,6 +1878,45 @@ describe('OpenAI-compatible gateway', () => {
           content: [{ type: 'input_text', text: 'Hello' }],
         },
       ],
+    })
+    expect(user.calls).toEqual([])
+    expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('routes Anthropic count_tokens to the native provider without billing', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ input_tokens: 21 }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/messages/count_tokens', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 99,
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ input_tokens: 21 })
+    const [url, init] = upstream.mock.calls[0]
+    expect(String(url)).toBe('https://api.anthropic.example/v1/messages/count_tokens')
+    expect(new Headers(init?.headers).get('x-api-key')).toBe('sk-upstream-secret')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      model: 'gpt-upstream',
+      messages: [{ role: 'user', content: 'Hello' }],
     })
     expect(user.calls).toEqual([])
     expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
@@ -1732,6 +1989,129 @@ describe('OpenAI-compatible gateway', () => {
     ])
     expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(3)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(3)
+  })
+
+  it('routes Codex Responses through the provider planner with Codex-owned authentication', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'codex' })
+    Object.assign(database.credential, {
+      platform: 'codex',
+      protocol: 'codex',
+      auth_scheme: 'bearer',
+      provider_config_json: '{"account_id":"workspace-123"}',
+      base_url: 'https://chatgpt.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'resp_codex_native',
+        model: 'gpt-upstream',
+        status: 'completed',
+        output: [],
+        usage: { input_tokens: 3, output_tokens: 1 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/backend-api/codex/responses', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        originator: 'attacker',
+        'chatgpt-account-id': 'attacker-account',
+      },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello', store: true }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    const [url, init] = upstream.mock.calls[0]
+    const headers = new Headers(init?.headers)
+    expect(String(url)).toBe('https://chatgpt.example/backend-api/codex/responses')
+    expect(headers.get('authorization')).toBe('Bearer sk-upstream-secret')
+    expect(headers.get('originator')).toBe('codex_cli_rs')
+    expect(headers.get('chatgpt-account-id')).toBe('workspace-123')
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'gpt-upstream',
+      input: 'hello',
+      store: false,
+    })
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('rejects unsupported cross-protocol operations before state mutation or fetch', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({}))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'Hello' }] }),
+    }, env)
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'provider_operation_not_supported' },
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('rebuilds native provider authentication on every retry attempt', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      upstream.mock.calls.length === 1
+        ? Response.json({ error: { message: 'busy' } }, { status: 503 })
+        : Response.json({
+            id: 'msg_retry',
+            type: 'message',
+            role: 'assistant',
+            model: 'gpt-upstream',
+            content: [{ type: 'text', text: 'ok' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 2, output_tokens: 1 },
+          }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    expect(upstream).toHaveBeenCalledTimes(2)
+    for (const [url, init] of upstream.mock.calls) {
+      expect(String(url)).toBe('https://api.anthropic.example/v1/messages')
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('sk-upstream-secret')
+      expect(new Headers(init?.headers).get('authorization')).toBeNull()
+    }
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
   })
 
   it('serves native Responses input_tokens without reserving or charging balance', async () => {
@@ -1884,6 +2264,126 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
+  it('routes Gemini generateContent natively with header auth and native usage metadata', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'gemini' })
+    Object.assign(database.credential, {
+      platform: 'gemini',
+      protocol: 'gemini',
+      auth_scheme: 'x-goog-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://generativelanguage.example',
+    })
+    const nativeResponse = {
+      candidates: [{
+        index: 0,
+        content: { role: 'model', parts: [{ text: 'native Gemini' }] },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: {
+        promptTokenCount: 9,
+        candidatesTokenCount: 3,
+        totalTokenCount: 13,
+        cachedContentTokenCount: 2,
+        thoughtsTokenCount: 1,
+      },
+      modelVersion: 'gemini-upstream',
+    }
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json(nativeResponse),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      generationConfig: { maxOutputTokens: 64 },
+    }
+    const response = await createApp().request('/v1beta/models/gpt-public:generateContent', {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': 'sk-customer',
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual(nativeResponse)
+    const [url, init] = upstream.mock.calls[0]
+    const headers = new Headers(init?.headers)
+    expect(String(url)).toBe('https://generativelanguage.example/v1beta/models/gpt-upstream:generateContent')
+    expect(headers.get('x-goog-api-key')).toBe('sk-upstream-secret')
+    expect(headers.get('authorization')).toBeNull()
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 9,
+          output_tokens: 4,
+          cache_read_tokens: 2,
+          outcome: 'completed',
+        },
+      },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('passes through native Gemini SSE and settles at a finishReason terminal event', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'gemini' })
+    Object.assign(database.credential, {
+      platform: 'gemini',
+      protocol: 'gemini',
+      auth_scheme: 'x-goog-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://generativelanguage.example',
+    })
+    const frames = [
+      { candidates: [{ content: { role: 'model', parts: [{ text: 'Hel' }] } }] },
+      {
+        candidates: [{ content: { role: 'model', parts: [{ text: 'Hello' }] }, finishReason: 'STOP' }],
+        usageMetadata: {
+          promptTokenCount: 7,
+          candidatesTokenCount: 2,
+          totalTokenCount: 10,
+          cachedContentTokenCount: 1,
+          thoughtsTokenCount: 1,
+        },
+      },
+    ]
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => new Response(
+      frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''),
+      { headers: { 'content-type': 'text/event-stream' } },
+    ))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1beta/models/gpt-public:streamGenerateContent', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).toContain('"finishReason":"STOP"')
+    expect(text).not.toContain('"error"')
+    expect(String(upstream.mock.calls[0][0])).toBe(
+      'https://generativelanguage.example/v1beta/models/gpt-upstream:streamGenerateContent?alt=sse',
+    )
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          input_tokens: 7,
+          output_tokens: 3,
+          cache_read_tokens: 1,
+          outcome: 'completed',
+        },
+      },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
   it('streams Gemini-native SSE from Responses terminal events', async () => {
     const { env, user } = await harness()
     vi.stubGlobal('fetch', vi.fn(async () => new Response([
@@ -1984,6 +2484,39 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('routes Gemini countTokens natively without charging balance', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'gemini' })
+    Object.assign(database.credential, {
+      platform: 'gemini',
+      protocol: 'gemini',
+      auth_scheme: 'x-goog-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://generativelanguage.example',
+    })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ totalTokens: 23 }),
+    )
+    vi.stubGlobal('fetch', upstream)
+    const body = { contents: [{ role: 'user', parts: [{ text: 'How many?' }] }] }
+
+    const response = await createApp().request('/v1beta/models/gpt-public:countTokens', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ totalTokens: 23 })
+    const [url, init] = upstream.mock.calls[0]
+    expect(String(url)).toBe('https://generativelanguage.example/v1beta/models/gpt-upstream:countTokens')
+    expect(new Headers(init?.headers).get('x-goog-api-key')).toBe('sk-upstream-secret')
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(user.calls).toEqual([])
+    expect(pool.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
   it('bridges Gemini embedContent to OpenAI embeddings with native output', async () => {
     const { env, user } = await harness()
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
@@ -2020,5 +2553,42 @@ describe('OpenAI-compatible gateway', () => {
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
       usage_event: { payload: { requested_model: 'gpt-public', input_tokens: 2, output_tokens: 0 } },
     })
+  })
+
+  it('routes Gemini embedContent natively and preserves the native response', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'gemini' })
+    Object.assign(database.credential, {
+      platform: 'gemini',
+      protocol: 'gemini',
+      auth_scheme: 'x-goog-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://generativelanguage.example',
+    })
+    const nativeResponse = { embedding: { values: [0.25, -0.5] } }
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json(nativeResponse),
+    )
+    vi.stubGlobal('fetch', upstream)
+    const body = {
+      content: { parts: [{ text: 'Represent this sentence.' }] },
+      taskType: 'RETRIEVAL_DOCUMENT',
+    }
+
+    const response = await createApp().request('/v1beta/models/gpt-public:embedContent', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual(nativeResponse)
+    const [url, init] = upstream.mock.calls[0]
+    expect(String(url)).toBe('https://generativelanguage.example/v1beta/models/gpt-upstream:embedContent')
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { output_tokens: 0, estimated: true, outcome: 'completed' } },
+    })
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 })

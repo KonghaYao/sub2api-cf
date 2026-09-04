@@ -32,7 +32,7 @@ describe('admin accounts Worker transport capabilities', () => {
     const { list } = await import('@/api/admin/accounts')
 
     await list(1, 20, {
-      platform: '',
+      platform: 'toString',
       status: '',
       type: 'oauth',
       group: 'legacy-group',
@@ -45,6 +45,70 @@ describe('admin accounts Worker transport capabilities', () => {
       signal: undefined,
     })
   })
+
+  it.each(['openai', 'anthropic', 'gemini', 'codex'])(
+    'forwards the supported %s Worker platform filter',
+    async (platform) => {
+      get.mockResolvedValueOnce({ data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 } })
+      const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+      setCloudflareWorkerContractActive(true)
+      const { list } = await import('@/api/admin/accounts')
+
+      await list(1, 20, { platform })
+
+      expect(get).toHaveBeenCalledWith('/admin/accounts', {
+        params: { page: 1, page_size: 20, platform },
+        signal: undefined,
+      })
+    }
+  )
+
+  it.each([
+    ['openai', 'openai', 'bearer'],
+    ['anthropic', 'anthropic', 'x-api-key'],
+    ['gemini', 'gemini', 'x-goog-api-key'],
+    ['codex', 'codex', 'bearer'],
+  ] as const)(
+    'adapts the %s Worker account tuple without losing provider metadata',
+    async (platform, protocol, authScheme) => {
+      get.mockResolvedValueOnce({
+        data: {
+          id: `${platform}-uuid`,
+          name: `${platform} primary`,
+          platform,
+          protocol,
+          auth_scheme: authScheme,
+          base_url: `https://${platform}.example.test`,
+          provider_config: platform === 'codex' ? { account_id: 'acct_codex' } : {},
+          enabled: true,
+          max_concurrency: 6,
+          control_version: 3,
+          created_at_ms: 1_788_451_200_000,
+          updated_at_ms: 1_788_451_260_000,
+          group_links: [{ group_id: `${platform}-group`, priority: 2, weight: 1 }],
+          model_capabilities: [{ model_id: `${platform}-model`, responses: true }],
+        },
+      })
+      const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+      setCloudflareWorkerContractActive(true)
+      const { getById } = await import('@/api/admin/accounts')
+
+      const account = await getById(`${platform}-uuid`)
+
+      expect(account).toMatchObject({
+        id: `${platform}-uuid`,
+        platform,
+        protocol,
+        auth_scheme: authScheme,
+        provider_config: platform === 'codex' ? { account_id: 'acct_codex' } : {},
+        type: 'apikey',
+        concurrency: 6,
+        priority: 2,
+        status: 'active',
+        group_ids: [`${platform}-group`],
+      })
+    }
+  )
 
   it('never sends proxy or TLS fingerprint fields on create', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
@@ -137,6 +201,31 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(post.mock.calls[0]?.[2]).toEqual(post.mock.calls[1]?.[2])
   })
 
+  it('keeps the Worker Codex provider_config while removing unsupported fields', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { create } = await import('@/api/admin/accounts')
+    post.mockResolvedValueOnce({ data: {} })
+
+    await create({
+      name: 'codex primary',
+      platform: 'codex',
+      protocol: 'codex',
+      auth_scheme: 'bearer',
+      type: 'apikey',
+      base_url: 'https://chatgpt.com',
+      api_key: 'secret-key',
+      provider_config: { account_id: 'acct_codex' },
+      notes: 'legacy-only',
+    } as never)
+
+    expect(post.mock.calls[0]?.[1]).toMatchObject({
+      platform: 'codex',
+      provider_config: { account_id: 'acct_codex' },
+    })
+    expect(post.mock.calls[0]?.[1]).not.toHaveProperty('notes')
+  })
+
   it('never sends proxy or fingerprint fields on update', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
@@ -151,10 +240,40 @@ describe('admin accounts Worker transport capabilities', () => {
 
     expect(put).toHaveBeenCalledWith('/admin/accounts/1', {
       name: 'updated',
-      expected_control_version: 7,
     }, {
       headers: { 'If-Match': '"7"' },
     })
+  })
+
+  it('returns the partial Worker health-check snapshot and preserves its UUID', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        id: 'codex-uuid',
+        config_version: 3,
+        control_version: 4,
+        health_status: 'healthy',
+        last_checked_at_ms: 1_788_451_260_000,
+        last_latency_ms: 37,
+        last_health_error: null,
+      },
+    })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { testAccount } = await import('@/api/admin/accounts')
+
+    const result = await testAccount('codex-uuid')
+
+    expect(post).toHaveBeenCalledWith('/admin/accounts/codex-uuid/test')
+    expect(result).toMatchObject({
+      id: 'codex-uuid',
+      config_version: 3,
+      control_version: 4,
+      health_status: 'healthy',
+      success: true,
+      latency_ms: 37,
+    })
+    expect(result).not.toHaveProperty('name')
+    expect(result).not.toHaveProperty('platform')
   })
 
   it('uses the UUID and control version when disabling a Worker account', async () => {

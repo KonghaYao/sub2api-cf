@@ -86,6 +86,11 @@ import {
 } from './control/catalog'
 import { getAdminSettings, updateAdminSettings } from './control/settings'
 import {
+  clearAdminGroupRpmOverrides,
+  listAdminGroupRpmOverrides,
+  putAdminGroupRpmOverrides,
+} from './control/group-rpm'
+import {
   batchDeleteAdminRedeemCodes,
   batchUpdateAdminRedeemCodes,
   deleteAdminRedeemCode,
@@ -364,6 +369,9 @@ export function createApp() {
   app.get('/api/v1/admin/groups', listAdminGroups)
   app.get('/api/v1/admin/groups/all', allAdminGroups)
   app.post('/api/v1/admin/groups', createAdminGroup)
+  app.get('/api/v1/admin/groups/:id/rpm-overrides', listAdminGroupRpmOverrides)
+  app.put('/api/v1/admin/groups/:id/rpm-overrides', putAdminGroupRpmOverrides)
+  app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)
   app.get('/api/v1/admin/groups/:id/models-list-candidates', getAdminModelCandidates)
   app.get('/api/v1/admin/groups/:id/models', listAdminGroupModels)
   app.put('/api/v1/admin/groups/:id/models/:model_id', putAdminGroupModel)

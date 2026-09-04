@@ -330,6 +330,7 @@ describe('password identity and rotating sessions', () => {
     expect(payload.data.refresh_token).toMatch(/^srt_v1_/)
     expect(payload.data.expires_in).toBeGreaterThan(0)
     expect(payload.data.user.email).toBe('alice@example.com')
+    expect(payload.data.user).toMatchObject({ concurrency: 5, rpm_limit: 0 })
     const persisted = Array.from(database.users.values())[0]
     expect(persisted.password_credential).not.toContain('correct horse battery staple')
     expect(JSON.stringify(database.writes)).not.toContain('correct horse battery staple')

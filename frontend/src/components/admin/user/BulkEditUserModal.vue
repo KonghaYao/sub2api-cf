@@ -93,14 +93,14 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
-import type { BatchUpdateUserLimitsRequest } from '@/api/admin/users'
+import type { AdminUserId, BatchUpdateUserLimitsRequest } from '@/api/admin/users'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Toggle from '@/components/common/Toggle.vue'
 
 const props = defineProps<{
   show: boolean
-  selectedIds: number[]
+  selectedIds: AdminUserId[]
 }>()
 
 const emit = defineEmits<{

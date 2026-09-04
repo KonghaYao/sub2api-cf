@@ -56,6 +56,8 @@ export interface UserRow {
   role: 'admin' | 'user'
   status: 'active' | 'disabled'
   balance_micros: number
+  concurrency: number
+  rpm_limit: number
   state_version: number
   auth_version: number
   password_credential: string | null
@@ -140,6 +142,8 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       role: 'user',
       status: 'active',
       balance_micros: 0,
+      concurrency: 5,
+      rpm_limit: 0,
       state_version: 0,
       auth_version: 1,
       password_credential: credential,
@@ -549,7 +553,8 @@ function sessionUserSelect(): string {
                  s.previous_refresh_token_hash, s.access_expires_at_ms,
                  s.refresh_expires_at_ms, s.revoked_at_ms, s.step_up_expires_at_ms,
                  u.id, u.email, u.display_name, u.role, u.status,
-                 u.balance_micros, u.state_version, u.auth_version,
+                 u.balance_micros, u.concurrency, u.rpm_limit,
+                 u.state_version, u.auth_version,
                  u.password_credential, u.email_verified_at_ms,
                  u.password_changed_at_ms, u.last_login_at_ms,
                  u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at_ms,
@@ -560,7 +565,7 @@ function sessionUserSelect(): string {
 
 async function findUserByEmail(env: Env, email: string): Promise<UserRow | null> {
   return env.DB.prepare(
-    `SELECT id, email, display_name, role, status, balance_micros,
+    `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, auth_version, password_credential,
             email_verified_at_ms, password_changed_at_ms,
             last_login_at_ms, avatar_object_key, avatar_content_type, avatar_updated_at_ms,
@@ -573,7 +578,7 @@ async function findUserByEmail(env: Env, email: string): Promise<UserRow | null>
 
 async function findUserById(env: Env, id: string): Promise<UserRow | null> {
   return env.DB.prepare(
-    `SELECT id, email, display_name, role, status, balance_micros,
+    `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, auth_version, password_credential,
             email_verified_at_ms, password_changed_at_ms,
             last_login_at_ms, avatar_object_key, avatar_content_type, avatar_updated_at_ms,
@@ -785,7 +790,8 @@ export function publicUser(user: UserRow): Record<string, unknown> {
     avatar_url: avatarUrl(user),
     role: user.role,
     balance: user.balance_micros / 1_000_000,
-    concurrency: 0,
+    concurrency: Number.isSafeInteger(user.concurrency) ? user.concurrency : 0,
+    rpm_limit: Number.isSafeInteger(user.rpm_limit) ? user.rpm_limit : 0,
     status: user.status,
     allowed_groups: null,
     balance_notify_enabled: false,

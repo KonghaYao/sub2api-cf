@@ -154,25 +154,28 @@ function mountModal(groups: any[] = []) {
   })
 }
 
-function mountWorkerModal(groups: any[] = [
-  { id: 'group-1', name: 'Primary', platform: 'openai', status: 'active' },
-]) {
+function mountWorkerModal(
+  groups: any[] = [
+    { id: 'group-1', name: 'Primary', platform: 'openai', status: 'active' },
+  ],
+  workerModels: any[] = [{
+    id: 'model-1',
+    platform: 'openai',
+    public_name: 'gpt-test',
+    upstream_name: 'gpt-test',
+    endpoint: 'both',
+    embeddings: false,
+    enabled: true,
+    control_version: 0,
+  }]
+) {
   return mount(CreateAccountModal, {
     props: {
       show: true,
       proxies: [],
       groups,
       cloudflareWorker: true,
-      workerModels: [{
-        id: 'model-1',
-        platform: 'openai',
-        public_name: 'gpt-test',
-        upstream_name: 'gpt-test',
-        endpoint: 'both',
-        embeddings: false,
-        enabled: true,
-        control_version: 0,
-      }],
+      workerModels,
     },
     global: {
       stubs: {
@@ -267,9 +270,77 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
         embeddings: false,
       }],
     })
-    expect(wrapper.text()).not.toContain('Anthropic')
+    expect(wrapper.get('[data-testid="worker-account-platform"]').findAll('option')).toHaveLength(4)
     expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
   })
+
+  it.each([
+    ['anthropic', 'anthropic', 'x-api-key', 'https://api.anthropic.com'],
+    ['gemini', 'gemini', 'x-goog-api-key', 'https://generativelanguage.googleapis.com'],
+    ['codex', 'codex', 'bearer', 'https://chatgpt.com'],
+  ] as const)(
+    'uses the fixed %s Worker contract and submits only same-platform routing',
+    async (platform, protocol, authScheme, baseUrl) => {
+      const groups = [
+        { id: 'openai-group', name: 'OpenAI Group', platform: 'openai', status: 'active' },
+        { id: `${platform}-group`, name: `${platform} Group`, platform, status: 'active' },
+      ]
+      const models = [
+        {
+          id: 'openai-model',
+          platform: 'openai',
+          public_name: 'OpenAI Model',
+          upstream_name: 'OpenAI Model',
+          endpoint: 'both',
+          embeddings: false,
+          enabled: true,
+          control_version: 0,
+        },
+        {
+          id: `${platform}-model`,
+          platform,
+          public_name: `${platform} Model`,
+          upstream_name: `${platform} Model`,
+          endpoint: 'both',
+          embeddings: platform === 'gemini',
+          enabled: true,
+          control_version: 0,
+        },
+      ]
+      const wrapper = mountWorkerModal(groups, models)
+
+      await wrapper.get('[data-testid="worker-account-platform"]').setValue(platform)
+      await flushPromises()
+      await wrapper.get('[data-testid="worker-account-name"]').setValue(`${platform} account`)
+      await wrapper.get('[data-testid="worker-account-api-key"]').setValue('worker-secret')
+      if (platform === 'codex') {
+        await wrapper.get('[data-testid="worker-account-account-id"]').setValue('acct_codex')
+      } else {
+        expect(wrapper.find('[data-testid="worker-account-account-id"]').exists()).toBe(false)
+      }
+
+      expect((wrapper.get('[data-testid="worker-account-base-url"]').element as HTMLInputElement).value)
+        .toBe(baseUrl)
+      expect(wrapper.find('[data-testid="worker-account-group-openai-group"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="worker-account-model-openai-model"]').exists()).toBe(false)
+
+      await wrapper.get('form#create-worker-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({
+        name: `${platform} account`,
+        platform,
+        protocol,
+        auth_scheme: authScheme,
+        base_url: baseUrl,
+        group_links: [{ group_id: `${platform}-group`, priority: 0, weight: 1 }],
+        model_capabilities: [expect.objectContaining({ model_id: `${platform}-model` })],
+        ...(platform === 'codex'
+          ? { provider_config: { account_id: 'acct_codex' } }
+          : {}),
+      }))
+    }
+  )
 
   it('refuses to create a Worker account without a routable group', async () => {
     const wrapper = mountWorkerModal([])

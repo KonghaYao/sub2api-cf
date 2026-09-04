@@ -1,3 +1,10 @@
+import type {
+  ProviderAuthScheme,
+  ProviderConfig,
+  ProviderPlatform,
+  ProviderProtocol,
+} from './providers'
+
 export type GatewayEndpoint = 'chat_completions' | 'responses' | 'embeddings'
 export type GenerativeGatewayEndpoint = Exclude<GatewayEndpoint, 'embeddings'>
 
@@ -9,6 +16,14 @@ export interface GatewayPrincipal {
   platform: string
   balance_micros: number
   user_state_version: number
+  /** D1-to-DO limit projection contract. Version 1 is introduced by migration 0022. */
+  limit_config_version: number
+  /** Original user-wide concurrency ceiling; zero means unlimited. */
+  concurrency_limit: number
+  /** Original user-wide fixed-minute request ceiling; zero means unlimited. */
+  user_rpm_limit: number
+  /** Effective override-or-group fixed-minute ceiling; zero means exempt/unlimited. */
+  group_rpm_limit: number
   billing: GatewayBilling
 }
 
@@ -36,6 +51,7 @@ export type GatewayBilling =
 
 export interface ModelRoute {
   config_revision: number
+  platform: ProviderPlatform
   model_id: string
   public_name: string
   upstream_name: string
@@ -59,6 +75,10 @@ export interface ModelRoute {
 
 export interface AccountCandidate {
   account_id: string
+  platform: ProviderPlatform
+  protocol: ProviderProtocol
+  auth_scheme: ProviderAuthScheme
+  provider_config: ProviderConfig
   base_url: string
   max_concurrency: number
   priority: number
@@ -69,8 +89,11 @@ export interface AccountCandidate {
 
 export interface AccountCredential {
   account_id: string
+  platform: ProviderPlatform
+  protocol: ProviderProtocol
   base_url: string
-  auth_scheme: 'bearer'
+  auth_scheme: ProviderAuthScheme
+  provider_config: ProviderConfig
   secret_id: string
   key_version: number
   nonce_b64: string

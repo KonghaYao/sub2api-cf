@@ -11,6 +11,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import {
+  type AdminUserId,
   batchUpdateLimits,
   bindUserAuthIdentity,
   type AdminBindAuthIdentityRequest,
@@ -18,6 +19,7 @@ import {
   type BatchUpdateUserLimitsRequest,
   type BatchUpdateUserLimitsResponse,
 } from '@/api/admin/users'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 type Assert<T extends true> = T
 type IsExact<T, U> = (
@@ -70,7 +72,7 @@ const batchRequestContractExact: Assert<
   IsExact<
     BatchUpdateUserLimitsRequest,
     {
-      user_ids: number[]
+      user_ids: AdminUserId[]
       all?: boolean
       concurrency?: number
       rpm_limit?: number
@@ -84,6 +86,7 @@ const batchResponseContractExact: Assert<
 describe('admin users api auth identity binding', () => {
   beforeEach(() => {
     post.mockReset()
+    setCloudflareWorkerContractActive(false)
   })
 
   it('posts the backend-compatible auth identity bind payload and returns the backend response shape', async () => {

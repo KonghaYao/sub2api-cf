@@ -76,6 +76,61 @@ describe('gateway repository embeddings routing', () => {
   })
 })
 
+describe('gateway repository provider routing', () => {
+  it.each([
+    ['openai', 'openai', 'bearer', '{}'],
+    ['anthropic', 'anthropic', 'x-api-key', '{}'],
+    ['gemini', 'gemini', 'x-goog-api-key', '{}'],
+    ['codex', 'codex', 'bearer', '{"account_id":"org-codex"}'],
+  ] as const)(
+    'selects %s accounts for a same-platform group and projects the provider contract',
+    async (platform, protocol, authScheme, providerConfigJson) => {
+      const { raw, d1 } = createSqliteD1()
+      applyMigrations(raw)
+      seedProviderRoute(raw, platform, protocol, authScheme, providerConfigJson)
+      const testEnv = { DB: d1 } as Env
+
+      const route = await resolveGatewayRoute(
+        testEnv,
+        `group-${platform}`,
+        `${platform}-public`,
+        'responses',
+        'user-1',
+      )
+
+      expect(route.model).toMatchObject({
+        platform,
+        model_id: `model-${platform}`,
+        public_name: `${platform}-public`,
+      })
+      expect(route.candidates).toEqual([
+        expect.objectContaining({
+          account_id: `account-${platform}`,
+          platform,
+          protocol,
+          auth_scheme: authScheme,
+          provider_config: JSON.parse(providerConfigJson),
+        }),
+      ])
+      const credential = await getAccountCredential(
+        testEnv,
+        `group-${platform}`,
+        `model-${platform}`,
+        'responses',
+        `account-${platform}`,
+      )
+      expect(credential).toMatchObject({
+        account_id: `account-${platform}`,
+        platform,
+        protocol,
+        auth_scheme: authScheme,
+        provider_config: JSON.parse(providerConfigJson),
+      })
+      raw.close()
+    },
+  )
+})
+
 function seedEmbeddingRoute(database: any): void {
   database.exec(`
     INSERT INTO "groups" (
@@ -111,4 +166,68 @@ function seedEmbeddingRoute(database: any): void {
       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
     ) VALUES ('account-1', 'model-1', 0, 0, 1, 1, 1);
   `)
+}
+
+function seedProviderRoute(
+  database: any,
+  platform: 'openai' | 'anthropic' | 'gemini' | 'codex',
+  protocol: 'openai' | 'anthropic' | 'gemini' | 'codex',
+  authScheme: 'bearer' | 'x-api-key' | 'x-goog-api-key',
+  providerConfigJson: string,
+): void {
+  database.prepare(`
+    INSERT INTO "groups" (
+      id, name, platform, enabled, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, ?, 1, 1, 1)
+  `).run(`group-${platform}`, `group-${platform}`, platform)
+  database.prepare(`
+    INSERT INTO models (
+      id, platform, public_name, upstream_name, endpoint, embeddings,
+      enabled, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, ?, ?, 'responses', 0, 1, 1, 1)
+  `).run(`model-${platform}`, platform, `${platform}-public`, `${platform}-upstream`)
+  database.prepare(`
+    INSERT INTO group_models (
+      group_id, model_id, enabled, catalog_visible, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, 1, 1, 1, 1)
+  `).run(`group-${platform}`, `model-${platform}`)
+  database.prepare(`
+    INSERT INTO model_prices (
+      id, group_id, model_id, version, active,
+      input_micros_per_million, output_micros_per_million,
+      cache_read_micros_per_million, per_request_micros,
+      minimum_reservation_micros, effective_at_ms, created_at_ms
+    ) VALUES (?, ?, ?, 1, 1, 1000, 2000, 0, 0, 1, 1, 1)
+  `).run(`price-${platform}`, `group-${platform}`, `model-${platform}`)
+  database.prepare(`
+    INSERT INTO accounts (
+      id, platform, name, credential_ref, enabled, max_concurrency,
+      created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
+      config_version, provider_config_json
+    ) VALUES (?, ?, ?, ?, 1, 4, 1, 1, ?, ?, ?, 1, ?)
+  `).run(
+    `account-${platform}`,
+    platform,
+    `account-${platform}`,
+    `secret-${platform}`,
+    protocol,
+    `https://${platform}.upstream.example`,
+    authScheme,
+    providerConfigJson,
+  )
+  database.prepare(`
+    INSERT INTO account_secrets (
+      id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, 1, 'nonce', 'ciphertext', 1, 1)
+  `).run(`secret-${platform}`, `account-${platform}`)
+  database.prepare(`
+    INSERT INTO account_groups (
+      account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, 0, 1, 1, 1)
+  `).run(`account-${platform}`, `group-${platform}`)
+  database.prepare(`
+    INSERT INTO account_models (
+      account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
+    ) VALUES (?, ?, 0, 1, 0, 1, 1)
+  `).run(`account-${platform}`, `model-${platform}`)
 }

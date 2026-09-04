@@ -30,17 +30,19 @@ Status meanings:
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
 | OpenAI model list | D1-backed group/model catalog at `/v1/models` and `/models` | Partial | Worker handler tests and root alias; add deployed-binding contract |
-| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Worker gateway fixtures cover terminal-without-EOF for Chat/Responses/Anthropic/Gemini, exact-usage disconnect draining, 10s idle/30s total drain bounds, and single settlement/release; remaining native-provider stream fixtures remain |
+| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Worker gateway fixtures cover terminal-without-EOF for Chat/Responses plus native Anthropic/Gemini streams, exact-usage disconnect draining, 10s idle/30s total drain bounds, and single settlement/release; deployed E2E and remaining legacy variants remain |
 | Responses | `/v1/responses`, `/responses`, compact and input-token subroutes | Partial | Existing core tests; add subroute fixtures |
 | Embeddings | OpenAI-compatible request/response and token billing | Partial | Worker protocol/handler fixtures pass; port the remaining original embedding handler/service fixtures |
-| Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Partial | Worker protocol/handler fixtures pass; port the remaining `apicompat` and Anthropic gateway suites |
-| Gemini generateContent | `/v1beta/models/*`, streaming and Gemini error translation | Partial | Worker protocol/handler fixtures pass; port the remaining Gemini multiplatform suites |
-| Codex backend API | `/backend-api/codex/*`, manifest, Responses transport | Partial | Worker routes and contract fixtures pass; add authenticated deployed E2E |
+| Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Partial | Native Anthropic URL/auth/body, synchronous usage, SSE terminal/usage/cancellation, count-tokens and retry fixtures pass; port the remaining `apicompat` variants and add deployed E2E |
+| Gemini generateContent | `/v1beta/models/*`, streaming and Gemini error translation | Partial | Native Gemini generate/stream/countTokens/embedContent URL/auth/body, usage and terminal fixtures pass; port remaining multiplatform variants and add deployed E2E |
+| Codex backend API | `/backend-api/codex/*`, manifest, Responses transport | Partial | Codex Responses now uses the provider planner with server-owned Bearer/account/originator headers and `store:false`; add authenticated deployed E2E and provider lifecycle coverage |
 | Protocol conversion | Strict allow-listed Responses-to-Chat fallback plus Anthropic/Gemini Responses adapters | Partial | Responses request, synchronous response, SSE lifecycle and integrated Chat-only account fixtures pass; reverse Chat-to-Responses routing and remaining legacy `apicompat` fixtures remain |
 | Model aliases/capabilities | Group-visible names, upstream override, endpoint and account capabilities | Partial | Repository selection and model visibility tests |
-| Multi-provider accounts | OpenAI-compatible, Anthropic, Gemini and Codex credential/config adapters | Planned | Per-provider request, auth, timeout, and error fixtures |
+| Multi-provider accounts | OpenAI-compatible, Anthropic, Gemini and Codex credential/config adapters | Partial | Migration 0023, D1-backed admin CRUD, versioned AES-GCM rotation and strict contracts pass; gateway repository selects same-platform accounts and handler fetches through provider plans. Native Anthropic/Gemini and Codex Responses fixtures pass, unsupported cross-protocol operations fail before fetch/state mutation, and the Worker frontend supports provider-specific create/edit/health contracts. Deployed E2E and scheduled lifecycle probes remain |
 | Account scheduling | Weighted priority, concurrency leases, cooldown, sticky affinity, failover | Partial | Durable Object state-machine plus integration tests |
-| API-key limits | Enabled/expiry, group, model allowlist, RPM and concurrency | Partial | Auth repository tests; add rate/concurrency integration |
+| User ingress limits on API-key requests | User-wide concurrency and user-wide RPM hard ceiling across every key/group | Done | These are user limits, not per-key RPM or concurrency fields. Migration 0022, user control/profile contracts and a user-partitioned SQLite Durable Object implement the original limits across all of a user's keys, using server-time fixed-minute windows, renewable leases, expiry reclaim, replay/release idempotency and fail-closed admission; state and every upstream gateway path have race/retry/disconnect contract tests |
+| Group-scoped RPM policy | Group RPM plus per-(user, group) override, while preserving the user hard ceiling | Done | Migration 0022, group CRUD, bounded set-replacement override control APIs, frontend contracts and atomic admission enforcement pass group/override/user-ceiling, replay and isolation tests |
+| API-key monetary limits | Per-key total quota plus 5h/1d/7d amount windows and reset lifecycle | Partial | A user-sharded SQLite Durable Object implements versioned per-key integer-micro configure/reserve/settle/cancel state, atomic anti-oversell, exact rolling-window boundaries, expiry recovery and replay safety. D1 configuration projection, admin writes, gateway admission/settlement wiring and explicit usage reset remain |
 | User/platform quota | Balance reservation/settlement, subscription and platform windows | Partial | Per-subscription SQLite Durable Object prevents quota oversell and projects settlements idempotently; platform-level quota APIs remain |
 | Usage and billing API | `/v1/usage` and `/v1/sub2api/billing` with immutable price version | Partial | Routes and balance/subscription billing attribution exist; complete legacy aggregate/filter coverage |
 | Media generation | Images, async/batch images, video, voice/live and task polling | Planned | Provider fixtures, R2 artifacts, Queue workflow tests |
@@ -98,10 +100,10 @@ Commercial storage rules:
 | --- | --- | --- | --- |
 | Break-glass admin auth | Constant-time Bearer secret for bootstrap and recovery only | Done | `test/control/admin-auth.test.ts` |
 | Admin sessions/RBAC | D1 sessions plus granular roles, immutable permission grants, assignment audit, deny-by-default route authorization and last-super-admin protection | Partial | RBAC lifecycle, CAS/idempotency, immutable built-ins, route permission categories and recovery tests pass; normal login, step-up and explicit CSRF/origin enforcement remain |
-| User management | List/create/detail/update/disable, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Route/state/concurrency tests and real local D1 migration; add deployed-binding E2E |
+| User management | List/create/detail/update/disable, password reset, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Admin-created login-capable users, password reset with session revocation, concurrency/RPM fields and the frontend UUID adapter pass route/state/SQLite and concurrency tests; add deployed-binding E2E and normal admin authentication |
 | API-key management | User key create/list/update/revoke, persistent idempotency/CAS, HMAC storage and one-time secret display | Partial | Route, hashing, concurrency and invalidation tests; add user self-service and deployed-binding E2E |
 | Groups/models/prices | Core group/model CRUD, CAS, catalog visibility, integer multiplier and append-only active prices exist; duplicate, atomic batch sort and advanced pricing remain | Partial | Worker control/gateway unit tests plus manual local migration and trigger checks; add binding E2E |
-| Accounts/channels | OpenAI account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual health probe exist; channels, quota and provider lifecycle remain | Partial | Account control tests and Pool stale-revision tests; add deployed-binding E2E and provider probes |
+| Accounts/channels | OpenAI, Anthropic, Gemini and Codex account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual provider health probes exist; channels, quota and provider lifecycle remain | Partial | Real SQLite/D1 provider CRUD/migration/repository tests, request/health/handler-native provider fixtures and frontend provider create/edit/health contracts pass; add deployed-binding E2E and scheduled lifecycle probes |
 | Usage/finance | Request ledger, aggregates, reconciliation and corrective workflows | Partial | Owner-scoped user aggregates and subscription projections exist; admin reconciliation and corrective workflows remain |
 | Settings | Typed versioned settings, audit and KV invalidation | Done | Versioned read/write, optimistic concurrency, idempotency, secret redaction and KV invalidation tests |
 | Unified audit trail | Read-only cross-domain D1 event stream with stable cursor and allowlisted detail | Partial | Settings, RBAC, auth and payment events share bounded list/detail routes behind `admin.audit.read`; frontend uses cursor pagination and exposes no destructive clear action. Request/error, retention and remaining domain sources remain |
@@ -147,7 +149,8 @@ following suites rather than relying only on newly invented happy-path tests:
 - Provider/gateway behavior: `backend/internal/service/openai_*_test.go`,
   `gateway_multiplatform_test.go`, and `gemini_multiplatform_test.go`.
 - Billing and limits: `billing_service_test.go`,
-  `gateway_service_subscription_billing_test.go`, and `concurrency_service_test.go`.
+  `gateway_service_subscription_billing_test.go`, `concurrency_service_test.go`,
+  `billing_cache_service_rpm_test.go`, and `concurrency_cache_integration_test.go`.
 - Identity: `auth_service_register_test.go`, `auth_session_revocation_test.go`,
   `integration/e2e_user_flow_test.go`, and `passkey_handler_test.go`.
 - Commerce: `subscription_*_test.go`, `redeem_service_*_test.go`,
@@ -173,8 +176,9 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
    non-Stripe providers. The order state machine and webhook verification are production
    implementations, not stubs.
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
-   request/error/stream conversion fixtures; rate and concurrency integration; failover, cooldown,
-   request-size policy, and accounting reconciliation.
+   request/error/stream conversion fixtures; failover, cooldown, API-key 5h/1d/7d spend windows,
+   request-size policy, and accounting reconciliation. User concurrency plus user/group RPM
+   admission is already Worker-native and atomically enforced before billing and Pool leases.
 3. **Identity completion**: email verification, password reset, and versioned notification-email
    preferences are implemented in the Worker; production still needs a verified Email Service
    sender and deployed delivery E2E. Next are OAuth linking, TOTP step-up/recovery codes, passkeys,

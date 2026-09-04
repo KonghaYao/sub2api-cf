@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.10.0"
+    "APP_VERSION": "0.11.0"
   },
   "assets": {
     "directory": "../frontend/dist",
@@ -86,6 +86,10 @@
       {
         "name": "AUTH_RATE_LIMIT",
         "class_name": "AuthRateLimitDO"
+      },
+      {
+        "name": "API_KEY_LIMIT_STATE",
+        "class_name": "ApiKeyLimitDO"
       }
     ]
   },
@@ -101,6 +105,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["SubscriptionStateDO"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["ApiKeyLimitDO"]
     }
   ],
   "env": {
@@ -108,7 +116,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.10.0"
+        "APP_VERSION": "0.11.0"
       },
       "d1_databases": [
         {
@@ -164,6 +172,10 @@
           {
             "name": "AUTH_RATE_LIMIT",
             "class_name": "AuthRateLimitDO"
+          },
+          {
+            "name": "API_KEY_LIMIT_STATE",
+            "class_name": "ApiKeyLimitDO"
           }
         ]
       },
@@ -175,7 +187,7 @@
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.10.0"
+        "APP_VERSION": "0.11.0"
       },
       "d1_databases": [
         {
@@ -231,6 +243,10 @@
           {
             "name": "AUTH_RATE_LIMIT",
             "class_name": "AuthRateLimitDO"
+          },
+          {
+            "name": "API_KEY_LIMIT_STATE",
+            "class_name": "ApiKeyLimitDO"
           }
         ]
       },

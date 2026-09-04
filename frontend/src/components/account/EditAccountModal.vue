@@ -11,8 +11,19 @@
       class="space-y-5"
       @submit.prevent="handleWorkerUpdate"
     >
-      <div class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
-        OpenAI · Bearer API key
+      <div class="grid grid-cols-1 gap-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200 sm:grid-cols-3">
+        <span>
+          Platform:
+          <strong data-testid="worker-account-edit-platform">{{ workerContractDetails.platform }}</strong>
+        </span>
+        <span>
+          Protocol:
+          <strong data-testid="worker-account-edit-protocol">{{ workerContractDetails.protocol }}</strong>
+        </span>
+        <span>
+          Auth:
+          <strong data-testid="worker-account-edit-auth-scheme">{{ workerContractDetails.authScheme }}</strong>
+        </span>
       </div>
       <div>
         <label class="input-label">{{ t('common.name') }}</label>
@@ -31,6 +42,16 @@
           autocomplete="new-password"
           class="input"
           :placeholder="t('admin.accounts.apiKeyLeaveEmpty')"
+        />
+      </div>
+      <div v-if="workerContractDetails.platform === 'codex'">
+        <label class="input-label">Account ID</label>
+        <input
+          v-model="workerForm.account_id"
+          data-testid="worker-account-edit-account-id"
+          type="text"
+          class="input"
+          placeholder="Optional Codex account ID"
         />
       </div>
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -3013,8 +3034,18 @@ const workerForm = reactive({
   name: '',
   base_url: 'https://api.openai.com/v1',
   api_key: '',
+  account_id: '',
   enabled: true,
   max_concurrency: 4,
+})
+
+const workerContractDetails = computed(() => {
+  const account = props.account as unknown as Record<string, unknown> | null
+  return {
+    platform: typeof account?.platform === 'string' ? account.platform : '',
+    protocol: typeof account?.protocol === 'string' ? account.protocol : '',
+    authScheme: typeof account?.auth_scheme === 'string' ? account.auth_scheme : '',
+  }
 })
 
 const { t } = useI18n()
@@ -3032,6 +3063,12 @@ watch(
       ? workerAccount.base_url
       : String(account.credentials?.base_url ?? 'https://api.openai.com/v1')
     workerForm.api_key = ''
+    const providerConfig = workerAccount.provider_config !== null && typeof workerAccount.provider_config === 'object'
+      ? workerAccount.provider_config as Record<string, unknown>
+      : {}
+    workerForm.account_id = account.platform === 'codex' && typeof providerConfig.account_id === 'string'
+      ? providerConfig.account_id
+      : ''
     workerForm.enabled = workerAccount.enabled === true || account.status === 'active'
     workerForm.max_concurrency = Number(workerAccount.max_concurrency ?? account.concurrency) || 4
   },
@@ -4724,6 +4761,11 @@ const handleWorkerUpdate = async () => {
       expected_control_version: controlVersion,
     }
     if (workerForm.api_key.trim()) payload.api_key = workerForm.api_key.trim()
+    if (workerContractDetails.value.platform === 'codex') {
+      payload.provider_config = workerForm.account_id.trim()
+        ? { account_id: workerForm.account_id.trim() }
+        : {}
+    }
     const updatedAccount = await adminAPI.accounts.update(props.account.id, payload as never)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))
     emit('updated', updatedAccount)

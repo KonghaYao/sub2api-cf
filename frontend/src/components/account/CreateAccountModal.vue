@@ -11,8 +11,27 @@
       class="space-y-5"
       @submit.prevent="handleWorkerCreate"
     >
-      <div class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
-        OpenAI · Bearer API key
+      <div
+        data-testid="worker-account-contract"
+        class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200"
+      >
+        {{ workerProviderContract.label }} · {{ workerProviderContract.protocol }} · {{ workerProviderContract.authScheme }}
+      </div>
+      <div>
+        <label class="input-label">{{ t('admin.accounts.platform') }}</label>
+        <select
+          v-model="workerForm.platform"
+          data-testid="worker-account-platform"
+          class="input"
+        >
+          <option
+            v-for="option in workerPlatformOptions"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </option>
+        </select>
       </div>
       <div>
         <label class="input-label">{{ t('admin.accounts.accountName') }}</label>
@@ -26,7 +45,17 @@
           required
           class="input"
           data-testid="worker-account-base-url"
-          placeholder="https://api.openai.com/v1"
+          :placeholder="workerProviderContract.defaultBaseUrl"
+        />
+      </div>
+      <div v-if="workerForm.platform === 'codex'">
+        <label class="input-label">Account ID</label>
+        <input
+          v-model="workerForm.account_id"
+          type="text"
+          class="input"
+          data-testid="worker-account-account-id"
+          placeholder="Optional Codex account ID"
         />
       </div>
       <div>
@@ -60,7 +89,7 @@
       <div>
         <label class="input-label">{{ t('admin.accounts.groups') }}</label>
         <p v-if="workerGroups.length === 0" class="text-sm text-amber-600">
-          Create at least one enabled OpenAI group before adding an account.
+          Create at least one enabled {{ workerProviderContract.label }} group before adding an account.
         </p>
         <div v-else class="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <label
@@ -73,6 +102,7 @@
               type="checkbox"
               :value="String(group.id)"
               class="rounded border-gray-300"
+              :data-testid="`worker-account-group-${group.id}`"
             />
             {{ group.name }}
           </label>
@@ -80,12 +110,12 @@
       </div>
       <div>
         <label class="input-label">Models</label>
-        <p v-if="workerModels.length === 0" class="text-sm text-amber-600">
-          Create at least one OpenAI model before adding an account.
+        <p v-if="workerPlatformModels.length === 0" class="text-sm text-amber-600">
+          Create at least one {{ workerProviderContract.label }} model before adding an account.
         </p>
         <div v-else class="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <label
-            v-for="model in workerModels.filter((item) => item.enabled)"
+            v-for="model in workerPlatformModels"
             :key="model.id"
             class="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-sm dark:border-dark-600"
           >
@@ -4051,25 +4081,82 @@ const emit = defineEmits<{
   created: []
 }>()
 
+type WorkerAccountPlatform = Extract<AccountPlatform, 'openai' | 'anthropic' | 'gemini' | 'codex'>
+
+const workerProviderContracts = {
+  openai: {
+    label: 'OpenAI',
+    protocol: 'openai',
+    authScheme: 'bearer',
+    defaultBaseUrl: 'https://api.openai.com/v1',
+  },
+  anthropic: {
+    label: 'Anthropic',
+    protocol: 'anthropic',
+    authScheme: 'x-api-key',
+    defaultBaseUrl: 'https://api.anthropic.com',
+  },
+  gemini: {
+    label: 'Gemini',
+    protocol: 'gemini',
+    authScheme: 'x-goog-api-key',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
+  },
+  codex: {
+    label: 'Codex',
+    protocol: 'codex',
+    authScheme: 'bearer',
+    defaultBaseUrl: 'https://chatgpt.com',
+  },
+} as const satisfies Record<WorkerAccountPlatform, {
+  label: string
+  protocol: string
+  authScheme: string
+  defaultBaseUrl: string
+}>
+
+const workerPlatformOptions = (Object.keys(workerProviderContracts) as WorkerAccountPlatform[])
+  .map((value) => ({ value, label: workerProviderContracts[value].label }))
+
 const workerForm = reactive({
+  platform: 'openai' as WorkerAccountPlatform,
   name: '',
   base_url: 'https://api.openai.com/v1',
   api_key: '',
+  account_id: '',
   enabled: true,
   max_concurrency: 4,
   group_ids: [] as string[],
   model_ids: [] as string[],
 })
+const workerProviderContract = computed(() => workerProviderContracts[workerForm.platform])
 const workerGroups = computed(() =>
-  props.groups.filter((group) => group.platform === 'openai' && group.status !== 'inactive')
+  props.groups.filter((group) => group.platform === workerForm.platform && group.status !== 'inactive')
+)
+const workerPlatformModels = computed(() =>
+  props.workerModels.filter((model) => model.platform === workerForm.platform && model.enabled)
 )
 
 watch(
-  [() => props.show, () => props.workerModels, workerGroups],
+  () => workerForm.platform,
+  (platform) => {
+    workerForm.base_url = workerProviderContracts[platform].defaultBaseUrl
+    workerForm.account_id = ''
+    workerForm.group_ids = []
+    workerForm.model_ids = []
+  }
+)
+
+watch(
+  [() => props.show, workerPlatformModels, workerGroups],
   ([show, models, groups]) => {
     if (!show || !props.cloudflareWorker) return
+    const validModelIds = new Set(models.map((model) => model.id))
+    const validGroupIds = new Set(groups.map((group) => String(group.id)))
+    workerForm.model_ids = workerForm.model_ids.filter((id) => validModelIds.has(id))
+    workerForm.group_ids = workerForm.group_ids.filter((id) => validGroupIds.has(id))
     if (workerForm.model_ids.length === 0) {
-      workerForm.model_ids = models.filter((model) => model.enabled).map((model) => model.id)
+      workerForm.model_ids = models.map((model) => model.id)
     }
     if (workerForm.group_ids.length === 0) {
       workerForm.group_ids = groups.map((group) => String(group.id))
@@ -5231,38 +5318,48 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
 }
 
 const handleWorkerCreate = async () => {
-  if (workerForm.group_ids.length === 0) {
+  const allowedGroupIds = new Set(workerGroups.value.map((group) => String(group.id)))
+  const selectedGroupIds = workerForm.group_ids.filter((groupId) => allowedGroupIds.has(groupId))
+  const selectedModels = workerPlatformModels.value.filter((model) => workerForm.model_ids.includes(model.id))
+  if (selectedGroupIds.length === 0) {
     appStore.showError('Select at least one group')
     return
   }
-  if (workerForm.model_ids.length === 0) {
+  if (selectedModels.length === 0) {
     appStore.showError('Select at least one model')
     return
   }
+  const providerContract = workerProviderContracts[workerForm.platform]
   submitting.value = true
   try {
     await adminAPI.accounts.create({
       name: workerForm.name.trim(),
-      platform: 'openai',
-      protocol: 'openai',
-      auth_scheme: 'bearer',
+      platform: workerForm.platform,
+      protocol: providerContract.protocol,
+      auth_scheme: providerContract.authScheme,
       type: 'apikey',
       base_url: workerForm.base_url.trim(),
       api_key: workerForm.api_key.trim(),
       enabled: workerForm.enabled,
       max_concurrency: workerForm.max_concurrency,
-      group_links: workerForm.group_ids.map((groupId) => ({
+      ...(workerForm.platform === 'codex'
+        ? {
+            provider_config: workerForm.account_id.trim()
+              ? { account_id: workerForm.account_id.trim() }
+              : {},
+          }
+        : {}),
+      group_links: selectedGroupIds.map((groupId) => ({
         group_id: groupId,
         priority: 0,
         weight: 1,
       })),
-      model_capabilities: workerForm.model_ids.map((modelId) => {
-        const model = props.workerModels.find((item) => item.id === modelId)
+      model_capabilities: selectedModels.map((model) => {
         return {
-          model_id: modelId,
-          chat_completions: model?.endpoint === 'chat_completions' || model?.endpoint === 'both',
-          responses: model?.endpoint === 'responses' || model?.endpoint === 'both',
-          embeddings: model?.embeddings === true,
+          model_id: model.id,
+          chat_completions: model.endpoint === 'chat_completions' || model.endpoint === 'both',
+          responses: model.endpoint === 'responses' || model.endpoint === 'both',
+          embeddings: model.embeddings === true,
         }
       }),
     } as unknown as CreateAccountRequest)
@@ -5280,9 +5377,11 @@ const handleWorkerCreate = async () => {
 
 // Methods
 const resetForm = () => {
+  workerForm.platform = 'openai'
   workerForm.name = ''
   workerForm.base_url = 'https://api.openai.com/v1'
   workerForm.api_key = ''
+  workerForm.account_id = ''
   workerForm.enabled = true
   workerForm.max_concurrency = 4
   workerForm.group_ids = []

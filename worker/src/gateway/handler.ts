@@ -41,21 +41,26 @@ import {
   getAccountCredential,
   listModels,
   resolveGatewayRoute,
-  validateBaseUrl,
 } from './repository'
+import { buildProviderRequest, type ProviderOperation } from './providers'
+import type { ProviderPlatform } from './providers'
 import { readGatewayJsonBody } from './request-body'
 import {
+  acquireApiKeyAdmission,
   cancelBillingReservation,
   disablePoolAccount,
   prepareBillingReservation,
   recordPoolFailure,
+  releaseApiKeyAdmission,
   releasePoolLease,
   RENEW_AFTER_MS,
   renewPoolLease,
+  renewApiKeyAdmission,
   renewBillingReservation,
   reservePoolAccount,
   settleBillingReservation,
   syncPoolAccounts,
+  type ApiKeyAdmissionLease,
 } from './state-client'
 import type {
   GatewayEndpoint,
@@ -78,7 +83,9 @@ type GatewayBindings = { Bindings: Env }
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const HEADER_TIMEOUT_MS = 30_000
 const BODY_IDLE_TIMEOUT_MS = 120_000
+const TOTAL_SYNC_TIMEOUT_MS = 120_000
 const TOTAL_STREAM_TIMEOUT_MS = 15 * 60_000
+const BILLING_RENEW_AFTER_MS = 8 * 60_000
 const DISCONNECT_DRAIN_IDLE_TIMEOUT_MS = 10_000
 const DISCONNECT_DRAIN_TOTAL_TIMEOUT_MS = 30_000
 const FAILURE_COOLDOWN_MS = 30_000
@@ -157,8 +164,14 @@ export async function handleEmbeddings(
       return {
         requestedModel,
         stream: false,
-        upstreamBody: (model: ModelRoute) => ({ ...body, model: model.upstream_name }),
-        responseProtocol: 'openai' as const,
+        resolveUpstream: (model: ModelRoute, _upstreamEndpoint: GatewayEndpoint, platform: ProviderPlatform) => {
+          assertProviderOperation(platform, 'embeddings')
+          return {
+            body: { ...body, model: model.upstream_name },
+            operation: 'embeddings' as const,
+            responseProtocol: 'openai' as const,
+          }
+        },
       }
     },
     gatewayErrorResponse,
@@ -227,10 +240,22 @@ export async function handleGeminiModelOperation(
         return {
           requestedModel: publicModel,
           stream: false,
-          upstreamBody: (model: ModelRoute) =>
-            prepareGeminiEmbeddingRequest(body, model.upstream_name),
-          transformResponse: geminiEmbeddingResponse,
-          responseProtocol: 'gemini' as const,
+          resolveUpstream: (model: ModelRoute, _upstreamEndpoint: GatewayEndpoint, platform: ProviderPlatform) => {
+            if (platform === 'gemini') {
+              return {
+                body: { ...body },
+                operation: 'embeddings' as const,
+                responseProtocol: 'native_gemini' as const,
+              }
+            }
+            assertProviderOperation(platform, 'embeddings')
+            return {
+              body: prepareGeminiEmbeddingRequest(body, model.upstream_name),
+              operation: 'embeddings' as const,
+              transformResponse: geminiEmbeddingResponse,
+              responseProtocol: 'gemini' as const,
+            }
+          },
         }
       },
       geminiErrorResponse,
@@ -247,15 +272,27 @@ export async function handleGeminiModelOperation(
       return {
         requestedModel: publicModel,
         stream,
-        upstreamBody: (model: ModelRoute) =>
-          convertGeminiGenerateContentToResponsesRequest(body, {
-            publicModel,
-            mappedModel: model.upstream_name,
-            stream,
-          }).body,
-        transformResponse: (value: unknown) =>
-          convertOpenAIResponsesResponseToGemini(value, { publicModel }),
-        responseProtocol: 'gemini' as const,
+        resolveUpstream: (model: ModelRoute, _upstreamEndpoint: GatewayEndpoint, platform: ProviderPlatform) => {
+          if (platform === 'gemini') {
+            return {
+              body: { ...body },
+              operation: stream ? 'stream_generate_content' as const : 'generate_content' as const,
+              responseProtocol: 'native_gemini' as const,
+            }
+          }
+          assertProviderOperation(platform, 'responses')
+          return {
+            body: convertGeminiGenerateContentToResponsesRequest(body, {
+              publicModel,
+              mappedModel: model.upstream_name,
+              stream,
+            }).body,
+            operation: 'responses' as const,
+            transformResponse: (value: unknown) =>
+              convertOpenAIResponsesResponseToGemini(value, { publicModel }),
+            responseProtocol: 'gemini' as const,
+          }
+        },
       }
     },
     geminiErrorResponse,
@@ -267,8 +304,10 @@ async function handleGeminiCountTokens(
   publicModel: string,
 ): Promise<Response> {
   const requestId = crypto.randomUUID()
+  const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
+  let admission: ApiKeyAdmissionLease | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
@@ -284,18 +323,26 @@ async function handleGeminiCountTokens(
       'responses',
       principal.user_id,
     )
-    const converted = convertGeminiGenerateContentToResponsesRequest(parsed.body, {
-      publicModel,
-      mappedModel: route.model.upstream_name,
-      stream: false,
-    }).body
-    const upstreamBody: Record<string, unknown> = {
-      model: converted.model,
-      input: converted.input,
+    const provider = providerForCandidates(route.candidates)
+    let operation: ProviderOperation
+    let upstreamBody: Record<string, unknown>
+    if (provider === 'gemini') {
+      operation = 'count_tokens'
+      upstreamBody = { ...parsed.body }
+    } else {
+      if (provider !== 'openai') unsupportedProviderOperation(provider, 'count_tokens')
+      operation = 'responses_input_tokens'
+      const converted = convertGeminiGenerateContentToResponsesRequest(parsed.body, {
+        publicModel,
+        mappedModel: route.model.upstream_name,
+        stream: false,
+      }).body
+      upstreamBody = { model: converted.model, input: converted.input }
+      for (const key of ['instructions', 'tools', 'tool_choice']) {
+        if (converted[key] !== undefined) upstreamBody[key] = converted[key]
+      }
     }
-    for (const key of ['instructions', 'tools', 'tool_choice']) {
-      if (converted[key] !== undefined) upstreamBody[key] = converted[key]
-    }
+    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -310,12 +357,12 @@ async function handleGeminiCountTokens(
       route.model.model_id,
       requestId,
       'responses',
-      JSON.stringify(upstreamBody),
-      false,
+      upstreamBody,
       route.candidates.length,
       context.req.raw.headers,
       context.req.raw.signal,
-      'responses_input_tokens',
+      operation,
+      route.model.upstream_name,
     )
     if (!acquired.response.ok) {
       if (isUnsupportedTokenCountStatus(acquired.response.status)) {
@@ -337,8 +384,9 @@ async function handleGeminiCountTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
+      { pool, leaseId: acquired.leaseId, admission, startedAt },
     )
-    return geminiTokenCountResponse(readInputTokenCount(bytes), requestId)
+    return geminiTokenCountResponse(readInputTokenCount(bytes, provider), requestId)
   } catch (error) {
     const normalized = error instanceof GeminiCodecError
       ? new GatewayError(400, 'invalid_argument', error.message)
@@ -348,6 +396,7 @@ async function handleGeminiCountTokens(
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
     }
+    await bestEffort(() => releaseApiKeyAdmission(admission))
   }
 }
 
@@ -363,12 +412,23 @@ export async function handleAnthropicMessages(
       return {
         requestedModel: request.model,
         stream: request.stream,
-        upstreamBody: (model: ModelRoute) => ({
-          ...toOpenAIResponsesRequest(request, model.upstream_name),
-        }),
-        transformResponse: (value: unknown) =>
-          responsesToAnthropicMessage(value, request.model),
-        responseProtocol: 'anthropic' as const,
+        resolveUpstream: (model: ModelRoute, _upstreamEndpoint: GatewayEndpoint, platform: ProviderPlatform) => {
+          if (platform === 'anthropic') {
+            return {
+              body: { ...request, model: model.upstream_name },
+              operation: 'messages' as const,
+              responseProtocol: 'native_anthropic' as const,
+            }
+          }
+          assertProviderOperation(platform, 'responses')
+          return {
+            body: { ...toOpenAIResponsesRequest(request, model.upstream_name) },
+            operation: 'responses' as const,
+            transformResponse: (value: unknown) =>
+              responsesToAnthropicMessage(value, request.model),
+            responseProtocol: 'anthropic' as const,
+          }
+        },
       }
     },
     anthropicErrorResponse,
@@ -381,10 +441,19 @@ export async function handleResponsesCompact(
   return dispatchGateway(
     context,
     'responses',
-    (body) => ({
-      ...prepareOpenAiRequest(body, 'responses', false),
-      upstreamOperation: 'responses_compact' as const,
-    }),
+    (body) => {
+      const prepared = prepareOpenAiRequest(body, 'responses', false)
+      return {
+        ...prepared,
+        resolveUpstream: (model, upstreamEndpoint, platform) => {
+          assertProviderOperation(platform, 'responses_compact')
+          return {
+            ...prepared.resolveUpstream(model, upstreamEndpoint, platform),
+            operation: 'responses_compact' as const,
+          }
+        },
+      }
+    },
     gatewayErrorResponse,
   )
 }
@@ -393,8 +462,10 @@ export async function handleAnthropicCountTokens(
   context: Context<GatewayBindings>,
 ): Promise<Response> {
   const requestId = crypto.randomUUID()
+  const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
+  let admission: ApiKeyAdmissionLease | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
@@ -407,10 +478,18 @@ export async function handleAnthropicCountTokens(
       'responses',
       principal.user_id,
     )
-    const upstreamBody = toOpenAIResponsesInputTokensRequest(
-      request,
-      route.model.upstream_name,
-    )
+    const provider = providerForCandidates(route.candidates)
+    let operation: ProviderOperation
+    let upstreamBody: unknown
+    if (provider === 'anthropic') {
+      operation = 'count_tokens'
+      upstreamBody = { ...request, model: route.model.upstream_name }
+    } else {
+      if (provider !== 'openai') unsupportedProviderOperation(provider, 'count_tokens')
+      operation = 'responses_input_tokens'
+      upstreamBody = toOpenAIResponsesInputTokensRequest(request, route.model.upstream_name)
+    }
+    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -425,12 +504,12 @@ export async function handleAnthropicCountTokens(
       route.model.model_id,
       requestId,
       'responses',
-      JSON.stringify(upstreamBody),
-      false,
+      upstreamBody,
       route.candidates.length,
       context.req.raw.headers,
       context.req.raw.signal,
-      'responses_input_tokens',
+      operation,
+      route.model.upstream_name,
     )
 
     if (!acquired.response.ok) {
@@ -456,6 +535,7 @@ export async function handleAnthropicCountTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
+      { pool, leaseId: acquired.leaseId, admission, startedAt },
     )
     let payload: unknown
     try {
@@ -479,6 +559,7 @@ export async function handleAnthropicCountTokens(
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
     }
+    await bestEffort(() => releaseApiKeyAdmission(admission))
   }
 }
 
@@ -486,8 +567,10 @@ export async function handleResponsesInputTokens(
   context: Context<GatewayBindings>,
 ): Promise<Response> {
   const requestId = crypto.randomUUID()
+  const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
+  let admission: ApiKeyAdmissionLease | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
@@ -505,10 +588,13 @@ export async function handleResponsesInputTokens(
       'responses',
       principal.user_id,
     )
+    const provider = providerForCandidates(route.candidates)
+    if (provider !== 'openai') unsupportedProviderOperation(provider, 'responses_input_tokens')
     const upstreamBody: Record<string, unknown> = {
       ...parsed.body,
       model: route.model.upstream_name,
     }
+    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     pool = await syncPoolAccounts(
       context.env,
       principal.group_id,
@@ -523,12 +609,12 @@ export async function handleResponsesInputTokens(
       route.model.model_id,
       requestId,
       'responses',
-      JSON.stringify(upstreamBody),
-      false,
+      upstreamBody,
       route.candidates.length,
       context.req.raw.headers,
       context.req.raw.signal,
       'responses_input_tokens',
+      route.model.upstream_name,
     )
 
     if (!acquired.response.ok) {
@@ -554,6 +640,7 @@ export async function handleResponsesInputTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
+      { pool, leaseId: acquired.leaseId, admission, startedAt },
     )
     let payload: unknown
     try {
@@ -574,6 +661,7 @@ export async function handleResponsesInputTokens(
     if (pool !== null && acquired !== null) {
       await bestEffort(() => releasePoolLease(pool!, acquired!.leaseId))
     }
+    await bestEffort(() => releaseApiKeyAdmission(admission))
   }
 }
 
@@ -613,7 +701,7 @@ function geminiTokenCountResponse(inputTokens: number, requestId: string): Respo
   })
 }
 
-function readInputTokenCount(bytes: Uint8Array): number {
+function readInputTokenCount(bytes: Uint8Array, platform: ProviderPlatform = 'openai'): number {
   let payload: unknown
   try {
     payload = JSON.parse(new TextDecoder().decode(bytes))
@@ -621,7 +709,9 @@ function readInputTokenCount(bytes: Uint8Array): number {
     throw new GatewayError(502, 'invalid_upstream_response', 'Upstream returned invalid token usage', 'server_error')
   }
   const inputTokens = payload !== null && typeof payload === 'object'
-    ? (payload as Record<string, unknown>).input_tokens
+    ? platform === 'gemini'
+      ? (payload as Record<string, unknown>).totalTokens
+      : (payload as Record<string, unknown>).input_tokens
     : undefined
   if (!Number.isSafeInteger(inputTokens) || (inputTokens as number) < 0) {
     throw new GatewayError(502, 'invalid_upstream_response', 'Upstream returned invalid token usage', 'server_error')
@@ -640,14 +730,128 @@ function isUnsupportedTokenCountStatus(status: number): boolean {
   return status === 404 || status === 405 || status === 501
 }
 
+function assertProviderOperation(platform: ProviderPlatform, operation: ProviderOperation): void {
+  const supported: Record<ProviderPlatform, ReadonlySet<ProviderOperation>> = {
+    openai: new Set([
+      'models',
+      'chat_completions',
+      'responses',
+      'responses_compact',
+      'responses_input_tokens',
+      'embeddings',
+    ]),
+    anthropic: new Set(['models', 'messages', 'count_tokens']),
+    gemini: new Set(['models', 'generate_content', 'stream_generate_content', 'count_tokens', 'embeddings']),
+    codex: new Set(['models', 'responses']),
+  }
+  if (!supported[platform].has(operation)) unsupportedProviderOperation(platform, operation)
+}
+
+function unsupportedProviderOperation(
+  platform: ProviderPlatform,
+  operation: ProviderOperation,
+): never {
+  throw new GatewayError(
+    409,
+    'provider_operation_not_supported',
+    `The ${operation} operation is not supported by the selected ${platform} provider route`,
+  )
+}
+
+function extractProviderUsage(value: unknown, platform: ProviderPlatform): TokenUsage | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const root = value as Record<string, unknown>
+  if (platform === 'anthropic') {
+    const usage = objectValue(root.usage)
+    if (usage === null) return null
+    const input = nonNegativeInteger(usage.input_tokens)
+    const output = nonNegativeInteger(usage.output_tokens)
+    if (input === null || output === null) return null
+    return normalizedAnthropicUsage(
+      input,
+      output,
+      nonNegativeInteger(usage.cache_creation_input_tokens) ?? 0,
+      nonNegativeInteger(usage.cache_read_input_tokens) ?? 0,
+    )
+  }
+  if (platform === 'gemini') {
+    const usage = objectValue(root.usageMetadata)
+    if (usage === null) return null
+    const input = nonNegativeInteger(usage.promptTokenCount)
+    const candidates = nonNegativeInteger(usage.candidatesTokenCount)
+    const thoughts = nonNegativeInteger(usage.thoughtsTokenCount) ?? 0
+    if (input === null || candidates === null) return null
+    return {
+      input_tokens: input,
+      output_tokens: candidates + thoughts,
+      cache_read_tokens: Math.min(nonNegativeInteger(usage.cachedContentTokenCount) ?? 0, input),
+      estimated: false,
+    }
+  }
+  return extractUsage(value)
+}
+
+function normalizedAnthropicUsage(
+  inputTokens: number,
+  outputTokens: number,
+  cacheCreationTokens: number,
+  cacheReadTokens: number,
+): TokenUsage | null {
+  const totalInputTokens = inputTokens + cacheCreationTokens + cacheReadTokens
+  if (!Number.isSafeInteger(totalInputTokens)) return null
+  return {
+    // Anthropic reports ordinary, cache-write, and cache-read input as separate
+    // buckets. The shared price engine expects total input with cache reads tagged
+    // separately, so folding all buckets here prices each token exactly once.
+    input_tokens: totalInputTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+    estimated: false,
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null
+}
+
+function providerForCandidates(candidates: Array<{ platform: ProviderPlatform }>): ProviderPlatform {
+  const platform = candidates[0]?.platform
+  if (platform === undefined || candidates.some((candidate) => candidate.platform !== platform)) {
+    throw new GatewayError(500, 'invalid_provider_account', 'Upstream provider candidates are inconsistent', 'server_error')
+  }
+  return platform
+}
+
 interface PreparedGatewayRequest {
   requestedModel: string
   stream: boolean
-  upstreamBody: (model: ModelRoute, upstreamEndpoint: GatewayEndpoint) => Record<string, unknown>
-  transformResponse?: (value: unknown) => unknown
-  responseProtocol: 'openai' | 'anthropic' | 'gemini'
-  upstreamOperation?: UpstreamOperation
+  resolveUpstream: (
+    model: ModelRoute,
+    upstreamEndpoint: GatewayEndpoint,
+    platform: ProviderPlatform,
+  ) => ProviderDispatch
   protocolFallback?: 'responses_to_chat'
+}
+
+type ResponseProtocol =
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'responses_from_chat'
+  | 'native_anthropic'
+  | 'native_gemini'
+
+interface ProviderDispatch {
+  body: Record<string, unknown>
+  operation: ProviderOperation
+  responseProtocol: ResponseProtocol
+  transformResponse?: (value: unknown) => unknown
 }
 
 type PrepareGatewayRequest = (body: Record<string, unknown>) => PreparedGatewayRequest
@@ -664,7 +868,11 @@ function prepareOpenAiRequest(
   return {
     requestedModel,
     stream,
-    upstreamBody: (model, upstreamEndpoint) => {
+    resolveUpstream: (model, upstreamEndpoint, platform) => {
+      const operation = upstreamEndpoint
+      if (platform !== 'openai' && !(platform === 'codex' && operation === 'responses')) {
+        return unsupportedProviderOperation(platform, operation)
+      }
       if (
         endpoint === 'responses' &&
         allowProtocolFallback &&
@@ -673,10 +881,14 @@ function prepareOpenAiRequest(
         const fallbackBody = body.max_output_tokens === undefined
           ? { ...body, max_output_tokens: model.default_max_output_tokens }
           : body
-        return responsesToChatCompletionsRequest(
-          parseResponsesRequest(fallbackBody),
-          model.upstream_name,
-        ) as unknown as Record<string, unknown>
+        return {
+          body: responsesToChatCompletionsRequest(
+            parseResponsesRequest(fallbackBody),
+            model.upstream_name,
+          ) as unknown as Record<string, unknown>,
+          operation: 'chat_completions',
+          responseProtocol: 'responses_from_chat',
+        }
       }
       const upstreamBody: Record<string, unknown> = { ...body, model: model.upstream_name }
       if (
@@ -696,9 +908,8 @@ function prepareOpenAiRequest(
           include_usage: true,
         }
       }
-      return upstreamBody
+      return { body: upstreamBody, operation, responseProtocol: 'openai' }
     },
-    responseProtocol: 'openai',
     ...(endpoint === 'responses' && allowProtocolFallback
       ? { protocolFallback: 'responses_to_chat' as const }
       : {}),
@@ -713,6 +924,8 @@ async function dispatchGateway(
 ): Promise<Response> {
   const requestId = crypto.randomUUID()
   const startedAt = Date.now()
+  let admission: ApiKeyAdmissionLease | null = null
+  let admissionHandedOff = false
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const parsed = await readGatewayJsonBody(context.req.raw)
@@ -728,9 +941,9 @@ async function dispatchGateway(
     )
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint
-    const usesResponsesBridge = prepared.protocolFallback === 'responses_to_chat' &&
-      endpoint === 'responses' && upstreamEndpoint === 'chat_completions'
-    const upstreamBody = prepared.upstreamBody(model, upstreamEndpoint)
+    const provider = providerForCandidates(route.candidates)
+    const providerDispatch = prepared.resolveUpstream(model, upstreamEndpoint, provider)
+    const upstreamBody = providerDispatch.body
     const pricedReservationMicros = reservationForRequest(
       model,
       upstreamBody,
@@ -745,6 +958,7 @@ async function dispatchGateway(
       : pricedReservationMicros
     const candidates = route.candidates
 
+    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     await prepareBillingReservation(context.env, principal, requestId, reservationMicros)
     let pool: DurableObjectStub
     try {
@@ -760,7 +974,6 @@ async function dispatchGateway(
       throw error
     }
 
-    const serialized = JSON.stringify(upstreamBody)
     const acquired = await acquireUpstream(
       context.env,
       pool,
@@ -768,12 +981,12 @@ async function dispatchGateway(
       model.model_id,
       requestId,
       upstreamEndpoint,
-      serialized,
-      stream,
+      upstreamBody,
       candidates.length,
       context.req.raw.headers,
       context.req.raw.signal,
-      prepared.upstreamOperation ?? upstreamEndpoint,
+      providerDispatch.operation,
+      model.upstream_name,
     ).catch(async (error) => {
       await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
       throw error
@@ -807,6 +1020,7 @@ async function dispatchGateway(
         await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
         throw new GatewayError(502, 'empty_upstream_stream', 'Upstream returned an empty stream', 'server_error')
       }
+      admissionHandedOff = true
       return createStreamingResponse({
         env: context.env,
         endpoint,
@@ -821,16 +1035,18 @@ async function dispatchGateway(
         inputBytes: parsed.bytes.byteLength,
         stream,
         startedAt,
-        responseProtocol: usesResponsesBridge
-          ? 'responses_from_chat'
-          : prepared.responseProtocol,
+        admission,
+        providerPlatform: provider,
+        responseProtocol: providerDispatch.responseProtocol,
         waitUntil: optionalWaitUntil(context),
       })
     }
 
+    admissionHandedOff = true
     return await createSynchronousResponse({
       env: context.env,
       response: acquired.response,
+      endpoint,
       pool,
       leaseId: acquired.leaseId,
       accountId: acquired.accountId,
@@ -842,9 +1058,11 @@ async function dispatchGateway(
       clientSignal: context.req.raw.signal,
       stream,
       startedAt,
-      transformResponse: usesResponsesBridge
+      admission,
+      providerPlatform: provider,
+      transformResponse: providerDispatch.responseProtocol === 'responses_from_chat'
         ? (value) => chatCompletionsResponseToResponses(value, requestedModel)
-        : prepared.transformResponse,
+        : providerDispatch.transformResponse,
     })
   } catch (error) {
     const normalized = error instanceof ProtocolValidationError
@@ -855,6 +1073,10 @@ async function dispatchGateway(
         ? new GatewayError(400, 'invalid_argument', error.message)
         : asGatewayError(error)
     return errorResponse(normalized, requestId)
+  } finally {
+    if (!admissionHandedOff) {
+      await bestEffort(() => releaseApiKeyAdmission(admission))
+    }
   }
 }
 
@@ -902,7 +1124,7 @@ interface AcquiredUpstream {
   leaseId: string
 }
 
-type UpstreamOperation = GatewayEndpoint | 'responses_compact' | 'responses_input_tokens'
+type UpstreamOperation = ProviderOperation
 
 async function acquireUpstream(
   env: Env,
@@ -911,12 +1133,12 @@ async function acquireUpstream(
   modelId: string,
   requestId: string,
   endpoint: GatewayEndpoint,
-  body: string,
-  stream: boolean,
+  body: unknown,
   candidateCount: number,
   inboundHeaders: Headers,
   clientSignal: AbortSignal,
   operation: UpstreamOperation = endpoint,
+  upstreamModel?: string,
 ): Promise<AcquiredUpstream> {
   let lastError: GatewayError | null = null
   const attempts = Math.min(4, candidateCount + 1)
@@ -935,13 +1157,20 @@ async function acquireUpstream(
         env.CREDENTIALS_MASTER_KEY,
         credentialAad(env.ENVIRONMENT, account.account_id, account.secret_id, account.key_version),
       )
-      const url = upstreamUrl(account.base_url, operation)
-      const response = await fetchWithHeaderTimeout(url, {
-        method: 'POST',
-        headers: upstreamHeaders(credential.api_key, stream, inboundHeaders, env.APP_VERSION),
+      const plan = buildProviderRequest({
+        account,
+        credential,
+        operation,
+        model: upstreamModel,
         body,
+        client_headers: inboundHeaders,
+      })
+      const response = await fetchWithHeaderTimeout(new URL(plan.url), {
+        method: plan.method,
+        headers: plan.headers,
+        body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
         redirect: 'manual',
-      }, clientSignal)
+      }, clientSignal, plan.timeout_ms)
       if (response.status >= 300 && response.status < 400) {
         await bestEffort(async () => response.body?.cancel())
         throw new GatewayError(502, 'upstream_redirect_rejected', 'Upstream redirect was rejected', 'server_error')
@@ -972,6 +1201,7 @@ async function acquireUpstream(
 
 interface FinalizeInput {
   env: Env
+  endpoint: GatewayEndpoint
   pool: DurableObjectStub
   leaseId: string
   accountId: string
@@ -982,6 +1212,8 @@ interface FinalizeInput {
   inputBytes: number
   stream: boolean
   startedAt: number
+  admission: ApiKeyAdmissionLease | null
+  providerPlatform: ProviderPlatform
 }
 
 async function createSynchronousResponse(
@@ -998,6 +1230,12 @@ async function createSynchronousResponse(
         input.response,
         MAX_SYNC_RESPONSE_BYTES,
         input.clientSignal,
+        {
+          pool: input.pool,
+          leaseId: input.leaseId,
+          admission: input.admission,
+          startedAt: input.startedAt,
+        },
       )
     } catch (error) {
       await bestEffort(() =>
@@ -1017,7 +1255,8 @@ async function createSynchronousResponse(
     } catch {
       // Compatible upstreams occasionally return non-JSON bodies; charge by bounded byte estimate.
     }
-    const usage = extractUsage(parsed) ?? estimatedUsage(input.inputBytes, bytes.byteLength)
+    const usage = extractProviderUsage(parsed, input.providerPlatform) ??
+      estimatedUsage(input.inputBytes, input.endpoint === 'embeddings' ? 0 : bytes.byteLength)
     let downstreamValue: unknown = parsed
     if (input.transformResponse !== undefined) {
       try {
@@ -1045,7 +1284,10 @@ async function createSynchronousResponse(
     headers.set('content-length', String(output.byteLength))
     return new Response(output.buffer as ArrayBuffer, { status: input.response.status, headers })
   } finally {
-    await bestEffort(() => releasePoolLease(input.pool, input.leaseId))
+    await Promise.all([
+      bestEffort(() => releasePoolLease(input.pool, input.leaseId)),
+      bestEffort(() => releaseApiKeyAdmission(input.admission)),
+    ])
   }
 }
 
@@ -1371,24 +1613,175 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
   }
 }
 
+class NativeProviderStreamTransformer implements GatewayStreamTransformer {
+  private readonly decoder = new TextDecoder()
+  private buffer = ''
+  private emittedBytes = 0
+  private inputTokens: number | null = null
+  private outputTokens: number | null = null
+  private cacheCreationTokens = 0
+  private cacheReadTokens = 0
+  private terminalValue: 'completed' | 'failed' | null = null
+
+  constructor(
+    private readonly platform: 'anthropic' | 'gemini',
+    private readonly upstreamModel: string,
+    private readonly publicModel: string,
+  ) {}
+
+  push(chunk: Uint8Array): Uint8Array[] {
+    this.buffer += this.decoder.decode(chunk, { stream: true })
+    if (this.buffer.length > MAX_SYNC_RESPONSE_BYTES) {
+      throw new GatewayError(502, 'invalid_upstream_stream', 'Upstream SSE event exceeded the size limit', 'server_error')
+    }
+    return this.drain(false)
+  }
+
+  finish(): Uint8Array[] {
+    this.buffer += this.decoder.decode()
+    return this.drain(true)
+  }
+
+  usage(): TokenUsage | null {
+    if (this.inputTokens === null || this.outputTokens === null) return null
+    if (this.platform === 'anthropic') {
+      return normalizedAnthropicUsage(
+        this.inputTokens,
+        this.outputTokens,
+        this.cacheCreationTokens,
+        this.cacheReadTokens,
+      )
+    }
+    return {
+      input_tokens: this.inputTokens,
+      output_tokens: this.outputTokens,
+      cache_read_tokens: Math.min(this.cacheReadTokens, this.inputTokens),
+      estimated: false,
+    }
+  }
+
+  outputBytes(): number {
+    return this.emittedBytes
+  }
+
+  terminal(): 'completed' | 'failed' | 'missing' {
+    return this.terminalValue ?? 'missing'
+  }
+
+  errorFrame(message: string): Uint8Array {
+    if (this.platform === 'anthropic') {
+      return encoder.encode(formatAnthropicSseEvent({
+        type: 'error',
+        error: { type: 'api_error', message },
+      }))
+    }
+    return encoder.encode(serializeGeminiSseFrame({
+      data: { error: { code: 502, message, status: 'INTERNAL' } },
+    }))
+  }
+
+  private drain(flush: boolean): Uint8Array[] {
+    const chunks: Uint8Array[] = []
+    while (true) {
+      const match = /\r?\n\r?\n/.exec(this.buffer)
+      if (match === null) break
+      const frame = this.buffer.slice(0, match.index)
+      this.buffer = this.buffer.slice(match.index + match[0].length)
+      chunks.push(this.transformFrame(frame, match[0]))
+    }
+    if (flush && this.buffer.length > 0) {
+      chunks.push(this.transformFrame(this.buffer, ''))
+      this.buffer = ''
+    }
+    return chunks
+  }
+
+  private transformFrame(frame: string, delimiter: string): Uint8Array {
+    const sourceLines = frame.split(/\r?\n/)
+    const eventName = sourceLines.find((line) => line.startsWith('event:'))?.slice(6).trim()
+    const data = sourceLines
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (data === '' || data === '[DONE]') return this.encode(frame + delimiter)
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(data)
+    } catch {
+      throw new GatewayError(502, 'invalid_upstream_stream', 'Upstream returned an invalid event stream', 'server_error')
+    }
+    const root = objectValue(payload)
+    if (root !== null) this.observe(root, eventName)
+    const rewritten = rewriteModelNames(payload, this.upstreamModel, this.publicModel)
+    const lines = sourceLines.filter((line) => !line.startsWith('data:'))
+    lines.push(`data: ${JSON.stringify(rewritten)}`)
+    return this.encode(lines.join('\n') + delimiter)
+  }
+
+  private observe(root: Record<string, unknown>, eventName?: string): void {
+    if (this.platform === 'anthropic') {
+      const type = typeof root.type === 'string' ? root.type : eventName
+      this.observeAnthropicUsage(objectValue(root.usage))
+      this.observeAnthropicUsage(objectValue(objectValue(root.message)?.usage))
+      if (type === 'message_stop') this.terminalValue = 'completed'
+      if (type === 'error') this.terminalValue = 'failed'
+      return
+    }
+
+    const usage = extractProviderUsage(root, 'gemini')
+    if (usage !== null) {
+      this.inputTokens = usage.input_tokens
+      this.outputTokens = usage.output_tokens
+      this.cacheReadTokens = usage.cache_read_tokens
+    }
+    if (root.error !== undefined) this.terminalValue = 'failed'
+    const candidates = Array.isArray(root.candidates) ? root.candidates : []
+    if (candidates.some((candidate) => {
+      const value = objectValue(candidate)?.finishReason
+      return typeof value === 'string' && value !== '' && value !== 'FINISH_REASON_UNSPECIFIED'
+    })) this.terminalValue = 'completed'
+  }
+
+  private observeAnthropicUsage(usage: Record<string, unknown> | null): void {
+    if (usage === null) return
+    this.inputTokens = nonNegativeInteger(usage.input_tokens) ?? this.inputTokens
+    this.outputTokens = nonNegativeInteger(usage.output_tokens) ?? this.outputTokens
+    this.cacheCreationTokens = nonNegativeInteger(usage.cache_creation_input_tokens) ?? this.cacheCreationTokens
+    this.cacheReadTokens = nonNegativeInteger(usage.cache_read_input_tokens) ?? this.cacheReadTokens
+  }
+
+  private encode(value: string): Uint8Array {
+    const encoded = encoder.encode(value)
+    this.emittedBytes += encoded.byteLength
+    return encoded
+  }
+}
+
 function createStreamingResponse(input: FinalizeInput & {
   response: Response
   endpoint: GenerativeGatewayEndpoint
-  responseProtocol: 'openai' | 'anthropic' | 'gemini' | 'responses_from_chat'
+  responseProtocol: ResponseProtocol
   waitUntil?: WaitUntil
 }): Response {
   const reader = input.response.body!.getReader()
-  const tracker: GatewayStreamTransformer = input.responseProtocol === 'anthropic'
-    ? new AnthropicResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
-    : input.responseProtocol === 'gemini'
-      ? new GeminiResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
-      : input.responseProtocol === 'responses_from_chat'
-        ? new ChatResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
-      : new OpenAiStreamTransformer(input.model.upstream_name, input.requestedModel, input.endpoint)
+  const tracker: GatewayStreamTransformer = input.responseProtocol === 'native_anthropic'
+    ? new NativeProviderStreamTransformer('anthropic', input.model.upstream_name, input.requestedModel)
+    : input.responseProtocol === 'native_gemini'
+      ? new NativeProviderStreamTransformer('gemini', input.model.upstream_name, input.requestedModel)
+      : input.responseProtocol === 'anthropic'
+        ? new AnthropicResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+        : input.responseProtocol === 'gemini'
+          ? new GeminiResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+          : input.responseProtocol === 'responses_from_chat'
+            ? new ChatResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+            : new OpenAiStreamTransformer(input.model.upstream_name, input.requestedModel, input.endpoint)
   let finalized: Promise<void> | null = null
   let userRenewal = 0
   let poolRenewal = 0
-  let lastRenewedAt = Date.now()
+  let admissionRenewal = 0
+  let lastLeaseRenewedAt = Date.now()
+  let lastBillingRenewedAt = Date.now()
   let lastChunkAt = Date.now()
   let emitted = false
   let downstreamCancelled = false
@@ -1412,7 +1805,10 @@ function createStreamingResponse(input: FinalizeInput & {
           await cancelBillingReservation(input.env, input.principal, input.requestId)
         }
       } finally {
-        await bestEffort(() => releasePoolLease(input.pool, input.leaseId))
+        await Promise.all([
+          bestEffort(() => releasePoolLease(input.pool, input.leaseId)),
+          bestEffort(() => releaseApiKeyAdmission(input.admission)),
+        ])
       }
     })()
     return finalized
@@ -1425,14 +1821,19 @@ function createStreamingResponse(input: FinalizeInput & {
   }
 
   const renewIfDue = async (): Promise<void> => {
-    if (Date.now() - lastRenewedAt < RENEW_AFTER_MS) return
-    userRenewal += 1
-    poolRenewal += 1
-    await Promise.all([
-      renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
-      renewPoolLease(input.pool, input.leaseId, poolRenewal),
-    ])
-    lastRenewedAt = Date.now()
+    const now = Date.now()
+    if (now - lastLeaseRenewedAt >= RENEW_AFTER_MS) {
+      admissionRenewal += 1
+      poolRenewal += 1
+      await renewApiKeyAdmission(input.admission, admissionRenewal)
+      await renewPoolLease(input.pool, input.leaseId, poolRenewal)
+      lastLeaseRenewedAt = Date.now()
+    }
+    if (now - lastBillingRenewedAt >= BILLING_RENEW_AFTER_MS) {
+      userRenewal += 1
+      await renewBillingReservation(input.env, input.principal, input.requestId, userRenewal)
+      lastBillingRenewedAt = Date.now()
+    }
   }
 
   const readNext = async (
@@ -1829,50 +2230,17 @@ function parseStream(body: Record<string, unknown>): boolean {
   return body.stream
 }
 
-function upstreamUrl(baseUrl: string, operation: UpstreamOperation): URL {
-  const url = validateBaseUrl(baseUrl)
-  const path = operation === 'chat_completions'
-    ? 'chat/completions'
-    : operation === 'embeddings'
-      ? 'embeddings'
-    : operation === 'responses_compact'
-      ? 'responses/compact'
-    : operation === 'responses_input_tokens'
-      ? 'responses/input_tokens'
-      : 'responses'
-  url.pathname = `${url.pathname}/${path}`.replace(/\/+/g, '/')
-  return url
-}
-
-function upstreamHeaders(
-  apiKey: string,
-  stream: boolean,
-  inbound: Headers,
-  appVersion: string,
-): Headers {
-  const headers = new Headers({
-    authorization: `Bearer ${apiKey}`,
-    'content-type': 'application/json',
-    accept: stream ? 'text/event-stream' : 'application/json',
-    'user-agent': `Sub2API-Cloudflare/${appVersion}`,
-  })
-  for (const name of ['openai-beta']) {
-    const value = inbound.get(name)
-    if (value !== null && value.length <= 1_024) headers.set(name, value)
-  }
-  return headers
-}
-
 async function fetchWithHeaderTimeout(
   url: URL,
   init: RequestInit,
   clientSignal: AbortSignal,
+  timeoutMs = HEADER_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController()
   const onClientAbort = () => controller.abort()
   if (clientSignal.aborted) controller.abort()
   else clientSignal.addEventListener('abort', onClientAbort, { once: true })
-  const timer = setTimeout(() => controller.abort(), HEADER_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(url, { ...init, signal: controller.signal })
   } catch (error) {
@@ -1933,37 +2301,69 @@ async function readResponseLimited(
   response: Response,
   maximum: number,
   clientSignal: AbortSignal,
+  lease: {
+    pool: DurableObjectStub
+    leaseId: string
+    admission: ApiKeyAdmissionLease | null
+    startedAt: number
+  },
 ): Promise<Uint8Array> {
   if (response.body === null) return new Uint8Array()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
-  let onClientAbort = () => {}
-  const clientAborted = new Promise<{ kind: 'abort' }>((resolve) => {
-    onClientAbort = () => resolve({ kind: 'abort' })
-    clientSignal.addEventListener('abort', onClientAbort, { once: true })
-  })
-  try {
+  let renewalSequence = 0
+  let lastRenewedAt = lease.startedAt
+  let lastChunkAt = Date.now()
+  const deadlineAt = lease.startedAt + TOTAL_SYNC_TIMEOUT_MS
     if (clientSignal.aborted) {
       await bestEffort(() => reader.cancel('client cancelled'))
       throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
     }
     while (true) {
       const pending = reader.read().then((result) => ({ kind: 'read' as const, result }))
-      const raced = await Promise.race([
-        readOrTick(pending, BODY_IDLE_TIMEOUT_MS),
-        clientAborted,
-      ])
-      if (raced.kind === 'abort') {
-        await bestEffort(() => reader.cancel('client cancelled'))
-        throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
+      let result: ReadableStreamReadResult<Uint8Array>
+      while (true) {
+        const now = Date.now()
+        if (now >= deadlineAt) {
+          await bestEffort(() => reader.cancel('upstream response total timeout'))
+          throw new GatewayError(504, 'upstream_timeout', 'Upstream response exceeded the maximum duration', 'server_error')
+        }
+        if (now - lastRenewedAt >= RENEW_AFTER_MS) {
+          renewalSequence += 1
+          try {
+            await renewApiKeyAdmission(lease.admission, renewalSequence)
+            await renewPoolLease(lease.pool, lease.leaseId, renewalSequence)
+          } catch (error) {
+            await bestEffort(() => reader.cancel('lease renewal failed'))
+            throw error
+          }
+          lastRenewedAt = Date.now()
+        }
+        const raced = await readOrTickOrAbort(
+          pending,
+          Math.max(1, Math.min(
+            RENEW_AFTER_MS,
+            BODY_IDLE_TIMEOUT_MS - (now - lastChunkAt),
+            deadlineAt - now,
+          )),
+          clientSignal,
+        )
+        if (raced.kind === 'abort') {
+          await bestEffort(() => reader.cancel('client cancelled'))
+          throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
+        }
+        if (raced.kind === 'read') {
+          result = raced.result
+          break
+        }
+        if (Date.now() - lastChunkAt >= BODY_IDLE_TIMEOUT_MS) {
+          await bestEffort(() => reader.cancel('upstream response idle timeout'))
+          throw new GatewayError(504, 'upstream_idle_timeout', 'Upstream response timed out', 'server_error')
+        }
       }
-      if (raced.kind === 'tick') {
-        await bestEffort(() => reader.cancel('upstream response idle timeout'))
-        throw new GatewayError(504, 'upstream_idle_timeout', 'Upstream response timed out', 'server_error')
-      }
-      const result = raced.result
       if (result.done) break
+      lastChunkAt = Date.now()
       total += result.value.byteLength
       if (total > maximum) {
         await bestEffort(() => reader.cancel('response too large'))
@@ -1971,9 +2371,6 @@ async function readResponseLimited(
       }
       chunks.push(result.value)
     }
-  } finally {
-    clientSignal.removeEventListener('abort', onClientAbort)
-  }
   const output = new Uint8Array(total)
   let offset = 0
   for (const chunk of chunks) {
@@ -1985,25 +2382,6 @@ async function readResponseLimited(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
-}
-
-function readOrTick<T>(
-  read: Promise<{ kind: 'read'; result: ReadableStreamReadResult<T> }>,
-  milliseconds: number,
-): Promise<{ kind: 'read'; result: ReadableStreamReadResult<T> } | { kind: 'tick' }> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve({ kind: 'tick' }), milliseconds)
-    read.then(
-      (result) => {
-        clearTimeout(timer)
-        resolve(result)
-      },
-      (error) => {
-        clearTimeout(timer)
-        reject(error)
-      },
-    )
-  })
 }
 
 function readOrTickOrAbort<T>(

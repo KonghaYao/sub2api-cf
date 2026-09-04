@@ -10,6 +10,11 @@ interface UserRow {
   role: 'user' | 'admin'
   status: 'active' | 'disabled'
   balance_micros: number
+  concurrency?: number
+  rpm_limit?: number
+  password_credential?: string | null
+  auth_version?: number
+  password_changed_at_ms?: number | null
   state_version: number
   control_version: number
   created_at_ms: number
@@ -102,6 +107,8 @@ class UserStatement {
         user.email = String(email)
         user.display_name = String(displayName)
         user.role = role as UserRow['role']
+        user.concurrency = Number(this.values[3])
+        user.rpm_limit = Number(this.values[4])
         user.control_version = Number(controlVersion)
         user.updated_at_ms = Number(updatedAt)
         changes = 1
@@ -111,6 +118,9 @@ class UserStatement {
         results: [],
         meta: { changes } as D1Meta & Record<string, unknown>,
       }
+    }
+    if (this.query.includes('UPDATE user_sessions')) {
+      return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
     if (this.query.includes('UPDATE users') && this.query.includes('SET status = ?')) {
       const [status, balanceMicros, stateVersion, updatedAt, id] = this.values
@@ -142,7 +152,19 @@ class UserStatement {
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
     if (this.query.includes('INSERT INTO users')) {
-      const [id, email, displayName, role, balanceMicros, now] = this.values
+      const [
+        id,
+        email,
+        displayName,
+        role,
+        balanceMicros,
+        concurrency,
+        rpmLimit,
+        now,
+        ,
+        passwordCredential,
+        passwordChangedAt,
+      ] = this.values
       this.database.users.set(String(id), {
         id: String(id),
         email: String(email),
@@ -150,6 +172,11 @@ class UserStatement {
         role: role as UserRow['role'],
         status: 'active',
         balance_micros: Number(balanceMicros),
+        concurrency: Number(concurrency),
+        rpm_limit: Number(rpmLimit),
+        password_credential: passwordCredential === null ? null : String(passwordCredential),
+        auth_version: 1,
+        password_changed_at_ms: passwordChangedAt === null ? null : Number(passwordChangedAt),
         state_version: 0,
         control_version: 0,
         created_at_ms: Number(now),

@@ -14,6 +14,7 @@ export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'gemini', label: 'Gemini' },
+  { value: 'codex', label: 'Codex' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'grok', label: 'Grok' },
   { value: 'kimi', label: 'Kimi' },

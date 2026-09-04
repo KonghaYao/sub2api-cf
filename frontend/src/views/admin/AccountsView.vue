@@ -433,6 +433,19 @@
           </template>
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
+              <button
+                v-if="cloudflareWorkerContract"
+                :data-testid="`worker-account-health-${row.id}`"
+                :disabled="workerHealthTests.has(String(row.id))"
+                :title="t('admin.accounts.testConnection')"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-emerald-900/20 dark:hover:text-emerald-400"
+                @click="handleWorkerHealthTest(row)"
+              >
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                </svg>
+                <span class="text-xs">{{ t('admin.accounts.testConnection') }}</span>
+              </button>
               <button @click="handleEdit(row)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400">
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                 <span class="text-xs">{{ t('common.edit') }}</span>
@@ -619,6 +632,7 @@ const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
 const probingUpstreamBilling = reactive(new Set<number>())
+const workerHealthTests = reactive(new Set<string>())
 const upstreamBillingProbeGloballyEnabled = ref<boolean | undefined>(undefined)
 const upstreamBillingNow = ref(Date.now())
 const upstreamBillingRateETag = ref<string | null>(null)
@@ -2296,6 +2310,54 @@ const handleProbeUpstreamBilling = async (account: Account) => {
 const handleAccountUpdated = (updatedAccount: Account) => {
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
+}
+const WORKER_HEALTH_PATCH_FIELDS = [
+  'health_status',
+  'last_checked_at_ms',
+  'last_latency_ms',
+  'last_health_error',
+  'config_version',
+  'control_version',
+  'updated_at',
+  'updated_at_ms',
+] as const
+const patchWorkerHealthResult = (account: Account, result: Record<string, unknown>) => {
+  const currentAccount = accounts.value.find(item => item.id === account.id) ?? account
+  const patched = { ...currentAccount } as unknown as Record<string, unknown>
+  for (const field of WORKER_HEALTH_PATCH_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(result, field) && result[field] !== undefined) {
+      patched[field] = result[field]
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(result, 'last_health_error')
+    && result.last_health_error !== undefined) {
+    patched.error_message = result.last_health_error
+  }
+  if (!Object.prototype.hasOwnProperty.call(result, 'updated_at')
+    && typeof result.updated_at_ms === 'number'
+    && Number.isFinite(result.updated_at_ms)) {
+    patched.updated_at = new Date(result.updated_at_ms).toISOString()
+  }
+  patchAccountInList(patched as unknown as Account)
+  enterAutoRefreshSilentWindow()
+}
+const handleWorkerHealthTest = async (account: Account) => {
+  const accountID = String(account.id)
+  if (workerHealthTests.has(accountID)) return
+  workerHealthTests.add(accountID)
+  try {
+    const result = await adminAPI.accounts.testAccount(account.id)
+    if ('id' in result) patchWorkerHealthResult(account, result as unknown as Record<string, unknown>)
+    if (result.success) {
+      appStore.showSuccess(t('admin.accounts.testCompleted'))
+    } else {
+      appStore.showError(result.message || t('admin.accounts.testFailed'))
+    }
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.testFailed')))
+  } finally {
+    workerHealthTests.delete(accountID)
+  }
 }
 const formatExportTimestamp = () => {
   const now = new Date()

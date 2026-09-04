@@ -80,6 +80,7 @@ const WORKER_ACCOUNT_CREATE_FIELDS = new Set([
   'api_key',
   'enabled',
   'max_concurrency',
+  'provider_config',
   'group_links',
   'model_capabilities',
 ])
@@ -90,6 +91,7 @@ const WORKER_ACCOUNT_UPDATE_FIELDS = new Set([
   'api_key',
   'enabled',
   'max_concurrency',
+  'provider_config',
   'group_links',
   'model_capabilities',
   'expected_control_version',

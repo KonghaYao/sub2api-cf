@@ -1,5 +1,6 @@
 import type { Context } from 'hono'
 import type { Env } from '../env'
+import { hashPassword, PasswordValidationError, validateNewPassword } from '../auth/password'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
@@ -19,6 +20,7 @@ import {
   requireResourceId,
   requireSafeInteger,
   requireString,
+  optionalSafeInteger,
 } from './http'
 
 type ControlBindings = { Bindings: Env }
@@ -30,6 +32,8 @@ interface UserRow {
   role: 'user' | 'admin'
   status: 'active' | 'disabled'
   balance_micros: number
+  concurrency: number
+  rpm_limit: number
   state_version: number
   control_version: number
   created_at_ms: number
@@ -41,6 +45,9 @@ interface CreateUserInput {
   display_name: string
   role: UserRow['role']
   balance_micros: number
+  concurrency: number
+  rpm_limit: number
+  password?: string
 }
 
 interface UserUpdatePatch {
@@ -48,6 +55,9 @@ interface UserUpdatePatch {
   display_name?: string
   role?: UserRow['role']
   status?: UserRow['status']
+  concurrency?: number
+  rpm_limit?: number
+  password?: string
 }
 
 export async function createAdminUser(context: Context<ControlBindings>): Promise<Response> {
@@ -72,6 +82,9 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
       throw new GatewayError(409, 'email_already_exists', 'A user with this email already exists')
     }
     const now = Date.now()
+    const passwordCredential = input.password === undefined
+      ? null
+      : await hashPassword(input.password)
     const user: UserRow = {
       id: userId,
       email: input.email,
@@ -79,6 +92,8 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
       role: input.role,
       status: 'active',
       balance_micros: input.balance_micros,
+      concurrency: input.concurrency,
+      rpm_limit: input.rpm_limit,
       state_version: 0,
       control_version: 0,
       created_at_ms: now,
@@ -89,9 +104,23 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
         context.env.DB.prepare(
           `INSERT INTO users (
              id, email, display_name, role, status, balance_micros,
-             state_version, created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, 'active', ?, 0, ?, ?)`,
-        ).bind(user.id, user.email, user.display_name, user.role, user.balance_micros, now, now),
+             concurrency, rpm_limit, state_version, created_at_ms, updated_at_ms,
+             password_credential, password_changed_at_ms, email_verified_at_ms
+           ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+        ).bind(
+          user.id,
+          user.email,
+          user.display_name,
+          user.role,
+          user.balance_micros,
+          user.concurrency,
+          user.rpm_limit,
+          now,
+          now,
+          passwordCredential,
+          passwordCredential === null ? null : now,
+          passwordCredential === null ? null : now,
+        ),
         controlIdempotencyInsert(context.env, idempotency, 'user', user.id, user, now),
       ])
     } catch (error) {
@@ -151,7 +180,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
       `SELECT COUNT(*) AS total FROM users ${where}`,
     ).bind(...values)
     const rowsStatement = context.env.DB.prepare(
-      `SELECT id, email, display_name, role, status, balance_micros,
+      `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
               state_version, control_version, created_at_ms, updated_at_ms
          FROM users
          ${where}
@@ -308,11 +337,17 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
     const metadataChanged =
       next.email !== user.email ||
       next.display_name !== user.display_name ||
-      next.role !== user.role
+      next.role !== user.role ||
+      next.concurrency !== user.concurrency ||
+      next.rpm_limit !== user.rpm_limit ||
+      patch.password !== undefined
     let updatedAtMs = user.updated_at_ms
     const statements: D1PreparedStatement[] = []
 
     if (metadataChanged) {
+      const passwordCredential = patch.password === undefined
+        ? null
+        : await hashPassword(patch.password)
       updatedAtMs = Date.now()
       if (controlVersion >= Number.MAX_SAFE_INTEGER) {
         throw new GatewayError(409, 'control_version_exhausted', 'User control version is exhausted')
@@ -320,10 +355,22 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       statements.push(
         context.env.DB.prepare(
           `UPDATE users
-              SET email = ?, display_name = ?, role = ?,
+              SET email = ?, display_name = ?, role = ?, concurrency = ?, rpm_limit = ?,
                   email_verified_at_ms = CASE
                     WHEN email <> ? THEN NULL
                     ELSE email_verified_at_ms
+                  END,
+                  password_credential = CASE
+                    WHEN ? IS NULL THEN password_credential
+                    ELSE ?
+                  END,
+                  password_changed_at_ms = CASE
+                    WHEN ? IS NULL THEN password_changed_at_ms
+                    ELSE ?
+                  END,
+                  auth_version = CASE
+                    WHEN ? IS NULL THEN auth_version
+                    ELSE auth_version + 1
                   END,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
@@ -332,13 +379,27 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
           next.email,
           next.display_name,
           next.role,
+          next.concurrency,
+          next.rpm_limit,
           next.email,
+          passwordCredential,
+          passwordCredential,
+          passwordCredential,
+          updatedAtMs,
+          passwordCredential,
           controlVersion,
           controlVersion + 1,
           updatedAtMs,
           user.id,
         ),
       )
+      if (passwordCredential !== null) {
+        statements.push(context.env.DB.prepare(
+          `UPDATE user_sessions
+              SET revoked_at_ms = ?, revoke_reason = 'admin_password_reset'
+            WHERE user_id = ? AND revoked_at_ms IS NULL`,
+        ).bind(updatedAtMs, user.id))
+      }
       controlVersion += 1
     }
 
@@ -454,6 +515,9 @@ function parseCreateUser(body: Record<string, unknown>): CreateUserInput {
     balance_micros: body.balance_micros === undefined
       ? 0
       : requireSafeInteger(body, 'balance_micros'),
+    concurrency: optionalSafeInteger(body, 'concurrency') ?? 5,
+    rpm_limit: optionalSafeInteger(body, 'rpm_limit') ?? 0,
+    password: optionalNewPassword(body),
   }
 }
 
@@ -481,24 +545,45 @@ function parseUserUpdatePatch(body: Record<string, unknown>): UserUpdatePatch {
     }
     patch.status = body.status
   }
+  patch.concurrency = optionalSafeInteger(body, 'concurrency')
+  patch.rpm_limit = optionalSafeInteger(body, 'rpm_limit')
+  patch.password = optionalNewPassword(body)
   return patch
 }
 
 function applyUserUpdatePatch(
   patch: UserUpdatePatch,
   current: UserRow,
-): Pick<UserRow, 'email' | 'display_name' | 'role' | 'status'> {
+): Pick<UserRow, 'email' | 'display_name' | 'role' | 'status' | 'concurrency' | 'rpm_limit'> {
   return {
     email: patch.email ?? current.email,
     display_name: patch.display_name ?? current.display_name,
     role: patch.role ?? current.role,
     status: patch.status ?? current.status,
+    concurrency: patch.concurrency ?? current.concurrency,
+    rpm_limit: patch.rpm_limit ?? current.rpm_limit,
   }
+}
+
+function optionalNewPassword(body: Record<string, unknown>): string | undefined {
+  if (body.password === undefined) return undefined
+  if (typeof body.password !== 'string') {
+    throw new GatewayError(400, 'invalid_password', 'Password must be a string')
+  }
+  try {
+    validateNewPassword(body.password)
+  } catch (error) {
+    if (error instanceof PasswordValidationError) {
+      throw new GatewayError(400, error.code, error.message)
+    }
+    throw error
+  }
+  return body.password
 }
 
 async function findUserById(env: Env, id: string): Promise<UserRow | null> {
   return env.DB.prepare(
-    `SELECT id, email, display_name, role, status, balance_micros,
+    `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, control_version, created_at_ms, updated_at_ms
        FROM users
       WHERE id = ?`,
@@ -509,7 +594,7 @@ async function findUserById(env: Env, id: string): Promise<UserRow | null> {
 
 async function findUserByEmail(env: Env, email: string): Promise<UserRow | null> {
   return env.DB.prepare(
-    `SELECT id, email, display_name, role, status, balance_micros,
+    `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, control_version, created_at_ms, updated_at_ms
        FROM users
       WHERE email = ?`,

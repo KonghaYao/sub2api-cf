@@ -33,6 +33,7 @@ describe('admin groups Cloudflare Worker contract', () => {
       status: 'active',
       sort_order: 0,
       rate_multiplier_ppm: 1_250_000,
+      rpm_limit: 60,
       catalog_mode: 'all_routable',
       group_type: 'subscription',
       is_exclusive: true,
@@ -49,6 +50,7 @@ describe('admin groups Cloudflare Worker contract', () => {
       description: null,
       platform: 'openai',
       rate_multiplier: 1.25,
+      rpm_limit: 60,
       is_exclusive: true,
       subscription_type: 'subscription',
       daily_limit_usd: 10.25,
@@ -68,6 +70,7 @@ describe('admin groups Cloudflare Worker contract', () => {
       description: null,
       platform: 'openai',
       rate_multiplier_ppm: 1_250_000,
+      rpm_limit: 60,
       is_exclusive: true,
       group_type: 'subscription',
       daily_quota_micros: 10_250_000,
@@ -99,6 +102,7 @@ describe('admin groups Cloudflare Worker contract', () => {
       name: 'Renamed',
       status: 'inactive',
       rate_multiplier: 0.8,
+      rpm_limit: 90,
       is_exclusive: false,
       subscription_type: 'subscription',
       daily_limit_usd: 10,
@@ -109,6 +113,7 @@ describe('admin groups Cloudflare Worker contract', () => {
       name: 'Renamed',
       enabled: false,
       rate_multiplier_ppm: 800_000,
+      rpm_limit: 90,
       is_exclusive: false,
       group_type: 'subscription',
       daily_quota_micros: 10_000_000,
@@ -130,6 +135,44 @@ describe('admin groups Cloudflare Worker contract', () => {
       daily_limit_usd: -1
     })).rejects.toMatchObject({ code: 'invalid_group_quota' })
     expect(post).not.toHaveBeenCalled()
+  })
+
+  it('uses the dedicated idempotent Worker contract for per-user RPM overrides', async () => {
+    get.mockResolvedValueOnce({
+      data: [{
+        user_id: 'user-uuid',
+        user_name: 'Alice',
+        user_email: 'alice@example.test',
+        user_notes: '',
+        user_status: 'active',
+        rpm_override: 120,
+      }],
+    })
+    put.mockResolvedValueOnce({ data: { message: 'RPM overrides updated', updated: 1 } })
+    deleteRequest.mockResolvedValueOnce({ data: { message: 'RPM overrides cleared', deleted: 1 } })
+    const {
+      batchSetGroupRPMOverrides,
+      clearGroupRPMOverrides,
+      getGroupRPMOverrides,
+    } = await import('@/api/admin/groups')
+
+    await expect(getGroupRPMOverrides(7)).resolves.toHaveLength(1)
+    await batchSetGroupRPMOverrides(7, [{ user_id: 42, rpm_override: 120 }])
+    await clearGroupRPMOverrides(7)
+
+    expect(get).toHaveBeenCalledWith('/admin/groups/7/rpm-overrides')
+    expect(put).toHaveBeenCalledWith('/admin/groups/7/rpm-overrides', {
+      entries: [{ user_id: '42', rpm_override: 120 }],
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-group-rpm-put-33333333-3333-4333-8333-333333333333',
+      },
+    })
+    expect(deleteRequest).toHaveBeenCalledWith('/admin/groups/7/rpm-overrides', {
+      headers: {
+        'Idempotency-Key': 'admin-group-rpm-clear-33333333-3333-4333-8333-333333333333',
+      },
+    })
   })
 
   it('soft-disables with the cached version instead of expecting a legacy message', async () => {

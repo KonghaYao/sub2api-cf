@@ -42,6 +42,15 @@ function operationKey(prefix: string): string {
 
 let pendingWorkerCreate: { fingerprint: string; key: string } | null = null
 
+const WORKER_ACCOUNT_CONTRACTS = {
+  openai: { protocol: 'openai', authScheme: 'bearer' },
+  anthropic: { protocol: 'anthropic', authScheme: 'x-api-key' },
+  gemini: { protocol: 'gemini', authScheme: 'x-goog-api-key' },
+  codex: { protocol: 'codex', authScheme: 'bearer' },
+} as const
+
+type WorkerAccountPlatform = keyof typeof WORKER_ACCOUNT_CONTRACTS
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value !== null && typeof value === 'object') {
@@ -72,7 +81,9 @@ function workerAccountListParams(
 ): Record<string, string | number> {
   if (!isCloudflareWorkerContractActive()) return { page, page_size: pageSize, ...filters }
   const params: Record<string, string | number> = { page, page_size: pageSize }
-  if (filters?.platform === 'openai') params.platform = 'openai'
+  if (filters?.platform && Object.prototype.hasOwnProperty.call(WORKER_ACCOUNT_CONTRACTS, filters.platform)) {
+    params.platform = filters.platform
+  }
   if (filters?.status === 'active' || filters?.status === 'inactive') params.status = filters.status
   const search = filters?.search?.trim()
   if (search) params.search = search
@@ -80,12 +91,25 @@ function workerAccountListParams(
 }
 
 function adaptAccount(account: Account): Account {
+  if (!isCloudflareWorkerContractActive()) return account
   const value = account as unknown as Record<string, unknown>
-  if (typeof value.id !== 'string' || value.auth_scheme !== 'bearer') return account
+  const platform = value.platform
+  if (typeof value.id !== 'string' || typeof platform !== 'string') return account
+  if (!Object.prototype.hasOwnProperty.call(WORKER_ACCOUNT_CONTRACTS, platform)) return account
+  const contract = WORKER_ACCOUNT_CONTRACTS[platform as WorkerAccountPlatform]
+  if (!contract || value.protocol !== contract.protocol || value.auth_scheme !== contract.authScheme) {
+    return account
+  }
 
   const groupLinks = Array.isArray(value.group_links)
     ? value.group_links as Array<{ group_id?: unknown; priority?: unknown }>
     : []
+  const providerConfig = value.provider_config !== null && typeof value.provider_config === 'object'
+    ? value.provider_config as Record<string, unknown>
+    : {}
+  const safeProviderConfig = platform === 'codex' && typeof providerConfig.account_id === 'string'
+    ? { account_id: providerConfig.account_id }
+    : {}
   const createdAt = Number(value.created_at_ms)
   const updatedAt = Number(value.updated_at_ms)
   const enabled = value.enabled === true
@@ -94,7 +118,8 @@ function adaptAccount(account: Account): Account {
     ...value,
     id: value.id as unknown as number,
     type: 'apikey',
-    credentials: { base_url: value.base_url },
+    credentials: { base_url: typeof value.base_url === 'string' ? value.base_url : '' },
+    provider_config: safeProviderConfig,
     proxy_id: null,
     concurrency: Number(value.max_concurrency) || 1,
     priority: Number(groupLinks[0]?.priority) || 0,
@@ -105,7 +130,9 @@ function adaptAccount(account: Account): Account {
     auto_pause_on_expired: false,
     created_at: Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : '',
     updated_at: Number.isFinite(updatedAt) ? new Date(updatedAt).toISOString() : '',
-    group_ids: groupLinks.map((link) => String(link.group_id)) as unknown as number[],
+    group_ids: groupLinks
+      .filter((link) => typeof link.group_id === 'string')
+      .map((link) => link.group_id) as unknown as number[],
     schedulable: enabled,
     rate_limited_at: null,
     rate_limit_reset_at: null,
@@ -325,12 +352,17 @@ export async function duplicate(id: number): Promise<Account> {
  * @returns Updated account
  */
 export async function update(id: number | string, updates: UpdateAccountRequest): Promise<Account> {
-  const payload = sanitizeCloudflareAccountUpdatePayload(updates)
-  const expectedVersion = (payload as unknown as Record<string, unknown>).expected_control_version
+  const workerContract = isCloudflareWorkerContractActive()
+  const sanitizedPayload = sanitizeCloudflareAccountUpdatePayload(updates)
+  const sanitizedRecord = sanitizedPayload as unknown as Record<string, unknown>
+  const expectedVersion = sanitizedRecord.expected_control_version
+  const payload = workerContract
+    ? Object.fromEntries(Object.entries(sanitizedRecord).filter(([key]) => key !== 'expected_control_version'))
+    : sanitizedPayload
   const { data } = await apiClient.put<Account>(
     `/admin/accounts/${id}`,
     payload,
-    isCloudflareWorkerContractActive() && Number.isSafeInteger(expectedVersion)
+    workerContract && Number.isSafeInteger(expectedVersion)
       ? { headers: { 'If-Match': `"${expectedVersion}"` } }
       : undefined
   )
@@ -380,16 +412,69 @@ export async function toggleStatus(id: number, status: 'active' | 'inactive'): P
  * @param id - Account ID
  * @returns Test result
  */
-export async function testAccount(id: number): Promise<{
+export interface AccountTestResult {
   success: boolean
   message: string
   latency_ms?: number
-}> {
-  const { data } = await apiClient.post<{
-    success: boolean
-    message: string
-    latency_ms?: number
-  }>(`/admin/accounts/${id}/test`)
+}
+
+export interface WorkerAccountTestResult extends AccountTestResult {
+  id: number | string
+  health_status?: 'unknown' | 'healthy' | 'unhealthy'
+  last_checked_at_ms?: number | null
+  last_latency_ms?: number | null
+  last_health_error?: string | null
+  config_version?: number
+  control_version?: number
+  updated_at?: string
+  updated_at_ms?: number
+}
+
+export async function testAccount(id: number | string): Promise<AccountTestResult | WorkerAccountTestResult> {
+  if (isCloudflareWorkerContractActive()) {
+    const { data: workerValue } = await apiClient.post<Record<string, unknown>>(`/admin/accounts/${id}/test`)
+    const success = workerValue.health_status === 'healthy'
+    const error = typeof workerValue.last_health_error === 'string'
+      ? workerValue.last_health_error
+      : null
+    return {
+      id: typeof workerValue.id === 'string' || typeof workerValue.id === 'number'
+        ? workerValue.id
+        : id,
+      success,
+      message: error ?? (success ? 'Account connectivity test succeeded' : 'Account connectivity test failed'),
+      ...(workerValue.health_status === 'unknown'
+        || workerValue.health_status === 'healthy'
+        || workerValue.health_status === 'unhealthy'
+        ? { health_status: workerValue.health_status }
+        : {}),
+      ...(workerValue.last_checked_at_ms === null || Number.isFinite(Number(workerValue.last_checked_at_ms))
+        ? { last_checked_at_ms: workerValue.last_checked_at_ms === null ? null : Number(workerValue.last_checked_at_ms) }
+        : {}),
+      ...(workerValue.last_latency_ms === null || Number.isFinite(Number(workerValue.last_latency_ms))
+        ? { last_latency_ms: workerValue.last_latency_ms === null ? null : Number(workerValue.last_latency_ms) }
+        : {}),
+      ...(workerValue.last_health_error === null || typeof workerValue.last_health_error === 'string'
+        ? { last_health_error: workerValue.last_health_error }
+        : {}),
+      ...(typeof workerValue.config_version === 'number' && Number.isSafeInteger(workerValue.config_version)
+        ? { config_version: workerValue.config_version }
+        : {}),
+      ...(typeof workerValue.control_version === 'number' && Number.isSafeInteger(workerValue.control_version)
+        ? { control_version: workerValue.control_version }
+        : {}),
+      ...(typeof workerValue.updated_at === 'string'
+        ? { updated_at: workerValue.updated_at }
+        : {}),
+      ...(typeof workerValue.updated_at_ms === 'number' && Number.isFinite(workerValue.updated_at_ms)
+        ? { updated_at_ms: workerValue.updated_at_ms }
+        : {}),
+      ...(Number.isFinite(Number(workerValue.last_latency_ms))
+        ? { latency_ms: Number(workerValue.last_latency_ms) }
+        : {}),
+    }
+  }
+  const { data } = await apiClient.post<AccountTestResult>(`/admin/accounts/${id}/test`)
   return data
 }
 

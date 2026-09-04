@@ -333,6 +333,8 @@ describe('EditAccountModal', () => {
       ...buildAccount(),
       id: 'account-uuid',
       name: 'Worker account',
+      protocol: 'openai',
+      auth_scheme: 'bearer',
       base_url: 'https://api.openai.com/v1',
       enabled: true,
       max_concurrency: 4,
@@ -369,7 +371,59 @@ describe('EditAccountModal', () => {
       max_concurrency: 4,
       expected_control_version: 6,
     })
+    expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('openai')
+    expect(wrapper.get('[data-testid="worker-account-edit-protocol"]').text()).toBe('openai')
+    expect(wrapper.get('[data-testid="worker-account-edit-auth-scheme"]').text()).toBe('bearer')
     expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
+  })
+
+  it('hydrates and updates the optional Codex account_id without changing its contract tuple', async () => {
+    const account = {
+      ...buildAccount(),
+      id: 'codex-uuid',
+      name: 'Codex account',
+      platform: 'codex',
+      protocol: 'codex',
+      auth_scheme: 'bearer',
+      base_url: 'https://chatgpt.com',
+      provider_config: { account_id: 'acct_old' },
+      enabled: true,
+      max_concurrency: 2,
+      control_version: 8,
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mount(EditAccountModal, {
+      props: {
+        show: true,
+        account,
+        proxies: [],
+        groups: [],
+        cloudflareWorker: true,
+      },
+      global: {
+        stubs: {
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('codex')
+    expect(wrapper.get('[data-testid="worker-account-edit-protocol"]').text()).toBe('codex')
+    expect((wrapper.get('[data-testid="worker-account-edit-account-id"]').element as HTMLInputElement).value)
+      .toBe('acct_old')
+
+    await wrapper.get('[data-testid="worker-account-edit-account-id"]').setValue('acct_new')
+    await wrapper.get('form#edit-worker-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledWith('codex-uuid', {
+      name: 'Codex account',
+      base_url: 'https://chatgpt.com',
+      enabled: true,
+      max_concurrency: 2,
+      provider_config: { account_id: 'acct_new' },
+      expected_control_version: 8,
+    })
   })
 
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {

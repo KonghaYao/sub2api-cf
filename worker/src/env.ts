@@ -11,6 +11,8 @@ export interface Env {
   /** Subscription quota authority. Optional only so unrelated unit fixtures stay compact; billing fails closed. */
   SUBSCRIPTION_STATE?: DurableObjectNamespace
   POOL_STATE: DurableObjectNamespace
+  /** User-partitioned API-key ingress admission. Optional only for legacy unit fixtures; configured requests fail closed. */
+  API_KEY_LIMIT_STATE?: DurableObjectNamespace
   /** Password-entry limiter. Optional in types so non-auth fixtures remain small; auth fails closed. */
   AUTH_RATE_LIMIT?: DurableObjectNamespace
   /** Native Cloudflare email delivery binding. Preferred when configured. */

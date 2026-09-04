@@ -505,6 +505,7 @@ export class ResponsesToAnthropicEventCodec {
       case 'response.incomplete':
         return this.complete(event)
       case 'response.failed':
+        return this.failed(event)
       case 'error':
         this.messageStopped = true
         return [{ ...mapOpenAIErrorToAnthropic(502), type: 'error' }]
@@ -642,6 +643,18 @@ export class ResponsesToAnthropicEventCodec {
         : 'end_turn'
     const events = this.ensureStarted()
     events.push(...this.terminal(stopReason))
+    return events
+  }
+
+  private failed(event: JsonObject): AnthropicSseEvent[] {
+    const response = event.response === undefined ? undefined : objectAt(event.response, 'event.response')
+    const rawUsage = response?.usage ?? event.usage
+    if (rawUsage !== undefined) this.usage = responsesUsage(rawUsage)
+    const events = this.ensureStarted()
+    // Once an Anthropic message_start has been emitted, changing wire shape to
+    // a standalone error event leaves the client with an unbalanced message.
+    // Match the legacy bridge: close any open block and end the partial message.
+    events.push(...this.terminal('end_turn'))
     return events
   }
 

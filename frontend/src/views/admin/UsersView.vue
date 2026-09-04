@@ -784,7 +784,7 @@ const { t } = useI18n()
 import { adminAPI } from '@/api/admin'
 import type { AdminUser, AdminGroup, UserAttributeDefinition } from '@/types'
 import type { BatchUserUsageStats } from '@/api/admin/dashboard'
-import type { PlatformQuotaItem } from '@/api/admin/users'
+import type { AdminUserId, PlatformQuotaItem } from '@/api/admin/users'
 import type { Column } from '@/components/common/types'
 import type { SelectOption } from '@/components/common/Select.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -1296,13 +1296,13 @@ const {
   selectedCount,
   setSelectedIds,
   clear: clearSelection
-} = useTableSelection<AdminUser>({
+} = useTableSelection<AdminUser, AdminUserId>({
   rows: sortedUsers,
-  getId: (user) => user.id
+  getId: (user) => user.id as AdminUserId
 })
 
 const handleSelectedKeysUpdate = (keys: Array<string | number>) => {
-  setSelectedIds(keys.filter((key): key is number => typeof key === 'number'))
+  setSelectedIds(keys)
 }
 
 const getUserSelectionLabel = (user: AdminUser) =>

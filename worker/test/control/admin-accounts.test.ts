@@ -31,21 +31,23 @@ class Statement {
       return this.db.project(String(this.values[0])) as T | null
     }
     if (this.sql.includes('SELECT COUNT(*) AS total') && this.sql.includes('FROM "groups"')) {
-      const platforms = this.values
+      const [expectedPlatform, ...ids] = this.values
+      const platforms = ids
         .map((id) => this.db.groups.get(String(id)))
         .filter((platform): platform is string => platform !== undefined)
       return {
         total: platforms.length,
-        mismatched: platforms.filter((platform) => platform !== 'openai').length,
+        mismatched: platforms.filter((platform) => platform !== expectedPlatform).length,
       } as T
     }
     if (this.sql.includes('SELECT COUNT(*) AS total') && this.sql.includes('FROM models')) {
-      const platforms = this.values
+      const [expectedPlatform, ...ids] = this.values
+      const platforms = ids
         .map((id) => this.db.models.get(String(id)))
         .filter((platform): platform is string => platform !== undefined)
       return {
         total: platforms.length,
-        mismatched: platforms.filter((platform) => platform !== 'openai').length,
+        mismatched: platforms.filter((platform) => platform !== expectedPlatform).length,
       } as T
     }
     if (this.sql.includes('FROM "groups"')) {
@@ -76,13 +78,17 @@ class Statement {
       return result([...this.db.accounts.values()].filter(supported).slice(offset, offset + limit).map((row) => this.db.project(row.id)!), 0)
     }
     if (this.sql.includes('INSERT INTO accounts')) {
-      const [id, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms, base_url] = this.values
+      const [
+        id, platform, name, credential_ref, enabled, max_concurrency,
+        created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
+        provider_config_json,
+      ] = this.values
       if ([...this.db.accounts.values()].some((row) => row.name === name)) {
         throw new Error('UNIQUE constraint failed: accounts.platform, accounts.name')
       }
       this.db.accounts.set(String(id), {
         id, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms, base_url,
-        platform: 'openai', protocol: 'openai', auth_scheme: 'bearer', config_version: 1,
+        platform, protocol, auth_scheme, provider_config_json, config_version: 1,
         control_version: 0, health_status: 'unknown', last_checked_at_ms: null,
         last_latency_ms: null, last_health_error: null,
       })
@@ -97,11 +103,11 @@ class Statement {
       return result()
     }
     if (this.sql.includes('UPDATE accounts') && this.sql.includes('control_version = CASE')) {
-      const [name, enabled, max, base, config, expected, control, reset, , , , updated, id] = this.values
+      const [name, enabled, max, base, providerConfig, config, expected, control, reset, , , , updated, id] = this.values
       const row = this.db.accounts.get(String(id))
       if (!row) return result([], 0)
       if (row.control_version !== expected) throw new Error('CHECK constraint failed: control_version >= 0')
-      Object.assign(row, { name, enabled, max_concurrency: max, base_url: base, config_version: config, control_version: control, updated_at_ms: updated })
+      Object.assign(row, { name, enabled, max_concurrency: max, base_url: base, provider_config_json: providerConfig, config_version: config, control_version: control, updated_at_ms: updated })
       if (reset === 1) Object.assign(row, { health_status: 'unknown', last_checked_at_ms: null, last_latency_ms: null, last_health_error: null })
       return result()
     }
@@ -173,15 +179,22 @@ class MemoryDb {
     const secret = this.secrets.get(String(account.credential_ref)); if (!secret) return null
     const links = [...this.groupLinks.values()].filter((row) => row.account_id === id).map(stripInternal)
     const caps = [...this.modelCaps.values()].filter((row) => row.account_id === id).map(stripInternal)
-    return { ...account, secret_id: secret.id, key_version: secret.key_version, nonce_b64: secret.nonce_b64, ciphertext_b64: secret.ciphertext_b64, group_links_json: JSON.stringify(links), model_capabilities_json: JSON.stringify(caps) }
+    return { ...account, provider_config_json: account.provider_config_json ?? '{}', secret_id: secret.id, key_version: secret.key_version, nonce_b64: secret.nonce_b64, ciphertext_b64: secret.ciphertext_b64, group_links_json: JSON.stringify(links), model_capabilities_json: JSON.stringify(caps) }
   }
 }
 
 function stripInternal({ account_id: _account, created_at_ms: _created, updated_at_ms: _updated, ...row }: Row) { return row }
-function supported(row: Row) { return row.platform === 'openai' && row.protocol === 'openai' && row.auth_scheme === 'bearer' && row.base_url != null }
+function supported(row: Row) {
+  return row.base_url != null && (
+    (row.platform === 'openai' && row.protocol === 'openai' && row.auth_scheme === 'bearer') ||
+    (row.platform === 'anthropic' && row.protocol === 'anthropic' && row.auth_scheme === 'x-api-key') ||
+    (row.platform === 'gemini' && row.protocol === 'gemini' && row.auth_scheme === 'x-goog-api-key') ||
+    (row.platform === 'codex' && row.protocol === 'codex' && row.auth_scheme === 'bearer')
+  )
+}
 function result(results: unknown[] = [], changes = 1): D1Result<unknown> { return { success: true, results, meta: { changes } as D1Meta & Record<string, unknown> } }
 function env(db: MemoryDb): Env {
-  return { APP_VERSION: 'test', ENVIRONMENT: 'test', CREDENTIALS_MASTER_KEY: 'm'.repeat(32), ASSETS: {} as Fetcher, DB: db as unknown as D1Database, CONFIG_KV: {} as KVNamespace, OBJECTS: {} as R2Bucket, EVENTS_QUEUE: {} as Queue, USER_STATE: {} as DurableObjectNamespace, POOL_STATE: {} as DurableObjectNamespace }
+  return { APP_VERSION: 'test', ENVIRONMENT: 'test', CREDENTIALS_MASTER_KEY: 'm'.repeat(32), ASSETS: {} as Fetcher, DB: db as unknown as D1Database, CONFIG_KV: {} as KVNamespace, OBJECTS: {} as R2Bucket, EVENTS_QUEUE: {} as Queue, USER_STATE: {} as DurableObjectNamespace, POOL_STATE: {} as DurableObjectNamespace, API_KEY_LIMIT_STATE: {} as DurableObjectNamespace }
 }
 function createApp() {
   const app = new Hono<{ Bindings: Env }>()
@@ -261,7 +274,7 @@ describe('admin account control plane', () => {
 
   it('lists/details safe projections and replaces routing plus credential atomically on partial update', async () => {
     const db = new MemoryDb(); const created = await json(await create(db)); const id = created.data.id
-    db.accounts.set('unsupported', { ...db.accounts.get(id), id: 'unsupported', credential_ref: 'unsupported-secret', platform: 'anthropic' })
+    db.accounts.set('unsupported', { ...db.accounts.get(id), id: 'unsupported', credential_ref: 'unsupported-secret', platform: 'vertex' })
     db.secrets.set('unsupported-secret', { ...db.secrets.values().next().value, id: 'unsupported-secret', account_id: 'unsupported' })
     const list = await json(await createApp().request('/accounts', {}, env(db)))
     expect(list.data.total).toBe(1); expect(list.data.items[0].group_links[0]).toMatchObject({ group_id: 'group-a' })
@@ -298,9 +311,10 @@ describe('admin account control plane', () => {
 
   it('probes strict HTTPS /models with bearer auth, without overwriting concurrently changed config', async () => {
     const db = new MemoryDb(); const created = await json(await create(db)); const id = created.data.id
-    const fetchMock = vi.fn(async () => new Response('{}')); vi.stubGlobal('fetch', fetchMock)
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response('{}')); vi.stubGlobal('fetch', fetchMock)
     const healthy = await json(await createApp().request(`/accounts/${id}/test`, { method: 'POST' }, env(db)))
-    expect(fetchMock).toHaveBeenCalledWith('https://api.example.com/v1/models', expect.objectContaining({ redirect: 'manual', headers: expect.objectContaining({ authorization: `Bearer ${input.api_key}` }) }))
+    expect(fetchMock).toHaveBeenCalledWith('https://api.example.com/v1/models', expect.objectContaining({ redirect: 'manual' }))
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(`Bearer ${input.api_key}`)
     expect(healthy.data).toMatchObject({ health_status: 'healthy', config_version: 1, control_version: 0 })
     db.beforeHealth = () => { db.accounts.get(id)!.config_version += 1; db.accounts.get(id)!.control_version += 1 }
     const stale = await createApp().request(`/accounts/${id}/test`, { method: 'POST' }, env(db))
@@ -311,7 +325,7 @@ describe('admin account control plane', () => {
   it('rejects unsupported/private upstream configuration', async () => {
     const db = new MemoryDb()
     const invalid = await createApp().request('/accounts', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'invalid-account-1' }, body: JSON.stringify({ ...input, base_url: 'http://127.0.0.1/v1' }) }, env(db))
-    const unsupported = await createApp().request('/accounts', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'invalid-account-2' }, body: JSON.stringify({ ...input, platform: 'anthropic' }) }, env(db))
+    const unsupported = await createApp().request('/accounts', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'invalid-account-2' }, body: JSON.stringify({ ...input, platform: 'vertex' }) }, env(db))
     expect(invalid.status).toBe(400); expect(unsupported.status).toBe(409); expect(db.accounts).toHaveLength(0)
   })
 

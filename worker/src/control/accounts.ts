@@ -2,6 +2,15 @@ import type { Context } from 'hono'
 import type { Env } from '../env'
 import { decryptCredential, encryptCredential } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import {
+  buildProviderHealthRequest,
+  providerContract,
+  type ProviderAccount,
+  type ProviderAuthScheme,
+  type ProviderConfig,
+  type ProviderPlatform,
+  type ProviderProtocol,
+} from '../gateway/providers'
 import { credentialAad, validateBaseUrl } from '../gateway/repository'
 import {
   controlIdempotency,
@@ -26,14 +35,15 @@ type ControlBindings = { Bindings: Env }
 
 interface AccountRow {
   id: string
-  platform: 'openai'
+  platform: ProviderPlatform
   name: string
   credential_ref: string
   enabled: number
   max_concurrency: number
-  protocol: 'openai'
+  protocol: ProviderProtocol
   base_url: string
-  auth_scheme: 'bearer'
+  auth_scheme: ProviderAuthScheme
+  provider_config_json: string
   config_version: number
   control_version: number
   health_status: 'unknown' | 'healthy' | 'unhealthy'
@@ -67,10 +77,11 @@ interface ModelCapability {
 
 interface CreateAccountInput {
   name: string
-  platform: 'openai'
-  protocol: 'openai'
+  platform: ProviderPlatform
+  protocol: ProviderProtocol
   base_url: string
-  auth_scheme: 'bearer'
+  auth_scheme: ProviderAuthScheme
+  provider_config: ProviderConfig
   api_key: string
   enabled: boolean
   max_concurrency: number
@@ -95,6 +106,7 @@ interface AccountPatch {
   name?: string
   base_url?: string
   api_key?: string
+  provider_config?: ProviderConfig
   enabled?: boolean
   max_concurrency?: number
   group_links?: GroupLinkInput[]
@@ -104,6 +116,7 @@ interface AccountPatch {
 const ACCOUNT_PROJECTION = `
   SELECT a.id, a.platform, a.name, a.credential_ref, a.enabled,
          a.max_concurrency, a.protocol, a.base_url, a.auth_scheme,
+         a.provider_config_json,
          a.config_version, a.control_version, a.health_status,
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
          a.created_at_ms, a.updated_at_ms,
@@ -147,15 +160,20 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
     const conditions = [
-      `a.platform = 'openai'`,
-      `a.protocol = 'openai'`,
-      `a.auth_scheme = 'bearer'`,
+      `(
+        (a.platform = 'openai' AND a.protocol = 'openai' AND a.auth_scheme = 'bearer')
+        OR (a.platform = 'anthropic' AND a.protocol = 'anthropic' AND a.auth_scheme = 'x-api-key')
+        OR (a.platform = 'gemini' AND a.protocol = 'gemini' AND a.auth_scheme = 'x-goog-api-key')
+        OR (a.platform = 'codex' AND a.protocol = 'codex' AND a.auth_scheme = 'bearer')
+      )`,
       'a.base_url IS NOT NULL',
     ]
     const values: unknown[] = []
     const platform = context.req.query('platform')
     if (platform !== undefined) {
-      requireSupportedValue(platform, 'platform', 'openai')
+      const supportedPlatform = requireProviderPlatform(platform)
+      conditions.push('a.platform = ?')
+      values.push(supportedPlatform)
     }
     const enabled = parseEnabledQuery(context.req.query('enabled'), context.req.query('status'))
     if (enabled !== undefined) {
@@ -225,7 +243,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
     if ((await findAccount(context.env, accountId)) !== null) {
       throw new GatewayError(409, 'idempotency_record_missing', 'Account exists without its idempotency record')
     }
-    await validateLinks(context.env, input.group_links, input.model_capabilities)
+    await validateLinks(context.env, input.platform, input.group_links, input.model_capabilities)
     const masterKey = requireCredentialsMasterKey(context.env)
     const encrypted = await encryptCredential(
       { api_key: input.api_key },
@@ -235,13 +253,14 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
     const now = Date.now()
     const safe = accountResponse({
       id: accountId,
-      platform: 'openai',
+      platform: input.platform,
       name: input.name,
       enabled: input.enabled,
       max_concurrency: input.max_concurrency,
-      protocol: 'openai',
+      protocol: input.protocol,
       base_url: input.base_url,
-      auth_scheme: 'bearer',
+      auth_scheme: input.auth_scheme,
+      provider_config: input.provider_config,
       config_version: 1,
       control_version: 0,
       health_status: 'unknown',
@@ -262,9 +281,23 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       context.env.DB.prepare(
         `INSERT INTO accounts (
            id, platform, name, credential_ref, enabled, max_concurrency,
-           created_at_ms, updated_at_ms, protocol, base_url, auth_scheme, config_version
-         ) VALUES (?, 'openai', ?, ?, ?, ?, ?, ?, 'openai', ?, 'bearer', 1)`,
-      ).bind(accountId, input.name, secretId, input.enabled ? 1 : 0, input.max_concurrency, now, now, input.base_url),
+           created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
+           provider_config_json, config_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ).bind(
+        accountId,
+        input.platform,
+        input.name,
+        secretId,
+        input.enabled ? 1 : 0,
+        input.max_concurrency,
+        now,
+        now,
+        input.protocol,
+        input.base_url,
+        input.auth_scheme,
+        JSON.stringify(input.provider_config),
+      ),
       context.env.DB.prepare(
         `INSERT INTO account_secrets (
            id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
@@ -296,19 +329,28 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
     const expectedVersion = requireExpectedControlVersion(context.req.raw, body)
     const account = await requireAccount(context.env, context.req.param('id'))
     assertVersion(account, expectedVersion)
-    const patch = parseAccountPatch(body)
-    await validateLinks(context.env, patch.group_links ?? [], patch.model_capabilities ?? [])
+    const patch = parseAccountPatch(body, account)
+    await validateLinks(
+      context.env,
+      account.platform,
+      patch.group_links ?? [],
+      patch.model_capabilities ?? [],
+    )
     const nextControlVersion = incrementVersion(account.control_version, 'control_version')
     const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
     const now = Date.now()
     const baseUrl = patch.base_url ?? account.base_url
-    const resetHealth = patch.base_url !== undefined || patch.api_key !== undefined
+    const providerConfig = patch.provider_config ?? parseProviderConfigProjection(account.provider_config_json)
+    const resetHealth = patch.base_url !== undefined ||
+      patch.api_key !== undefined ||
+      patch.provider_config !== undefined
     const statements: D1PreparedStatement[] = [
       accountCasStatement(context.env, account.id, account.control_version, {
         name: patch.name ?? account.name,
         enabled: patch.enabled ?? account.enabled === 1,
         max_concurrency: patch.max_concurrency ?? account.max_concurrency,
         base_url: baseUrl,
+        provider_config: providerConfig,
         config_version: nextConfigVersion,
         control_version: nextControlVersion,
         now,
@@ -380,6 +422,7 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
         enabled: false,
         max_concurrency: account.max_concurrency,
         base_url: account.base_url,
+        provider_config: parseProviderConfigProjection(account.provider_config_json),
         config_version: incrementVersion(account.config_version, 'config_version'),
         control_version: incrementVersion(account.control_version, 'control_version'),
         now,
@@ -402,7 +445,7 @@ export async function putAdminAccountGroupLink(context: Context<ControlBindings>
     assertVersion(account, expectedVersion)
     const groupId = requireResourceId(context.req.param('group_id') || context.req.param('groupId'), 'group')
     const link = parseGroupLink(body, groupId)
-    await validateLinks(context.env, [link], [])
+    await validateLinks(context.env, account.platform, [link], [])
     const now = Date.now()
     await mutateAccountRelation(context.env, account, context.env.DB.prepare(
       `INSERT INTO account_groups (
@@ -432,7 +475,7 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
     assertVersion(account, expectedVersion)
     const modelId = requireResourceId(context.req.param('model_id') || context.req.param('modelId'), 'model')
     const capability = parseModelCapability(body, modelId)
-    await validateLinks(context.env, [], [capability])
+    await validateLinks(context.env, account.platform, [], [capability])
     const now = Date.now()
     await mutateAccountRelation(context.env, account, context.env.DB.prepare(
       `INSERT INTO account_models (
@@ -467,22 +510,25 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
     requireSupportedAccount(account)
-    const baseUrl = validateBaseUrl(account.base_url).toString().replace(/\/$/, '')
     const credential = await decryptCredential(
       account.nonce_b64,
       account.ciphertext_b64,
       requireCredentialsMasterKey(context.env),
       credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
+    const plan = buildProviderHealthRequest({
+      account: providerAccount(account),
+      credential,
+    })
     const started = Date.now()
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 4_000)
+    const timer = setTimeout(() => controller.abort(), plan.timeout_ms)
     let status: 'healthy' | 'unhealthy' = 'unhealthy'
     let healthError: string | null = null
     try {
-      const response = await fetch(`${baseUrl}/models`, {
-        method: 'GET',
-        headers: { authorization: `Bearer ${credential.api_key}`, accept: 'application/json' },
+      const response = await fetch(plan.url, {
+        method: plan.method,
+        headers: plan.headers,
         redirect: 'manual',
         cache: 'no-store',
         signal: controller.signal,
@@ -574,6 +620,7 @@ async function mutateAccountRelation(
       enabled: account.enabled === 1,
       max_concurrency: account.max_concurrency,
       base_url: account.base_url,
+      provider_config: parseProviderConfigProjection(account.provider_config_json),
       config_version: incrementVersion(account.config_version, 'config_version'),
       control_version: incrementVersion(account.control_version, 'control_version'),
       now,
@@ -592,6 +639,7 @@ function accountCasStatement(
     enabled: boolean
     max_concurrency: number
     base_url: string
+    provider_config: ProviderConfig
     config_version: number
     control_version: number
     now: number
@@ -600,7 +648,7 @@ function accountCasStatement(
 ): D1PreparedStatement {
   return env.DB.prepare(
     `UPDATE accounts
-        SET name = ?, enabled = ?, max_concurrency = ?, base_url = ?,
+        SET name = ?, enabled = ?, max_concurrency = ?, base_url = ?, provider_config_json = ?,
             config_version = ?,
             control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
             health_status = CASE WHEN ? = 1 THEN 'unknown' ELSE health_status END,
@@ -614,6 +662,7 @@ function accountCasStatement(
     value.enabled ? 1 : 0,
     value.max_concurrency,
     value.base_url,
+    JSON.stringify(value.provider_config),
     value.config_version,
     expectedControlVersion,
     value.control_version,
@@ -644,16 +693,33 @@ async function runAccountBatch(
 }
 
 function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
+  rejectUnknownFields(body, CREATE_ACCOUNT_FIELDS)
+  const platform = body.platform === undefined ? 'openai' : requireProviderPlatform(body.platform)
+  const contract = providerContract(platform)
+  const protocol = body.protocol === undefined
+    ? contract.protocol
+    : requireProviderProtocol(body.protocol)
+  const authScheme = body.auth_scheme === undefined
+    ? contract.auth_scheme
+    : requireProviderAuthScheme(body.auth_scheme)
+  if (protocol !== contract.protocol || authScheme !== contract.auth_scheme) {
+    throw new GatewayError(
+      409,
+      'provider_contract_mismatch',
+      'platform, protocol, and auth_scheme must use a supported provider contract',
+    )
+  }
   const baseUrl = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
-  validateProviderFields(body)
+  validateAccountType(body)
   return {
     name: requireString(body, 'name', 128),
-    platform: 'openai',
-    protocol: 'openai',
+    platform,
+    protocol,
     base_url: baseUrl,
-    auth_scheme: 'bearer',
-    api_key: requireString(body, 'api_key', 8_192),
+    auth_scheme: authScheme,
+    provider_config: parseProviderConfig(body.provider_config, platform),
+    api_key: requireProviderCredential(body, 'api_key'),
     enabled,
     max_concurrency: body.max_concurrency === undefined
       ? 4
@@ -663,12 +729,24 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   }
 }
 
-function parseAccountPatch(body: Record<string, unknown>): AccountPatch {
-  validateProviderFields(body)
+function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): AccountPatch {
+  rejectUnknownFields(body, UPDATE_ACCOUNT_FIELDS)
+  validateAccountType(body)
+  assertImmutableProviderField(body.platform, account.platform, 'platform', requireProviderPlatform)
+  assertImmutableProviderField(body.protocol, account.protocol, 'protocol', requireProviderProtocol)
+  assertImmutableProviderField(
+    body.auth_scheme,
+    account.auth_scheme,
+    'auth_scheme',
+    requireProviderAuthScheme,
+  )
   const patch: AccountPatch = {}
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
   if (body.base_url !== undefined) patch.base_url = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
-  if (body.api_key !== undefined) patch.api_key = requireString(body, 'api_key', 8_192)
+  if (body.api_key !== undefined) patch.api_key = requireProviderCredential(body, 'api_key')
+  if (body.provider_config !== undefined) {
+    patch.provider_config = parseProviderConfig(body.provider_config, account.platform)
+  }
   if (body.enabled !== undefined || body.status !== undefined) patch.enabled = parseEnabledBody(body, true)
   if (body.max_concurrency !== undefined) {
     patch.max_concurrency = requireSafeInteger(body, 'max_concurrency', 1, 1_000)
@@ -683,17 +761,86 @@ function parseAccountPatch(body: Record<string, unknown>): AccountPatch {
   return patch
 }
 
-function validateProviderFields(body: Record<string, unknown>): void {
-  if (body.platform !== undefined) requireSupportedValue(body.platform, 'platform', 'openai')
-  if (body.protocol !== undefined) requireSupportedValue(body.protocol, 'protocol', 'openai')
-  if (body.auth_scheme !== undefined) requireSupportedValue(body.auth_scheme, 'auth_scheme', 'bearer')
-  if (body.type !== undefined) requireSupportedValue(body.type, 'type', 'apikey')
+const CREATE_ACCOUNT_FIELDS = new Set([
+  'name', 'platform', 'protocol', 'base_url', 'auth_scheme', 'provider_config',
+  'api_key', 'enabled', 'status', 'max_concurrency', 'group_links',
+  'model_capabilities', 'type',
+])
+const UPDATE_ACCOUNT_FIELDS = new Set([
+  ...CREATE_ACCOUNT_FIELDS,
+  'control_version',
+])
+
+function rejectUnknownFields(body: Record<string, unknown>, allowed: ReadonlySet<string>): void {
+  const unsupported = Object.keys(body).find((key) => !allowed.has(key))
+  if (unsupported !== undefined) {
+    throw new GatewayError(400, 'unsupported_account_field', `Field '${unsupported}' is not supported`)
+  }
 }
 
-function requireSupportedValue(value: unknown, field: string, expected: string): void {
-  if (value !== expected) {
-    throw new GatewayError(409, `${field}_not_supported`, `Only ${expected} ${field} is supported`)
+function validateAccountType(body: Record<string, unknown>): void {
+  if (body.type !== undefined && body.type !== 'apikey') {
+    throw new GatewayError(409, 'type_not_supported', 'Only apikey account type is supported')
   }
+}
+
+function requireProviderCredential(body: Record<string, unknown>, field: string): string {
+  const value = requireString(body, field, 8_192)
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new GatewayError(400, `invalid_${field}`, `${field} contains an invalid control character`)
+  }
+  return value
+}
+
+function requireProviderPlatform(value: unknown): ProviderPlatform {
+  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex') {
+    return value
+  }
+  throw new GatewayError(409, 'platform_not_supported', 'Supported platforms are openai, anthropic, gemini, and codex')
+}
+
+function requireProviderProtocol(value: unknown): ProviderProtocol {
+  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex') {
+    return value
+  }
+  throw new GatewayError(409, 'protocol_not_supported', 'Provider protocol is not supported')
+}
+
+function requireProviderAuthScheme(value: unknown): ProviderAuthScheme {
+  if (value === 'bearer' || value === 'x-api-key' || value === 'x-goog-api-key') return value
+  throw new GatewayError(409, 'auth_scheme_not_supported', 'Provider authentication scheme is not supported')
+}
+
+function assertImmutableProviderField<T extends string>(
+  raw: unknown,
+  current: T,
+  field: string,
+  parse: (value: unknown) => T,
+): void {
+  if (raw !== undefined && parse(raw) !== current) {
+    throw new GatewayError(409, 'provider_contract_immutable', `${field} cannot be changed after account creation`)
+  }
+}
+
+function parseProviderConfig(value: unknown, platform: ProviderPlatform): ProviderConfig {
+  if (value === undefined) return {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
+  }
+  const raw = value as Record<string, unknown>
+  const unsupported = Object.keys(raw).find((key) => key !== 'account_id')
+  if (unsupported !== undefined) {
+    throw new GatewayError(400, 'invalid_provider_config', `provider_config field '${unsupported}' is not supported`)
+  }
+  if (raw.account_id === undefined) return {}
+  if (platform !== 'codex') {
+    throw new GatewayError(400, 'invalid_provider_config', 'account_id is supported only for Codex')
+  }
+  const accountId = requireString(raw, 'account_id', 256)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(accountId)) {
+    throw new GatewayError(400, 'invalid_provider_config', 'Codex account_id is invalid')
+  }
+  return { account_id: accountId }
 }
 
 function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boolean {
@@ -801,6 +948,7 @@ function optionalBoolean(body: Record<string, unknown>, field: string, fallback?
 
 async function validateLinks(
   env: Env,
+  platform: ProviderPlatform,
   groupLinks: GroupLinkInput[],
   modelCapabilities: ModelCapabilityInput[],
 ): Promise<void> {
@@ -811,18 +959,18 @@ async function validateLinks(
       ? null
       : env.DB.prepare(
         `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN platform = 'openai' THEN 0 ELSE 1 END), 0) AS mismatched
+                COALESCE(SUM(CASE WHEN platform = ? THEN 0 ELSE 1 END), 0) AS mismatched
            FROM "groups"
           WHERE id IN (${groups.map(() => '?').join(', ')})`,
-      ).bind(...groups).first<{ total: number; mismatched: number }>(),
+      ).bind(platform, ...groups).first<{ total: number; mismatched: number }>(),
     models.length === 0
       ? null
       : env.DB.prepare(
         `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN platform = 'openai' THEN 0 ELSE 1 END), 0) AS mismatched
+                COALESCE(SUM(CASE WHEN platform = ? THEN 0 ELSE 1 END), 0) AS mismatched
            FROM models
           WHERE id IN (${models.map(() => '?').join(', ')})`,
-      ).bind(...models).first<{ total: number; mismatched: number }>(),
+      ).bind(platform, ...models).first<{ total: number; mismatched: number }>(),
   ])
   assertLinkCheck(groupCheck, groups.length, 'group')
   assertLinkCheck(modelCheck, models.length, 'model')
@@ -887,9 +1035,27 @@ async function findAccount(env: Env, id: string): Promise<AccountRow | null> {
 }
 
 function requireSupportedAccount(account: AccountRow): void {
-  if (account.platform !== 'openai' || account.protocol !== 'openai' || account.auth_scheme !== 'bearer') {
-    throw new GatewayError(409, 'account_not_supported', 'Only OpenAI bearer accounts are supported')
+  const platform = requireProviderPlatform(account.platform)
+  const contract = providerContract(platform)
+  if (account.protocol !== contract.protocol || account.auth_scheme !== contract.auth_scheme) {
+    throw new GatewayError(409, 'account_not_supported', 'Account provider contract is not supported')
   }
+  validateBaseUrl(account.base_url)
+  parseProviderConfig(accountProviderConfig(account), platform)
+}
+
+function providerAccount(row: AccountRow): ProviderAccount {
+  return {
+    platform: row.platform,
+    protocol: row.protocol,
+    auth_scheme: row.auth_scheme,
+    base_url: row.base_url,
+    provider_config: accountProviderConfig(row),
+  }
+}
+
+function accountProviderConfig(row: AccountRow): ProviderConfig {
+  return parseProviderConfigProjection(row.provider_config_json)
 }
 
 function publicAccount(row: AccountRow) {
@@ -917,6 +1083,7 @@ function publicAccount(row: AccountRow) {
     protocol: row.protocol,
     base_url: row.base_url,
     auth_scheme: row.auth_scheme,
+    provider_config: accountProviderConfig(row),
     config_version: row.config_version,
     control_version: row.control_version,
     health_status: row.health_status,
@@ -933,13 +1100,14 @@ function publicAccount(row: AccountRow) {
 
 function accountResponse(value: {
   id: string
-  platform: 'openai'
+  platform: ProviderPlatform
   name: string
   enabled: boolean
   max_concurrency: number
-  protocol: 'openai'
+  protocol: ProviderProtocol
   base_url: string
-  auth_scheme: 'bearer'
+  auth_scheme: ProviderAuthScheme
+  provider_config: ProviderConfig
   config_version: number
   control_version: number
   health_status: 'unknown' | 'healthy' | 'unhealthy'
@@ -967,6 +1135,16 @@ function parseProjectionArray<T>(raw: string, description: string): T[] {
     return value as T[]
   } catch {
     throw new GatewayError(500, 'invalid_account_projection', `Account ${description} projection is invalid`, 'server_error')
+  }
+}
+
+function parseProviderConfigProjection(raw: string): ProviderConfig {
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object')
+    return value as ProviderConfig
+  } catch {
+    throw new GatewayError(500, 'invalid_account_projection', 'Account provider config projection is invalid', 'server_error')
   }
 }
 

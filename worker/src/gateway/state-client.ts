@@ -9,12 +9,91 @@ export const RESERVATION_TTL_MS = 10 * 60_000
 export const LEASE_TTL_MS = 60_000
 export const RENEW_AFTER_MS = 20_000
 
+export interface ApiKeyAdmissionLease {
+  stub: DurableObjectStub
+  requestId: string
+}
+
 interface StateErrorBody {
   error?: { code?: string; message?: string }
 }
 
 interface PoolLeaseBody {
   lease?: { account_id?: string; status?: string }
+}
+
+interface AdmissionLeaseBody {
+  admitted?: boolean
+  lease?: { request_id?: string; status?: string }
+}
+
+export async function acquireApiKeyAdmission(
+  env: Env,
+  principal: GatewayPrincipal,
+  requestId: string,
+): Promise<ApiKeyAdmissionLease | null> {
+  // Fixtures authored before migration 0022 have no projection discriminator.
+  // Real D1 rows always return version 1, including when every limit is zero.
+  if (principal.limit_config_version !== 1) return null
+  if (env.API_KEY_LIMIT_STATE === undefined) {
+    throw new GatewayError(503, 'api_key_limits_unavailable', 'API key admission state is unavailable', 'server_error')
+  }
+  const stub = env.API_KEY_LIMIT_STATE.get(
+    env.API_KEY_LIMIT_STATE.idFromName(`user:${principal.user_id}`),
+  )
+  let response: Response
+  try {
+    response = await post(stub, '/admit', {
+      schema_version: STATE_SCHEMA_VERSION,
+      request_id: requestId,
+      api_key_id: principal.api_key_id,
+      group_id: principal.group_id,
+      concurrency_limit: principal.concurrency_limit,
+      user_rpm_limit: principal.user_rpm_limit,
+      group_rpm_limit: principal.group_rpm_limit,
+      lease_ttl_ms: LEASE_TTL_MS,
+    })
+  } catch {
+    throw new GatewayError(503, 'api_key_limits_unavailable', 'API key admission state is unavailable', 'server_error')
+  }
+  const accepted = await requireStateOk(Promise.resolve(response))
+  let body: AdmissionLeaseBody
+  try {
+    body = await accepted.json() as AdmissionLeaseBody
+  } catch {
+    throw new GatewayError(503, 'api_key_limits_unavailable', 'API key admission state returned an invalid response', 'server_error')
+  }
+  if (
+    body.admitted !== true ||
+    body.lease?.request_id !== requestId ||
+    body.lease.status !== 'active'
+  ) {
+    throw new GatewayError(503, 'api_key_limits_unavailable', 'API key admission state returned an invalid lease', 'server_error')
+  }
+  return { stub, requestId }
+}
+
+export async function renewApiKeyAdmission(
+  lease: ApiKeyAdmissionLease | null,
+  renewalSequence: number,
+): Promise<void> {
+  if (lease === null) return
+  await requireStateOk(post(lease.stub, '/renew', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: lease.requestId,
+    renewal_sequence: renewalSequence,
+    lease_ttl_ms: LEASE_TTL_MS,
+  }))
+}
+
+export async function releaseApiKeyAdmission(
+  lease: ApiKeyAdmissionLease | null,
+): Promise<void> {
+  if (lease === null) return
+  await requireStateOk(post(lease.stub, '/release', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: lease.requestId,
+  }))
 }
 
 export interface BillingReference {
@@ -343,5 +422,5 @@ async function stateResponseError(response: Response): Promise<GatewayError> {
     : status === 429
       ? 'rate_limit_error'
       : 'server_error'
-  return new GatewayError(status, code, message, type)
+  return new GatewayError(status, code, message, type, response.headers.get('retry-after') ?? undefined)
 }

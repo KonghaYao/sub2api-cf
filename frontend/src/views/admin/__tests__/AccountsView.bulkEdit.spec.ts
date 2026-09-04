@@ -11,6 +11,7 @@ const {
   getUpstreamBillingProbeSettings,
   getAllProxies,
   getAllGroups,
+  testAccount,
   probeUpstreamBilling,
   probeUpstreamBillingBatch,
   showError,
@@ -23,6 +24,7 @@ const {
   getUpstreamBillingProbeSettings: vi.fn(),
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn(),
+  testAccount: vi.fn(),
   probeUpstreamBilling: vi.fn(),
   probeUpstreamBillingBatch: vi.fn(),
   showError: vi.fn(),
@@ -42,6 +44,7 @@ vi.mock('@/api/admin', () => ({
       getUpstreamBillingRatesWithEtag,
       getBatchTodayStats,
       getUpstreamBillingProbeSettings,
+      testAccount,
       delete: vi.fn(),
       batchClearError: vi.fn(),
       batchRefresh: vi.fn(),
@@ -106,9 +109,12 @@ const DataTableStub = {
     <div data-test="data-table">
       <span v-for="column in columns" :key="column.key" data-test="column-key">{{ column.key }}</span>
       <div v-for="row in data" :key="row.id">
+        <span data-test="account-identity">{{ row.id }}|{{ row.name }}|{{ row.platform }}|{{ row.protocol }}</span>
+        <span data-test="account-health">{{ row.health_status }}|{{ row.last_latency_ms }}|{{ row.control_version }}|{{ row.updated_at }}</span>
         <div data-test="select-row"><slot name="cell-select" :row="row" /></div>
         <slot name="cell-created_at" :value="row.created_at" :row="row" />
         <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
+        <div data-test="account-actions"><slot name="cell-actions" :row="row" /></div>
       </div>
     </div>
   `
@@ -195,6 +201,7 @@ describe('admin AccountsView bulk edit scope', () => {
     getUpstreamBillingProbeSettings.mockReset()
     getAllProxies.mockReset()
     getAllGroups.mockReset()
+    testAccount.mockReset()
     probeUpstreamBilling.mockReset()
     probeUpstreamBillingBatch.mockReset()
     showError.mockReset()
@@ -249,6 +256,127 @@ describe('admin AccountsView bulk edit scope', () => {
       'created_at',
       'actions',
     ])
+  })
+
+  it('runs a Worker account health check from the row action', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    const account = {
+      id: 'account-uuid',
+      name: 'Anthropic primary',
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      type: 'apikey',
+      credentials: { base_url: 'https://api.anthropic.com' },
+      base_url: 'https://api.anthropic.com',
+      enabled: true,
+      max_concurrency: 3,
+      concurrency: 3,
+      priority: 0,
+      status: 'active',
+      group_ids: [],
+      auto_pause_on_expired: false,
+      created_at: '2026-09-05T00:00:00.000Z',
+      updated_at: '2026-09-05T00:00:00.000Z',
+      control_version: 1,
+    }
+    listAccounts.mockResolvedValueOnce({
+      items: [account],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    testAccount.mockResolvedValueOnce({
+      ...account,
+      health_status: 'healthy',
+      last_latency_ms: 24,
+      success: true,
+      message: 'Account connectivity test succeeded',
+      latency_ms: 24,
+    })
+    const wrapper = mountWorkerView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="worker-account-health-account-uuid"]').trigger('click')
+    await flushPromises()
+
+    expect(testAccount).toHaveBeenCalledWith('account-uuid')
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.testCompleted')
+  })
+
+  it('merges a partial Worker health response without losing identity and de-duplicates an in-flight probe', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    const account = {
+      id: 'account-uuid',
+      name: 'Anthropic primary',
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      type: 'apikey',
+      credentials: { base_url: 'https://api.anthropic.com' },
+      base_url: 'https://api.anthropic.com',
+      enabled: true,
+      max_concurrency: 3,
+      concurrency: 3,
+      priority: 0,
+      status: 'active',
+      group_ids: [],
+      auto_pause_on_expired: false,
+      created_at: '2026-09-05T00:00:00.000Z',
+      updated_at: '2026-09-05T00:00:00.000Z',
+      control_version: 1,
+    }
+    listAccounts.mockResolvedValueOnce({
+      items: [account],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+
+    let resolveHealth!: (result: Record<string, unknown>) => void
+    testAccount.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveHealth = resolve
+    }))
+    const wrapper = mountWorkerView()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { params: { search: string } }).params.search = 'anthropic'
+    const healthButton = wrapper.get('[data-testid="worker-account-health-account-uuid"]')
+    await healthButton.trigger('click')
+
+    expect(healthButton.attributes('disabled')).toBeDefined()
+    await healthButton.trigger('click')
+    expect(testAccount).toHaveBeenCalledTimes(1)
+
+    resolveHealth({
+      id: 'account-uuid',
+      name: undefined,
+      platform: undefined,
+      protocol: undefined,
+      health_status: 'healthy',
+      last_checked_at_ms: 1_788_547_200_000,
+      last_latency_ms: 24,
+      last_health_error: null,
+      config_version: 1,
+      control_version: 2,
+      updated_at: '2026-09-05T00:01:00.000Z',
+      success: true,
+      message: 'Account connectivity test succeeded',
+      latency_ms: 24,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="account-identity"]').text()).toBe(
+      'account-uuid|Anthropic primary|anthropic|anthropic'
+    )
+    expect(wrapper.get('[data-test="account-health"]').text()).toBe(
+      'healthy|24|2|2026-09-05T00:01:00.000Z'
+    )
+    expect(healthButton.attributes('disabled')).toBeUndefined()
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.testCompleted')
+    expect(showError).not.toHaveBeenCalled()
   })
 
   it('opens bulk edit in filtered-results mode from the bulk actions dropdown', async () => {

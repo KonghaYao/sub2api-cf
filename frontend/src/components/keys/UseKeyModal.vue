@@ -1212,6 +1212,7 @@ function generateRoutedCodexFiles(
   const configDir = isWindows ? '%userprofile%\\.codex' : '~/.codex'
   const preferredModels: Partial<Record<GroupPlatform, string>> = {
     openai: 'gpt-5.5',
+    codex: 'gpt-5.5',
     anthropic: 'claude-sonnet-4-6',
     gemini: 'gemini-2.5-pro',
     antigravity: 'claude-sonnet-4-6',
@@ -1226,6 +1227,7 @@ function generateRoutedCodexFiles(
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
+    codex: 'Codex',
     gemini: 'Gemini',
     antigravity: 'Antigravity',
     grok: 'Grok',

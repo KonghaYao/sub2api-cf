@@ -9,6 +9,12 @@ import type {
   GatewayPrincipal,
   ModelRoute,
 } from './types'
+import type {
+  ProviderAuthScheme,
+  ProviderConfig,
+  ProviderPlatform,
+  ProviderProtocol,
+} from './providers'
 
 interface PrincipalRow {
   api_key_id: string
@@ -20,6 +26,10 @@ interface PrincipalRow {
   user_status: string
   balance_micros: number
   user_state_version: number
+  limit_config_version?: number
+  concurrency_limit?: number
+  user_rpm_limit?: number
+  group_rpm_limit?: number
   group_id: string
   group_enabled: number
   group_accessible: number
@@ -67,6 +77,10 @@ export async function authenticateGatewayRequest(
             k.enabled AS api_key_enabled, k.expires_at_ms, k.revoked_at_ms,
             u.id AS user_id, u.status AS user_status, u.balance_micros,
             u.state_version AS user_state_version,
+            1 AS limit_config_version,
+            u.concurrency AS concurrency_limit,
+            u.rpm_limit AS user_rpm_limit,
+            COALESCE(rpm_override.rpm_override, g.rpm_limit) AS group_rpm_limit,
             g.id AS group_id, g.enabled AS group_enabled, g.platform, g.group_type,
             subscription.id AS subscription_id,
             subscription.starts_at_ms AS subscription_starts_at_ms,
@@ -84,6 +98,8 @@ export async function authenticateGatewayRequest(
        FROM api_keys k
        JOIN users u ON u.id = k.user_id
        JOIN "groups" g ON g.id = k.group_id
+       LEFT JOIN user_group_rpm_overrides rpm_override
+         ON rpm_override.user_id = u.id AND rpm_override.group_id = g.id
        LEFT JOIN user_subscriptions subscription
          ON subscription.user_id = u.id AND subscription.group_id = g.id
         AND subscription.status = 'active'
@@ -105,11 +121,36 @@ export async function authenticateGatewayRequest(
   if (row.user_status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
-  if (row.group_enabled !== 1 || row.platform !== 'openai') {
+  if (row.group_enabled !== 1 || !isProviderPlatform(row.platform)) {
     throw new GatewayError(403, 'group_unavailable', 'API key group is unavailable', 'permission_error')
   }
   if (row.group_accessible !== 1) {
     throw new GatewayError(403, 'group_access_denied', 'API key group access is no longer valid', 'permission_error')
+  }
+  const legacyLimitFixture = [
+    row.limit_config_version,
+    row.concurrency_limit,
+    row.user_rpm_limit,
+    row.group_rpm_limit,
+  ].every((value) => value === undefined)
+  const limitConfigVersion = legacyLimitFixture ? 0 : row.limit_config_version
+  const concurrencyLimit = legacyLimitFixture ? 0 : row.concurrency_limit
+  const userRpmLimit = legacyLimitFixture ? 0 : row.user_rpm_limit
+  const groupRpmLimit = legacyLimitFixture ? 0 : row.group_rpm_limit
+  for (const [field, value] of [
+    ['limit_config_version', limitConfigVersion],
+    ['concurrency_limit', concurrencyLimit],
+    ['user_rpm_limit', userRpmLimit],
+    ['group_rpm_limit', groupRpmLimit],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || (value as number) < 0) {
+      throw new GatewayError(500, 'invalid_api_key_limits', `Gateway ${field} is invalid`, 'server_error')
+    }
+  }
+  // Hand-written pre-0022 unit fixtures omit every projection field. Partial
+  // or malformed projections still fail closed; deployed D1 always emits v1.
+  if (limitConfigVersion !== 0 && limitConfigVersion !== 1) {
+    throw new GatewayError(500, 'invalid_api_key_limits', 'Gateway limit projection version is invalid', 'server_error')
   }
 
   const billing = subscriptionBilling(row)
@@ -121,6 +162,10 @@ export async function authenticateGatewayRequest(
     platform: row.platform,
     balance_micros: row.balance_micros,
     user_state_version: row.user_state_version,
+    limit_config_version: limitConfigVersion!,
+    concurrency_limit: concurrencyLimit!,
+    user_rpm_limit: userRpmLimit!,
+    group_rpm_limit: groupRpmLimit!,
     billing,
   }
 }
@@ -185,7 +230,7 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
             JOIN accounts a ON a.id = ag.account_id
             JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
            WHERE ag.group_id = gm.group_id AND a.enabled = 1
-             AND a.platform = 'openai' AND a.protocol = 'openai'
+             AND m.platform = g.platform AND a.platform = g.platform
              AND (
                (m.endpoint = 'chat_completions' AND am.chat_completions = 1) OR
                (m.endpoint = 'responses' AND am.responses = 1) OR
@@ -225,7 +270,7 @@ export async function resolveGatewayRoute(
       `${modelSelect(true)}
         WHERE gm.group_id = ? AND m.public_name = ?
           AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
-          AND g.enabled = 1 AND g.platform = 'openai' AND m.platform = g.platform
+          AND g.enabled = 1 AND m.platform = g.platform
           AND ${modelCapability}
         LIMIT 1`,
     ).bind(...modelBindings),
@@ -239,7 +284,7 @@ export async function resolveGatewayRoute(
   if (model === undefined) {
     throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
   }
-  let candidates = candidateResult.results as unknown as AccountCandidate[]
+  let candidates = candidateResult.results.map(parseAccountCandidate)
   let upstreamEndpoint = endpoint
   if (
     candidates.length === 0 &&
@@ -247,7 +292,7 @@ export async function resolveGatewayRoute(
     fallbackEndpoint === 'chat_completions' &&
     fallbackCandidateResult !== undefined
   ) {
-    candidates = fallbackCandidateResult.results as unknown as AccountCandidate[]
+    candidates = fallbackCandidateResult.results.map(parseAccountCandidate)
     upstreamEndpoint = 'chat_completions'
   }
   if (
@@ -266,18 +311,18 @@ function accountCandidatesStatement(
   capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings',
 ): D1PreparedStatement {
   return env.DB.prepare(
-    `SELECT a.id AS account_id, a.base_url, a.max_concurrency,
+    `SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
+            a.provider_config_json, a.base_url, a.max_concurrency,
             ag.priority, ag.weight, a.config_version,
             revision.revision AS config_revision, am.model_id
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
        JOIN account_models am ON am.account_id = a.id
+       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
+       JOIN models m ON m.id = am.model_id AND m.platform = g.platform
        CROSS JOIN gateway_config_revision revision
-      WHERE ag.group_id = ? AND a.enabled = 1 AND a.platform = 'openai'
-        AND a.protocol = 'openai' AND a.base_url IS NOT NULL
-        AND am.model_id = (
-          SELECT id FROM models WHERE platform = 'openai' AND public_name = ? LIMIT 1
-        )
+      WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
+        AND m.public_name = ?
         AND ${capabilityColumn} = 1
       ORDER BY ag.priority ASC, a.id ASC`,
   )
@@ -293,24 +338,26 @@ export async function getAccountCredential(
 ): Promise<AccountCredential> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
-    `SELECT a.id AS account_id, a.base_url, a.auth_scheme,
+    `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
+            a.provider_config_json,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
        FROM accounts a
        JOIN account_groups ag ON ag.account_id = a.id
        JOIN account_models am ON am.account_id = a.id
+       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
+       JOIN models m ON m.id = am.model_id AND m.platform = g.platform
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
         AND ${capabilityColumn} = 1 AND a.enabled = 1
-        AND a.platform = 'openai' AND a.protocol = 'openai'
         AND a.base_url IS NOT NULL
       LIMIT 1`,
   )
     .bind(accountId, groupId, modelId)
-    .first<AccountCredential>()
-  if (row === null || row.auth_scheme !== 'bearer') {
+    .first<AccountCredentialRow>()
+  if (row === null) {
     throw new GatewayError(503, 'credential_unavailable', 'Upstream account credential is unavailable', 'server_error')
   }
-  return row
+  return parseAccountCredential(row)
 }
 
 export function credentialAad(
@@ -386,7 +433,7 @@ function readApiKey(headers: Headers): string {
 function modelSelect(includeUserRate = false): string {
   const userRate = includeUserRate ? 'user_rate.rate_multiplier_ppm' : 'NULL'
   return `SELECT revision.revision AS config_revision,
-                 m.id AS model_id, m.public_name,
+                 m.id AS model_id, m.platform, m.public_name,
                  COALESCE(gm.upstream_name_override, m.upstream_name) AS upstream_name,
                  m.endpoint, m.embeddings, p.id AS price_id, p.version AS price_version,
                  p.input_micros_per_million, p.output_micros_per_million,
@@ -405,6 +452,75 @@ function modelSelect(includeUserRate = false): string {
                    ON user_rate.group_id = gm.group_id AND user_rate.user_id = ?`
               : ''}
             CROSS JOIN gateway_config_revision revision`
+}
+
+interface ProviderAccountProjection {
+  platform: string
+  protocol: string
+  auth_scheme: string
+  provider_config_json: string
+}
+
+type AccountCandidateRow = Omit<AccountCandidate, 'platform' | 'protocol' | 'auth_scheme' | 'provider_config'> &
+  ProviderAccountProjection
+
+type AccountCredentialRow = Omit<AccountCredential, 'platform' | 'protocol' | 'auth_scheme' | 'provider_config'> &
+  ProviderAccountProjection
+
+function parseAccountCandidate(value: unknown): AccountCandidate {
+  const row = value as AccountCandidateRow
+  const { provider_config_json: _providerConfigJson, ...candidate } = row
+  return { ...candidate, ...parseProviderAccountProjection(row) }
+}
+
+function parseAccountCredential(row: AccountCredentialRow): AccountCredential {
+  const { provider_config_json: _providerConfigJson, ...credential } = row
+  return { ...credential, ...parseProviderAccountProjection(row) }
+}
+
+function parseProviderAccountProjection(row: ProviderAccountProjection): {
+  platform: ProviderPlatform
+  protocol: ProviderProtocol
+  auth_scheme: ProviderAuthScheme
+  provider_config: ProviderConfig
+} {
+  if (!isProviderPlatform(row.platform)) return invalidProviderAccount()
+  const expected = row.platform
+  const valid = row.protocol === expected && (
+    (expected === 'openai' && row.auth_scheme === 'bearer') ||
+    (expected === 'anthropic' && row.auth_scheme === 'x-api-key') ||
+    (expected === 'gemini' && row.auth_scheme === 'x-goog-api-key') ||
+    (expected === 'codex' && row.auth_scheme === 'bearer')
+  )
+  if (!valid) return invalidProviderAccount()
+  let config: unknown
+  try {
+    config = JSON.parse(row.provider_config_json)
+  } catch {
+    return invalidProviderAccount()
+  }
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    return invalidProviderAccount()
+  }
+  return {
+    platform: row.platform,
+    protocol: row.protocol as ProviderProtocol,
+    auth_scheme: row.auth_scheme as ProviderAuthScheme,
+    provider_config: config as ProviderConfig,
+  }
+}
+
+function invalidProviderAccount(): never {
+  throw new GatewayError(
+    500,
+    'invalid_provider_account',
+    'Upstream provider account configuration is invalid',
+    'server_error',
+  )
+}
+
+function isProviderPlatform(value: string): value is ProviderPlatform {
+  return value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex'
 }
 
 function accountCapabilityColumn(

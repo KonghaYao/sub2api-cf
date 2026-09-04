@@ -34,6 +34,7 @@ interface GroupRow {
   enabled: number
   sort_order: number
   rate_multiplier_ppm: number
+  rpm_limit: number
   catalog_mode: 'all_routable' | 'allowlist'
   group_type: 'standard' | 'subscription'
   is_exclusive: number
@@ -100,7 +101,7 @@ interface PriceRow {
 }
 
 const GROUP_COLUMNS = `id, name, description, platform, enabled, sort_order,
-  rate_multiplier_ppm, catalog_mode, group_type, is_exclusive,
+  rate_multiplier_ppm, rpm_limit, catalog_mode, group_type, is_exclusive,
   daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
   control_version, created_at_ms, updated_at_ms`
 const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings, enabled,
@@ -198,10 +199,10 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
         context.env.DB.prepare(
           `INSERT INTO "groups" (
              id, name, description, platform, enabled, sort_order,
-             rate_multiplier_ppm, catalog_mode, group_type, is_exclusive,
+             rate_multiplier_ppm, rpm_limit, catalog_mode, group_type, is_exclusive,
              daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
              created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id,
           row.name,
@@ -210,6 +211,7 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
           row.enabled,
           row.sort_order,
           row.rate_multiplier_ppm,
+          row.rpm_limit,
           row.catalog_mode,
           row.group_type,
           row.is_exclusive,
@@ -268,7 +270,7 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
         context.env.DB.prepare(
           `UPDATE "groups"
               SET name = ?, description = ?, platform = ?, enabled = ?, sort_order = ?,
-                  rate_multiplier_ppm = ?, catalog_mode = ?, group_type = ?, is_exclusive = ?,
+                  rate_multiplier_ppm = ?, rpm_limit = ?, catalog_mode = ?, group_type = ?, is_exclusive = ?,
                   daily_quota_micros = ?, weekly_quota_micros = ?, monthly_quota_micros = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
@@ -280,6 +282,7 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
           next.enabled,
           next.sort_order,
           next.rate_multiplier_ppm,
+          next.rpm_limit,
           next.catalog_mode,
           next.group_type,
           next.is_exclusive,
@@ -703,6 +706,7 @@ function parseCreateGroup(body: Record<string, unknown>) {
     enabled,
     sort_order: optionalSafeInteger(body, 'sort_order', 0, 1_000_000) ?? 0,
     rate_multiplier_ppm: optionalSafeInteger(body, 'rate_multiplier_ppm', 0) ?? 1_000_000,
+    rpm_limit: optionalSafeInteger(body, 'rpm_limit', 0) ?? 0,
     catalog_mode: catalogMode as GroupRow['catalog_mode'],
     group_type: groupType,
     is_exclusive: optionalBoolean(body, 'is_exclusive') === false ? 0 : 1,
@@ -717,7 +721,8 @@ function parseCreateGroup(body: Record<string, unknown>) {
 function parseGroupPatch(body: Record<string, unknown>) {
   const result: Partial<{
     name: string; description: string | null; platform: string; enabled: boolean;
-    sort_order: number; rate_multiplier_ppm: number; catalog_mode: GroupRow['catalog_mode'];
+    sort_order: number; rate_multiplier_ppm: number; rpm_limit: number;
+    catalog_mode: GroupRow['catalog_mode'];
     group_type: GroupRow['group_type']; is_exclusive: number;
     daily_quota_micros: number | null; weekly_quota_micros: number | null;
     monthly_quota_micros: number | null
@@ -734,6 +739,8 @@ function parseGroupPatch(body: Record<string, unknown>) {
   if (sortOrder !== undefined) result.sort_order = sortOrder
   const multiplier = optionalSafeInteger(body, 'rate_multiplier_ppm', 0)
   if (multiplier !== undefined) result.rate_multiplier_ppm = multiplier
+  const rpmLimit = optionalSafeInteger(body, 'rpm_limit', 0)
+  if (rpmLimit !== undefined) result.rpm_limit = rpmLimit
   const catalogMode = optionalString(body, 'catalog_mode', 32)
   if (catalogMode !== undefined) {
     if (catalogMode !== 'all_routable' && catalogMode !== 'allowlist') {
@@ -959,8 +966,12 @@ function publicPrice(row: PriceRow) {
 }
 
 function ensureSupportedPlatform(platform: string, enabled: boolean): void {
-  if (enabled && platform !== 'openai') {
-    throw new GatewayError(409, 'platform_not_supported', 'Only OpenAI-compatible groups and models can be enabled')
+  if (enabled && !['openai', 'anthropic', 'gemini', 'codex'].includes(platform)) {
+    throw new GatewayError(
+      409,
+      'platform_not_supported',
+      'Only OpenAI, Anthropic, Gemini, and Codex groups and models can be enabled',
+    )
   }
 }
 

@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import type {
   AdminGroup,
   GroupPlatform,
@@ -103,6 +104,7 @@ function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unk
   if (group.rate_multiplier !== undefined) {
     payload.rate_multiplier_ppm = Math.round(group.rate_multiplier * 1_000_000)
   }
+  if (group.rpm_limit !== undefined) payload.rpm_limit = group.rpm_limit
   if (group.is_exclusive !== undefined) payload.is_exclusive = group.is_exclusive
   if (group.subscription_type !== undefined) payload.group_type = group.subscription_type
   if (group.daily_limit_usd !== undefined) {
@@ -126,6 +128,7 @@ function workerUpdateGroupPayload(group: UpdateGroupRequest): Record<string, unk
   if (group.rate_multiplier !== undefined) {
     payload.rate_multiplier_ppm = Math.round(group.rate_multiplier * 1_000_000)
   }
+  if (group.rpm_limit !== undefined) payload.rpm_limit = group.rpm_limit
   if (group.is_exclusive !== undefined) payload.is_exclusive = group.is_exclusive
   if (group.subscription_type !== undefined) payload.group_type = group.subscription_type
   if (group.daily_limit_usd !== undefined) {
@@ -568,6 +571,12 @@ export interface GroupRPMOverrideEntry {
  * Get RPM overrides for users in a group (subset of rate-multipliers endpoint).
  */
 export async function getGroupRPMOverrides(id: number): Promise<GroupRPMOverrideEntry[]> {
+  if (isCloudflareWorkerContractActive()) {
+    const { data } = await apiClient.get<GroupRPMOverrideEntry[]>(
+      `/admin/groups/${id}/rpm-overrides`
+    )
+    return data
+  }
   const { data } = await apiClient.get<GroupRateMultiplierEntry[]>(
     `/admin/groups/${id}/rate-multipliers`
   )
@@ -585,15 +594,24 @@ export async function getGroupRPMOverrides(id: number): Promise<GroupRPMOverride
 
 /**
  * Batch set RPM overrides for users in a group.
- * Only touches rpm_override column; preserves rate_multiplier on existing rows.
+ * Worker PUT replaces the group's complete override collection; an empty
+ * collection clears it. The legacy endpoint still preserves rate_multiplier.
  */
 export async function batchSetGroupRPMOverrides(
   id: number,
   entries: Array<{ user_id: number; rpm_override: number }>
 ): Promise<{ message: string }> {
+  const workerContract = isCloudflareWorkerContractActive()
   const { data } = await apiClient.put<{ message: string }>(
     `/admin/groups/${id}/rpm-overrides`,
-    { entries }
+    {
+      entries: workerContract
+        ? entries.map((entry) => ({ ...entry, user_id: String(entry.user_id) }))
+        : entries
+    },
+    workerContract
+      ? { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-rpm-put') } }
+      : undefined
   )
   return data
 }
@@ -602,7 +620,13 @@ export async function batchSetGroupRPMOverrides(
  * Clear all RPM overrides for a group (preserves rate_multiplier).
  */
 export async function clearGroupRPMOverrides(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/groups/${id}/rpm-overrides`)
+  const workerContract = isCloudflareWorkerContractActive()
+  const { data } = await apiClient.delete<{ message: string }>(
+    `/admin/groups/${id}/rpm-overrides`,
+    workerContract
+      ? { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-rpm-clear') } }
+      : undefined
+  )
   return data
 }
 

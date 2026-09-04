@@ -9,6 +9,7 @@ import type { ModelRoute } from '../../src/gateway/types'
 
 const model: ModelRoute = {
   config_revision: 1,
+  platform: 'openai',
   model_id: 'model-1',
   public_name: 'gpt-public',
   upstream_name: 'gpt-upstream',
