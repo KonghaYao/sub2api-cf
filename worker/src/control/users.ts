@@ -321,6 +321,10 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
         context.env.DB.prepare(
           `UPDATE users
               SET email = ?, display_name = ?, role = ?,
+                  email_verified_at_ms = CASE
+                    WHEN email <> ? THEN NULL
+                    ELSE email_verified_at_ms
+                  END,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ?`,
@@ -328,6 +332,7 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
           next.email,
           next.display_name,
           next.role,
+          next.email,
           controlVersion,
           controlVersion + 1,
           updatedAtMs,
@@ -410,6 +415,13 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       }
       if (isControlVersionError(error)) {
         throw new GatewayError(409, 'user_update_conflict', 'User changed concurrently; retry the update')
+      }
+      if (isLastSuperAdminError(error)) {
+        throw new GatewayError(
+          409,
+          'last_super_admin',
+          'Assign another active super administrator before disabling or demoting this account',
+        )
       }
       if (isLastActiveAdminError(error)) {
         throw new GatewayError(
@@ -696,4 +708,9 @@ function isControlVersionError(error: unknown): boolean {
 function isLastActiveAdminError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return /last_active_admin/i.test(message)
+}
+
+function isLastSuperAdminError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /last_super_admin/i.test(message)
 }

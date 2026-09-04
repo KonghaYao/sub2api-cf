@@ -24,6 +24,14 @@ import {
   serializeGeminiSseFrame,
 } from './protocols/gemini'
 import {
+  ChatCompletionsToResponsesEventCodec,
+  ResponsesBridgeError,
+  chatCompletionsResponseToResponses,
+  formatResponsesSseEvent,
+  parseResponsesRequest,
+  responsesToChatCompletionsRequest,
+} from './protocols/responses'
+import {
   persistSettlementRecovery,
   signalSettlementRecovery,
 } from './recovery'
@@ -372,7 +380,7 @@ export async function handleResponsesCompact(
     context,
     'responses',
     (body) => ({
-      ...prepareOpenAiRequest(body, 'responses'),
+      ...prepareOpenAiRequest(body, 'responses', false),
       upstreamOperation: 'responses_compact' as const,
     }),
     gatewayErrorResponse,
@@ -633,10 +641,11 @@ function isUnsupportedTokenCountStatus(status: number): boolean {
 interface PreparedGatewayRequest {
   requestedModel: string
   stream: boolean
-  upstreamBody: (model: ModelRoute) => Record<string, unknown>
+  upstreamBody: (model: ModelRoute, upstreamEndpoint: GatewayEndpoint) => Record<string, unknown>
   transformResponse?: (value: unknown) => unknown
   responseProtocol: 'openai' | 'anthropic' | 'gemini'
   upstreamOperation?: UpstreamOperation
+  protocolFallback?: 'responses_to_chat'
 }
 
 type PrepareGatewayRequest = (body: Record<string, unknown>) => PreparedGatewayRequest
@@ -645,6 +654,7 @@ type GatewayErrorResponder = (error: GatewayError, requestId?: string) => Respon
 function prepareOpenAiRequest(
   body: Record<string, unknown>,
   endpoint: GatewayEndpoint,
+  allowProtocolFallback = endpoint === 'responses',
 ): PreparedGatewayRequest {
   validateClientControls(body)
   const requestedModel = requiredModel(body)
@@ -652,7 +662,20 @@ function prepareOpenAiRequest(
   return {
     requestedModel,
     stream,
-    upstreamBody: (model) => {
+    upstreamBody: (model, upstreamEndpoint) => {
+      if (
+        endpoint === 'responses' &&
+        allowProtocolFallback &&
+        upstreamEndpoint === 'chat_completions'
+      ) {
+        const fallbackBody = body.max_output_tokens === undefined
+          ? { ...body, max_output_tokens: model.default_max_output_tokens }
+          : body
+        return responsesToChatCompletionsRequest(
+          parseResponsesRequest(fallbackBody),
+          model.upstream_name,
+        ) as unknown as Record<string, unknown>
+      }
       const upstreamBody: Record<string, unknown> = { ...body, model: model.upstream_name }
       if (
         upstreamBody.max_output_tokens === undefined &&
@@ -674,6 +697,9 @@ function prepareOpenAiRequest(
       return upstreamBody
     },
     responseProtocol: 'openai',
+    ...(endpoint === 'responses' && allowProtocolFallback
+      ? { protocolFallback: 'responses_to_chat' as const }
+      : {}),
   }
 }
 
@@ -696,9 +722,13 @@ async function dispatchGateway(
       requestedModel,
       endpoint,
       principal.user_id,
+      prepared.protocolFallback === 'responses_to_chat' ? 'chat_completions' : undefined,
     )
     const model = route.model
-    const upstreamBody = prepared.upstreamBody(model)
+    const upstreamEndpoint = route.upstream_endpoint
+    const usesResponsesBridge = prepared.protocolFallback === 'responses_to_chat' &&
+      endpoint === 'responses' && upstreamEndpoint === 'chat_completions'
+    const upstreamBody = prepared.upstreamBody(model, upstreamEndpoint)
     const pricedReservationMicros = reservationForRequest(
       model,
       upstreamBody,
@@ -720,7 +750,7 @@ async function dispatchGateway(
         context.env,
         principal.group_id,
         model.model_id,
-        endpoint,
+        upstreamEndpoint,
         candidates,
       )
     } catch (error) {
@@ -735,13 +765,13 @@ async function dispatchGateway(
       principal.group_id,
       model.model_id,
       requestId,
-      endpoint,
+      upstreamEndpoint,
       serialized,
       stream,
       candidates.length,
       context.req.raw.headers,
       context.req.raw.signal,
-      prepared.upstreamOperation,
+      prepared.upstreamOperation ?? upstreamEndpoint,
     ).catch(async (error) => {
       await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
       throw error
@@ -789,7 +819,9 @@ async function dispatchGateway(
         inputBytes: parsed.bytes.byteLength,
         stream,
         startedAt,
-        responseProtocol: prepared.responseProtocol,
+        responseProtocol: usesResponsesBridge
+          ? 'responses_from_chat'
+          : prepared.responseProtocol,
       })
     }
 
@@ -807,11 +839,15 @@ async function dispatchGateway(
       clientSignal: context.req.raw.signal,
       stream,
       startedAt,
-      transformResponse: prepared.transformResponse,
+      transformResponse: usesResponsesBridge
+        ? (value) => chatCompletionsResponseToResponses(value, requestedModel)
+        : prepared.transformResponse,
     })
   } catch (error) {
     const normalized = error instanceof ProtocolValidationError
       ? new GatewayError(400, 'invalid_request_error', error.message)
+      : error instanceof ResponsesBridgeError
+        ? new GatewayError(400, 'invalid_request_error', error.message)
       : error instanceof GeminiCodecError
         ? new GatewayError(400, 'invalid_argument', error.message)
         : asGatewayError(error)
@@ -1055,6 +1091,93 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
   }
 }
 
+class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
+  private readonly decoder = new TextDecoder()
+  private readonly accounting: SseEventTransformer
+  private readonly codec: ChatCompletionsToResponsesEventCodec
+  private buffer = ''
+  private emittedBytes = 0
+  private terminalValue: 'completed' | 'failed' | null = null
+
+  constructor(upstreamModel: string, private readonly publicModel: string) {
+    this.accounting = new SseEventTransformer(upstreamModel, publicModel)
+    this.codec = new ChatCompletionsToResponsesEventCodec(publicModel)
+  }
+
+  push(chunk: Uint8Array): Uint8Array[] {
+    this.accounting.push(chunk)
+    this.buffer += this.decoder.decode(chunk, { stream: true })
+    if (this.buffer.length > MAX_SYNC_RESPONSE_BYTES) {
+      throw new GatewayError(
+        502,
+        'invalid_upstream_stream',
+        'Upstream SSE event exceeded the size limit',
+        'server_error',
+      )
+    }
+    return this.drain(false)
+  }
+
+  finish(): Uint8Array[] {
+    this.accounting.finish()
+    this.buffer += this.decoder.decode()
+    return this.drain(true)
+  }
+
+  usage(): TokenUsage | null {
+    return this.accounting.usage()
+  }
+
+  outputBytes(): number {
+    return this.emittedBytes
+  }
+
+  terminal(): 'completed' | 'failed' | 'missing' {
+    return this.terminalValue ?? 'missing'
+  }
+
+  errorFrame(message: string): Uint8Array {
+    return streamErrorFrame('responses', message, this.publicModel)
+  }
+
+  private drain(flush: boolean): Uint8Array[] {
+    const chunks: Uint8Array[] = []
+    while (true) {
+      const match = /\r?\n\r?\n/.exec(this.buffer)
+      if (match === null) break
+      const frame = this.buffer.slice(0, match.index)
+      this.buffer = this.buffer.slice(match.index + match[0].length)
+      chunks.push(...this.transformFrame(frame))
+    }
+    if (flush && this.buffer.length > 0) {
+      chunks.push(...this.transformFrame(this.buffer))
+      this.buffer = ''
+    }
+    return chunks
+  }
+
+  private transformFrame(frame: string): Uint8Array[] {
+    const data = frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (data === '') return []
+    const events = data === '[DONE]'
+      ? this.codec.finish()
+      : this.codec.push(JSON.parse(data) as unknown)
+    return events.map((event) => {
+      if (event.type === 'response.completed') this.terminalValue = 'completed'
+      if (event.type === 'response.failed' || event.type === 'response.incomplete') {
+        this.terminalValue = 'failed'
+      }
+      const encoded = encoder.encode(formatResponsesSseEvent(event))
+      this.emittedBytes += encoded.byteLength
+      return encoded
+    })
+  }
+}
+
 class GeminiResponsesStreamTransformer implements GatewayStreamTransformer {
   private readonly decoder = new TextDecoder()
   private readonly accounting: SseEventTransformer
@@ -1225,13 +1348,15 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
 function createStreamingResponse(input: FinalizeInput & {
   response: Response
   endpoint: GenerativeGatewayEndpoint
-  responseProtocol: 'openai' | 'anthropic' | 'gemini'
+  responseProtocol: 'openai' | 'anthropic' | 'gemini' | 'responses_from_chat'
 }): Response {
   const reader = input.response.body!.getReader()
   const tracker: GatewayStreamTransformer = input.responseProtocol === 'anthropic'
     ? new AnthropicResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
     : input.responseProtocol === 'gemini'
       ? new GeminiResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+      : input.responseProtocol === 'responses_from_chat'
+        ? new ChatResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
       : new OpenAiStreamTransformer(input.model.upstream_name, input.requestedModel, input.endpoint)
   let finalized: Promise<void> | null = null
   let userRenewal = 0

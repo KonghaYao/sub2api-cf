@@ -47,6 +47,7 @@ class FakeStatement {
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
     if (this.query.includes('FROM group_models gm')) return model as T
     if (this.query.includes('FROM accounts a') && this.query.includes('account_secrets')) {
+      if (this.database.chatOnly && this.query.includes('am.responses = 1')) return null
       return this.database.credential as T
     }
     if (this.query.includes('FROM inbox')) return null
@@ -75,6 +76,9 @@ class FakeStatement {
       return { success: true, results: [model as T], meta: {} as D1Meta & Record<string, unknown> }
     }
     if (this.query.includes('FROM account_groups ag')) {
+      if (this.database.chatOnly && this.query.includes('am.responses = 1')) {
+        return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
+      }
       return {
         success: true,
         results: [
@@ -101,6 +105,7 @@ class FakeDatabase {
   credential: Record<string, unknown> = {}
   recovery: Record<string, unknown> | null = null
   failRecoveryWrites = false
+  chatOnly = false
   readonly principal = {
     api_key_id: 'key-1',
     api_key_auth_version: 1,
@@ -362,6 +367,95 @@ describe('OpenAI-compatible gateway', () => {
       payload: { input_tokens: 10, output_tokens: 5, account_id: accountId },
     })
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
+  it('bridges a Responses request through a Chat Completions-only account', async () => {
+    const { env, database, user, poolNames } = await harness()
+    database.chatOnly = true
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'chatcmpl-fallback',
+        object: 'chat.completion',
+        created: 1_700_000_000,
+        model: 'gpt-upstream',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'hello from chat' },
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 3, total_tokens: 9 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        instructions: 'Be concise.',
+        input: 'hello',
+        max_output_tokens: 77,
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      id: 'chatcmpl-fallback',
+      object: 'response',
+      model: 'gpt-public',
+      status: 'completed',
+      output: [{
+        type: 'message',
+        content: [{ type: 'output_text', text: 'hello from chat' }],
+      }],
+      usage: { input_tokens: 6, output_tokens: 3, total_tokens: 9 },
+    })
+    const [url, init] = upstream.mock.calls[0]
+    expect(String(url)).toBe('https://upstream.example/v1/chat/completions')
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'gpt-upstream',
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'hello' },
+      ],
+      max_completion_tokens: 77,
+      stream: false,
+    })
+    expect(poolNames).toContain(
+      'group:group-1:platform:openai:model:model-1:endpoint:chat_completions:shard:0',
+    )
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { input_tokens: 6, output_tokens: 3 } },
+    })
+  })
+
+  it('bridges Chat Completions SSE into a terminal Responses event stream', async () => {
+    const { env, database, user } = await harness()
+    database.chatOnly = true
+    vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      'data: {"id":"chatcmpl-stream-fallback","object":"chat.completion.chunk","created":1700000000,"model":"gpt-upstream","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n',
+      'data: [DONE]\n\n',
+    ].join(''), { headers: { 'content-type': 'text/event-stream' } })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello', stream: true }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).toContain('event: response.created')
+    expect(text).toContain('event: response.output_text.delta')
+    expect(text).toContain('event: response.completed')
+    expect(text).toContain('"model":"gpt-public"')
+    expect(text).not.toContain('gpt-upstream')
+    expect(text).not.toContain('[DONE]')
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: { payload: { stream: true, input_tokens: 4, output_tokens: 2 } },
+    })
   })
 
   it('charges an active subscription at the effective rate without touching balance state', async () => {

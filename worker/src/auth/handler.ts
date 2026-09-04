@@ -24,6 +24,7 @@ import {
   tokenDigest,
   TokenValidationError,
 } from './tokens'
+import type { RegistrationEmailChallengeConsumption } from './email-challenges'
 
 type AuthBindings = { Bindings: Env }
 
@@ -33,6 +34,7 @@ const MAX_USER_AGENT_LENGTH = 512
 
 interface PublicAuthSettings {
   registration_enabled?: boolean
+  email_verification_enabled?: boolean
   turnstile_enabled?: boolean
 }
 
@@ -106,8 +108,21 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     const credential = await hashPassword(password)
     await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     const now = Date.now()
+    const userId = crypto.randomUUID()
+    let registrationChallenge: RegistrationEmailChallengeConsumption | null = null
+    let registrationChallengeModule: typeof import('./email-challenges') | null = null
+    if (settings.email_verification_enabled === true) {
+      registrationChallengeModule = await import('./email-challenges')
+      registrationChallenge = await registrationChallengeModule.prepareRegistrationEmailChallengeConsumption(
+        context.env,
+        email,
+        body.verify_code,
+        userId,
+        now,
+      )
+    }
     const user: UserRow = {
-      id: crypto.randomUUID(),
+      id: userId,
       email,
       display_name: email.slice(0, email.indexOf('@')).slice(0, 128),
       role: 'user',
@@ -116,7 +131,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       state_version: 0,
       auth_version: 1,
       password_credential: credential,
-      email_verified_at_ms: null,
+      email_verified_at_ms: registrationChallenge?.verifiedAtMs ?? null,
       password_changed_at_ms: now,
       last_login_at_ms: now,
       avatar_object_key: null,
@@ -128,14 +143,16 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     const issued = await issueSession(context.env, user, now)
     const emailHash = await sha256Hex(email)
     try {
-      await context.env.DB.batch([
+      const statements: D1PreparedStatement[] = []
+      if (registrationChallenge !== null) statements.push(registrationChallenge.consumeStatement)
+      statements.push(
         context.env.DB.prepare(
           `INSERT INTO users (
              id, email, display_name, role, status, balance_micros,
              state_version, created_at_ms, updated_at_ms,
              password_credential, auth_version, password_changed_at_ms,
-             last_login_at_ms
-           ) VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?)`,
+             last_login_at_ms, email_verified_at_ms
+           ) VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?)`,
         ).bind(
           user.id,
           email,
@@ -145,7 +162,11 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
           credential,
           now,
           now,
+          registrationChallenge?.verifiedAtMs ?? null,
         ),
+      )
+      if (registrationChallenge !== null) statements.push(registrationChallenge.claimStatement)
+      statements.push(
         sessionInsert(context.env, user, issued, requestUserAgent(context.req.raw)),
         authAuditInsert(
           context.env,
@@ -156,11 +177,15 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
           issued.sessionId,
           now,
         ),
-      ])
+      )
+      await context.env.DB.batch(statements)
     } catch (error) {
       if (/UNIQUE constraint failed: users\.email/i.test(errorMessage(error))) {
         await recordAuthRateLimitFailure(context.env, rateLimitSubject)
         throw new GatewayError(409, 'email_already_registered', 'Email is already registered')
+      }
+      if (registrationChallengeModule?.isRegistrationEmailChallengeClaimFailure(error) === true) {
+        throw new GatewayError(400, 'INVALID_VERIFY_CODE', 'Invalid or expired verification code')
       }
       throw error
     }

@@ -36,7 +36,7 @@ Status meanings:
 | Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Partial | Worker protocol/handler fixtures pass; port the remaining `apicompat` and Anthropic gateway suites |
 | Gemini generateContent | `/v1beta/models/*`, streaming and Gemini error translation | Partial | Worker protocol/handler fixtures pass; port the remaining Gemini multiplatform suites |
 | Codex backend API | `/backend-api/codex/*`, manifest, Responses transport | Partial | Worker routes and contract fixtures pass; add authenticated deployed E2E |
-| Protocol conversion | Chat, Responses, Anthropic, and Gemini normalized through an internal request model | Planned | Round-trip fixtures from `backend/internal/pkg/apicompat` |
+| Protocol conversion | Strict allow-listed Responses-to-Chat fallback plus Anthropic/Gemini Responses adapters | Partial | Responses request, synchronous response, SSE lifecycle and integrated Chat-only account fixtures pass; reverse Chat-to-Responses routing and remaining legacy `apicompat` fixtures remain |
 | Model aliases/capabilities | Group-visible names, upstream override, endpoint and account capabilities | Partial | Repository selection and model visibility tests |
 | Multi-provider accounts | OpenAI-compatible, Anthropic, Gemini and Codex credential/config adapters | Planned | Per-provider request, auth, timeout, and error fixtures |
 | Account scheduling | Weighted priority, concurrency leases, cooldown, sticky affinity, failover | Partial | Durable Object state-machine plus integration tests |
@@ -55,7 +55,7 @@ Status meanings:
 | Public settings | KV cache backed by versioned D1 settings | Partial | Default/cache/invalidation tests |
 | Password registration/login | D1 identity, Web Crypto hashes, Turnstile and Durable Object rate limits | Done | Registration/login, Turnstile, fail-closed limiter and enumeration-boundary tests |
 | Sessions | Hashed refresh tokens, rotation, logout/revoke, device/session list | Done | Rotation/replay/logout plus current-device list, selective/family, other-device and all-device revocation race tests |
-| Email challenges | Queue-delivered verification/reset/login challenges with expiry and attempt limits | Planned | Challenge state and email delivery tests |
+| Email challenges | Queue-delivered registration verification, authenticated email verification, and password reset challenges with expiry and attempt limits | Partial | Atomic consumption/replay, address binding, expiry, concurrent reset, rate-limit, delivery lease, tamper and retry tests pass; native `SEND_EMAIL` and compatibility `EMAIL_DELIVERY` paths are covered, while a verified production sender and deployed delivery E2E remain required |
 | OAuth identities | Provider adapters and safe identity linking | Planned | Callback/link-conflict tests |
 | TOTP and step-up | Encrypted TOTP secret, recovery codes and privileged-action challenge | Planned | TOTP and recovery-code tests |
 | Passkeys | WebAuthn challenge state and credential lifecycle | Planned | Port passkey handler tests |
@@ -65,7 +65,7 @@ Status meanings:
 | Subscription plans | Plans, user subscriptions, renewals and usage windows | Partial | Public/admin plan CRUD, user list/progress, redeem assignment/extension and gateway quota enforcement pass; payment renewal remains |
 | Redemption/invitations | Atomic redeem, administrative lifecycle, invitation rewards, exhaustion and expiry | Partial | Balance/subscription redemption plus hashed one-time admin generation, CAS batch lifecycle, idempotency, expiry and race tests pass; invitation rewards remain |
 | Promotions | Promo validation, applicability and one-time consumption | Planned | Promo boundary and idempotency tests |
-| Payments | D1 orders/provider config, Stripe signed webhooks, R2 evidence, Queue/DO subscription fulfillment and Stripe refunds | Partial | Worker order/config/currency/Stripe/webhook/fulfillment/refund/admin suites pass. v0.7 checkout is USD-plan-only, balance top-up stays effectively disabled, D1 atomically admits pending/daily limits, Stripe and D1 share a >=30m expiry, cron expires sessions, and late authoritative payments enter refund reconciliation. Add receipts, entitlement clawback and remaining providers |
+| Payments | D1 orders/provider config, Stripe signed webhooks, R2 evidence, Queue/DO subscription fulfillment and Stripe refunds | Partial | Worker order/config/currency/Stripe/webhook/fulfillment/refund/admin suites pass. v0.8 checkout is USD-plan-only, balance top-up stays disabled, D1 atomically admits pending/daily limits, Stripe and D1 share a >=30m expiry, cron expires sessions, late payments enter refund reconciliation, and subscription refunds claw back or restore entitlement exactly once. Add receipts, reconciliation views and retained providers |
 | Affiliate | Referral attribution, commission ledger and payout views | Planned | Port affiliate service suites |
 | Announcements | Published audience-aware announcements and acknowledgement | Planned | Visibility and acknowledgement tests |
 
@@ -87,7 +87,9 @@ Commercial storage rules:
   authority. A paid callback after expiry/cancellation is recorded in R2 and D1 as a recoverable
   refund request and never creates fulfillment work.
 - KV contains disposable public/config caches only; it is never financial truth.
-- Queue consumers deliver email and project fulfillment/refund/affiliate events idempotently.
+- Queue consumers lease and retry email delivery and project fulfillment/refund/affiliate events;
+  the compatibility email adapter receives a stable idempotency key, while native email retries
+  retain the same event ID for reconciliation after ambiguous send outcomes.
 - R2 stores exports, receipts, avatars, and long-lived audit artifacts where appropriate.
 
 ## 3. Administration and operations plane
@@ -95,7 +97,7 @@ Commercial storage rules:
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
 | Break-glass admin auth | Constant-time Bearer secret for bootstrap and recovery only | Done | `test/control/admin-auth.test.ts` |
-| Admin sessions/RBAC | Bootstrap/recovery-issued D1 sessions exist with last-admin protection; normal login, granular roles, step-up, CSRF/origin checks and rate limits remain | Partial | Session boundary/recovery tests; add login, revocation and authorization matrix |
+| Admin sessions/RBAC | D1 sessions plus granular roles, immutable permission grants, assignment audit, deny-by-default route authorization and last-super-admin protection | Partial | RBAC lifecycle, CAS/idempotency, immutable built-ins, route permission categories and recovery tests pass; normal login, step-up and explicit CSRF/origin enforcement remain |
 | User management | List/create/detail/update/disable, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Route/state/concurrency tests and real local D1 migration; add deployed-binding E2E |
 | API-key management | User key create/list/update/revoke, persistent idempotency/CAS, HMAC storage and one-time secret display | Partial | Route, hashing, concurrency and invalidation tests; add user self-service and deployed-binding E2E |
 | Groups/models/prices | Core group/model CRUD, CAS, catalog visibility, integer multiplier and append-only active prices exist; duplicate, atomic batch sort and advanced pricing remain | Partial | Worker control/gateway unit tests plus manual local migration and trigger checks; add binding E2E |
@@ -163,17 +165,18 @@ remaining API or UI affordance.
 The remaining work is ordered by end-user value. Each milestone must keep the guarded release order
 of tests, asset build, target D1 migrations, Worker deployment, and production smoke checks.
 
-1. **Payment closure**: the first Stripe slice now has server-priced hosted checkout, encrypted
+1. **Payment closure**: the Stripe slice now has server-priced hosted checkout, encrypted
    provider configuration, signed webhook ingestion, R2 evidence, idempotent subscription
-   fulfilment, refund state recovery, and matching user/admin screens. Remaining work is receipts,
-   balance/entitlement clawback during refunds, reconciliation, and the retained non-Stripe
-   providers. The order state machine and webhook verification are production implementations,
-   not stubs.
+   fulfilment, refund state recovery, subscription-entitlement clawback/rollback, and matching
+   user/admin screens. Remaining work is receipts, reconciliation views, and the retained
+   non-Stripe providers. The order state machine and webhook verification are production
+   implementations, not stubs.
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
    request/error/stream conversion fixtures; rate and concurrency integration; failover, cooldown,
    request-size policy, and accounting reconciliation.
-3. **Identity completion**: email verification and password reset first, then OAuth linking, TOTP
-   step-up/recovery codes, passkeys, linked identities, and notification preferences.
+3. **Identity completion**: email verification and password reset are implemented in the Worker;
+   production still needs a verified Email Service sender and deployed delivery E2E. Next are OAuth
+   linking, TOTP step-up/recovery codes, passkeys, linked identities, and notification preferences.
 4. **Media and realtime**: image/audio/video task APIs backed by Queue and R2, task polling and
    cancellation, followed by WebSocket realtime relay. Legacy provider-specific variants may be
    collapsed into one capability-based task contract.

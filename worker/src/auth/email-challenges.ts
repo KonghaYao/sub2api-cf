@@ -1,0 +1,1016 @@
+import type { Context } from 'hono'
+import type { Env, PlatformEvent } from '../env'
+import { controlError, controlSuccess, readJsonObject } from '../control/http'
+import { readSystemSettingSecret } from '../control/settings'
+import { sha256Hex } from '../gateway/crypto'
+import { asGatewayError, GatewayError } from '../gateway/errors'
+import { authenticateUserRequest, type UserRow } from './handler'
+import { hashPassword, PasswordValidationError, validateNewPassword } from './password'
+import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
+
+type AuthBindings = { Bindings: Env }
+export type EmailChallengePurpose =
+  | 'registration_email_verification'
+  | 'email_verification'
+  | 'password_reset'
+
+const EMAIL_VERIFICATION_TTL_MS = 15 * 60 * 1_000
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1_000
+const CHALLENGE_COOLDOWN_MS = 60 * 1_000
+const REGISTRATION_MAX_ATTEMPTS = 5
+const DELIVERY_LEASE_MS = 60 * 1_000
+const TOKEN_BYTES = 32
+const TOKEN_PEPPER_MIN_BYTES = 32
+const DELIVERY_ERROR_MAX_LENGTH = 1_024
+
+const EMAIL_VERIFICATION_TOKEN_PATTERN = /^sev_v1_[A-Za-z0-9_-]{43}$/
+const PASSWORD_RESET_TOKEN_PATTERN = /^spr_v1_[A-Za-z0-9_-]{43}$/
+const REGISTRATION_CODE_PATTERN = /^\d{6}$/
+
+interface EmailChallengeRow {
+  id: string
+  user_id: string | null
+  purpose: EmailChallengePurpose
+  token_hash: string
+  generation: number
+  status: 'pending' | 'consumed'
+  delivery_event_id: string
+  delivery_event_hash: string
+  delivery_state: 'pending' | 'queued' | 'delivering' | 'sent' | 'failed'
+  created_at_ms: number
+  expires_at_ms: number
+}
+
+interface EmailChallengePublicSettings {
+  email_verification_enabled?: boolean
+  turnstile_enabled?: boolean
+  site_name?: string
+}
+
+export interface EmailChallengeDeliveryPayload {
+  challenge_id: string
+  user_id: string | null
+  email_hash: string
+  purpose: EmailChallengePurpose
+  recipient_email: string
+  token: string
+  action_url: string
+  site_name: string
+  locale: string
+  expires_at_ms: number
+  generation: number
+}
+
+export type EmailChallengeDeliveryEvent = PlatformEvent<EmailChallengeDeliveryPayload> & {
+  event_type: 'auth.email-challenge.delivery.v1'
+  aggregate_type: 'user' | 'email_identity'
+}
+
+export type EmailChallengeDeliveryResult = 'delivered' | 'already_delivered' | 'stale'
+
+export interface RegistrationEmailChallengeConsumption {
+  /** Put this statement before the user INSERT in the same D1 batch. */
+  consumeStatement: D1PreparedStatement
+  /** Put this statement after the user INSERT; its FKs abort the batch if consume lost a race. */
+  claimStatement: D1PreparedStatement
+  consumeNonce: string
+  emailHash: string
+  verifiedAtMs: number
+}
+
+/** True when the claim FK aborted a registration batch after a consume race/replay. */
+export function isRegistrationEmailChallengeClaimFailure(error: unknown): boolean {
+  return /FOREIGN KEY constraint failed/i.test(
+    error instanceof Error ? error.message : String(error),
+  )
+}
+
+/** Compatible with the original POST /api/v1/auth/send-verify-code contract. */
+export async function requestRegistrationEmailVerification(
+  context: Context<AuthBindings>,
+): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const email = requireEmail(body.email)
+    const settings = await requireEmailChallengeSettings(
+      context.env,
+      'registration_email_verification',
+    )
+    const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'register')
+    await verifyTurnstile(context, settings, body.turnstile_token)
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+    const existingUser = await findUserByEmail(context.env, email)
+    if (existingUser === null) {
+      await issueChallenge(
+        context.env,
+        context.req.raw,
+        { id: null, email },
+        'registration_email_verification',
+        settings,
+      )
+    }
+    return controlSuccess({ message: 'Verification code sent successfully', countdown: 60 })
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/**
+ * Validate a six-digit registration code and return statements for the caller's
+ * existing registration D1 batch. The caller must execute them in this order:
+ * consumeStatement, user INSERT (with email_verified_at_ms=verifiedAtMs),
+ * claimStatement, then session/audit statements. The claim FK guarantees an
+ * invalid or concurrent replay rolls the entire batch back.
+ *
+ * A wrong code increments its durable attempt counter before this function
+ * rejects. No raw code is returned or persisted by this preparation step.
+ */
+export async function prepareRegistrationEmailChallengeConsumption(
+  env: Env,
+  emailValue: unknown,
+  codeValue: unknown,
+  userId: string,
+  now = Date.now(),
+): Promise<RegistrationEmailChallengeConsumption> {
+  const email = requireEmail(emailValue)
+  const code = requireChallengeToken(codeValue, 'registration_email_verification')
+  if (typeof userId !== 'string' || userId.length === 0 || userId.length > 128) {
+    throw new GatewayError(400, 'invalid_user_id', 'User id is invalid')
+  }
+  const [emailHash, tokenHash] = await Promise.all([
+    sha256Hex(email),
+    challengeTokenDigest(env, code, 'registration_email_verification'),
+  ])
+  const row = await env.DB.prepare(
+    `SELECT id, token_hash, status, expires_at_ms, verification_attempts
+       FROM email_challenges
+      WHERE email_hash = ? AND purpose = 'registration_email_verification'
+      LIMIT 1`,
+  ).bind(emailHash).first<{
+    id: string
+    token_hash: string
+    status: string
+    expires_at_ms: number
+    verification_attempts: number
+  }>()
+  if (
+    row === null || row.status !== 'pending' || row.expires_at_ms <= now ||
+    row.verification_attempts >= REGISTRATION_MAX_ATTEMPTS ||
+    !constantTimeHexEqual(row.token_hash, tokenHash)
+  ) {
+    if (row !== null && row.status === 'pending' && row.expires_at_ms > now) {
+      await env.DB.prepare(
+        `UPDATE email_challenges
+            SET verification_attempts = MIN(?, verification_attempts + 1), updated_at_ms = ?
+          WHERE id = ? AND status = 'pending' AND expires_at_ms > ?`,
+      ).bind(REGISTRATION_MAX_ATTEMPTS, now, row.id, now).run()
+    }
+    throw invalidChallenge('registration_email_verification')
+  }
+
+  const consumeNonce = crypto.randomUUID()
+  return {
+    consumeStatement: env.DB.prepare(
+      `UPDATE email_challenges
+          SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?, updated_at_ms = ?
+        WHERE id = ? AND email_hash = ? AND purpose = 'registration_email_verification'
+          AND token_hash = ? AND status = 'pending' AND expires_at_ms > ?
+          AND verification_attempts < ?
+        RETURNING id`,
+    ).bind(
+      now,
+      consumeNonce,
+      now,
+      row.id,
+      emailHash,
+      tokenHash,
+      now,
+      REGISTRATION_MAX_ATTEMPTS,
+    ),
+    claimStatement: env.DB.prepare(
+      `INSERT INTO registration_email_challenge_claims (
+         consume_nonce, user_id, email_hash, claimed_at_ms
+       ) VALUES (?, ?, ?, ?)`,
+    ).bind(consumeNonce, userId, emailHash, now),
+    consumeNonce,
+    emailHash,
+    verifiedAtMs: now,
+  }
+}
+
+/** Public request endpoint. Its success response deliberately reveals no account state. */
+export async function requestPasswordReset(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const email = requireEmail(body.email)
+    const settings = await requireEmailChallengeSettings(context.env, 'password_reset')
+    const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'login')
+    await verifyTurnstile(context, settings, body.turnstile_token)
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+
+    const user = await findActiveUserByEmail(context.env, email)
+    if (user !== null) {
+      await issueChallenge(context.env, context.req.raw, user, 'password_reset', settings)
+    }
+    return passwordResetRequestAccepted()
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/** Public reset endpoint. Challenge consumption, password mutation, and session revocation are one D1 batch. */
+export async function resetPasswordWithChallenge(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const email = requireEmail(body.email)
+    const token = requireChallengeToken(body.token, 'password_reset')
+    const newPassword = requirePassword(body.new_password)
+    validateNewPassword(newPassword)
+    await requireEmailChallengeSettings(context.env, 'password_reset')
+    const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'login')
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+    const [digest, credential] = await Promise.all([
+      challengeTokenDigest(context.env, token, 'password_reset'),
+      hashPassword(newPassword),
+    ])
+    const user = await findActiveUserByEmail(context.env, email)
+    if (user === null) throw invalidChallenge('password_reset')
+    const now = Date.now()
+    const consumeNonce = crypto.randomUUID()
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `UPDATE email_challenges
+            SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?, updated_at_ms = ?
+          WHERE user_id = ? AND purpose = 'password_reset' AND token_hash = ?
+            AND status = 'pending' AND expires_at_ms > ?
+            AND EXISTS (
+              SELECT 1 FROM users
+               WHERE users.id = email_challenges.user_id
+                 AND users.email = ? AND users.status = 'active'
+            )
+          RETURNING id`,
+      ).bind(now, consumeNonce, now, user.id, digest, now, email),
+      context.env.DB.prepare(
+        `UPDATE users
+            SET password_credential = ?, auth_version = auth_version + 1,
+                password_changed_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM email_challenges
+               WHERE user_id = users.id AND purpose = 'password_reset'
+                 AND consume_nonce = ? AND status = 'consumed'
+            )
+          RETURNING id`,
+      ).bind(credential, now, now, user.id, consumeNonce),
+      context.env.DB.prepare(
+        `UPDATE user_sessions
+            SET revoked_at_ms = COALESCE(revoked_at_ms, ?),
+                revoke_reason = COALESCE(revoke_reason, 'password_reset')
+          WHERE user_id = ? AND revoked_at_ms IS NULL
+            AND EXISTS (
+              SELECT 1 FROM email_challenges
+               WHERE user_id = ? AND purpose = 'password_reset'
+                 AND consume_nonce = ? AND status = 'consumed'
+            )`,
+      ).bind(now, user.id, user.id, consumeNonce),
+      context.env.DB.prepare(
+        `INSERT INTO auth_audit_events (
+           id, user_id, event_type, outcome, email_hash, ip_hash,
+           session_id, metadata_json, occurred_at_ms
+         )
+         SELECT ?, ?, 'auth.password_reset', 'succeeded', email_hash, NULL,
+                NULL, '{}', ?
+           FROM email_challenges
+          WHERE user_id = ? AND purpose = 'password_reset' AND consume_nonce = ?`,
+      ).bind(crypto.randomUUID(), user.id, now, user.id, consumeNonce),
+    ])
+    if (results[0].results.length !== 1 || results[1].results.length !== 1) {
+      throw invalidChallenge('password_reset')
+    }
+    return controlSuccess({
+      message: 'Your password has been reset successfully. You can now log in with your new password.',
+    })
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/** Authenticated endpoint that sends a verification challenge only to the session owner's email. */
+export async function requestEmailVerification(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    const settings = await requireEmailChallengeSettings(context.env, 'email_verification')
+    const rateLimit = await checkAuthRateLimit(
+      context.env,
+      context.req.raw,
+      user.email,
+      'register',
+    )
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+    if (user.email_verified_at_ms === null) {
+      await issueChallenge(context.env, context.req.raw, user, 'email_verification', settings)
+    }
+    return controlSuccess({ message: 'If verification is needed, an email will arrive shortly.' })
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/** Authenticated endpoint that binds a one-time challenge to the current user. */
+export async function confirmEmailVerification(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    const body = await readJsonObject(context.req.raw)
+    const token = requireChallengeToken(body.token, 'email_verification')
+    const normalizedEmail = requireEmail(user.email)
+    const [digest, currentEmailHash] = await Promise.all([
+      challengeTokenDigest(context.env, token, 'email_verification'),
+      sha256Hex(normalizedEmail),
+    ])
+    const now = Date.now()
+    const challenge = await context.env.DB.prepare(
+      `SELECT id, email_hash
+         FROM email_challenges
+        WHERE user_id = ? AND purpose = 'email_verification' AND token_hash = ?
+          AND status = 'pending' AND expires_at_ms > ?
+        LIMIT 1`,
+    ).bind(user.id, digest, now).first<{ id: string; email_hash: string }>()
+    if (challenge === null || !constantTimeHexEqual(challenge.email_hash, currentEmailHash)) {
+      throw invalidChallenge('email_verification')
+    }
+    const consumeNonce = crypto.randomUUID()
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `UPDATE email_challenges
+            SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?, updated_at_ms = ?
+          WHERE id = ? AND user_id = ? AND purpose = 'email_verification'
+            AND token_hash = ? AND email_hash = ?
+            AND status = 'pending' AND expires_at_ms > ?
+            AND EXISTS (
+              SELECT 1 FROM users
+               WHERE id = ? AND lower(trim(email)) = ?
+            )
+          RETURNING id`,
+      ).bind(
+        now,
+        consumeNonce,
+        now,
+        challenge.id,
+        user.id,
+        digest,
+        currentEmailHash,
+        now,
+        user.id,
+        normalizedEmail,
+      ),
+      context.env.DB.prepare(
+        `UPDATE users
+            SET email_verified_at_ms = COALESCE(email_verified_at_ms, ?), updated_at_ms = ?
+          WHERE id = ? AND lower(trim(email)) = ?
+            AND EXISTS (
+              SELECT 1 FROM email_challenges
+               WHERE user_id = users.id AND purpose = 'email_verification'
+                 AND consume_nonce = ? AND status = 'consumed'
+            )
+          RETURNING id`,
+      ).bind(now, now, user.id, normalizedEmail, consumeNonce),
+      context.env.DB.prepare(
+        `INSERT INTO auth_audit_events (
+           id, user_id, event_type, outcome, email_hash, ip_hash,
+           session_id, metadata_json, occurred_at_ms
+         )
+         SELECT ?, ?, 'auth.email_verified', 'succeeded', email_hash, NULL,
+                ?, '{}', ?
+           FROM email_challenges
+          WHERE user_id = ? AND purpose = 'email_verification' AND consume_nonce = ?`,
+      ).bind(crypto.randomUUID(), user.id, user.session_id, now, user.id, consumeNonce),
+    ])
+    if (results[0].results.length !== 1 || results[1].results.length !== 1) {
+      throw invalidChallenge('email_verification')
+    }
+    return controlSuccess({ message: 'Email verified successfully.', verified_at: new Date(now).toISOString() })
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/**
+ * Queue consumer seam. Delivery failures are thrown so the caller can retry the
+ * same event; the D1 lease prevents concurrent duplicate sends. Native Cloudflare
+ * email delivery is preferred, with the Worker service binding retained as a
+ * compatibility adapter that receives a stable Idempotency-Key.
+ */
+export async function consumeEmailChallengeDelivery(
+  value: unknown,
+  env: Env,
+): Promise<EmailChallengeDeliveryResult> {
+  const event = requireEmailChallengeDeliveryEvent(value)
+  const now = Date.now()
+  const digest = await challengeTokenDigest(env, event.payload.token, event.payload.purpose)
+  const eventHash = await emailDeliveryEventDigest(env, event)
+  const challenge = await env.DB.prepare(
+    `SELECT id, user_id, purpose, token_hash, generation, status,
+            delivery_event_id, delivery_event_hash, delivery_state, created_at_ms, expires_at_ms
+       FROM email_challenges
+      WHERE id = ? AND user_id IS ? AND email_hash = ? AND purpose = ? AND token_hash = ?
+        AND delivery_event_hash = ?
+        AND generation = ? AND delivery_event_id = ?
+      LIMIT 1`,
+  ).bind(
+    event.payload.challenge_id,
+    event.payload.user_id,
+    event.payload.email_hash,
+    event.payload.purpose,
+    digest,
+    eventHash,
+    event.payload.generation,
+    event.event_id,
+  ).first<EmailChallengeRow>()
+  if (challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now) {
+    return 'stale'
+  }
+  if (challenge.delivery_state === 'sent') return 'already_delivered'
+
+  const leaseId = crypto.randomUUID()
+  const lease = await env.DB.prepare(
+    `UPDATE email_challenges
+        SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
+            delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
+            last_delivery_error = NULL, updated_at_ms = ?
+      WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
+        AND delivery_event_id = ?
+        AND (
+          delivery_state IN ('pending', 'queued', 'failed')
+          OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
+        )
+      RETURNING id`,
+  ).bind(
+    leaseId,
+    now + DELIVERY_LEASE_MS,
+    now,
+    challenge.id,
+    now,
+    event.event_id,
+    now,
+  ).all<{ id: string }>()
+  if (lease.results.length !== 1) {
+    const current = await env.DB.prepare(
+      'SELECT delivery_state FROM email_challenges WHERE id = ?',
+    ).bind(challenge.id).first<{ delivery_state: string }>()
+    if (current?.delivery_state === 'sent') return 'already_delivered'
+    throw new Error(`Email challenge delivery ${event.event_id} already has an active lease`)
+  }
+
+  try {
+    await deliverEmailChallenge(event, env)
+    const update = await env.DB.prepare(
+      `UPDATE email_challenges
+          SET delivery_state = 'sent', delivered_at_ms = ?, delivery_lease_id = NULL,
+              delivery_lease_expires_at_ms = NULL, updated_at_ms = ?
+        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+    ).bind(Date.now(), Date.now(), challenge.id, leaseId).run()
+    if (resultChanges(update) !== 1) {
+      throw new Error(`Email challenge delivery ${event.event_id} lost its lease after sending`)
+    }
+    return 'delivered'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown delivery failure'
+    await env.DB.prepare(
+      `UPDATE email_challenges
+          SET delivery_state = 'failed', delivery_lease_id = NULL,
+              delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
+        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+    ).bind(message.slice(0, DELIVERY_ERROR_MAX_LENGTH), Date.now(), challenge.id, leaseId).run()
+    throw error
+  }
+}
+
+async function deliverEmailChallenge(event: EmailChallengeDeliveryEvent, env: Env): Promise<void> {
+  if (env.SEND_EMAIL !== undefined) {
+    const content = renderEmailChallenge(event)
+    await env.SEND_EMAIL.send({
+      from: requireEmailFromAddress(env.EMAIL_FROM_ADDRESS),
+      to: event.payload.recipient_email,
+      subject: content.subject,
+      text: content.text,
+      html: content.html,
+    })
+    return
+  }
+
+  if (env.EMAIL_DELIVERY !== undefined) {
+    const response = await env.EMAIL_DELIVERY.fetch(new Request(
+      'https://email-delivery.internal/v1/challenges',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': event.event_id,
+        },
+        body: JSON.stringify({
+          recipient_email: event.payload.recipient_email,
+          purpose: event.payload.purpose,
+          token: event.payload.token,
+          action_url: event.payload.action_url,
+          site_name: event.payload.site_name,
+          locale: event.payload.locale,
+          expires_at_ms: event.payload.expires_at_ms,
+        }),
+      },
+    ))
+    if (!response.ok) throw new Error(`email delivery Worker returned ${response.status}`)
+    return
+  }
+
+  throw new Error('No email delivery binding is configured (SEND_EMAIL or EMAIL_DELIVERY)')
+}
+
+function renderEmailChallenge(event: EmailChallengeDeliveryEvent): {
+  subject: string
+  text: string
+  html: string
+} {
+  const siteName = normalizedSiteName(event.payload.site_name)
+  const actionUrl = requireEmailActionUrl(event.payload.action_url)
+  const details = event.payload.purpose === 'password_reset'
+    ? { subject: 'Reset your password', heading: 'Reset your password', action: 'Reset password' }
+    : event.payload.purpose === 'registration_email_verification'
+    ? { subject: 'Verify your registration', heading: 'Verify your email', action: 'Verify email' }
+    : { subject: 'Verify your email', heading: 'Verify your email', action: 'Verify email' }
+  const subject = `${siteName}: ${details.subject}`
+  const text = [
+    `${siteName}: ${details.heading}`,
+    '',
+    `Verification token: ${event.payload.token}`,
+    `${details.action}: ${actionUrl}`,
+    '',
+    'If you did not request this message, you can ignore it.',
+  ].join('\n')
+  const html = [
+    '<!doctype html><html><body>',
+    `<h1>${escapeHtml(details.heading)}</h1>`,
+    `<p>${escapeHtml(siteName)} received a request for this email address.</p>`,
+    `<p><a href="${escapeHtml(actionUrl)}">${escapeHtml(details.action)}</a></p>`,
+    `<p>Verification token: <code>${escapeHtml(event.payload.token)}</code></p>`,
+    '<p>If you did not request this message, you can ignore it.</p>',
+    '</body></html>',
+  ].join('')
+  return { subject, text, html }
+}
+
+function requireEmailFromAddress(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new Error('EMAIL_FROM_ADDRESS is required when SEND_EMAIL is configured')
+  }
+  const email = value.trim().toLowerCase()
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('EMAIL_FROM_ADDRESS must be a valid email address')
+  }
+  return email
+}
+
+function requireEmailActionUrl(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('Email challenge action URL is invalid')
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('Email challenge action URL must use HTTP or HTTPS')
+  }
+  return url.toString()
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]!)
+}
+
+export function isEmailChallengeDeliveryEvent(value: unknown): value is EmailChallengeDeliveryEvent {
+  try {
+    requireEmailChallengeDeliveryEvent(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function issueChallenge(
+  env: Env,
+  request: Request,
+  user: { id: string | null; email: string },
+  purpose: EmailChallengePurpose,
+  settings: EmailChallengePublicSettings,
+): Promise<void> {
+  const now = Date.now()
+  const emailHash = await sha256Hex(user.email)
+  const existing = await env.DB.prepare(
+    `SELECT id, user_id, purpose, token_hash, generation, status,
+            delivery_event_id, delivery_event_hash, delivery_state, created_at_ms, expires_at_ms
+       FROM email_challenges
+      WHERE email_hash = ? AND purpose = ?
+      LIMIT 1`,
+  ).bind(emailHash, purpose).first<EmailChallengeRow>()
+  if (
+    existing !== null &&
+    existing.status === 'pending' &&
+    existing.expires_at_ms > now &&
+    existing.created_at_ms + CHALLENGE_COOLDOWN_MS > now
+  ) {
+    return
+  }
+
+  const token = createChallengeToken(purpose)
+  const challengeId = crypto.randomUUID()
+  const generation = (existing?.generation ?? 0) + 1
+  const eventId = `email-challenge:${challengeId}:${generation}`
+  const [tokenHash, ipHash] = await Promise.all([
+    challengeTokenDigest(env, token, purpose),
+    requestIpHash(request),
+  ])
+  const expiresAtMs = now + challengeTtl(purpose)
+  const event = createEmailChallengeDeliveryEvent({
+    challenge_id: challengeId,
+    user_id: user.id,
+    email_hash: emailHash,
+    purpose,
+    recipient_email: user.email,
+    token,
+    action_url: challengeActionUrl(request, user.email, token, purpose),
+    site_name: normalizedSiteName(settings.site_name),
+    locale: request.headers.get('accept-language')?.slice(0, 128) ?? '',
+    expires_at_ms: expiresAtMs,
+    generation,
+  }, now)
+  const eventHash = await emailDeliveryEventDigest(env, event)
+  let changed = 0
+  try {
+    if (existing === null) {
+      const insert = await env.DB.prepare(
+        `INSERT INTO email_challenges (
+           id, user_id, purpose, email_hash, token_hash, generation, status,
+           delivery_event_id, delivery_event_hash, delivery_state,
+           delivery_attempts, verification_attempts,
+           requested_ip_hash, created_at_ms, expires_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, 'pending', 0, 0, ?, ?, ?, ?)`,
+      ).bind(
+        challengeId,
+        user.id,
+        purpose,
+        emailHash,
+        tokenHash,
+        generation,
+        eventId,
+        eventHash,
+        ipHash,
+        now,
+        expiresAtMs,
+        now,
+      ).run()
+      changed = resultChanges(insert)
+    } else {
+      const update = await env.DB.prepare(
+        `UPDATE email_challenges
+            SET id = ?, email_hash = ?, token_hash = ?, generation = ?, status = 'pending',
+                delivery_event_id = ?, delivery_event_hash = ?, delivery_state = 'pending',
+                delivery_attempts = 0,
+                verification_attempts = 0,
+                delivery_lease_id = NULL, delivery_lease_expires_at_ms = NULL,
+                last_delivery_error = NULL, requested_ip_hash = ?, created_at_ms = ?,
+                expires_at_ms = ?, delivered_at_ms = NULL, consumed_at_ms = NULL,
+                consume_nonce = NULL, updated_at_ms = ?
+          WHERE email_hash = ? AND purpose = ? AND generation = ?`,
+      ).bind(
+        challengeId,
+        emailHash,
+        tokenHash,
+        generation,
+        eventId,
+        eventHash,
+        ipHash,
+        now,
+        expiresAtMs,
+        now,
+        emailHash,
+        purpose,
+        existing.generation,
+      ).run()
+      changed = resultChanges(update)
+    }
+  } catch (error) {
+    if (isConstraintConflict(error)) return
+    throw error
+  }
+  if (changed !== 1) return
+
+  try {
+    await env.EVENTS_QUEUE.send(event)
+    await env.DB.prepare(
+      `UPDATE email_challenges SET delivery_state = 'queued', updated_at_ms = ?
+        WHERE id = ? AND delivery_event_id = ? AND delivery_state = 'pending'`,
+    ).bind(Date.now(), challengeId, eventId).run()
+  } catch (error) {
+    await env.DB.prepare(
+      `UPDATE email_challenges
+          SET delivery_state = 'failed', last_delivery_error = ?, updated_at_ms = ?
+        WHERE id = ? AND delivery_event_id = ? AND delivery_state = 'pending'`,
+    ).bind('queue enqueue failed', Date.now(), challengeId, eventId).run()
+    // The public response is deliberately unchanged. A later request may rotate
+    // this failed challenge, while the persistent limiter prevents token churn.
+    console.error('email challenge enqueue failed', {
+      purpose,
+      name: error instanceof Error ? error.name : 'unknown',
+    })
+  }
+}
+
+export function createEmailChallengeDeliveryEvent(
+  payload: EmailChallengeDeliveryPayload,
+  occurredAtMs: number,
+): EmailChallengeDeliveryEvent {
+  return {
+    schema_version: 1,
+    event_id: `email-challenge:${payload.challenge_id}:${payload.generation}`,
+    event_type: 'auth.email-challenge.delivery.v1',
+    occurred_at_ms: occurredAtMs,
+    aggregate_type: payload.user_id === null ? 'email_identity' : 'user',
+    aggregate_id: payload.user_id ?? payload.email_hash,
+    payload,
+  }
+}
+
+function requireEmailChallengeDeliveryEvent(value: unknown): EmailChallengeDeliveryEvent {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalidEvent()
+  const event = value as Partial<EmailChallengeDeliveryEvent>
+  const payload = event.payload
+  if (
+    event.schema_version !== 1 ||
+    event.event_type !== 'auth.email-challenge.delivery.v1' ||
+    (event.aggregate_type !== 'user' && event.aggregate_type !== 'email_identity') ||
+    typeof event.event_id !== 'string' ||
+    typeof event.aggregate_id !== 'string' ||
+    !Number.isSafeInteger(event.occurred_at_ms) ||
+    payload === null || typeof payload !== 'object' || Array.isArray(payload) ||
+    typeof payload.challenge_id !== 'string' ||
+    (payload.user_id !== null && typeof payload.user_id !== 'string') ||
+    typeof payload.email_hash !== 'string' || !/^[a-f0-9]{64}$/.test(payload.email_hash) ||
+    event.aggregate_type !== (payload.user_id === null ? 'email_identity' : 'user') ||
+    event.aggregate_id !== (payload.user_id ?? payload.email_hash) ||
+    (payload.purpose !== 'registration_email_verification' &&
+      payload.purpose !== 'email_verification' && payload.purpose !== 'password_reset') ||
+    typeof payload.recipient_email !== 'string' || payload.recipient_email.length > 320 ||
+    !isChallengeToken(payload.token, payload.purpose) ||
+    typeof payload.action_url !== 'string' || payload.action_url.length > 2_048 ||
+    typeof payload.site_name !== 'string' || payload.site_name.length > 128 ||
+    typeof payload.locale !== 'string' || payload.locale.length > 128 ||
+    !Number.isSafeInteger(payload.expires_at_ms) ||
+    !Number.isSafeInteger(payload.generation) || payload.generation < 1 ||
+    event.event_id !== `email-challenge:${payload.challenge_id}:${payload.generation}`
+  ) {
+    throw invalidEvent()
+  }
+  return event as EmailChallengeDeliveryEvent
+}
+
+async function findActiveUserByEmail(env: Env, email: string): Promise<UserRow | null> {
+  return env.DB.prepare(
+    `SELECT id, email, display_name, role, status, balance_micros, state_version,
+            auth_version, password_credential, email_verified_at_ms,
+            password_changed_at_ms, last_login_at_ms, avatar_object_key,
+            avatar_content_type, avatar_updated_at_ms, created_at_ms, updated_at_ms
+       FROM users
+      WHERE email = ? AND status = 'active'
+      LIMIT 1`,
+  ).bind(email).first<UserRow>()
+}
+
+async function findUserByEmail(env: Env, email: string): Promise<Pick<UserRow, 'id'> | null> {
+  return env.DB.prepare('SELECT id FROM users WHERE email = ? LIMIT 1')
+    .bind(email)
+    .first<Pick<UserRow, 'id'>>()
+}
+
+async function requireEmailChallengeSettings(
+  env: Env,
+  purpose: EmailChallengePurpose,
+): Promise<EmailChallengePublicSettings> {
+  let settings: EmailChallengePublicSettings | null
+  try {
+    settings = await env.CONFIG_KV.get<EmailChallengePublicSettings>(
+      `${env.ENVIRONMENT}:public-settings:v1`,
+      'json',
+    )
+  } catch {
+    throw new GatewayError(503, 'settings_unavailable', 'Authentication settings are unavailable', 'server_error')
+  }
+  if (settings?.email_verification_enabled !== true) {
+    throw new GatewayError(
+      403,
+      purpose === 'password_reset' ? 'PASSWORD_RESET_DISABLED' : 'EMAIL_VERIFICATION_DISABLED',
+      purpose === 'password_reset' ? 'Password reset is not enabled' : 'Email verification is not enabled',
+      'permission_error',
+    )
+  }
+  return settings
+}
+
+async function verifyTurnstile(
+  context: Context<AuthBindings>,
+  settings: EmailChallengePublicSettings,
+  token: unknown,
+): Promise<void> {
+  if (settings.turnstile_enabled !== true) return
+  if (typeof token !== 'string' || token.trim() === '' || token.length > 2_048) {
+    throw new GatewayError(400, 'captcha_required', 'Turnstile verification is required')
+  }
+  const secret = context.env.TURNSTILE_SECRET_KEY ??
+    await readSystemSettingSecret(context.env, 'turnstile_secret_key')
+  if (!secret) {
+    throw new GatewayError(503, 'turnstile_not_configured', 'Turnstile is not configured', 'server_error')
+  }
+  const form = new URLSearchParams({ secret, response: token })
+  const address = context.req.header('cf-connecting-ip')
+  if (address) form.set('remoteip', address)
+  let response: Response
+  try {
+    response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    })
+  } catch {
+    throw new GatewayError(503, 'turnstile_unavailable', 'Turnstile verification is unavailable', 'server_error')
+  }
+  const value = await response.json().catch(() => null) as { success?: unknown } | null
+  if (!response.ok || value?.success !== true) {
+    throw new GatewayError(400, 'captcha_invalid', 'Turnstile verification failed')
+  }
+}
+
+function createChallengeToken(purpose: EmailChallengePurpose): string {
+  if (purpose === 'registration_email_verification') return createSixDigitCode()
+  const bytes = crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  const random = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+  return `${purpose === 'email_verification' ? 'sev' : 'spr'}_v1_${random}`
+}
+
+function createSixDigitCode(): string {
+  const digits = new Uint8Array(6)
+  for (let index = 0; index < digits.length; index += 1) {
+    let value = 255
+    while (value >= 250) value = crypto.getRandomValues(new Uint8Array(1))[0]
+    digits[index] = value % 10
+  }
+  return Array.from(digits).join('')
+}
+
+async function challengeTokenDigest(
+  env: Env,
+  token: string,
+  purpose: EmailChallengePurpose,
+): Promise<string> {
+  return hmacDigest(env, `sub2api/email-challenge/${purpose}/v1\0${token}`)
+}
+
+async function emailDeliveryEventDigest(env: Env, event: EmailChallengeDeliveryEvent): Promise<string> {
+  return hmacDigest(env, `sub2api/email-challenge-delivery/v1\0${JSON.stringify(event)}`)
+}
+
+async function hmacDigest(env: Env, message: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(requirePepper(env)),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message))
+  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function requestIpHash(request: Request): Promise<string> {
+  const address = request.headers.get('cf-connecting-ip')?.trim().toLowerCase() ||
+    'cloudflare-address-unavailable'
+  return sha256Hex(address.slice(0, 128))
+}
+
+function challengeActionUrl(
+  request: Request,
+  email: string,
+  token: string,
+  purpose: EmailChallengePurpose,
+): string {
+  const target = new URL(purpose === 'password_reset' ? '/reset-password' : '/email-verify', request.url)
+  target.searchParams.set('email', email)
+  target.searchParams.set('token', token)
+  return target.toString()
+}
+
+function challengeTtl(purpose: EmailChallengePurpose): number {
+  return purpose === 'password_reset' ? PASSWORD_RESET_TTL_MS : EMAIL_VERIFICATION_TTL_MS
+}
+
+function normalizedSiteName(value: unknown): string {
+  if (typeof value !== 'string') return 'Sub2API'
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 128)
+  return normalized === '' ? 'Sub2API' : normalized
+}
+
+function requireEmail(value: unknown): string {
+  if (typeof value !== 'string') throw new GatewayError(400, 'invalid_email', 'Email is invalid')
+  const email = value.trim().toLowerCase()
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new GatewayError(400, 'invalid_email', 'Email is invalid')
+  }
+  return email
+}
+
+function requirePassword(value: unknown): string {
+  if (typeof value !== 'string') throw new GatewayError(400, 'invalid_password', 'Password is invalid')
+  return value
+}
+
+function requireChallengeToken(value: unknown, purpose: EmailChallengePurpose): string {
+  if (!isChallengeToken(value, purpose)) throw invalidChallenge(purpose)
+  return value
+}
+
+function isChallengeToken(value: unknown, purpose: EmailChallengePurpose): value is string {
+  return typeof value === 'string' && (
+    purpose === 'registration_email_verification'
+      ? REGISTRATION_CODE_PATTERN.test(value)
+      : purpose === 'email_verification'
+      ? EMAIL_VERIFICATION_TOKEN_PATTERN.test(value)
+      : PASSWORD_RESET_TOKEN_PATTERN.test(value)
+  )
+}
+
+function requirePepper(env: Env): string {
+  if (!env.API_KEY_PEPPER || new TextEncoder().encode(env.API_KEY_PEPPER).byteLength < TOKEN_PEPPER_MIN_BYTES) {
+    throw new GatewayError(503, 'auth_not_configured', 'Authentication is not configured', 'server_error')
+  }
+  return env.API_KEY_PEPPER
+}
+
+function passwordResetRequestAccepted(): Response {
+  return controlSuccess({
+    message: 'If your email is registered, you will receive a password reset link shortly.',
+  })
+}
+
+function invalidChallenge(purpose: EmailChallengePurpose): GatewayError {
+  if (purpose === 'registration_email_verification') {
+    return new GatewayError(400, 'INVALID_VERIFY_CODE', 'Invalid or expired verification code')
+  }
+  return new GatewayError(
+    400,
+    purpose === 'password_reset' ? 'INVALID_RESET_TOKEN' : 'INVALID_EMAIL_VERIFICATION_TOKEN',
+    purpose === 'password_reset'
+      ? 'Invalid or expired password reset token'
+      : 'Invalid or expired email verification token',
+  )
+}
+
+function invalidEvent(): Error {
+  return new Error('Invalid email challenge delivery event')
+}
+
+function challengeError(error: unknown): Response {
+  if (error instanceof PasswordValidationError) {
+    return controlError(new GatewayError(400, error.code, error.message))
+  }
+  return controlError(asGatewayError(error))
+}
+
+function resultChanges(result: D1Result<unknown>): number {
+  const changes = (result.meta as D1Meta & { changes?: unknown }).changes
+  return Number.isSafeInteger(changes) ? changes as number : 0
+}
+
+function isConstraintConflict(error: unknown): boolean {
+  return /(?:UNIQUE|PRIMARY KEY) constraint failed/i.test(
+    error instanceof Error ? error.message : String(error),
+  )
+}
+
+function constantTimeHexEqual(left: string, right: string): boolean {
+  const length = Math.max(left.length, right.length)
+  let difference = left.length ^ right.length
+  for (let index = 0; index < length; index += 1) {
+    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0)
+  }
+  return difference === 0
+}

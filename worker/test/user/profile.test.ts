@@ -168,6 +168,10 @@ describe('user profile HTTP contract', () => {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ balance_notify_enabled: true }),
     })
     expect(unsupported.status).toBe(400)
+    const emailChange = await request(test, '/api/v1/user', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'changed@example.com' }),
+    })
+    expect(emailChange.status).toBe(400)
     const malformed = await request(test, '/api/v1/user', {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ avatar_url: 'https://example.test/avatar.png' }),
     })

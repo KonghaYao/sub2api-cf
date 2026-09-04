@@ -206,7 +206,12 @@ export async function resolveGatewayRoute(
   publicName: string,
   endpoint: GatewayEndpoint,
   userId: string,
-): Promise<{ model: ModelRoute; candidates: AccountCandidate[] }> {
+  fallbackEndpoint?: GatewayEndpoint,
+): Promise<{
+  model: ModelRoute
+  candidates: AccountCandidate[]
+  upstream_endpoint: GatewayEndpoint
+}> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const modelCapability = endpoint === 'embeddings'
     ? 'm.embeddings = 1'
@@ -215,7 +220,7 @@ export async function resolveGatewayRoute(
     ? [groupId, publicName]
     : [groupId, publicName, endpoint]
   const modelBindings = [userId, ...routeBindings]
-  const [modelResult, candidateResult] = await env.DB.batch([
+  const statements = [
     env.DB.prepare(
       `${modelSelect(true)}
         WHERE gm.group_id = ? AND m.public_name = ?
@@ -225,19 +230,33 @@ export async function resolveGatewayRoute(
         LIMIT 1`,
     ).bind(...modelBindings),
     accountCandidatesStatement(env, groupId, publicName, capabilityColumn),
-  ])
+  ]
+  if (endpoint === 'responses' && fallbackEndpoint === 'chat_completions') {
+    statements.push(accountCandidatesStatement(env, groupId, publicName, 'am.chat_completions'))
+  }
+  const [modelResult, candidateResult, fallbackCandidateResult] = await env.DB.batch(statements)
   const model = modelResult.results[0] as unknown as ModelRoute | undefined
   if (model === undefined) {
     throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
   }
-  const candidates = candidateResult.results as unknown as AccountCandidate[]
+  let candidates = candidateResult.results as unknown as AccountCandidate[]
+  let upstreamEndpoint = endpoint
+  if (
+    candidates.length === 0 &&
+    endpoint === 'responses' &&
+    fallbackEndpoint === 'chat_completions' &&
+    fallbackCandidateResult !== undefined
+  ) {
+    candidates = fallbackCandidateResult.results as unknown as AccountCandidate[]
+    upstreamEndpoint = 'chat_completions'
+  }
   if (
     candidates.length === 0 ||
     candidates.some((candidate) => candidate.config_revision !== model.config_revision)
   ) {
     throw new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
   }
-  return { model, candidates }
+  return { model, candidates, upstream_endpoint: upstreamEndpoint }
 }
 
 function accountCandidatesStatement(

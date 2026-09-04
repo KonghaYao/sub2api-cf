@@ -11,6 +11,7 @@ import {
   getRefundEligibleProviders,
   processAdminRefund,
   queryAdminRefund,
+  recoverPendingRefundClawbacks,
   requestPaymentRefund,
 } from '../../src/payment/refunds'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
@@ -26,6 +27,7 @@ interface Fixture {
   app: Hono<{ Bindings: Env }>
   authorization: Record<'alice' | 'bob' | 'admin', string>
   stripeFetch: ReturnType<typeof vi.fn<typeof fetch>>
+  subscriptionFetch: ReturnType<typeof vi.fn>
 }
 
 interface InsertProviderInput {
@@ -232,6 +234,436 @@ describe('Stripe refund HTTP contract', () => {
       `SELECT status, version FROM payment_orders WHERE id = 'order-clawback-required'`,
     ).get()).toEqual({ status: 'COMPLETED', version: 0 })
     expect(test.stripeFetch).not.toHaveBeenCalled()
+  })
+
+  it('requires force when a subscription entitlement can no longer be found', async () => {
+    const test = await fixture()
+    insertOrder(test.raw, {
+      id: 'order-subscription-missing',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+    })
+
+    const response = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-missing/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'subscription-missing-v1' },
+        body: JSON.stringify({ amount: 12.5, reason: 'subscription missing' }),
+      })
+
+    expect(response.status).toBe(200)
+    expect(await json(response)).toEqual({
+      code: 0,
+      data: {
+        success: false,
+        warning: 'Cannot find an active subscription for deduction; retry with force',
+        require_force: true,
+      },
+    })
+    expect(test.stripeFetch).not.toHaveBeenCalled()
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM payment_refunds WHERE order_id = 'order-subscription-missing'`,
+    ).get()).toEqual({ count: 0 })
+  })
+
+  it('deducts snapshotted subscription days once and replays the completed result', async () => {
+    const test = await fixture()
+    seedSubscription(test.raw, {
+      id: 'subscription-refund-once',
+      userId: 'alice',
+      status: 'active',
+      startsAt: NOW - 10 * DAY_MS,
+      expiresAt: NOW + 60 * DAY_MS,
+      controlVersion: 3,
+    })
+    insertOrder(test.raw, {
+      id: 'order-subscription-refund-once',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      subscriptionId: 'subscription-refund-once',
+      paymentIntentId: 'pi-subscription-refund-once',
+    })
+    test.stripeFetch.mockResolvedValue(stripeRefund({
+      id: 're-subscription-refund-once', amount: 1_250, currency: 'usd', status: 'succeeded',
+      paymentIntent: 'pi-subscription-refund-once',
+    }))
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'subscription-refund-once-v1' },
+      body: JSON.stringify({ amount: 12.5, reason: 'subscription refund' }),
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await userRequest(test, 'admin',
+        '/api/v1/admin/payment/orders/order-subscription-refund-once/refund', request)
+      expect(response.status).toBe(200)
+      expect((await json(response)).data).toEqual({
+        success: true, balance_deducted: 0, subscription_days_deducted: 30,
+      })
+    }
+
+    expect(test.stripeFetch).toHaveBeenCalledTimes(1)
+    expect(test.subscriptionFetch).toHaveBeenCalledTimes(1)
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms, control_version
+         FROM user_subscriptions WHERE id = 'subscription-refund-once'`,
+    ).get()).toEqual({ status: 'active', expires_at_ms: NOW + 30 * DAY_MS, control_version: 4 })
+    expect(test.raw.prepare(
+      `SELECT clawback_kind, clawback_status, clawback_resource_id, clawback_days,
+              clawback_forced, clawback_applied_control_version
+         FROM payment_refunds WHERE order_id = 'order-subscription-refund-once'`,
+    ).get()).toEqual({
+      clawback_kind: 'subscription',
+      clawback_status: 'applied',
+      clawback_resource_id: 'subscription-refund-once',
+      clawback_days: 30,
+      clawback_forced: 0,
+      clawback_applied_control_version: 4,
+    })
+    expect(test.raw.prepare(
+      `SELECT status FROM subscription_state_sync
+        WHERE request_id LIKE 'payment-refund-clawback:%'`,
+    ).all()).toEqual([{ status: 'applied' }])
+  })
+
+  it('allows only one refund saga when different idempotency keys race', async () => {
+    const test = await fixture()
+    insertOrder(test.raw, {
+      id: 'order-refund-claim-race',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'balance',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      paymentIntentId: 'pi-refund-claim-race',
+    })
+    test.stripeFetch.mockResolvedValue(stripeRefund({
+      id: 're-refund-claim-race', amount: 1_250, currency: 'usd', status: 'succeeded',
+      paymentIntent: 'pi-refund-claim-race',
+    }))
+    const database = test.env.DB
+    const originalBatch = database.batch.bind(database)
+    let arrivals = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    database.batch = async <T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
+      if (statements.some((statement) => (
+        statement as D1PreparedStatement & { sql?: string }
+      ).sql?.includes('payment_refund_claims'))) {
+        arrivals += 1
+        if (arrivals === 2) release()
+        else await gate
+      }
+      return originalBatch<T>(statements)
+    }
+    const request = (idempotencyKey: string) => userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-refund-claim-race/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
+        body: JSON.stringify({ amount: 12.5, reason: 'concurrent refund', deduct_balance: false }),
+      })
+
+    const responses = await Promise.all([request('claim-race-a'), request('claim-race-b')])
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409])
+    expect(test.stripeFetch).toHaveBeenCalledTimes(1)
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM payment_refunds WHERE order_id = 'order-refund-claim-race'`,
+    ).get()).toEqual({ count: 1 })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM payment_refund_claims
+        WHERE order_id = 'order-refund-claim-race'`,
+    ).get()).toEqual({ count: 1 })
+  })
+
+  it('revokes an entitlement when subtracting its paid days would expire it', async () => {
+    const test = await fixture()
+    seedSubscription(test.raw, {
+      id: 'subscription-refund-revoke',
+      userId: 'alice',
+      status: 'active',
+      startsAt: NOW - 20 * DAY_MS,
+      expiresAt: NOW + 10 * DAY_MS,
+      controlVersion: 8,
+    })
+    insertOrder(test.raw, {
+      id: 'order-subscription-refund-revoke',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      subscriptionId: 'subscription-refund-revoke',
+    })
+    test.stripeFetch.mockResolvedValue(stripeRefund({
+      id: 're-subscription-refund-revoke', amount: 1_250, currency: 'usd', status: 'succeeded',
+      paymentIntent: 'pi-order-subscription-refund-revoke',
+    }))
+
+    const response = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-revoke/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'subscription-revoke-v1' },
+        body: JSON.stringify({ amount: 12.5, reason: 'revoke entitlement' }),
+      })
+
+    expect(response.status).toBe(200)
+    expect((await json(response)).data.subscription_days_deducted).toBe(30)
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms, control_version
+         FROM user_subscriptions WHERE id = 'subscription-refund-revoke'`,
+    ).get()).toEqual({ status: 'revoked', expires_at_ms: NOW + 10 * DAY_MS, control_version: 9 })
+    const configure = await (test.subscriptionFetch.mock.calls[0]?.[0] as Request).clone().json() as {
+      enabled: boolean
+    }
+    expect(configure.enabled).toBe(false)
+  })
+
+  it('rolls back a clawback while Stripe is pending and reapplies it exactly once on success', async () => {
+    const test = await fixture()
+    seedSubscription(test.raw, {
+      id: 'subscription-refund-pending',
+      userId: 'alice',
+      status: 'active',
+      startsAt: NOW - 10 * DAY_MS,
+      expiresAt: NOW + 60 * DAY_MS,
+      controlVersion: 1,
+    })
+    insertOrder(test.raw, {
+      id: 'order-subscription-refund-pending',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      subscriptionId: 'subscription-refund-pending',
+      paymentIntentId: 'pi-subscription-refund-pending',
+    })
+    test.stripeFetch
+      .mockResolvedValueOnce(stripeRefund({
+        id: 're-subscription-refund-pending', amount: 1_250, currency: 'usd', status: 'pending',
+        paymentIntent: 'pi-subscription-refund-pending',
+      }))
+      .mockResolvedValueOnce(stripeRefund({
+        id: 're-subscription-refund-pending', amount: 1_250, currency: 'usd', status: 'succeeded',
+        paymentIntent: 'pi-subscription-refund-pending',
+      }))
+
+    const started = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-pending/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'subscription-pending-v1' },
+        body: JSON.stringify({ amount: 12.5, reason: 'pending entitlement refund' }),
+      })
+    expect(started.status).toBe(200)
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms, control_version
+         FROM user_subscriptions WHERE id = 'subscription-refund-pending'`,
+    ).get()).toEqual({ status: 'active', expires_at_ms: NOW + 60 * DAY_MS, control_version: 3 })
+    expect(test.raw.prepare(
+      `SELECT clawback_status FROM payment_refunds
+        WHERE order_id = 'order-subscription-refund-pending'`,
+    ).get()).toEqual({ clawback_status: 'rolled_back' })
+
+    const completed = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-pending/refund/query',
+      { method: 'POST' })
+    expect(completed.status).toBe(200)
+    expect((await json(completed)).data).toEqual({
+      success: true, balance_deducted: 0, subscription_days_deducted: 30,
+    })
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms, control_version
+         FROM user_subscriptions WHERE id = 'subscription-refund-pending'`,
+    ).get()).toEqual({ status: 'active', expires_at_ms: NOW + 30 * DAY_MS, control_version: 4 })
+    expect(test.subscriptionFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not roll back entitlement when a stale pending query finishes after success', async () => {
+    const test = await fixture()
+    seedSubscription(test.raw, {
+      id: 'subscription-refund-query-race',
+      userId: 'alice',
+      status: 'active',
+      startsAt: NOW - 10 * DAY_MS,
+      expiresAt: NOW + 60 * DAY_MS,
+      controlVersion: 1,
+    })
+    insertOrder(test.raw, {
+      id: 'order-subscription-refund-query-race',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      subscriptionId: 'subscription-refund-query-race',
+      paymentIntentId: 'pi-subscription-refund-query-race',
+    })
+    let resolveStalePending!: (response: Response) => void
+    const stalePending = new Promise<Response>((resolve) => { resolveStalePending = resolve })
+    test.stripeFetch
+      .mockResolvedValueOnce(stripeRefund({
+        id: 're-subscription-refund-query-race', amount: 1_250, currency: 'usd', status: 'pending',
+        paymentIntent: 'pi-subscription-refund-query-race',
+      }))
+      .mockImplementationOnce(() => stalePending)
+      .mockResolvedValueOnce(stripeRefund({
+        id: 're-subscription-refund-query-race', amount: 1_250, currency: 'usd', status: 'succeeded',
+        paymentIntent: 'pi-subscription-refund-query-race',
+      }))
+
+    const started = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-query-race/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'query-race-v1' },
+        body: JSON.stringify({ amount: 12.5, reason: 'query race' }),
+      })
+    expect(started.status).toBe(200)
+
+    const staleQuery = userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-query-race/refund/query',
+      { method: 'POST' })
+    await vi.waitFor(() => expect(test.stripeFetch).toHaveBeenCalledTimes(2))
+    const succeeded = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-query-race/refund/query',
+      { method: 'POST' })
+    expect(succeeded.status).toBe(200)
+    resolveStalePending(stripeRefund({
+      id: 're-subscription-refund-query-race', amount: 1_250, currency: 'usd', status: 'pending',
+      paymentIntent: 'pi-subscription-refund-query-race',
+    }))
+    await staleQuery
+
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms FROM user_subscriptions
+        WHERE id = 'subscription-refund-query-race'`,
+    ).get()).toEqual({ status: 'active', expires_at_ms: NOW + 30 * DAY_MS })
+    expect(test.raw.prepare(
+      `SELECT status, clawback_status FROM payment_refunds
+        WHERE order_id = 'order-subscription-refund-query-race'`,
+    ).get()).toEqual({ status: 'refunded', clawback_status: 'applied' })
+  })
+
+  it('persists a rollback conflict and Cron restores the entitlement once it is safe', async () => {
+    const test = await fixture()
+    seedSubscription(test.raw, {
+      id: 'subscription-refund-recovery',
+      userId: 'alice',
+      status: 'active',
+      startsAt: NOW - 10 * DAY_MS,
+      expiresAt: NOW + 60 * DAY_MS,
+      controlVersion: 1,
+    })
+    insertOrder(test.raw, {
+      id: 'order-subscription-refund-recovery',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'subscription',
+      status: 'COMPLETED',
+      amountMicros: 12_500_000,
+      payAmountMicros: 12_500_000,
+      paidAmountMicros: 12_500_000,
+      subscriptionId: 'subscription-refund-recovery',
+      paymentIntentId: 'pi-subscription-refund-recovery',
+    })
+    test.stripeFetch.mockImplementationOnce(async () => {
+      test.raw.prepare(
+        `UPDATE user_subscriptions
+            SET expires_at_ms = ?, control_version = control_version + 1
+          WHERE id = 'subscription-refund-recovery'`,
+      ).run(NOW + 31 * DAY_MS)
+      return stripeRefund({
+        id: 're-subscription-refund-recovery', amount: 1_250, currency: 'usd', status: 'pending',
+        paymentIntent: 'pi-subscription-refund-recovery',
+      })
+    })
+
+    const started = await userRequest(test, 'admin',
+      '/api/v1/admin/payment/orders/order-subscription-refund-recovery/refund', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'subscription-recovery-v1' },
+        body: JSON.stringify({ amount: 12.5, reason: 'recover entitlement rollback' }),
+      })
+
+    expect(started.status).toBe(503)
+    expect((await json(started)).code).toBe('refund_clawback_rollback_pending')
+    expect(test.raw.prepare(
+      `SELECT status, clawback_status, clawback_recovery_attempts,
+              clawback_recovery_after_ms, clawback_last_error
+         FROM payment_refunds WHERE order_id = 'order-subscription-refund-recovery'`,
+    ).get()).toMatchObject({
+      status: 'pending',
+      clawback_status: 'rollback_pending',
+      clawback_recovery_attempts: 1,
+      clawback_recovery_after_ms: NOW + 1_000,
+      clawback_last_error: expect.stringContaining('manual reconciliation'),
+    })
+
+    test.raw.prepare(
+      `UPDATE payment_refunds
+          SET clawback_recovery_attempts = 19, clawback_recovery_after_ms = ?
+        WHERE order_id = 'order-subscription-refund-recovery'`,
+    ).run(NOW)
+    await expect(recoverPendingRefundClawbacks(test.env, 10)).resolves.toBe(0)
+    expect(test.raw.prepare(
+      `SELECT clawback_recovery_attempts, clawback_recovery_after_ms, clawback_last_error
+         FROM payment_refunds WHERE order_id = 'order-subscription-refund-recovery'`,
+    ).get()).toEqual({
+      clawback_recovery_attempts: 20,
+      clawback_recovery_after_ms: 8_640_000_000_000_000,
+      clawback_last_error: expect.stringContaining('manual_review:'),
+    })
+
+    test.raw.prepare(
+      `UPDATE user_subscriptions SET expires_at_ms = ?
+        WHERE id = 'subscription-refund-recovery'`,
+    ).run(NOW + 30 * DAY_MS)
+    test.raw.prepare(
+      `UPDATE payment_refunds SET clawback_recovery_after_ms = ?
+        WHERE order_id = 'order-subscription-refund-recovery'`,
+    ).run(NOW + 1_000)
+    vi.setSystemTime(NOW + 1_001)
+    await expect(recoverPendingRefundClawbacks(test.env, 10)).resolves.toBe(1)
+
+    expect(test.raw.prepare(
+      `SELECT status, expires_at_ms, control_version
+         FROM user_subscriptions WHERE id = 'subscription-refund-recovery'`,
+    ).get()).toEqual({ status: 'active', expires_at_ms: NOW + 60 * DAY_MS, control_version: 4 })
+    expect(test.raw.prepare(
+      `SELECT clawback_status, clawback_recovery_attempts,
+              clawback_recovery_after_ms, clawback_last_error
+         FROM payment_refunds WHERE order_id = 'order-subscription-refund-recovery'`,
+    ).get()).toEqual({
+      clawback_status: 'rolled_back',
+      clawback_recovery_attempts: 0,
+      clawback_recovery_after_ms: null,
+      clawback_last_error: null,
+    })
   })
 
   it('processes one partial Stripe refund and replays the completed result', async () => {
@@ -611,6 +1043,15 @@ async function fixture(): Promise<Fixture> {
        VALUES (?, ?, ?, ?, 100000000, ?, ?)`,
     ).run(id, `${id}@example.test`, id, role, NOW, NOW)
   }
+  raw.prepare(
+    `INSERT INTO "groups" (id, name, platform, enabled, group_type, created_at_ms, updated_at_ms)
+     VALUES ('group-refund', 'Refund group', 'openai', 1, 'subscription', ?, ?)`,
+  ).run(NOW, NOW)
+  raw.prepare(
+    `INSERT INTO subscription_plans (
+       id, group_id, name, validity_days, price_micros, currency, created_at_ms, updated_at_ms
+     ) VALUES ('plan-refund', 'group-refund', 'Refund plan', 30, 12500000, 'USD', ?, ?)`,
+  ).run(NOW, NOW)
 
   await insertProvider(raw, {
     id: 'stripe-user-refunds',
@@ -662,6 +1103,11 @@ async function fixture(): Promise<Fixture> {
 
   const stripeFetch = vi.fn<typeof fetch>()
   vi.stubGlobal('fetch', stripeFetch)
+  const subscriptionFetch = vi.fn(async () => Response.json({ ok: true }))
+  const subscriptionNamespace = {
+    idFromName: (name: string) => name,
+    get: () => ({ fetch: subscriptionFetch }),
+  } as unknown as DurableObjectNamespace
   const env = {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',
@@ -673,7 +1119,7 @@ async function fixture(): Promise<Fixture> {
     OBJECTS: {} as R2Bucket,
     EVENTS_QUEUE: {} as Queue,
     USER_STATE: {} as DurableObjectNamespace,
-    SUBSCRIPTION_STATE: {} as DurableObjectNamespace,
+    SUBSCRIPTION_STATE: subscriptionNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
   } as Env
 
@@ -684,7 +1130,7 @@ async function fixture(): Promise<Fixture> {
   app.post('/api/v1/admin/payment/orders/:id/refund', processAdminRefund)
   app.post('/api/v1/admin/payment/orders/:id/refund/query', queryAdminRefund)
 
-  return { raw, env, app, authorization, stripeFetch }
+  return { raw, env, app, authorization, stripeFetch, subscriptionFetch }
 }
 
 async function insertProvider(raw: any, input: InsertProviderInput): Promise<void> {
@@ -730,6 +1176,7 @@ function insertOrder(raw: any, input: {
   refundedAmountMicros?: number
   currency?: string
   paymentIntentId?: string | null
+  subscriptionId?: string
 }): void {
   const subscription = input.orderType === 'subscription'
   raw.prepare(
@@ -771,6 +1218,39 @@ function insertOrder(raw: any, input: {
     NOW,
     NOW,
     NOW - 1_000,
+    NOW,
+  )
+  if (input.subscriptionId !== undefined) {
+    raw.prepare(
+      `UPDATE payment_orders
+          SET subscription_id = ?, subscription_fulfilled_at_ms = ?
+        WHERE id = ?`,
+    ).run(input.subscriptionId, NOW, input.id)
+  }
+}
+
+function seedSubscription(raw: any, input: {
+  id: string
+  userId: string
+  status: 'active' | 'suspended' | 'revoked' | 'expired'
+  startsAt: number
+  expiresAt: number
+  controlVersion: number
+}): void {
+  raw.prepare(
+    `INSERT INTO user_subscriptions (
+       id, user_id, group_id, plan_id, status, starts_at_ms, expires_at_ms,
+       source_type, source_id, control_version, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, 'group-refund', 'plan-refund', ?, ?, ?, 'payment', ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.userId,
+    input.status,
+    input.startsAt,
+    input.expiresAt,
+    `seed-${input.id}`,
+    input.controlVersion,
+    input.startsAt,
     NOW,
   )
 }

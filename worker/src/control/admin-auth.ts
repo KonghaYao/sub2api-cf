@@ -7,6 +7,14 @@ import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/e
 
 type AdminBindings = { Bindings: Env }
 
+export interface AdminActor {
+  user_id: string
+  session_id: string
+  session_type: 'user_access' | 'admin_recovery'
+}
+
+const adminActorCache = new WeakMap<Request, Promise<AdminActor>>()
+
 export const requireAdminToken: MiddlewareHandler<AdminBindings> = async (context, next) => {
   const configured = context.env.ADMIN_TOKEN
   if (!configured || configured.length < 24) {
@@ -32,36 +40,69 @@ export const requireAdminToken: MiddlewareHandler<AdminBindings> = async (contex
 }
 
 export const requireAdminSession: MiddlewareHandler<AdminBindings> = async (context, next) => {
-  const authorization = context.req.header('authorization')?.trim() ?? ''
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+  } catch (error) {
+    return gatewayErrorResponse(asGatewayError(error))
+  }
+  await next()
+}
+
+/**
+ * Authenticates an administrative session and returns its server-derived actor.
+ * The break-glass ADMIN_TOKEN is deliberately not accepted here.
+ */
+export async function authenticateAdminSession(request: Request, env: Env): Promise<AdminActor> {
+  const cached = adminActorCache.get(request)
+  if (cached !== undefined) return cached
+  const pending = authenticateAdminSessionUncached(request, env)
+  adminActorCache.set(request, pending)
+  return pending
+}
+
+async function authenticateAdminSessionUncached(request: Request, env: Env): Promise<AdminActor> {
+  const authorization = request.headers.get('authorization')?.trim() ?? ''
   const match = /^Bearer\s+([^\s]+)$/i.exec(authorization)
   if (match === null) {
-    return gatewayErrorResponse(
-      new GatewayError(401, 'admin_session_required', 'Admin session is required', 'authentication_error'),
+    throw new GatewayError(
+      401,
+      'admin_session_required',
+      'Admin session is required',
+      'authentication_error',
     )
   }
-  const pepper = context.env.API_KEY_PEPPER
+  const pepper = env.API_KEY_PEPPER
   if (!pepper || pepper.length < 32) {
-    return gatewayErrorResponse(
-      new GatewayError(503, 'admin_auth_not_configured', 'Admin authentication is not configured', 'server_error'),
+    throw new GatewayError(
+      503,
+      'admin_auth_not_configured',
+      'Admin authentication is not configured',
+      'server_error',
     )
   }
   if (isOpaqueToken(match[1], 'access')) {
     let user: Awaited<ReturnType<typeof authenticateUserRequest>>
     try {
-      user = await authenticateUserRequest(context.req.raw, context.env)
+      user = await authenticateUserRequest(request, env)
     } catch (error) {
-      return gatewayErrorResponse(asGatewayError(error))
+      throw asGatewayError(error)
     }
     if (user.role !== 'admin') {
-      return gatewayErrorResponse(
-        new GatewayError(403, 'admin_role_required', 'Administrator role is required', 'permission_error'),
+      throw new GatewayError(
+        403,
+        'admin_role_required',
+        'Administrator role is required',
+        'permission_error',
       )
     }
-    await next()
-    return
+    return {
+      user_id: user.id,
+      session_id: user.session_id,
+      session_type: 'user_access',
+    }
   }
   const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
-  const session = await context.env.DB.prepare(
+  const session = await env.DB.prepare(
     `SELECT s.id AS session_id, s.user_id
        FROM admin_sessions s
        JOIN users u ON u.id = s.user_id
@@ -72,11 +113,17 @@ export const requireAdminSession: MiddlewareHandler<AdminBindings> = async (cont
     .bind(digest, Date.now())
     .first<{ session_id: string; user_id: string }>()
   if (session === null) {
-    return gatewayErrorResponse(
-      new GatewayError(401, 'invalid_admin_session', 'Invalid or expired admin session', 'authentication_error'),
+    throw new GatewayError(
+      401,
+      'invalid_admin_session',
+      'Invalid or expired admin session',
+      'authentication_error',
     )
   }
-  await next()
+  return {
+    ...session,
+    session_type: 'admin_recovery',
+  }
 }
 
 export async function recoverAdminSession(context: Context<AdminBindings>): Promise<Response> {
@@ -91,10 +138,16 @@ export async function recoverAdminSession(context: Context<AdminBindings>): Prom
       )
     }
     const admin = await context.env.DB.prepare(
-      `SELECT id
-         FROM users
-        WHERE role = 'admin' AND status = 'active'
-        ORDER BY created_at_ms ASC, id ASC
+      `SELECT u.id
+         FROM users AS u
+         JOIN admin_user_roles AS assignment
+           ON assignment.user_id = u.id AND assignment.active = 1
+         JOIN admin_roles AS role
+           ON role.id = assignment.role_id
+          AND role.active = 1
+          AND role.system_key = 'super_admin'
+        WHERE u.role = 'admin' AND u.status = 'active'
+        ORDER BY u.created_at_ms ASC, u.id ASC
         LIMIT 1`,
     ).first<{ id: string }>()
     if (admin === null) {

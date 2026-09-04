@@ -13,6 +13,12 @@ export interface Env {
   POOL_STATE: DurableObjectNamespace
   /** Password-entry limiter. Optional in types so non-auth fixtures remain small; auth fails closed. */
   AUTH_RATE_LIMIT?: DurableObjectNamespace
+  /** Native Cloudflare email delivery binding. Preferred when configured. */
+  SEND_EMAIL?: SendEmail
+  /** Verified sender address used with SEND_EMAIL. */
+  EMAIL_FROM_ADDRESS?: string
+  /** Compatibility Worker-to-Worker email renderer/delivery service. */
+  EMAIL_DELIVERY?: Fetcher
 
   /** HMAC key for customer API keys. Must be a high-entropy Worker secret. */
   API_KEY_PEPPER?: string

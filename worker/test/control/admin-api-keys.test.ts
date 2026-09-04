@@ -44,6 +44,9 @@ class KeyStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('SELECT 1 AS allowed') && this.query.includes('FROM admin_user_roles')) {
+      return { allowed: 1 } as T
+    }
     if (this.query.includes('FROM admin_sessions')) {
       return { session_id: 'session-1', user_id: 'admin-1' } as T
     }

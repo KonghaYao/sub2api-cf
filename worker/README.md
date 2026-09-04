@@ -58,6 +58,17 @@ HMAC-SHA-256 digest. The upstream key is encrypted with AES-256-GCM and bound
 to the account/secret version as authenticated data. Client-supplied proxy,
 base URL, SOCKS, uTLS, JA3, and transport controls are rejected.
 
+## Email delivery
+
+Before enabling email verification or password reset in production, configure a
+Cloudflare Email Service binding named `SEND_EMAIL` and set
+`EMAIL_FROM_ADDRESS` to an account-verified sender. The repository intentionally
+does not put an environment-specific sender address in `wrangler.jsonc`.
+
+The optional `EMAIL_DELIVERY` Worker service binding remains available as a
+compatibility adapter. Queue delivery fails explicitly (and is retried) when
+neither binding is configured; when both exist, `SEND_EMAIL` is used.
+
 ## Checks
 
 Run `pnpm run check` for TypeScript and unit tests. The Worker deliberately

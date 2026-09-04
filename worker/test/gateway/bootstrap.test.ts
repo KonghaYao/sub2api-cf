@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createApp } from '../../src/app'
 import type { Env } from '../../src/env'
+import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 class BootstrapStatement {
   values: unknown[] = []
@@ -114,5 +115,49 @@ describe('gateway bootstrap', () => {
     expect(database.batches[0].flatMap((statement) => statement.values)).not.toContain(
       body.data.admin_session,
     )
+  })
+
+  it('bootstraps a fresh migrated D1 database with exactly one super-admin assignment', async () => {
+    const database = createSqliteD1()
+    applyMigrations(database.raw)
+    const realEnv = env(new BootstrapDatabase())
+    realEnv.DB = database.d1
+
+    const response = await createApp().request('/api/v1/admin/bootstrap', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${adminToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        user: {
+          email: 'fresh-admin@example.com',
+          display_name: 'Fresh Admin',
+          balance_micros: 1_000_000,
+        },
+        group: { name: 'fresh-default' },
+        account: {
+          name: 'fresh-primary',
+          base_url: 'https://upstream.example/v1',
+          api_key: 'upstream-secret',
+        },
+        api_key: { name: 'fresh-bootstrap' },
+        models: [{
+          public_name: 'gpt-fresh',
+          input_micros_per_million: 1_000,
+          output_micros_per_million: 2_000,
+        }],
+      }),
+    }, realEnv)
+
+    expect(response.status).toBe(201)
+    expect(database.raw.prepare(
+      `SELECT role.system_key, COUNT(*) AS count
+         FROM admin_user_roles AS assignment
+         JOIN admin_roles AS role ON role.id = assignment.role_id
+        WHERE assignment.active = 1
+        GROUP BY role.system_key`,
+    ).all()).toEqual([{ system_key: 'super_admin', count: 1 }])
+    database.raw.close()
   })
 })

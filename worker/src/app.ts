@@ -7,6 +7,13 @@ import {
   registerWithPassword,
 } from './auth/handler'
 import {
+  confirmEmailVerification,
+  requestEmailVerification,
+  requestPasswordReset,
+  requestRegistrationEmailVerification,
+  resetPasswordWithChallenge,
+} from './auth/email-challenges'
+import {
   listUserSessions,
   revokeAllUserSessions,
   revokeOtherUserSessions,
@@ -35,6 +42,20 @@ import {
   requireAdminSession,
   requireAdminToken,
 } from './control/admin-auth'
+import {
+  assignAdminUserRole,
+  createAdminRole,
+  deleteAdminRole,
+  getAdminRole,
+  listAdminPermissions,
+  listAdminRbacAuditEvents,
+  listAdminRoles,
+  listAdminUserRoles,
+  requireAdminPermission,
+  requireAdminRoutePermission,
+  revokeAdminUserRole,
+  updateAdminRole,
+} from './control/rbac'
 import {
   adjustAdminUserBalance,
   createAdminUser,
@@ -266,6 +287,11 @@ export function createApp() {
   })
 
   app.post('/api/v1/auth/register', registerWithPassword)
+  app.post('/api/v1/auth/send-verify-code', requestRegistrationEmailVerification)
+  app.post('/api/v1/auth/forgot-password', requestPasswordReset)
+  app.post('/api/v1/auth/reset-password', resetPasswordWithChallenge)
+  app.post('/api/v1/auth/email-verification/request', requestEmailVerification)
+  app.post('/api/v1/auth/email-verification/confirm', confirmEmailVerification)
   app.post('/api/v1/auth/login', loginWithPassword)
   app.post('/api/v1/auth/refresh', refreshUserSession)
   app.post('/api/v1/auth/logout', logoutUserSession)
@@ -294,7 +320,7 @@ export function createApp() {
 
   app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
   app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
-  app.use('/api/v1/admin/*', requireAdminSession)
+  app.use('/api/v1/admin/*', requireAdminSession, requireAdminRoutePermission)
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
   app.get('/api/v1/admin/users', listAdminUsers)
@@ -370,6 +396,32 @@ export function createApp() {
   app.post('/api/v1/admin/redeem-codes/:id/expire', expireAdminRedeemCode)
   app.get('/api/v1/admin/redeem-codes/:id', getAdminRedeemCode)
   app.delete('/api/v1/admin/redeem-codes/:id', deleteAdminRedeemCode)
+  app.get('/api/v1/admin/rbac/permissions', requireAdminPermission('admin.rbac.read'), listAdminPermissions)
+  app.get('/api/v1/admin/rbac/roles', requireAdminPermission('admin.rbac.read'), listAdminRoles)
+  app.post('/api/v1/admin/rbac/roles', requireAdminPermission('admin.rbac.write'), createAdminRole)
+  app.get('/api/v1/admin/rbac/roles/:id', requireAdminPermission('admin.rbac.read'), getAdminRole)
+  app.put('/api/v1/admin/rbac/roles/:id', requireAdminPermission('admin.rbac.write'), updateAdminRole)
+  app.delete('/api/v1/admin/rbac/roles/:id', requireAdminPermission('admin.rbac.write'), deleteAdminRole)
+  app.get(
+    '/api/v1/admin/rbac/users/:user_id/roles',
+    requireAdminPermission('admin.rbac.read'),
+    listAdminUserRoles,
+  )
+  app.put(
+    '/api/v1/admin/rbac/users/:user_id/roles/:role_id',
+    requireAdminPermission('admin.rbac.write'),
+    assignAdminUserRole,
+  )
+  app.delete(
+    '/api/v1/admin/rbac/users/:user_id/roles/:role_id',
+    requireAdminPermission('admin.rbac.write'),
+    revokeAdminUserRole,
+  )
+  app.get(
+    '/api/v1/admin/rbac/audit',
+    requireAdminPermission('admin.audit.read'),
+    listAdminRbacAuditEvents,
+  )
 
   app.get('/api/v1/keys', listUserApiKeys)
   app.post('/api/v1/keys', createUserApiKey)
