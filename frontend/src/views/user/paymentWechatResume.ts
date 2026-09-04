@@ -6,7 +6,7 @@ export interface ParsedWechatResumeRoute {
   orderAmount: number
   orderType: 'balance' | 'subscription'
   paymentType: string
-  planId?: number
+  planId?: string | number
   openid?: string
   wechatResumeToken?: string
 }
@@ -38,8 +38,13 @@ export function parseWechatResumeRoute(
 
   const wechatResumeToken = readQueryString(query, 'wechat_resume_token')
   const paymentType = normalizeVisibleMethod(readQueryString(query, 'payment_type')) || 'wxpay'
-  const planId = Number.parseInt(readQueryString(query, 'plan_id'), 10)
-  const hasPlanId = Number.isFinite(planId) && planId > 0
+  const rawPlanId = readQueryString(query, 'plan_id').trim()
+  const matchedPlanId = plans.find(plan => String(plan.id) === rawPlanId)?.id
+  const numericPlanId = Number.parseInt(rawPlanId, 10)
+  const planId = matchedPlanId ?? (/^\d+$/.test(rawPlanId) && numericPlanId > 0 ? numericPlanId : undefined)
+  // During an OAuth resume the checkout response can still be empty; retain a
+  // syntactically safe opaque ID and let the server perform the final lookup.
+  const hasPlanId = /^[A-Za-z0-9_-]{1,128}$/.test(rawPlanId)
   const orderType = readQueryString(query, 'order_type') === 'subscription' || hasPlanId
     ? 'subscription'
     : 'balance'
@@ -50,7 +55,7 @@ export function parseWechatResumeRoute(
       paymentType,
       orderType,
       orderAmount: 0,
-      planId: hasPlanId ? planId : undefined,
+      planId: planId ?? (hasPlanId ? rawPlanId : undefined),
     }
   }
 
@@ -63,7 +68,7 @@ export function parseWechatResumeRoute(
   const orderAmount = Number.isFinite(rawAmount) && rawAmount > 0
     ? rawAmount
     : (orderType === 'subscription'
-      ? (plans.find(plan => plan.id === planId)?.price ?? 0)
+      ? (plans.find(plan => String(plan.id) === rawPlanId)?.price ?? 0)
       : fallbackBalanceAmount)
 
   return {
@@ -71,7 +76,7 @@ export function parseWechatResumeRoute(
     paymentType,
     orderType,
     orderAmount,
-    planId: hasPlanId ? planId : undefined,
+    planId: planId ?? (hasPlanId ? rawPlanId : undefined),
   }
 }
 

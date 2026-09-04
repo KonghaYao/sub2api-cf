@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import type { Env } from "../../src/env";
 import { UserStateDO } from "../../src/state/user-state-do";
+import { applyMigrations, createSqliteD1 } from "../helpers/sqlite-d1";
 
 interface StoredProfile {
   schema_version: number;
@@ -25,10 +27,25 @@ interface StoredLedgerEntry {
   created_at_ms: number;
 }
 
+interface StoredRequest {
+  schema_version: number;
+  request_id: string;
+  status: string;
+  reserved_micros: number;
+  settled_micros: number | null;
+  reservation_expires_at_ms: number | null;
+  reservation_ttl_ms: number | null;
+  renewal_sequence: number;
+  last_renewal_ttl_ms: number | null;
+  authorized_at_ms: number;
+  updated_at_ms: number;
+}
+
 class FakeUserStateStorage {
   profile: StoredProfile | null = null;
   stateVersion = 0;
   readonly ledger = new Map<string, StoredLedgerEntry>();
+  readonly requests = new Map<string, StoredRequest>();
 
   readonly sql = {
     exec: (query: string, ...params: unknown[]): object[] => this.exec(query, params),
@@ -68,6 +85,10 @@ class FakeUserStateStorage {
       }
       return [];
     }
+    if (normalized.includes("FROM user_requests") && normalized.includes("request_id = ?")) {
+      const request = this.requests.get(params[0] as string);
+      return request === undefined ? [] : [{ ...request }];
+    }
     if (normalized.includes("FROM user_outbox")) {
       if (normalized.includes("MIN(available_at_ms)")) return [{ next_alarm_ms: null }];
       return [];
@@ -101,17 +122,34 @@ class FakeUserStateStorage {
       this.ledger.set(entry.mutation_key, entry);
       return [];
     }
+    if (normalized.startsWith("INSERT INTO user_requests")) {
+      const request: StoredRequest = {
+        schema_version: params[0] as number,
+        request_id: params[1] as string,
+        status: params[2] as string,
+        reserved_micros: params[3] as number,
+        settled_micros: params[4] as number | null,
+        reservation_expires_at_ms: params[5] as number | null,
+        reservation_ttl_ms: params[6] as number | null,
+        renewal_sequence: params[7] as number,
+        last_renewal_ttl_ms: params[8] as number | null,
+        authorized_at_ms: params[9] as number,
+        updated_at_ms: params[10] as number,
+      };
+      this.requests.set(request.request_id, request);
+      return [];
+    }
     throw new Error(`Unexpected SQL in test: ${normalized}`);
   }
 }
 
-function createHarness(): { object: UserStateDO; storage: FakeUserStateStorage } {
+function createHarness(env?: Env): { object: UserStateDO; storage: FakeUserStateStorage } {
   const storage = new FakeUserStateStorage();
   const state = {
     storage,
     blockConcurrencyWhile: (callback: () => Promise<void>) => callback(),
   } as unknown as DurableObjectState;
-  return { object: new UserStateDO(state), storage };
+  return { object: new UserStateDO(state, env), storage };
 }
 
 function post(object: UserStateDO, path: string, body: Record<string, unknown>): Promise<Response> {
@@ -133,6 +171,69 @@ const opening = {
 };
 
 describe("UserStateDO balance contract", () => {
+  it("rechecks group entitlement before each authorization transition", async () => {
+    const { raw, d1 } = createSqliteD1();
+    applyMigrations(raw);
+    const now = Date.now();
+    raw.exec(`
+      INSERT INTO users (
+        id, email, display_name, balance_micros, created_at_ms, updated_at_ms
+      ) VALUES ('user-1', 'user-1@example.test', 'User 1', 1000, ${now}, ${now});
+      INSERT INTO "groups" (
+        id, name, platform, enabled, group_type, is_exclusive, created_at_ms, updated_at_ms
+      ) VALUES ('group-1', 'Group 1', 'openai', 1, 'standard', 1, ${now}, ${now});
+      INSERT INTO api_keys (
+        id, user_id, key_hash, name, enabled, created_at_ms, updated_at_ms,
+        group_id, key_prefix, auth_version
+      ) VALUES (
+        'key-1', 'user-1', '${"a".repeat(64)}', 'Key 1', 1, ${now}, ${now},
+        'group-1', 'sk-sub2api-test', 1
+      );
+      DELETE FROM user_group_permissions
+       WHERE user_id = 'user-1' AND group_id = 'group-1';
+    `);
+    const { object, storage } = createHarness({ DB: d1 } as Env);
+    await post(object, "/configure", opening);
+    const authorize = (requestId: string) => post(object, "/authorize", {
+      schema_version: 1,
+      request_id: requestId,
+      user_id: "user-1",
+      api_key_id: "key-1",
+      api_key_auth_version: 1,
+    });
+
+    const missingCredential = await post(object, "/authorize", {
+      schema_version: 1,
+      request_id: "request-without-key",
+    });
+    expect(missingCredential.status).toBe(400);
+    expect(storage.requests.has("request-without-key")).toBe(false);
+
+    const denied = await authorize("request-denied");
+    expect(denied.status).toBe(403);
+    await expect(denied.json()).resolves.toMatchObject({
+      error: { code: "group_access_denied" },
+    });
+    expect(storage.requests.has("request-denied")).toBe(false);
+
+    raw.prepare(
+      `INSERT INTO user_group_permissions (user_id, group_id, created_at_ms)
+       VALUES ('user-1', 'group-1', ?)`,
+    ).run(now);
+    expect((await authorize("request-allowed")).status).toBe(200);
+
+    raw.prepare(
+      `DELETE FROM user_group_permissions WHERE user_id = 'user-1' AND group_id = 'group-1'`,
+    ).run();
+    const revoked = await authorize("request-revoked");
+    expect(revoked.status).toBe(403);
+    await expect(revoked.json()).resolves.toMatchObject({
+      error: { code: "group_access_denied" },
+    });
+    expect(storage.requests.has("request-revoked")).toBe(false);
+    raw.close();
+  });
+
   it("makes configuration create-only while preserving exact retry idempotency", async () => {
     const { object, storage } = createHarness();
 

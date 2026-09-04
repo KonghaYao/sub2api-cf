@@ -553,7 +553,7 @@
 
           <div class="md:col-span-2">
             <label class="input-label">API Key</label>
-            <select v-model.number="form.apiKeyId" class="input" :disabled="loadingKeys">
+            <select v-model="form.apiKeyId" class="input" :disabled="loadingKeys">
               <option :value="0">{{ loadingKeys ? t('batchImage.create.loadingKeys') : t('batchImage.create.selectKeyPlaceholder') }}</option>
               <option v-for="key in geminiApiKeys" :key="key.id" :value="key.id">
                 {{ key.name }} · {{ key.group?.name || 'Gemini' }}
@@ -784,10 +784,11 @@ import {
   type BatchImageSubmitItem,
 } from '@/api/batchImage'
 import type { ApiKey } from '@/types'
+import { hasPlaintextApiKey, type ApiKeyWithPlaintext } from '@/utils/apiKeySecret'
 import type { Column } from '@/components/common/types'
 
 type BatchImageJobRow = Pick<BatchImageJob, 'id' | 'task_name' | 'parent_batch_id' | 'status' | 'model' | 'provider' | 'item_count' | 'success_count' | 'fail_count' | 'estimated_cost' | 'hold_amount' | 'actual_cost' | 'created_at' | 'downloaded_at'> & {
-  api_key_id: number
+  api_key_id: string | number
   api_key_name: string
   child_count: number
   is_child?: boolean
@@ -868,7 +869,12 @@ const downloadFilterOptions = computed<SelectOption[]>(() => [
   { value: 'false', label: t('batchImage.filters.notDownloaded') },
 ])
 
-const form = reactive({
+const form = reactive<{
+  apiKeyId: string | number
+  taskName: string
+  model: string
+  responseMimeType: string
+}>({
   apiKeyId: 0,
   taskName: '',
   model: '',
@@ -906,7 +912,7 @@ const showCreateModal = ref(false)
 const showGuideModal = ref(false)
 const currentJob = ref<BatchImageJob | null>(null)
 const selectedBatchId = ref('')
-const selectedBatchApiKeyId = ref(0)
+const selectedBatchApiKeyId = ref<string | number>(0)
 const items = ref<BatchImageDetailItem[]>([])
 const batchJobs = ref<BatchImageJobRow[]>([])
 const selectedJobIds = ref(new Set<string>())
@@ -938,7 +944,8 @@ let promptPopoverOpenTimer: ReturnType<typeof setTimeout> | null = null
 let activePromptPopoverTarget: HTMLElement | null = null
 
 const geminiApiKeys = computed(() =>
-  apiKeys.value.filter((key) =>
+  apiKeys.value.filter((key): key is ApiKeyWithPlaintext =>
+    hasPlaintextApiKey(key) &&
     key.status === 'active' &&
     key.group?.platform === 'gemini' &&
     key.group?.allow_batch_image_generation === true,
@@ -946,13 +953,13 @@ const geminiApiKeys = computed(() =>
 )
 
 const selectedApiKey = computed(() =>
-  geminiApiKeys.value.find((key) => key.id === Number(form.apiKeyId)) || null,
+  geminiApiKeys.value.find((key) => String(key.id) === String(form.apiKeyId)) || null,
 )
 
 const filteredApiKeys = computed(() => {
-  const selectedFilterID = Number(filters.apiKeyId || 0)
+  const selectedFilterID = filters.apiKeyId
   if (!selectedFilterID) return geminiApiKeys.value
-  return geminiApiKeys.value.filter(key => key.id === selectedFilterID)
+  return geminiApiKeys.value.filter(key => String(key.id) === selectedFilterID)
 })
 
 const apiKeyFilterOptions = computed<SelectOption[]>(() => [
@@ -1586,7 +1593,7 @@ function closeDetail() {
   clearItemPreviews()
 }
 
-function keyForSelectedBatch(): ApiKey | null {
+function keyForSelectedBatch(): ApiKeyWithPlaintext | null {
   if (selectedBatchApiKeyId.value) {
     const key = geminiApiKeys.value.find(item => item.id === selectedBatchApiKeyId.value)
     if (key) return key
@@ -1594,7 +1601,7 @@ function keyForSelectedBatch(): ApiKey | null {
   return selectedApiKey.value
 }
 
-function requireApiKey(): ApiKey | null {
+function requireApiKey(): ApiKeyWithPlaintext | null {
   if (!selectedApiKey.value) {
     appStore.showError(batchImageText('selectApiKey'))
     return null
@@ -1740,7 +1747,7 @@ function applyJobApiKey(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>) {
   }
 }
 
-function apiKeyForJob(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>): ApiKey | null {
+function apiKeyForJob(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>): ApiKeyWithPlaintext | null {
   if ('api_key_id' in job && job.api_key_id) {
     return geminiApiKeys.value.find(key => key.id === job.api_key_id) || null
   }

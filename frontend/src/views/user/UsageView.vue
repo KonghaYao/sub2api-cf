@@ -242,7 +242,6 @@ import { resolveUsageRequestType, requestTypeToLegacyStream } from '@/utils/usag
 import type {
   ApiKey,
   EndpointStat,
-  Group,
   GroupStat,
   ModelStat,
   TrendDataPoint,
@@ -251,6 +250,7 @@ import type {
   UsageStatsResponse,
   UserErrorRequest,
 } from '@/types'
+import type { AvailableUserGroup } from '@/api/groups'
 import type { Column } from '@/components/common/types'
 import { COMMON_ERROR_STATUS_CODES } from '@/utils/errorBadges'
 
@@ -405,7 +405,7 @@ const billingModeOptions = computed<SelectOption[]>(() => [
 ])
 
 const apiKeys = ref<ApiKey[]>([])
-const groups = ref<Group[]>([])
+const groups = ref<AvailableUserGroup[]>([])
 const modelOptionValues = ref<string[]>([])
 
 const apiKeyOptions = computed<SelectOption[]>(() => [

@@ -31,7 +31,7 @@ interface ParsedCredential {
 
 /** Hash a new user password using a random salt and versioned PBKDF2-SHA256. */
 export async function hashPassword(password: string): Promise<string> {
-  const passwordBytes = validateNewPassword(password)
+  const passwordBytes = newPasswordBytes(password)
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES))
   const digest = await derivePassword(passwordBytes, salt, PBKDF2_ITERATIONS, DERIVED_KEY_BYTES)
   return [
@@ -42,6 +42,16 @@ export async function hashPassword(password: string): Promise<string> {
     toBase64Url(salt),
     toBase64Url(digest),
   ].join('$')
+}
+
+/** Validate a new password without starting PBKDF2 work. */
+export function validateNewPassword(password: string): void {
+  newPasswordBytes(password)
+}
+
+/** Check whether a login password can be a credential without starting PBKDF2 work. */
+export function isPasswordInputValid(password: string): boolean {
+  return passwordBytesForVerification(password) !== null
 }
 
 /** Verify a password without ever decoding or returning stored plaintext. */
@@ -72,7 +82,7 @@ export function needsPasswordRehash(credential: string): boolean {
     parsed.length !== DERIVED_KEY_BYTES
 }
 
-function validateNewPassword(password: string): Uint8Array {
+function newPasswordBytes(password: string): Uint8Array {
   if (typeof password !== 'string') throw new PasswordValidationError('Password must be a string')
   const codePoints = Array.from(password).length
   if (codePoints < PASSWORD_MIN_CODE_POINTS) {

@@ -64,6 +64,14 @@ Run `pnpm run check` for TypeScript and unit tests. The Worker deliberately
 returns an explicit 404 for API routes that have not migrated yet instead of
 silently serving the SPA shell.
 
+## Deployment
+
+Use `pnpm run deploy:staging` or `pnpm run deploy:production`. These are the
+supported release entry points: they run the Worker checks, build the SPA,
+apply the target D1 migrations, and only then deploy the Worker. The default
+`pnpm run deploy` intentionally targets production through the same guarded
+pipeline; do not invoke `wrangler deploy` directly for a release.
+
 ## Durable Object state contracts
 
 `UserStateDO` stores money only as safe integer micro-units. Its internal

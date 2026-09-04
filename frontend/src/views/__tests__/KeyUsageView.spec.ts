@@ -231,4 +231,55 @@ describe('KeyUsageView daily detail', () => {
 
     wrapper.unmount()
   })
+
+  it('renders Worker subscription daily, weekly, monthly usage and expiry', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        mode: 'unrestricted',
+        isValid: true,
+        planName: 'Pro subscription',
+        remaining: 5,
+        unit: 'USD',
+        billing_type: 'subscription',
+        subscription: {
+          daily_usage_usd: 2,
+          daily_limit_usd: 10,
+          weekly_usage_usd: 35,
+          weekly_limit_usd: 40,
+          monthly_usage_usd: 50,
+          monthly_limit_usd: 100,
+          expires_at: '2026-10-01T00:00:00.000Z',
+        },
+        usage: { today: {}, total: {} },
+        daily_usage: [],
+        model_stats: [],
+      }),
+    } as Response)
+
+    const wrapper = mount(KeyUsageView, {
+      global: {
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          LocaleSwitcher: true,
+          Icon: true,
+        },
+      },
+    })
+
+    await wrapper.find('input').setValue('sk-test-key')
+    await wrapper.find('input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+
+    const text = wrapper.text()
+    expect(text).toContain('Pro subscription')
+    expect(text).toContain('$2.00 / $10.00')
+    expect(text).toContain('$35.00 / $40.00')
+    expect(text).toContain('$50.00 / $100.00')
+    expect(text).toContain('October 1, 2026')
+    expect(text).not.toContain('Wallet Balance')
+
+    wrapper.unmount()
+  })
 })

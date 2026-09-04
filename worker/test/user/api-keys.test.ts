@@ -32,8 +32,8 @@ async function fixture(): Promise<TestFixture> {
   }
   for (const id of ['group-a', 'group-b']) {
     raw.prepare(
-      `INSERT INTO "groups" (id, name, platform, created_at_ms, updated_at_ms)
-       VALUES (?, ?, 'openai', ?, ?)`,
+      `INSERT INTO "groups" (id, name, platform, is_exclusive, created_at_ms, updated_at_ms)
+       VALUES (?, ?, 'openai', 0, ?, ?)`,
     ).run(id, id, now, now)
   }
 
@@ -253,6 +253,162 @@ describe('user API keys', () => {
       `SELECT COUNT(*) AS total FROM auth_audit_events
        WHERE event_type = 'user.api_keys.update' AND user_id = 'alice'`,
     ).get()).toEqual({ total: 1 })
+  })
+
+  it('rejects direct binding to inaccessible groups and accepts an explicit permission', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    const createdAt = Date.now()
+    test.raw.prepare(
+      `INSERT INTO "groups" (
+         id, name, platform, enabled, group_type, is_exclusive, created_at_ms, updated_at_ms
+       ) VALUES ('private-group', 'Private', 'openai', 1, 'standard', 1, ?, ?)`,
+    ).run(createdAt, createdAt)
+
+    const create = (idempotencyKey: string) => app().request('/keys', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify({ name: 'Private key', group_id: 'private-group' }),
+    }, test.env)
+    const update = () => app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ group_id: 'private-group' }),
+    }, test.env)
+
+    const deniedCreate = await create('private-create-denied')
+    const deniedUpdate = await update()
+    expect(deniedCreate.status).toBe(403)
+    expect(deniedUpdate.status).toBe(403)
+    await expect(deniedCreate.json()).resolves.toMatchObject({ code: 'group_access_denied' })
+    await expect(deniedUpdate.json()).resolves.toMatchObject({ code: 'group_access_denied' })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS total FROM api_keys WHERE group_id = 'private-group'`,
+    ).get()).toEqual({ total: 0 })
+    expect(test.raw.prepare(
+      `SELECT group_id FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({ group_id: 'group-a' })
+
+    test.raw.prepare(
+      `INSERT INTO user_group_permissions (user_id, group_id, created_at_ms)
+       VALUES ('alice', 'private-group', ?)`,
+    ).run(createdAt)
+
+    const allowedCreate = await create('private-create-allowed')
+    const allowedUpdate = await update()
+    expect(allowedCreate.status).toBe(201)
+    expect(allowedUpdate.status).toBe(200)
+    await expect(allowedCreate.json()).resolves.toMatchObject({
+      data: { group_id: 'private-group', status: 'active' },
+    })
+    await expect(allowedUpdate.json()).resolves.toMatchObject({
+      data: { id: 'alice-key', group_id: 'private-group' },
+    })
+  })
+
+  it('lets the owner deactivate and reactivate a non-revoked key through status', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    seedKey(test.raw, { id: 'bob-key', userId: 'bob', name: 'Bob key', hashByte: 'b' })
+
+    const update = (id: string, status: string) => app().request(`/keys/${id}`, {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ status }),
+    }, test.env)
+
+    const foreign = await update('bob-key', 'inactive')
+    const deactivated = await update('alice-key', 'inactive')
+    const reactivated = await update('alice-key', 'active')
+
+    expect(foreign.status).toBe(404)
+    await expect(deactivated.json()).resolves.toMatchObject({
+      code: 0,
+      data: { id: 'alice-key', status: 'inactive' },
+    })
+    await expect(reactivated.json()).resolves.toMatchObject({
+      code: 0,
+      data: { id: 'alice-key', status: 'active' },
+    })
+    expect(test.raw.prepare(
+      `SELECT enabled, auth_version, control_version, revoked_at_ms
+       FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({ enabled: 1, auth_version: 3, control_version: 2, revoked_at_ms: null })
+    expect(test.raw.prepare(
+      `SELECT enabled, auth_version, control_version
+       FROM api_keys WHERE id = 'bob-key'`,
+    ).get()).toEqual({ enabled: 1, auth_version: 1, control_version: 0 })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS total FROM auth_audit_events
+       WHERE event_type = 'user.api_keys.update' AND user_id = 'alice'`,
+    ).get()).toEqual({ total: 2 })
+  })
+
+  it('rechecks access before reactivating a key in the same group', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+    const update = (status: 'active' | 'inactive') => app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ status }),
+    }, test.env)
+
+    expect((await update('inactive')).status).toBe(200)
+    test.raw.prepare(
+      `UPDATE "groups" SET is_exclusive = 1, updated_at_ms = ? WHERE id = 'group-a'`,
+    ).run(Date.now())
+
+    const denied = await update('active')
+
+    expect(denied.status).toBe(403)
+    await expect(denied.json()).resolves.toMatchObject({ code: 'group_access_denied' })
+    expect(test.raw.prepare(
+      `SELECT enabled, auth_version FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({ enabled: 0, auth_version: 2 })
+  })
+
+  it('rejects invalid status and cannot reactivate a revoked key', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+
+    const invalid = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ status: 'paused' }),
+    }, test.env)
+    await app().request('/keys/alice-key', {
+      method: 'DELETE',
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    const revoked = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ status: 'active' }),
+    }, test.env)
+
+    expect(invalid.status).toBe(400)
+    await expect(invalid.json()).resolves.toMatchObject({ code: 'invalid_status' })
+    expect(revoked.status).toBe(409)
+    await expect(revoked.json()).resolves.toMatchObject({ code: 'api_key_revoked' })
   })
 
   it('does not reveal another user key and makes revocation idempotent', async () => {

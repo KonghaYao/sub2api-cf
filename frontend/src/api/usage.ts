@@ -18,6 +18,13 @@ import type {
   UserErrorListParams
 } from '@/types'
 
+/** Worker resource identifiers are opaque strings; retain numeric inputs for
+ * legacy callers without widening admin-only query contracts globally. */
+type WorkerUsageQueryParams = Omit<UsageQueryParams, 'api_key_id' | 'group_id'> & {
+  api_key_id?: string | number
+  group_id?: string | number
+}
+
 // ==================== Dashboard Types ====================
 
 export interface PlatformDashboardStats {
@@ -59,9 +66,9 @@ export interface TrendParams {
   start_date?: string
   end_date?: string
   granularity?: 'day' | 'hour'
-  api_key_id?: number
+  api_key_id?: string | number
   model?: string
-  group_id?: number
+  group_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null
@@ -128,9 +135,9 @@ export interface UsageDashboardSnapshotV2Response {
 export async function list(
   page: number = 1,
   pageSize: number = 20,
-  apiKeyId?: number
+  apiKeyId?: string | number
 ): Promise<PaginatedResponse<UsageLog>> {
-  const params: UsageQueryParams = {
+  const params: WorkerUsageQueryParams = {
     page,
     page_size: pageSize
   }
@@ -169,7 +176,7 @@ export async function query(
  */
 export async function getStats(
   paramsOrPeriod: (UsageQueryParams & { period?: string; timezone?: string }) | string = 'today',
-  apiKeyId?: number
+  apiKeyId?: string | number
 ): Promise<UsageStatsResponse> {
   const params: Record<string, unknown> = typeof paramsOrPeriod === 'string'
     ? { period: paramsOrPeriod }
@@ -195,7 +202,7 @@ export async function getStats(
 export async function getStatsByDateRange(
   startDate: string,
   endDate: string,
-  apiKeyId?: number
+  apiKeyId?: string | number
 ): Promise<UsageStatsResponse> {
   const params: Record<string, unknown> = {
     start_date: startDate,
@@ -222,9 +229,9 @@ export async function getStatsByDateRange(
 export async function getByDateRange(
   startDate: string,
   endDate: string,
-  apiKeyId?: number
+  apiKeyId?: string | number
 ): Promise<PaginatedResponse<UsageLog>> {
-  const params: UsageQueryParams = {
+  const params: WorkerUsageQueryParams = {
     start_date: startDate,
     end_date: endDate,
     page: 1,
@@ -246,7 +253,7 @@ export async function getByDateRange(
  * @param id - Usage log ID
  * @returns Usage log details
  */
-export async function getById(id: number): Promise<UsageLog> {
+export async function getById(id: string | number): Promise<UsageLog> {
   const { data } = await apiClient.get<UsageLog>(`/usage/${id}`)
   return data
 }
@@ -280,10 +287,10 @@ export async function getDashboardTrend(params?: TrendParams): Promise<TrendResp
 export async function getDashboardModels(params?: {
   start_date?: string
   end_date?: string
-  api_key_id?: number
+  api_key_id?: string | number
   model?: string
   model_source?: 'requested'
-  group_id?: number
+  group_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null
@@ -302,7 +309,7 @@ export async function getDashboardModels(params?: {
  * @returns Daily usage detail rows
  */
 export async function getMyApiKeyDailyUsage(
-  apiKeyId: number,
+  apiKeyId: string | number,
   days: number = 30
 ): Promise<ApiKeyDailyUsageResponse> {
   const { data } = await apiClient.get<ApiKeyDailyUsageResponse>(
@@ -323,7 +330,7 @@ export async function getDashboardSnapshotV2(
 }
 
 export interface BatchApiKeyUsageStats {
-  api_key_id: number
+  api_key_id: string | number
   today_actual_cost: number
   total_actual_cost: number
 }
@@ -339,7 +346,7 @@ export interface BatchApiKeysUsageResponse {
  * @returns Usage stats map keyed by API key ID
  */
 export async function getDashboardApiKeysUsage(
-  apiKeyIds: number[],
+  apiKeyIds: Array<string | number>,
   options?: {
     signal?: AbortSignal
   }
@@ -365,7 +372,7 @@ export async function listMyErrorRequests(
   return data
 }
 
-export async function getMyErrorDetail(id: number): Promise<UserErrorRequestDetail> {
+export async function getMyErrorDetail(id: string | number): Promise<UserErrorRequestDetail> {
   const { data } = await apiClient.get<UserErrorRequestDetail>(`/usage/errors/${id}`)
   return data
 }

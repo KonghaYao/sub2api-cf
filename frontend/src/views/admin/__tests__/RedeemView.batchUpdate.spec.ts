@@ -20,8 +20,7 @@ vi.mock('@/api/admin', () => ({
       generate: vi.fn(),
       delete: vi.fn(),
       batchDelete: vi.fn(),
-      batchUpdate: batchUpdateRedeemCodes,
-      exportCodes: vi.fn()
+      batchUpdate: batchUpdateRedeemCodes
     },
     groups: {
       getAll: getAllGroups
@@ -114,7 +113,7 @@ describe('admin RedeemView batch update', () => {
     listRedeemCodes.mockResolvedValue({
       items: [
         {
-          id: 1,
+          id: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
           code: 'CODE-1',
           type: 'balance',
           value: 10,
@@ -125,7 +124,7 @@ describe('admin RedeemView batch update', () => {
           expires_at: null
         },
         {
-          id: 2,
+          id: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb',
           code: 'CODE-2',
           type: 'balance',
           value: 20,
@@ -171,15 +170,16 @@ describe('admin RedeemView batch update', () => {
     await wrapper.get('[data-test="batch-update-open"]').trigger('click')
     await flushPromises()
 
-    await wrapper.get('[data-test="batch-field-status"]').setValue(true)
-    await wrapper.get('[data-test="batch-status-select"]').setValue('disabled')
+    expect(wrapper.find('[data-test="batch-field-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="batch-status-select"]').exists()).toBe(false)
     await wrapper.get('[data-test="batch-field-notes"]').setValue(true)
     await wrapper.get('[data-test="batch-notes-input"]').setValue('maintenance')
     await wrapper.get('[data-test="batch-update-form"]').trigger('submit')
     await flushPromises()
 
-    expect(batchUpdateRedeemCodes).toHaveBeenCalledWith([1], {
-      status: 'disabled',
+    expect(batchUpdateRedeemCodes).toHaveBeenCalledWith([
+      'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa'
+    ], {
       notes: 'maintenance'
     })
     expect(showSuccess).toHaveBeenCalledWith('admin.redeem.batchUpdateSuccess')

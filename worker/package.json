@@ -1,18 +1,22 @@
 {
   "name": "sub2api-worker",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build:assets": "pnpm --dir ../frontend run build:cloudflare",
     "dev": "wrangler dev",
-    "deploy": "pnpm run build:assets && wrangler deploy",
+    "deploy": "pnpm run deploy:production",
+    "deploy:staging": "pnpm run check && pnpm run build:assets && pnpm run db:migrate:staging && wrangler deploy --env staging",
+    "deploy:production": "pnpm run check && pnpm run build:assets && pnpm run db:migrate:production && wrangler deploy --env production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm run typecheck && pnpm run test",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:migrate:staging": "wrangler d1 migrations apply DB --remote --env staging",
+    "db:migrate:production": "wrangler d1 migrations apply DB --remote --env production"
   },
   "engines": {
     "node": ">=22"

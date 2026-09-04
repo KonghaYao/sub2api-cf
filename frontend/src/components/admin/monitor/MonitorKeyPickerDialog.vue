@@ -75,7 +75,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { ApiKey } from '@/types'
+import type { ApiKeyWithPlaintext } from '@/utils/apiKeySecret'
 import type { Provider } from '@/api/admin/channelMonitor'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
@@ -84,7 +84,7 @@ import { maskApiKey } from '@/utils/maskApiKey'
 const props = withDefaults(defineProps<{
   show: boolean
   loading: boolean
-  keys: ApiKey[]
+  keys: ApiKeyWithPlaintext[]
   provider: Provider
   userGroupRates?: Record<number, number>
 }>(), {
@@ -93,7 +93,7 @@ const props = withDefaults(defineProps<{
 
 defineEmits<{
   (e: 'close'): void
-  (e: 'pick', key: ApiKey): void
+  (e: 'pick', key: ApiKeyWithPlaintext): void
 }>()
 
 const { t } = useI18n()
@@ -104,7 +104,7 @@ watch(() => props.show, (shown) => {
   if (!shown) search.value = ''
 })
 
-const filteredKeys = computed<ApiKey[]>(() => {
+const filteredKeys = computed<ApiKeyWithPlaintext[]>(() => {
   const q = search.value.trim().toLowerCase()
   return props.keys.filter((k) => {
     if (k.group?.platform !== props.provider) return false

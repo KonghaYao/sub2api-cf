@@ -35,6 +35,11 @@ interface GroupRow {
   sort_order: number
   rate_multiplier_ppm: number
   catalog_mode: 'all_routable' | 'allowlist'
+  group_type: 'standard' | 'subscription'
+  is_exclusive: number
+  daily_quota_micros: number | null
+  weekly_quota_micros: number | null
+  monthly_quota_micros: number | null
   control_version: number
   created_at_ms: number
   updated_at_ms: number
@@ -95,7 +100,9 @@ interface PriceRow {
 }
 
 const GROUP_COLUMNS = `id, name, description, platform, enabled, sort_order,
-  rate_multiplier_ppm, catalog_mode, control_version, created_at_ms, updated_at_ms`
+  rate_multiplier_ppm, catalog_mode, group_type, is_exclusive,
+  daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
+  control_version, created_at_ms, updated_at_ms`
 const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings, enabled,
   control_version, created_at_ms, updated_at_ms`
 
@@ -191,8 +198,10 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
         context.env.DB.prepare(
           `INSERT INTO "groups" (
              id, name, description, platform, enabled, sort_order,
-             rate_multiplier_ppm, catalog_mode, created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             rate_multiplier_ppm, catalog_mode, group_type, is_exclusive,
+             daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
+             created_at_ms, updated_at_ms
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id,
           row.name,
@@ -202,6 +211,11 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
           row.sort_order,
           row.rate_multiplier_ppm,
           row.catalog_mode,
+          row.group_type,
+          row.is_exclusive,
+          row.daily_quota_micros,
+          row.weekly_quota_micros,
+          row.monthly_quota_micros,
           now,
           now,
         ),
@@ -240,6 +254,7 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
     assertControlVersion(current.control_version, expected)
     const next = { ...current, ...patch, enabled: patch.enabled === undefined ? current.enabled : patch.enabled ? 1 : 0 }
     ensureSupportedPlatform(next.platform, next.enabled === 1)
+    validateGroupCommerceFields(next)
     const response = publicGroup({
       ...next,
       control_version: current.control_version + 1,
@@ -253,7 +268,8 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
         context.env.DB.prepare(
           `UPDATE "groups"
               SET name = ?, description = ?, platform = ?, enabled = ?, sort_order = ?,
-                  rate_multiplier_ppm = ?, catalog_mode = ?,
+                  rate_multiplier_ppm = ?, catalog_mode = ?, group_type = ?, is_exclusive = ?,
+                  daily_quota_micros = ?, weekly_quota_micros = ?, monthly_quota_micros = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ?`,
@@ -265,6 +281,11 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
           next.sort_order,
           next.rate_multiplier_ppm,
           next.catalog_mode,
+          next.group_type,
+          next.is_exclusive,
+          next.daily_quota_micros,
+          next.weekly_quota_micros,
+          next.monthly_quota_micros,
           expected,
           expected + 1,
           response.updated_at_ms,
@@ -674,7 +695,8 @@ function parseCreateGroup(body: Record<string, unknown>) {
   if (catalogMode !== 'all_routable' && catalogMode !== 'allowlist') {
     throw new GatewayError(400, 'invalid_catalog_mode', 'catalog_mode is invalid')
   }
-  return {
+  const groupType = parseGroupType(body) ?? 'standard'
+  const result = {
     name: requireString(body, 'name', 128),
     description: optionalNullableString(body, 'description', 1_024) ?? null,
     platform,
@@ -682,13 +704,23 @@ function parseCreateGroup(body: Record<string, unknown>) {
     sort_order: optionalSafeInteger(body, 'sort_order', 0, 1_000_000) ?? 0,
     rate_multiplier_ppm: optionalSafeInteger(body, 'rate_multiplier_ppm', 0) ?? 1_000_000,
     catalog_mode: catalogMode as GroupRow['catalog_mode'],
+    group_type: groupType,
+    is_exclusive: optionalBoolean(body, 'is_exclusive') === false ? 0 : 1,
+    daily_quota_micros: optionalNullableMicros(body, 'daily_quota_micros') ?? null,
+    weekly_quota_micros: optionalNullableMicros(body, 'weekly_quota_micros') ?? null,
+    monthly_quota_micros: optionalNullableMicros(body, 'monthly_quota_micros') ?? null,
   }
+  validateGroupCommerceFields(result)
+  return result
 }
 
 function parseGroupPatch(body: Record<string, unknown>) {
   const result: Partial<{
     name: string; description: string | null; platform: string; enabled: boolean;
-    sort_order: number; rate_multiplier_ppm: number; catalog_mode: GroupRow['catalog_mode']
+    sort_order: number; rate_multiplier_ppm: number; catalog_mode: GroupRow['catalog_mode'];
+    group_type: GroupRow['group_type']; is_exclusive: number;
+    daily_quota_micros: number | null; weekly_quota_micros: number | null;
+    monthly_quota_micros: number | null
   }> = {}
   const name = optionalString(body, 'name', 128)
   if (name !== undefined) result.name = name
@@ -709,8 +741,54 @@ function parseGroupPatch(body: Record<string, unknown>) {
     }
     result.catalog_mode = catalogMode
   }
+  const groupType = parseGroupType(body)
+  if (groupType !== undefined) result.group_type = groupType
+  const exclusive = optionalBoolean(body, 'is_exclusive')
+  if (exclusive !== undefined) result.is_exclusive = exclusive ? 1 : 0
+  for (const field of [
+    'daily_quota_micros',
+    'weekly_quota_micros',
+    'monthly_quota_micros',
+  ] as const) {
+    const value = optionalNullableMicros(body, field)
+    if (value !== undefined) result[field] = value
+  }
   if (Object.keys(result).length === 0) throw new GatewayError(400, 'empty_update', 'At least one field is required')
   return result
+}
+
+function parseGroupType(body: Record<string, unknown>): GroupRow['group_type'] | undefined {
+  const value = optionalString(body, 'group_type', 32)
+  if (value === undefined) return undefined
+  if (value !== 'standard' && value !== 'subscription') {
+    throw new GatewayError(400, 'invalid_group_type', 'group_type must be standard or subscription')
+  }
+  return value
+}
+
+function optionalNullableMicros(
+  body: Record<string, unknown>,
+  field: 'daily_quota_micros' | 'weekly_quota_micros' | 'monthly_quota_micros',
+): number | null | undefined {
+  if (body[field] === undefined) return undefined
+  if (body[field] === null) return null
+  return requireSafeInteger(body, field)
+}
+
+function validateGroupCommerceFields(
+  group: Pick<GroupRow, 'group_type' | 'daily_quota_micros' | 'weekly_quota_micros' | 'monthly_quota_micros'>,
+): void {
+  if (
+    group.group_type === 'standard' &&
+    [group.daily_quota_micros, group.weekly_quota_micros, group.monthly_quota_micros]
+      .some((value) => value !== null)
+  ) {
+    throw new GatewayError(
+      400,
+      'standard_group_subscription_quota',
+      'Subscription quota fields require group_type subscription',
+    )
+  }
 }
 
 function parseCreateModel(body: Record<string, unknown>) {
@@ -841,7 +919,12 @@ function groupModelSelect(): string {
 }
 
 function publicGroup(row: GroupRow) {
-  return { ...row, enabled: row.enabled === 1, status: row.enabled === 1 ? 'active' as const : 'inactive' as const }
+  return {
+    ...row,
+    enabled: row.enabled === 1,
+    is_exclusive: row.is_exclusive === 1,
+    status: row.enabled === 1 ? 'active' as const : 'inactive' as const,
+  }
 }
 
 function publicModel(row: ModelRow) {

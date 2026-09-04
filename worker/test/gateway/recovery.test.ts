@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Env } from '../../src/env'
 import { settleRecoveryRequest } from '../../src/gateway/recovery'
 
@@ -27,13 +27,24 @@ class RecoveryStatement {
 
 class RecoveryDatabase {
   readonly executed: RecoveryStatement[] = []
-  readonly row = {
+
+  constructor(readonly row: {
+    request_id: string
+    user_id: string
+    billing_type: 'balance' | 'subscription'
+    subscription_id: string | null
+    amount_micros: number
+    usage_event_json: string
+    attempts: number
+  } = {
     request_id: 'request-1',
     user_id: 'user-1',
+    billing_type: 'balance',
+    subscription_id: null as string | null,
     amount_micros: 10,
     usage_event_json: '{}',
     attempts: 19,
-  }
+  }) {}
 
   prepare(query: string): RecoveryStatement {
     return new RecoveryStatement(query, this)
@@ -67,5 +78,43 @@ describe('settlement recovery', () => {
       'manual_review: GatewayError: retry',
       'request-1',
     ])
+  })
+
+  it('replays a subscription settlement against its subscription Durable Object', async () => {
+    const database = new RecoveryDatabase({
+      request_id: 'request-subscription',
+      user_id: 'user-1',
+      billing_type: 'subscription',
+      subscription_id: 'subscription-1',
+      amount_micros: 25,
+      usage_event_json: '{}',
+      attempts: 0,
+    })
+    const subscriptionFetch = vi.fn(async () => Response.json({ settled_micros: 25 }))
+    const userFetch = vi.fn(async () => {
+      throw new Error('balance state must not be used')
+    })
+    const subscriptionNames: string[] = []
+    const env = {
+      DB: database as unknown as D1Database,
+      USER_STATE: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: userFetch }),
+      } as unknown as DurableObjectNamespace,
+      SUBSCRIPTION_STATE: {
+        idFromName: (name: string) => {
+          subscriptionNames.push(name)
+          return name
+        },
+        get: () => ({ fetch: subscriptionFetch }),
+      } as unknown as DurableObjectNamespace,
+    } as Env
+
+    await expect(settleRecoveryRequest(env, 'request-subscription')).resolves.toBe(true)
+
+    expect(subscriptionNames).toEqual(['subscription-1'])
+    expect(subscriptionFetch).toHaveBeenCalledOnce()
+    expect(userFetch).not.toHaveBeenCalled()
+    expect(database.executed.at(-1)?.query).toContain('DELETE FROM settlement_recovery')
   })
 })

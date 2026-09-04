@@ -250,13 +250,13 @@ import type {
   UpdateParams,
 } from '@/api/admin/channelMonitor'
 import type { ChannelMonitorTemplate } from '@/api/admin/channelMonitorTemplate'
-import type { ApiKey } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Select from '@/components/common/Select.vue'
 import ModelTagInput from '@/components/admin/channel/ModelTagInput.vue'
 import { getPlatformTextClass } from '@/components/admin/channel/types'
 import MonitorKeyPickerDialog from '@/components/admin/monitor/MonitorKeyPickerDialog.vue'
+import { hasPlaintextApiKey, type ApiKeyWithPlaintext } from '@/utils/apiKeySecret'
 import MonitorAdvancedRequestConfig from '@/components/admin/monitor/MonitorAdvancedRequestConfig.vue'
 import ProviderIcon from '@/components/user/monitor/ProviderIcon.vue'
 import { useChannelMonitorFormat } from '@/composables/useChannelMonitorFormat'
@@ -311,7 +311,7 @@ const submitting = ref(false)
 // API key picker
 const showKeyPicker = ref(false)
 const myKeysLoading = ref(false)
-const myActiveKeys = ref<ApiKey[]>([])
+const myActiveKeys = ref<ApiKeyWithPlaintext[]>([])
 const userGroupRates = ref<Record<number, number>>({})
 
 interface MonitorForm {
@@ -789,7 +789,8 @@ async function openMyKeyPicker() {
     ])
     const items = res.items || []
     const now = Date.now()
-    myActiveKeys.value = items.filter(k => {
+    myActiveKeys.value = items.filter((k): k is ApiKeyWithPlaintext => {
+      if (!hasPlaintextApiKey(k)) return false
       if (k.status !== 'active') return false
       if (!k.expires_at) return true
       return new Date(k.expires_at).getTime() > now
@@ -802,7 +803,7 @@ async function openMyKeyPicker() {
   }
 }
 
-function pickMyKey(k: ApiKey) {
+function pickMyKey(k: ApiKeyWithPlaintext) {
   form.api_key = k.key
   showKeyPicker.value = false
 }

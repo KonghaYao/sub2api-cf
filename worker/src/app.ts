@@ -7,6 +7,12 @@ import {
   registerWithPassword,
 } from './auth/handler'
 import {
+  listUserSessions,
+  revokeAllUserSessions,
+  revokeOtherUserSessions,
+  revokeUserSession,
+} from './auth/sessions'
+import {
   createAdminApiKey,
   listAdminApiKeys,
   revokeAdminApiKey,
@@ -56,6 +62,38 @@ import {
   updateAdminModel,
 } from './control/catalog'
 import { getAdminSettings, updateAdminSettings } from './control/settings'
+import {
+  batchDeleteAdminRedeemCodes,
+  batchUpdateAdminRedeemCodes,
+  deleteAdminRedeemCode,
+  expireAdminRedeemCode,
+  generateAdminRedeemCodes,
+  getAdminRedeemCode,
+  getAdminRedeemCodeStats,
+  listAdminRedeemCodes,
+} from './control/redeem-codes'
+import {
+  createAdminSubscriptionPlan,
+  disableAdminSubscriptionPlan,
+  getAdminSubscriptionPlan,
+  getPublicSubscriptionPlan,
+  listAdminSubscriptionPlans,
+  listPublicSubscriptionPlans,
+  updateAdminSubscriptionPlan,
+} from './control/subscription-plans'
+import {
+  assignAdminSubscription,
+  bulkAssignAdminSubscriptions,
+  extendAdminSubscription,
+  getAdminSubscription,
+  getAdminSubscriptionProgress,
+  listAdminGroupSubscriptions,
+  listAdminSubscriptions,
+  listAdminUserSubscriptions,
+  resetAdminSubscriptionQuota,
+  restoreAdminSubscription,
+  revokeAdminSubscription,
+} from './control/subscriptions'
 import type { Env } from './env'
 import {
   handleAnthropicCountTokens,
@@ -79,6 +117,34 @@ import {
   revokeUserApiKey,
   updateUserApiKey,
 } from './user/api-keys'
+import { getUserGroupRates, listAvailableUserGroups } from './user/groups'
+import { listUserRedemptions, redeemCode } from './user/redeem'
+import {
+  getUserSubscriptionProgress,
+  getUserSubscriptionSummary,
+  listActiveUserSubscriptions,
+  listUserSubscriptionProgress,
+  listUserSubscriptions,
+} from './user/subscriptions'
+import {
+  changeUserPassword,
+  getUserAvatar,
+  getUserProfile,
+  updateUserProfile,
+} from './user/profile'
+import {
+  dashboardApiKeysUsage,
+  dashboardModels,
+  dashboardSnapshot,
+  dashboardStats,
+  dashboardTrend,
+  getUserApiKeyDailyUsage,
+  getUsageDetail,
+  listUsage,
+  listUsageErrors,
+  usageErrorDetail,
+  usageStats,
+} from './user/usage'
 
 type AppBindings = {
   Bindings: Env
@@ -121,7 +187,7 @@ export function createApp() {
     context.header('x-frame-options', 'DENY')
     context.header('referrer-policy', 'strict-origin-when-cross-origin')
     context.header('permissions-policy', 'camera=(), microphone=(), geolocation=()')
-    if (isApiPath(new URL(context.req.url).pathname)) {
+    if (isApiPath(new URL(context.req.url).pathname) && !context.res.headers.has('cache-control')) {
       context.header('cache-control', 'no-store')
     }
   })
@@ -164,6 +230,27 @@ export function createApp() {
   app.post('/api/v1/auth/refresh', refreshUserSession)
   app.post('/api/v1/auth/logout', logoutUserSession)
   app.get('/api/v1/auth/me', currentUser)
+  app.get('/api/v1/auth/sessions', listUserSessions)
+  app.post('/api/v1/auth/sessions/revoke-others', revokeOtherUserSessions)
+  app.post('/api/v1/auth/sessions/revoke-all', revokeAllUserSessions)
+  app.post('/api/v1/auth/revoke-all-sessions', revokeAllUserSessions)
+  app.delete('/api/v1/auth/sessions/:id', revokeUserSession)
+
+  app.get('/api/v1/user/profile', getUserProfile)
+  app.put('/api/v1/user', updateUserProfile)
+  app.put('/api/v1/user/password', changeUserPassword)
+  app.get('/api/v1/user/avatar/:id', getUserAvatar)
+  app.get('/api/v1/user/api-keys/:id/usage/daily', getUserApiKeyDailyUsage)
+  app.get('/api/v1/usage/stats', usageStats)
+  app.get('/api/v1/usage/dashboard/stats', dashboardStats)
+  app.get('/api/v1/usage/dashboard/trend', dashboardTrend)
+  app.get('/api/v1/usage/dashboard/models', dashboardModels)
+  app.get('/api/v1/usage/dashboard/snapshot-v2', dashboardSnapshot)
+  app.post('/api/v1/usage/dashboard/api-keys-usage', dashboardApiKeysUsage)
+  app.get('/api/v1/usage/errors', listUsageErrors)
+  app.get('/api/v1/usage/errors/:id', usageErrorDetail)
+  app.get('/api/v1/usage', listUsage)
+  app.get('/api/v1/usage/:id', getUsageDetail)
 
   app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
   app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
@@ -206,12 +293,47 @@ export function createApp() {
   app.put('/api/v1/admin/accounts/:id/models/:model_id', putAdminAccountModelCapability)
   app.delete('/api/v1/admin/accounts/:id/models/:model_id', deleteAdminAccountModelCapability)
   app.post('/api/v1/admin/accounts/:id/test', testAdminAccount)
+  app.get('/api/v1/admin/payment/plans', listAdminSubscriptionPlans)
+  app.post('/api/v1/admin/payment/plans', createAdminSubscriptionPlan)
+  app.get('/api/v1/admin/payment/plans/:id', getAdminSubscriptionPlan)
+  app.put('/api/v1/admin/payment/plans/:id', updateAdminSubscriptionPlan)
+  app.delete('/api/v1/admin/payment/plans/:id', disableAdminSubscriptionPlan)
+  app.get('/api/v1/admin/subscriptions', listAdminSubscriptions)
+  app.post('/api/v1/admin/subscriptions/assign', assignAdminSubscription)
+  app.post('/api/v1/admin/subscriptions/bulk-assign', bulkAssignAdminSubscriptions)
+  app.get('/api/v1/admin/subscriptions/:id', getAdminSubscription)
+  app.get('/api/v1/admin/subscriptions/:id/progress', getAdminSubscriptionProgress)
+  app.post('/api/v1/admin/subscriptions/:id/extend', extendAdminSubscription)
+  app.post('/api/v1/admin/subscriptions/:id/reset-quota', resetAdminSubscriptionQuota)
+  app.post('/api/v1/admin/subscriptions/:id/revoke', revokeAdminSubscription)
+  app.post('/api/v1/admin/subscriptions/:id/restore', restoreAdminSubscription)
+  app.get('/api/v1/admin/groups/:id/subscriptions', listAdminGroupSubscriptions)
+  app.get('/api/v1/admin/users/:id/subscriptions', listAdminUserSubscriptions)
+  app.get('/api/v1/admin/redeem-codes', listAdminRedeemCodes)
+  app.post('/api/v1/admin/redeem-codes/generate', generateAdminRedeemCodes)
+  app.get('/api/v1/admin/redeem-codes/stats', getAdminRedeemCodeStats)
+  app.post('/api/v1/admin/redeem-codes/batch-delete', batchDeleteAdminRedeemCodes)
+  app.post('/api/v1/admin/redeem-codes/batch-update', batchUpdateAdminRedeemCodes)
+  app.post('/api/v1/admin/redeem-codes/:id/expire', expireAdminRedeemCode)
+  app.get('/api/v1/admin/redeem-codes/:id', getAdminRedeemCode)
+  app.delete('/api/v1/admin/redeem-codes/:id', deleteAdminRedeemCode)
 
   app.get('/api/v1/keys', listUserApiKeys)
   app.post('/api/v1/keys', createUserApiKey)
   app.get('/api/v1/keys/:id', getUserApiKey)
   app.put('/api/v1/keys/:id', updateUserApiKey)
   app.delete('/api/v1/keys/:id', revokeUserApiKey)
+  app.get('/api/v1/groups/available', listAvailableUserGroups)
+  app.get('/api/v1/groups/rates', getUserGroupRates)
+  app.get('/api/v1/subscriptions', listUserSubscriptions)
+  app.get('/api/v1/subscriptions/active', listActiveUserSubscriptions)
+  app.get('/api/v1/subscriptions/progress', listUserSubscriptionProgress)
+  app.get('/api/v1/subscriptions/summary', getUserSubscriptionSummary)
+  app.get('/api/v1/subscriptions/:id/progress', getUserSubscriptionProgress)
+  app.post('/api/v1/redeem', redeemCode)
+  app.get('/api/v1/redeem/history', listUserRedemptions)
+  app.get('/api/v1/payment/plans', listPublicSubscriptionPlans)
+  app.get('/api/v1/payment/plans/:id', getPublicSubscriptionPlan)
 
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)

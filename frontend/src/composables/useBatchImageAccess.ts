@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { keysAPI } from '@/api/keys'
 import { useAuthStore } from '@/stores/auth'
 import type { ApiKey } from '@/types'
+import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
 
 const loaded = ref(false)
 const loading = ref(false)
@@ -12,6 +13,7 @@ const pageSize = 100
 function keyAllowsBatchImage(key: ApiKey): boolean {
   return (
     key.status === 'active' &&
+    hasPlaintextApiKey(key) &&
     key.group?.platform === 'gemini' &&
     key.group?.allow_batch_image_generation === true
   )

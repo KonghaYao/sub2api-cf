@@ -22,6 +22,8 @@ const model: ModelRoute = {
   cache_read_micros_per_million: 500_000,
   per_request_micros: 0,
   minimum_reservation_micros: 1,
+  group_rate_multiplier_ppm: 1_000_000,
+  user_rate_multiplier_ppm: null,
   rate_multiplier_ppm: 1_000_000,
   max_output_tokens: 16_384,
   default_max_output_tokens: 4_096,
@@ -57,8 +59,10 @@ class FakeStatement {
       if (this.database.failRecoveryWrites) throw new Error('D1 unavailable')
       this.database.recovery = {
         user_id: this.values[1],
-        amount_micros: this.values[2],
-        usage_event_json: this.values[3],
+        billing_type: this.values[2],
+        subscription_id: this.values[3],
+        amount_micros: this.values[4],
+        usage_event_json: this.values[5],
       }
     } else if (this.query.includes('DELETE FROM settlement_recovery')) {
       this.database.recovery = null
@@ -109,7 +113,10 @@ class FakeDatabase {
     user_state_version: 0,
     group_id: 'group-1',
     group_enabled: 1,
+    group_accessible: 1,
     platform: 'openai',
+    group_type: 'standard',
+    subscription_id: null,
   }
 
   prepare(query: string): FakeStatement {
@@ -139,7 +146,7 @@ class FakeStateStub {
   settleFailures = 0
   snapshotAccounts: Array<Record<string, unknown>> = []
 
-  constructor(private readonly kind: 'user' | 'pool') {}
+  constructor(private readonly kind: 'user' | 'subscription' | 'pool') {}
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname
@@ -166,6 +173,7 @@ async function harness(): Promise<{
   env: Env
   database: FakeDatabase
   user: FakeStateStub
+  subscription: FakeStateStub
   pool: FakeStateStub
   poolNames: string[]
   queued: unknown[]
@@ -185,6 +193,7 @@ async function harness(): Promise<{
     ...encrypted,
   }
   const user = new FakeStateStub('user')
+  const subscription = new FakeStateStub('subscription')
   const pool = new FakeStateStub('pool')
   const poolNames: string[] = []
   const queued: unknown[] = []
@@ -203,13 +212,14 @@ async function harness(): Promise<{
     CREDENTIALS_MASTER_KEY: masterKey,
     DB: database as unknown as D1Database,
     USER_STATE: namespace(user),
+    SUBSCRIPTION_STATE: namespace(subscription),
     POOL_STATE: namespace(pool, poolNames),
     ASSETS: { fetch: async () => new Response('asset') } as unknown as Fetcher,
     CONFIG_KV: {} as KVNamespace,
     OBJECTS: {} as R2Bucket,
     EVENTS_QUEUE: { send: async (value: unknown) => void queued.push(value) } as unknown as Queue,
   }
-  return { env, database, user, pool, poolNames, queued }
+  return { env, database, user, subscription, pool, poolNames, queued }
 }
 
 describe('OpenAI-compatible gateway', () => {
@@ -352,6 +362,81 @@ describe('OpenAI-compatible gateway', () => {
       payload: { input_tokens: 10, output_tokens: 5, account_id: accountId },
     })
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
+  it('charges an active subscription at the effective rate without touching balance state', async () => {
+    const { env, database, user, subscription } = await harness()
+    const now = Date.now()
+    Object.assign(database.principal, {
+      group_type: 'subscription',
+      subscription_id: 'subscription-1',
+      subscription_starts_at_ms: now - 1_000,
+      subscription_expires_at_ms: now + 86_400_000,
+      daily_quota_micros: 1_000_000,
+      weekly_quota_micros: 2_000_000,
+      monthly_quota_micros: 3_000_000,
+      daily_used_micros: 0,
+      weekly_used_micros: 0,
+      monthly_used_micros: 0,
+      daily_anchor_ms: 0,
+      daily_window_start_ms: null,
+      weekly_window_start_ms: null,
+      monthly_window_start_ms: null,
+      quota_reset_epoch: 0,
+      quota_reset_generation: 0,
+      subscription_control_version: 0,
+    })
+    const originalMultiplier = model.rate_multiplier_ppm
+    model.rate_multiplier_ppm = 800_000
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      model: 'gpt-upstream',
+      choices: [],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    })))
+
+    try {
+      const response = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+      }, env)
+
+      expect(response.status).toBe(200)
+      expect(user.calls).toEqual([])
+      expect(subscription.calls.map((call) => call.path)).toEqual([
+        '/configure',
+        '/authorize',
+        '/reserve',
+        '/settle',
+      ])
+      expect(subscription.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        amount_micros: 32,
+        usage_event: {
+          payload: {
+            billing_type: 'subscription',
+            subscription_id: 'subscription-1',
+            amount_micros: 32,
+          },
+        },
+      })
+
+      subscription.calls.length = 0
+      model.rate_multiplier_ppm = 0
+      const freeResponse = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+      }, env)
+      expect(freeResponse.status).toBe(200)
+      expect(subscription.calls.find((call) => call.path === '/reserve')?.body).toMatchObject({
+        amount_micros: 0,
+      })
+      expect(subscription.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+        amount_micros: 0,
+      })
+    } finally {
+      model.rate_multiplier_ppm = originalMultiplier
+    }
   })
 
   it('streams complete SSE frames and settles from the terminal usage event', async () => {

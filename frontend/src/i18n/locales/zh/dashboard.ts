@@ -95,6 +95,7 @@ export default {
     created: '创建时间',
     copyToClipboard: '复制到剪贴板',
     copied: '已复制！',
+    plaintextUnavailable: '完整 API 密钥仅在创建时显示。请新建密钥后再使用此操作。',
     importToCcSwitch: '导入到 CCS',
     enable: '启用',
     disable: '禁用',
@@ -856,6 +857,23 @@ export default {
       deleteConfirm: '删除“{name}”？删除后将无法再使用它登录。',
       deleted: 'Passkey 已删除。',
       deleteFailed: '删除 Passkey 失败。'
+    },
+    sessions: {
+      title: '登录设备',
+      description: '查看当前有效会话，并退出不再使用的设备。',
+      empty: '当前没有有效的登录会话。',
+      unknownDevice: '未知设备',
+      current: '当前设备',
+      createdAt: '登录于 {date}',
+      lastSeen: '最近活动 {date}',
+      revoke: '退出',
+      revokeOthers: '退出其他设备',
+      revokeConfirm: '确认退出这台设备？该设备需要重新登录。',
+      revokeOthersConfirm: '确认退出除当前设备外的所有设备？',
+      revoked: '设备已退出。',
+      othersRevoked: '其他设备已全部退出。',
+      loadFailed: '加载登录设备失败。',
+      revokeFailed: '退出设备失败。'
     },
     balanceNotify: {
       title: '余额不足提醒',

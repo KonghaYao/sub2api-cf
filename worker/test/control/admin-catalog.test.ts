@@ -60,7 +60,10 @@ class CatalogStatement {
 
   async run(): Promise<D1Result<unknown>> {
     if (this.query.includes('INSERT INTO "groups"')) {
-      const [id, name, description, platform, enabled, sortOrder, multiplier, catalogMode, createdAt, updatedAt] = this.values
+      const [
+        id, name, description, platform, enabled, sortOrder, multiplier, catalogMode,
+        groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota, createdAt, updatedAt,
+      ] = this.values
       this.database.groups.set(String(id), {
         id: String(id),
         name: String(name),
@@ -70,6 +73,11 @@ class CatalogStatement {
         sort_order: Number(sortOrder),
         rate_multiplier_ppm: Number(multiplier),
         catalog_mode: String(catalogMode),
+        group_type: String(groupType),
+        is_exclusive: Number(isExclusive),
+        daily_quota_micros: dailyQuota === null ? null : Number(dailyQuota),
+        weekly_quota_micros: weeklyQuota === null ? null : Number(weeklyQuota),
+        monthly_quota_micros: monthlyQuota === null ? null : Number(monthlyQuota),
         control_version: 0,
         created_at_ms: Number(createdAt),
         updated_at_ms: Number(updatedAt),
@@ -84,8 +92,11 @@ class CatalogStatement {
       return result()
     }
     if (this.query.includes('UPDATE "groups"')) {
-      const [name, description, platform, enabled, sortOrder, multiplier, catalogMode,
-        expected, nextVersion, updatedAt, id] = this.values
+      const [
+        name, description, platform, enabled, sortOrder, multiplier, catalogMode,
+        groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
+        expected, nextVersion, updatedAt, id,
+      ] = this.values
       const group = this.database.requireRow(this.database.groups, String(id))
       this.database.assertVersion(group, Number(expected))
       Object.assign(group, {
@@ -96,6 +107,11 @@ class CatalogStatement {
         sort_order: Number(sortOrder),
         rate_multiplier_ppm: Number(multiplier),
         catalog_mode: String(catalogMode),
+        group_type: String(groupType),
+        is_exclusive: Number(isExclusive),
+        daily_quota_micros: dailyQuota === null ? null : Number(dailyQuota),
+        weekly_quota_micros: weeklyQuota === null ? null : Number(weeklyQuota),
+        monthly_quota_micros: monthlyQuota === null ? null : Number(monthlyQuota),
         control_version: Number(nextVersion),
         updated_at_ms: Number(updatedAt),
       })
@@ -410,6 +426,11 @@ describe('admin catalog control plane', () => {
       platform: 'openai',
       rate_multiplier_ppm: 1_250_000,
       catalog_mode: 'allowlist',
+      group_type: 'subscription',
+      is_exclusive: true,
+      daily_quota_micros: 10_000_000,
+      weekly_quota_micros: 50_000_000,
+      monthly_quota_micros: 150_000_000,
     }
 
     const created = await request(database, '/api/v1/admin/groups', 'POST', 'catalog-create-1', body)
@@ -425,8 +446,45 @@ describe('admin catalog control plane', () => {
       status: 'active',
       rate_multiplier_ppm: 1_250_000,
       catalog_mode: 'allowlist',
+      group_type: 'subscription',
+      is_exclusive: true,
+      daily_quota_micros: 10_000_000,
+      weekly_quota_micros: 50_000_000,
+      monthly_quota_micros: 150_000_000,
       control_version: 0,
     })
+  })
+
+  it('uses private-by-default groups and rejects subscription quotas on standard groups', async () => {
+    const database = new CatalogDatabase()
+    const created = await request(database, '/api/v1/admin/groups', 'POST', 'safe-group-defaults', {
+      name: 'private-default',
+      platform: 'openai',
+    })
+    const invalidQuota = await request(database, '/api/v1/admin/groups', 'POST', 'invalid-standard-quota', {
+      name: 'invalid-standard',
+      platform: 'openai',
+      group_type: 'standard',
+      daily_quota_micros: 1_000_000,
+    })
+    const invalidType = await request(database, '/api/v1/admin/groups', 'POST', 'invalid-group-type', {
+      name: 'invalid-type',
+      platform: 'openai',
+      group_type: 'enterprise',
+    })
+
+    expect(created.status).toBe(201)
+    expect((await json(created)).data).toMatchObject({
+      group_type: 'standard',
+      is_exclusive: true,
+      daily_quota_micros: null,
+      weekly_quota_micros: null,
+      monthly_quota_micros: null,
+    })
+    expect(invalidQuota.status).toBe(400)
+    expect((await json(invalidQuota)).code).toBe('standard_group_subscription_quota')
+    expect(invalidType.status).toBe(400)
+    expect((await json(invalidType)).code).toBe('invalid_group_type')
   })
 
   it('partially updates a group with CAS, rejects stale writes, and soft-disables it', async () => {
@@ -440,6 +498,8 @@ describe('admin catalog control plane', () => {
     const updated = await request(database, `/api/v1/admin/groups/${group.id}`, 'PUT', 'group-update', {
       expected_control_version: 0,
       name: 'renamed',
+      group_type: 'subscription',
+      daily_quota_micros: 25_000_000,
     })
     expect(updated.status).toBe(200)
     expect((await json(updated)).data).toMatchObject({
@@ -447,6 +507,9 @@ describe('admin catalog control plane', () => {
       description: 'keep me',
       rate_multiplier_ppm: 1_100_000,
       catalog_mode: 'allowlist',
+      group_type: 'subscription',
+      is_exclusive: true,
+      daily_quota_micros: 25_000_000,
       status: 'active',
       control_version: 1,
     })

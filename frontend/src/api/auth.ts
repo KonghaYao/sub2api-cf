@@ -338,6 +338,37 @@ export async function revokeAllSessions(): Promise<{ message: string }> {
   return data
 }
 
+export interface UserSessionSummary {
+  id: string
+  current: boolean
+  created_at: string
+  access_expires_at: string
+  refresh_expires_at: string
+  last_seen_at?: string
+  user_agent?: string
+}
+
+export interface UserSessionList {
+  items: UserSessionSummary[]
+  total: number
+}
+
+/** List the current user's active login sessions without exposing token material. */
+export async function getSessions(): Promise<UserSessionList> {
+  const { data } = await apiClient.get<UserSessionList>('/auth/sessions')
+  return data
+}
+
+/** Revoke one owned login-session family. */
+export async function revokeSession(id: string): Promise<void> {
+  await apiClient.delete(`/auth/sessions/${encodeURIComponent(id)}`)
+}
+
+/** Keep this browser's refresh family and revoke every other login session. */
+export async function revokeOtherSessions(): Promise<void> {
+  await apiClient.post('/auth/sessions/revoke-others')
+}
+
 /**
  * Check if user is authenticated
  * @returns True if user has valid token
@@ -702,6 +733,9 @@ export const authAPI = {
   resetPassword,
   refreshToken,
   revokeAllSessions,
+  getSessions,
+  revokeSession,
+  revokeOtherSessions,
   getPendingOAuthBindLoginKind,
   isPendingOAuthCreateAccountRequired,
   hasPendingOAuthSuggestedProfile,

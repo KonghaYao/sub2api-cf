@@ -10,8 +10,50 @@
 
       <!-- Settings Form -->
       <form v-else @submit.prevent="saveSettings" class="space-y-6" novalidate>
+        <div v-if="cloudflareWorkerSettings" class="card">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              Cloudflare Worker Settings
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Only settings enforced by the current Worker are shown here.
+            </p>
+          </div>
+          <div class="grid grid-cols-1 gap-6 p-6 md:grid-cols-2">
+            <div>
+              <label class="input-label">{{ t("admin.settings.site.siteName") }}</label>
+              <input v-model="form.site_name" type="text" class="input" />
+            </div>
+            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+              <span class="text-sm text-gray-700 dark:text-gray-300">Registration</span>
+              <Toggle v-model="form.registration_enabled" />
+            </div>
+            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+              <span class="text-sm text-gray-700 dark:text-gray-300">Email verification</span>
+              <Toggle v-model="form.email_verify_enabled" />
+            </div>
+            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+              <span class="text-sm text-gray-700 dark:text-gray-300">Cloudflare Turnstile</span>
+              <Toggle v-model="form.turnstile_enabled" />
+            </div>
+            <div>
+              <label class="input-label">Turnstile site key</label>
+              <input v-model="form.turnstile_site_key" type="text" class="input font-mono" />
+            </div>
+            <div>
+              <label class="input-label">Turnstile secret key</label>
+              <input
+                v-model="form.turnstile_secret_key"
+                type="password"
+                class="input font-mono"
+                :placeholder="form.turnstile_secret_key_configured ? 'Configured — leave blank to keep it' : ''"
+              />
+            </div>
+          </div>
+        </div>
+
         <!-- Tab Navigation -->
-        <div class="settings-tabs-shell">
+        <div v-if="!cloudflareWorkerSettings" class="settings-tabs-shell">
           <nav
             class="settings-tabs-scroll"
             role="tablist"
@@ -45,7 +87,7 @@
         </div>
 
         <!-- Tab: Security — Admin API Key -->
-        <div v-show="activeTab === 'security'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'security'" class="space-y-6">
           <!-- Admin API Key Settings -->
           <div class="card">
             <div
@@ -202,7 +244,7 @@
         <!-- /Tab: Security — Admin API Key -->
 
         <!-- Tab: Gateway -->
-        <div v-show="activeTab === 'gateway'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'gateway'" class="space-y-6">
           <!-- Overload Cooldown (529) Settings -->
           <div class="card">
             <div
@@ -1421,7 +1463,7 @@
         <!-- /Tab: Gateway -->
 
         <!-- Tab: Security — Registration, Turnstile, LinuxDo -->
-        <div v-show="activeTab === 'security'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'security'" class="space-y-6">
           <!-- Registration Settings -->
           <div class="card">
             <div
@@ -3822,7 +3864,7 @@
         <!-- /Tab: Security — Registration, Turnstile, LinuxDo, OIDC -->
 
         <!-- Tab: Users -->
-        <div v-show="activeTab === 'users'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'users'" class="space-y-6">
           <!-- Default Settings -->
           <div class="card">
             <div
@@ -4438,7 +4480,7 @@
         <!-- /Tab: Users -->
 
         <!-- Tab: Gateway — Claude Code, Scheduling -->
-        <div v-show="activeTab === 'gateway'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'gateway'" class="space-y-6">
           <!-- Claude Code Settings -->
           <div class="card">
             <div
@@ -6247,7 +6289,7 @@
         <!-- /Tab: Gateway — Claude Code, Scheduling -->
 
         <!-- Tab: General -->
-        <div v-show="activeTab === 'general'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'general'" class="space-y-6">
           <!-- Site Settings -->
           <div class="card">
             <div
@@ -6809,7 +6851,7 @@
 	        <!-- /Tab: General -->
 
 	        <!-- Tab: Login Agreement -->
-	        <div v-show="activeTab === 'agreement'" class="space-y-6">
+	        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'agreement'" class="space-y-6">
 	          <div class="card">
 	            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
 	              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -7011,7 +7053,7 @@
         <!-- /Tab: Login Agreement -->
 
 	        <!-- Tab: Features (功能开关) -->
-        <div v-show="activeTab === 'features'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'features'" class="space-y-6">
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
@@ -7712,7 +7754,7 @@
 
         <!-- Tab: Email -->
         <!-- Tab: Payment -->
-        <div v-show="activeTab === 'payment'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'payment'" class="space-y-6">
           <!-- Payment System Settings -->
           <div class="card">
             <div
@@ -8263,7 +8305,7 @@
           />
         </div>
 
-        <div v-show="activeTab === 'email'" class="space-y-6">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'email'" class="space-y-6">
           <!-- Email disabled hint - show when email_verify_enabled is off -->
           <div v-if="!form.email_verify_enabled" class="card">
             <div class="p-6">
@@ -8685,7 +8727,7 @@
         <!-- /Tab: Email -->
 
         <!-- Tab: Backup -->
-        <div v-show="activeTab === 'backup'">
+        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'backup'">
           <BackupSettings />
         </div>
 
@@ -8940,6 +8982,7 @@ const { copyToClipboard } = useClipboard();
 const loading = ref(true);
 const loadFailed = ref(false);
 const saving = ref(false);
+const cloudflareWorkerSettings = ref(false);
 const testingSmtp = ref(false);
 const sendingTestEmail = ref(false);
 const smtpPasswordManuallyEdited = ref(false);
@@ -10766,6 +10809,22 @@ async function loadSettings() {
   loadFailed.value = false;
   try {
     const settings = await adminAPI.settings.getSettings();
+    cloudflareWorkerSettings.value = settings.cloudflare_worker_contract === true;
+    if (cloudflareWorkerSettings.value) {
+      for (const key of [
+        "site_name",
+        "registration_enabled",
+        "email_verify_enabled",
+        "turnstile_enabled",
+        "turnstile_site_key",
+        "turnstile_secret_key_configured",
+      ] as const) {
+        const value = settings[key];
+        if (value !== null && value !== undefined) form[key] = value as never;
+      }
+      form.turnstile_secret_key = "";
+      return;
+    }
     settings.payment_load_balance_strategy =
       settings.payment_load_balance_strategy || "round-robin";
     // Only assign non-null values from backend (null means unconfigured, keep defaults)
@@ -11006,6 +11065,21 @@ function findDuplicateDefaultSubscription(
 async function saveSettings() {
   saving.value = true;
   try {
+    if (cloudflareWorkerSettings.value) {
+      const updated = await adminAPI.settings.updateSettings({
+        site_name: form.site_name,
+        registration_enabled: form.registration_enabled,
+        email_verify_enabled: form.email_verify_enabled,
+        turnstile_enabled: form.turnstile_enabled,
+        turnstile_site_key: form.turnstile_site_key,
+        turnstile_secret_key: form.turnstile_secret_key || undefined,
+      });
+      form.turnstile_secret_key_configured = updated.turnstile_secret_key_configured;
+      form.turnstile_secret_key = "";
+      await appStore.fetchPublicSettings(true);
+      appStore.showSuccess(t("admin.settings.settingsSaved"));
+      return;
+    }
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -12381,12 +12455,13 @@ async function loadProviders() {
     // Normalize supported_types: backend returns null when the list is empty
     // (Go nil slice → JSON null). Without this, ProviderCard's isSelected()
     // throws TypeError on null.includes(), causing the card to vanish.
-    providers.value = (res.data || []).map((p) => ({
+    const normalizedProviders = (res.data || []).map((p) => ({
       ...p,
       supported_types: Array.isArray(p.supported_types)
         ? p.supported_types
         : [],
     }));
+    providers.value.splice(0, providers.value.length, ...normalizedProviders);
   } catch (err: unknown) {
     appStore.showError(extractI18nErrorMessage(err, t, "payment.errors", t("common.error")));
   } finally {
@@ -12542,8 +12617,9 @@ async function handleDeleteProvider() {
   }
 }
 
-onMounted(() => {
-  loadSettings();
+onMounted(async () => {
+  await loadSettings();
+  if (cloudflareWorkerSettings.value) return;
   loadSubscriptionGroups();
   loadAdminApiKey();
   loadUpstreamBillingProbeSettings();

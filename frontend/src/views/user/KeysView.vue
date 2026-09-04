@@ -97,9 +97,10 @@
           <template #cell-key="{ value, row }">
             <div class="flex items-center gap-2">
               <code class="code text-xs">
-                {{ maskApiKey(value) }}
+                {{ row.key ? maskApiKey(row.key) : `${row.key_prefix}…` }}
               </code>
               <button
+                v-if="row.key"
                 @click="copyToClipboard(value, row.id)"
                 class="rounded-lg p-1 transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
                 :class="
@@ -373,6 +374,7 @@
             <div class="flex items-center gap-1">
               <!-- Use Key Button -->
               <button
+                v-if="row.key"
                 @click="openUseKeyModal(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20 dark:hover:text-green-400"
               >
@@ -381,7 +383,7 @@
               </button>
               <!-- Import to CC Switch Button -->
               <button
-                v-if="!publicSettings?.hide_ccs_import_button"
+                v-if="row.key && !publicSettings?.hide_ccs_import_button"
                 @click="importToCcswitch(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"
               >
@@ -508,7 +510,7 @@
         </div>
 
         <!-- Custom Key Section (only for create) -->
-        <div v-if="!showEditModal" class="space-y-3">
+        <div v-if="legacyKeyControlsAvailable && !showEditModal" class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.customKeyLabel') }}</label>
             <button
@@ -550,7 +552,7 @@
         </div>
 
         <!-- IP Restriction Section -->
-        <div class="space-y-3">
+        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.ipRestriction') }}</label>
             <button
@@ -596,7 +598,7 @@
         </div>
 
         <!-- Quota Limit Section -->
-        <div class="space-y-3">
+        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
           <label class="input-label">{{ t('keys.quotaLimit') }}</label>
           <!-- Switch commented out - always show input, 0 = unlimited
           <div class="flex items-center justify-between">
@@ -662,7 +664,7 @@
         </div>
 
         <!-- Rate Limit Section -->
-        <div class="space-y-3">
+        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.rateLimitSection') }}</label>
             <button
@@ -964,6 +966,29 @@
       @cancel="showDeleteDialog = false"
     />
 
+    <BaseDialog
+      :show="createdApiKeySecret !== ''"
+      :title="t('keys.keyCreatedSuccess')"
+      width="narrow"
+      @close="createdApiKeySecret = ''"
+    >
+      <div class="space-y-3">
+        <p class="text-sm text-amber-700 dark:text-amber-300">
+          {{ createdApiKeyWarning }}
+        </p>
+        <div class="flex items-center gap-2 rounded-lg bg-gray-100 p-3 dark:bg-dark-800">
+          <code class="min-w-0 flex-1 break-all text-xs">{{ createdApiKeySecret }}</code>
+          <button
+            type="button"
+            class="btn btn-secondary shrink-0"
+            @click="copyToClipboard(createdApiKeySecret, 'created')"
+          >
+            {{ t('keys.copyToClipboard') }}
+          </button>
+        </div>
+      </div>
+    </BaseDialog>
+
     <!-- Reset Quota Confirmation Dialog -->
     <ConfirmDialog
       :show="showResetQuotaDialog"
@@ -1125,7 +1150,7 @@
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
-import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
+import { keysAPI, authAPI, userGroupsAPI } from '@/api'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import DataTable from '@/components/common/DataTable.vue'
@@ -1141,10 +1166,12 @@ import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import GroupBadge from '@/components/common/GroupBadge.vue'
 	import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 	import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UpdateApiKeyRequest } from '@/types'
+import type { AvailableUserGroup } from '@/api/groups'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
+import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1158,7 +1185,7 @@ const formatDateTimeLocal = (isoDate: string): string => {
 }
 
 interface GroupOption {
-  value: number
+  value: string
   label: string
   description: string | null
   rate: number
@@ -1174,6 +1201,7 @@ interface GroupOption {
 const appStore = useAppStore()
 const onboardingStore = useOnboardingStore()
 const { copyToClipboard: clipboardCopy } = useClipboard()
+const legacyKeyControlsAvailable = false
 
 const allColumns = computed<Column[]>(() => [
   { key: 'name', label: t('common.name'), sortable: true },
@@ -1270,13 +1298,13 @@ const columns = computed<Column[]>(() =>
 )
 
 const apiKeys = ref<ApiKey[]>([])
-const groups = ref<Group[]>([])
+const groups = ref<AvailableUserGroup[]>([])
 const loading = ref(false)
 const submitting = ref(false)
 const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
-const userGroupRates = ref<Record<number, number>>({})
+const userGroupRates = ref<Record<string, number>>({})
 
 const pagination = ref({
   page: 1,
@@ -1304,13 +1332,15 @@ const showCcsClientSelect = ref(false)
 const showColumnDropdown = ref(false)
 const pendingCcsRow = ref<ApiKey | null>(null)
 const selectedKey = ref<ApiKey | null>(null)
-const copiedKeyId = ref<number | null>(null)
-const groupSelectorKeyId = ref<number | null>(null)
+const createdApiKeySecret = ref('')
+const createdApiKeyWarning = ref('This API key is shown only once. Store it securely before closing.')
+const copiedKeyId = ref<string | number | null>(null)
+const groupSelectorKeyId = ref<string | number | null>(null)
 const publicSettings = ref<PublicSettings | null>(null)
 const dropdownRef = ref<HTMLElement | null>(null)
 const columnDropdownRef = ref<HTMLElement | null>(null)
 const dropdownPosition = ref<{ top?: number; bottom?: number; left: number } | null>(null)
-const groupButtonRefs = ref<Map<number, HTMLElement>>(new Map())
+const groupButtonRefs = ref<Map<string | number, HTMLElement>>(new Map())
 let abortController: AbortController | null = null
 
 // Get the currently selected key for group change
@@ -1319,7 +1349,7 @@ const selectedKeyForGroup = computed(() => {
   return apiKeys.value.find((k) => k.id === groupSelectorKeyId.value) || null
 })
 
-const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance | null) => {
+const setGroupButtonRef = (keyId: string | number, el: Element | ComponentPublicInstance | null) => {
   if (el instanceof HTMLElement) {
     groupButtonRefs.value.set(keyId, el)
   } else {
@@ -1329,7 +1359,7 @@ const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance 
 
 const formData = ref({
   name: '',
-  group_id: null as number | null,
+  group_id: null as string | number | null,
   status: 'active' as 'active' | 'inactive',
   use_custom_key: false,
   custom_key: '',
@@ -1415,10 +1445,10 @@ const groupOptions = computed(() =>
     description: group.description,
     rate: group.rate_multiplier,
     userRate: userGroupRates.value[group.id] ?? null,
-    peakRateEnabled: group.peak_rate_enabled,
-    peakStart: group.peak_start,
-    peakEnd: group.peak_end,
-    peakRateMultiplier: group.peak_rate_multiplier,
+    peakRateEnabled: group.peak_rate_enabled ?? false,
+    peakStart: group.peak_start ?? '',
+    peakEnd: group.peak_end ?? '',
+    peakRateMultiplier: group.peak_rate_multiplier ?? 1,
     subscriptionType: group.subscription_type,
     platform: group.platform
   }))
@@ -1435,7 +1465,7 @@ const filteredGroupOptions = computed(() => {
   })
 })
 
-const copyToClipboard = async (text: string, keyId: number) => {
+const copyToClipboard = async (text: string, keyId: string | number) => {
   const success = await clipboardCopy(text, t('keys.copied'))
   if (success) {
     copiedKeyId.value = keyId
@@ -1477,22 +1507,12 @@ const loadApiKeys = async () => {
     })
     if (signal.aborted) return
     apiKeys.value = response.items
+    for (const key of apiKeys.value) {
+      key.group = groups.value.find((group) => String(group.id) === String(key.group_id)) as Group | undefined
+    }
     pagination.value.total = response.total
     pagination.value.pages = response.pages
 
-    // Load usage stats for all API keys in the list
-    if (response.items.length > 0) {
-      const keyIds = response.items.map((k) => k.id)
-      try {
-        const usageResponse = await usageAPI.getDashboardApiKeysUsage(keyIds, { signal })
-        if (signal.aborted) return
-        usageStats.value = usageResponse.stats
-      } catch (e) {
-        if (!isAbortError(e)) {
-          console.error('Failed to load usage stats:', e)
-        }
-      }
-    }
   } catch (error) {
     if (isAbortError(error)) {
       return
@@ -1508,6 +1528,9 @@ const loadApiKeys = async () => {
 const loadGroups = async () => {
   try {
     groups.value = await userGroupsAPI.getAvailable()
+    for (const key of apiKeys.value) {
+      key.group = groups.value.find((group) => String(group.id) === String(key.group_id)) as Group | undefined
+    }
   } catch (error) {
     console.error('Failed to load groups:', error)
   }
@@ -1530,6 +1553,10 @@ const loadPublicSettings = async () => {
 }
 
 const openUseKeyModal = (key: ApiKey) => {
+  if (!hasPlaintextApiKey(key)) {
+    appStore.showError(t('keys.plaintextUnavailable'))
+    return
+  }
   selectedKey.value = key
   showUseKeyModal.value = true
 }
@@ -1586,7 +1613,7 @@ const editKey = (key: ApiKey) => {
 const toggleKeyStatus = async (key: ApiKey) => {
   const newStatus = key.status === 'active' ? 'inactive' : 'active'
   try {
-    await keysAPI.toggleStatus(key.id, newStatus)
+    await keysAPI.toggleStatus(String(key.id), newStatus)
     appStore.showSuccess(
       newStatus === 'active' ? t('keys.keyEnabledSuccess') : t('keys.keyDisabledSuccess')
     )
@@ -1630,13 +1657,13 @@ const openGroupSelector = (key: ApiKey) => {
   }
 }
 
-const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
+const changeGroup = async (key: ApiKey, newGroupId: string | null) => {
   groupSelectorKeyId.value = null
   dropdownPosition.value = null
   if (key.group_id === newGroupId) return
 
   try {
-    await keysAPI.update(key.id, { group_id: newGroupId })
+    await keysAPI.update(String(key.id), { group_id: newGroupId })
     appStore.showSuccess(t('keys.groupChangedSuccess'))
     loadApiKeys()
   } catch (error) {
@@ -1680,15 +1707,6 @@ const handleSubmit = async () => {
     }
   }
 
-  // Parse IP lists only if IP restriction is enabled
-  const parseIPList = (text: string): string[] =>
-    text.split('\n').map(ip => ip.trim()).filter(ip => ip.length > 0)
-  const ipWhitelist = formData.value.enable_ip_restriction ? parseIPList(formData.value.ip_whitelist) : []
-  const ipBlacklist = formData.value.enable_ip_restriction ? parseIPList(formData.value.ip_blacklist) : []
-
-  // Calculate quota value (null/empty/0 = unlimited, stored as 0)
-  const quota = formData.value.quota && formData.value.quota > 0 ? formData.value.quota : 0
-
   // Calculate expiration
   let expiresInDays: number | undefined
   let expiresAt: string | null | undefined
@@ -1708,49 +1726,42 @@ const handleSubmit = async () => {
     expiresAt = ''
   }
 
-  // Calculate rate limit values (send 0 when toggle is off)
-  const rateLimitData = formData.value.enable_rate_limit ? {
-    rate_limit_5h: formData.value.rate_limit_5h && formData.value.rate_limit_5h > 0 ? formData.value.rate_limit_5h : 0,
-    rate_limit_1d: formData.value.rate_limit_1d && formData.value.rate_limit_1d > 0 ? formData.value.rate_limit_1d : 0,
-    rate_limit_7d: formData.value.rate_limit_7d && formData.value.rate_limit_7d > 0 ? formData.value.rate_limit_7d : 0,
-  } : { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
-
   submitting.value = true
   try {
     if (showEditModal.value && selectedKey.value) {
       const updates: UpdateApiKeyRequest = {
         name: formData.value.name,
         group_id: formData.value.group_id,
-        ip_whitelist: ipWhitelist,
-        ip_blacklist: ipBlacklist,
-        quota: quota,
         expires_at: expiresAt,
-        rate_limit_5h: rateLimitData.rate_limit_5h,
-        rate_limit_1d: rateLimitData.rate_limit_1d,
-        rate_limit_7d: rateLimitData.rate_limit_7d,
       }
       if (shouldSubmitEditStatus(selectedKey.value, formData.value.status)) {
         updates.status = formData.value.status
       }
-      await keysAPI.update(selectedKey.value.id, updates)
+      await keysAPI.update(String(selectedKey.value.id), updates)
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
     } else {
-      const customKey = formData.value.use_custom_key ? formData.value.custom_key : undefined
-      await keysAPI.create(
+      const created = await keysAPI.create(
         formData.value.name,
-        formData.value.group_id,
-        customKey,
-        ipWhitelist,
-        ipBlacklist,
-        quota,
+        String(formData.value.group_id),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
         expiresInDays,
-        rateLimitData
       )
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded
       if (onboardingStore.isCurrentStep('[data-tour="key-form-submit"]')) {
         onboardingStore.nextStep(500)
       }
+      closeModals()
+      if (created.key) {
+        createdApiKeySecret.value = created.key
+        createdApiKeyWarning.value = (created as ApiKey & { warning?: string }).warning
+          || 'This API key is shown only once. Store it securely before closing.'
+      }
+      loadApiKeys()
+      return
     }
     closeModals()
     loadApiKeys()
@@ -1772,7 +1783,7 @@ const handleDelete = async () => {
   if (!selectedKey.value) return
 
   try {
-    await keysAPI.delete(selectedKey.value.id)
+    await keysAPI.delete(String(selectedKey.value.id))
     appStore.showSuccess(t('keys.keyDeletedSuccess'))
     showDeleteDialog.value = false
     loadApiKeys()
@@ -1826,7 +1837,7 @@ const resetQuotaUsed = async () => {
   if (!selectedKey.value) return
   showResetQuotaDialog.value = false
   try {
-    await keysAPI.update(selectedKey.value.id, { reset_quota: true })
+    await keysAPI.update(String(selectedKey.value.id), { reset_quota: true })
     appStore.showSuccess(t('keys.quotaResetSuccess'))
     // Update local state
     if (selectedKey.value) {
@@ -1854,7 +1865,7 @@ const resetRateLimitUsage = async () => {
   if (!selectedKey.value) return
   showResetRateLimitDialog.value = false
   try {
-    await keysAPI.update(selectedKey.value.id, { reset_rate_limit_usage: true })
+    await keysAPI.update(String(selectedKey.value.id), { reset_rate_limit_usage: true })
     appStore.showSuccess(t('keys.rateLimitResetSuccess'))
     // Refresh key data
     await loadApiKeys()
@@ -1870,6 +1881,10 @@ const resetRateLimitUsage = async () => {
 }
 
 const importToCcswitch = (row: ApiKey) => {
+  if (!hasPlaintextApiKey(row)) {
+    appStore.showError(t('keys.plaintextUnavailable'))
+    return
+  }
   const platform = row.group?.platform || 'anthropic'
 
   // For antigravity platform, show client selection dialog
@@ -1884,6 +1899,10 @@ const importToCcswitch = (row: ApiKey) => {
 }
 
 const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
+  if (!hasPlaintextApiKey(row)) {
+    appStore.showError(t('keys.plaintextUnavailable'))
+    return
+  }
   const baseUrl = publicSettings.value?.api_base_url || window.location.origin
   const platform = row.group?.platform || 'anthropic'
 

@@ -29,6 +29,7 @@ import {
   StateApiError,
 } from "./http";
 import type { Env, PlatformEvent, UserStateChangedPayload } from "../env";
+import { groupAccessPredicate } from "../user/group-access";
 
 interface UserProfileRow {
   schema_version: number;
@@ -65,6 +66,12 @@ interface UserLedgerRow {
   balance_after_micros: number;
   enabled_after: number | null;
   created_at_ms: number;
+}
+
+interface AuthorizationRow {
+  group_enabled: number;
+  platform: string;
+  group_accessible: number;
 }
 
 export interface ConfigureUserCommand {
@@ -445,7 +452,7 @@ export class UserStateDO {
     const usageEvent = type === "settle" ? parseOptionalUsageEvent(body.usage_event, requestId) : null;
     const nowMs = Date.now();
 
-    if (type === "authorize" && body.api_key_id !== undefined) {
+    if (type === "authorize") {
       await this.verifyAuthorization(body);
     }
 
@@ -520,18 +527,32 @@ export class UserStateDO {
     if (this.env?.DB === undefined) {
       throw new StateApiError(503, "authorization_store_unavailable", "Authorization store is unavailable");
     }
+    const nowMs = Date.now();
     const result = await this.env.DB.prepare(
-      `SELECT k.id
+      `SELECT g.enabled AS group_enabled, g.platform,
+              CASE WHEN ${groupAccessPredicate("g", "u.id")}
+                   THEN 1 ELSE 0 END AS group_accessible
          FROM api_keys k
          JOIN users u ON u.id = k.user_id
+         JOIN "groups" g ON g.id = k.group_id
         WHERE k.id = ? AND k.user_id = ? AND k.auth_version = ?
           AND k.enabled = 1 AND k.revoked_at_ms IS NULL
           AND (k.expires_at_ms IS NULL OR k.expires_at_ms > ?)
           AND u.status = 'active'
         LIMIT 1`,
-    ).bind(apiKeyId, userId, authVersion, Date.now()).first();
+    ).bind(nowMs, nowMs, apiKeyId, userId, authVersion, nowMs).first<AuthorizationRow>();
     if (result === null) {
       throw new StateApiError(401, "invalid_api_key", "API key authorization is no longer valid");
+    }
+    if (result.group_enabled !== 1 || result.platform !== "openai") {
+      throw new StateApiError(403, "group_unavailable", "API key group is unavailable");
+    }
+    if (result.group_accessible !== 1) {
+      throw new StateApiError(
+        403,
+        "group_access_denied",
+        "API key group access is no longer valid",
+      );
     }
   }
 

@@ -24,7 +24,13 @@ describe('gateway repository embeddings routing', () => {
       }),
     ])
 
-    const route = await resolveGatewayRoute(testEnv, 'group-1', 'embed-public', 'embeddings')
+    const route = await resolveGatewayRoute(
+      testEnv,
+      'group-1',
+      'embed-public',
+      'embeddings',
+      'user-1',
+    )
     expect(route.model).toMatchObject({ model_id: 'model-1', embeddings: 1 })
     expect(route.candidates).toEqual([
       expect.objectContaining({ account_id: 'account-1', base_url: 'https://upstream.example/v1' }),
@@ -35,7 +41,13 @@ describe('gateway repository embeddings routing', () => {
 
     raw.prepare('UPDATE account_models SET embeddings = 0, updated_at_ms = 2 WHERE account_id = ? AND model_id = ?')
       .run('account-1', 'model-1')
-    await expect(resolveGatewayRoute(testEnv, 'group-1', 'embed-public', 'embeddings')).rejects.toMatchObject({
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-1',
+      'embed-public',
+      'embeddings',
+      'user-1',
+    )).rejects.toMatchObject({
       status: 503,
       code: 'no_upstream_accounts',
     })
@@ -52,7 +64,13 @@ describe('gateway repository embeddings routing', () => {
     raw.prepare('UPDATE models SET embeddings = 0, updated_at_ms = 2 WHERE id = ?').run('model-1')
 
     await expect(
-      resolveGatewayRoute({ DB: d1 } as Env, 'group-1', 'embed-public', 'embeddings'),
+      resolveGatewayRoute(
+        { DB: d1 } as Env,
+        'group-1',
+        'embed-public',
+        'embeddings',
+        'user-1',
+      ),
     ).rejects.toMatchObject({ status: 404, code: 'model_not_found' })
     raw.close()
   })

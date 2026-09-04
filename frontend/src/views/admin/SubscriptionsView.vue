@@ -794,7 +794,7 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 interface GroupOption {
-  value: number
+  value: string | number
   label: string
   description: string | null
   platform: GroupPlatform
@@ -951,7 +951,7 @@ const filters = reactive({
   status: 'active',
   group_id: '',
   platform: '',
-  user_id: null as number | null
+  user_id: null as string | number | null
 })
 
 // Sorting state
@@ -980,8 +980,8 @@ const revokingSubscription = ref<UserSubscription | null>(null)
 const restoringSubscription = ref<UserSubscription | null>(null)
 
 const assignForm = reactive({
-  user_id: null as number | null,
-  group_id: null as number | null,
+  user_id: null as string | number | null,
+  group_id: null as string | number | null,
   validity_days: 30
 })
 
@@ -1034,7 +1034,7 @@ const loadSubscriptions = async () => {
       pagination.page_size,
       {
         status: (filters.status as any) || undefined,
-        group_id: filters.group_id ? parseInt(filters.group_id) : undefined,
+        group_id: filters.group_id || undefined,
         platform: filters.platform || undefined,
         user_id: filters.user_id || undefined,
         sort_by: sortState.sort_by,

@@ -6,9 +6,17 @@ import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   hashPassword,
+  isPasswordInputValid,
   PasswordValidationError,
+  validateNewPassword,
   verifyPassword,
 } from './password'
+import {
+  checkAuthRateLimit,
+  clearAuthAccountRateLimit,
+  commitAuthRateLimitAttempt,
+  recordAuthRateLimitFailure,
+} from './rate-limit'
 import {
   createOpaqueToken,
   isOpaqueToken,
@@ -28,7 +36,7 @@ interface PublicAuthSettings {
   turnstile_enabled?: boolean
 }
 
-interface UserRow {
+export interface UserRow {
   id: string
   email: string
   display_name: string
@@ -41,6 +49,9 @@ interface UserRow {
   email_verified_at_ms: number | null
   password_changed_at_ms: number | null
   last_login_at_ms: number | null
+  avatar_object_key: string | null
+  avatar_content_type: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | null
+  avatar_updated_at_ms: number | null
   created_at_ms: number
   updated_at_ms: number
 }
@@ -77,13 +88,23 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
     const password = requirePassword(body.password)
+    validateNewPassword(password)
+    const rateLimitSubject = await checkAuthRateLimit(
+      context.env,
+      context.req.raw,
+      email,
+      'register',
+    )
     await verifyTurnstile(context, settings, body.turnstile_token)
+    await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
     const existing = await findUserByEmail(context.env, email)
     if (existing !== null) {
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
       throw new GatewayError(409, 'email_already_registered', 'Email is already registered')
     }
 
     const credential = await hashPassword(password)
+    await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     const now = Date.now()
     const user: UserRow = {
       id: crypto.randomUUID(),
@@ -98,6 +119,9 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       email_verified_at_ms: null,
       password_changed_at_ms: now,
       last_login_at_ms: now,
+      avatar_object_key: null,
+      avatar_content_type: null,
+      avatar_updated_at_ms: null,
       created_at_ms: now,
       updated_at_ms: now,
     }
@@ -135,13 +159,14 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       ])
     } catch (error) {
       if (/UNIQUE constraint failed: users\.email/i.test(errorMessage(error))) {
+        await recordAuthRateLimitFailure(context.env, rateLimitSubject)
         throw new GatewayError(409, 'email_already_registered', 'Email is already registered')
       }
       throw error
     }
     return controlSuccess(authPayload(user, issued), 201)
   } catch (error) {
-    return controlError(normalizeAuthError(error))
+    return authControlError(normalizeAuthError(error))
   }
 }
 
@@ -151,17 +176,27 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
     const body = await readJsonObject(context.req.raw)
     email = requireEmail(body.email)
     const password = requirePassword(body.password)
+    if (!isPasswordInputValid(password)) throw invalidCredentials()
+    const rateLimitSubject = await checkAuthRateLimit(
+      context.env,
+      context.req.raw,
+      email,
+      'login',
+    )
     const settings = await publicAuthSettings(context.env)
     await verifyTurnstile(context, settings, body.turnstile_token)
+    await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
     const user = await findUserByEmail(context.env, email)
     if (user === null || user.password_credential === null) {
       // Spend one password-derivation operation for missing identities so the
       // endpoint does not expose an obvious fast account-enumeration path.
       await hashPassword('invalid-password-placeholder')
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
       await recordAuthFailure(context.env, email, null, 'auth.login')
       throw invalidCredentials()
     }
     if (!(await verifyPassword(password, user.password_credential))) {
+      await recordAuthRateLimitFailure(context.env, rateLimitSubject)
       await recordAuthFailure(context.env, email, user.id, 'auth.login')
       throw invalidCredentials()
     }
@@ -169,6 +204,7 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
       throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
     }
 
+    await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     const now = Date.now()
     const issued = await issueSession(context.env, user, now)
     const emailHash = await sha256Hex(email)
@@ -193,7 +229,7 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
     user.updated_at_ms = now
     return controlSuccess(authPayload(user, issued))
   } catch (error) {
-    return controlError(normalizeAuthError(error))
+    return authControlError(normalizeAuthError(error))
   }
 }
 
@@ -326,6 +362,7 @@ function sessionUserSelect(): string {
                  u.balance_micros, u.state_version, u.auth_version,
                  u.password_credential, u.email_verified_at_ms,
                  u.password_changed_at_ms, u.last_login_at_ms,
+                 u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at_ms,
                  u.created_at_ms, u.updated_at_ms
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id`
@@ -336,7 +373,8 @@ async function findUserByEmail(env: Env, email: string): Promise<UserRow | null>
     `SELECT id, email, display_name, role, status, balance_micros,
             state_version, auth_version, password_credential,
             email_verified_at_ms, password_changed_at_ms,
-            last_login_at_ms, created_at_ms, updated_at_ms
+            last_login_at_ms, avatar_object_key, avatar_content_type, avatar_updated_at_ms,
+            created_at_ms, updated_at_ms
        FROM users
       WHERE email = ?
       LIMIT 1`,
@@ -495,11 +533,12 @@ function authPayload(user: UserRow, issued: IssuedSession): Record<string, unkno
   }
 }
 
-function publicUser(user: UserRow): Record<string, unknown> {
+export function publicUser(user: UserRow): Record<string, unknown> {
   return {
     id: user.id,
     username: user.display_name || user.email.slice(0, user.email.indexOf('@')),
     email: user.email,
+    avatar_url: avatarUrl(user),
     role: user.role,
     balance: user.balance_micros / 1_000_000,
     concurrency: 0,
@@ -515,6 +554,11 @@ function publicUser(user: UserRow): Record<string, unknown> {
     updated_at: new Date(user.updated_at_ms).toISOString(),
     run_mode: 'standard',
   }
+}
+
+function avatarUrl(user: Pick<UserRow, 'id' | 'avatar_object_key' | 'avatar_updated_at_ms'>): string | null {
+  if (!user.avatar_object_key || !Number.isSafeInteger(user.avatar_updated_at_ms)) return null
+  return `/api/v1/user/avatar/${encodeURIComponent(user.id)}?v=${user.avatar_updated_at_ms}`
 }
 
 function toIso(value: number | null): string | null {
@@ -567,6 +611,12 @@ function normalizeAuthError(error: unknown): GatewayError {
     return new GatewayError(401, error.code, 'Invalid or expired token', 'authentication_error')
   }
   return asGatewayError(error)
+}
+
+function authControlError(error: GatewayError): Response {
+  const response = controlError(error)
+  if (error.retryAfter !== undefined) response.headers.set('retry-after', error.retryAfter)
+  return response
 }
 
 function errorMessage(error: unknown): string {

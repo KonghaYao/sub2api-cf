@@ -12,11 +12,22 @@ interface ApiKeyRow {
   last_used_at_ms: number | null
   created_at_ms: number
   updated_at_ms: number
-  group_id: string
+  group_id: string | null
   key_prefix: string
   auth_version: number
   control_version: number
   revoked_at_ms: number | null
+}
+
+interface GroupRow {
+  id: string
+  name: string
+  description: string | null
+  platform: string
+  enabled: number
+  rate_multiplier_ppm: number
+  group_type: 'standard' | 'subscription'
+  is_exclusive: number
 }
 
 class KeyStatement {
@@ -49,12 +60,22 @@ class KeyStatement {
         : null) as T | null
     }
     if (this.query.includes('FROM "groups"')) {
-      return (['group-1', 'group-2'].includes(String(this.values[0]))
-        ? { id: String(this.values[0]), enabled: 1 }
+      const group = this.database.groups.get(String(this.values[0]))
+      return (group === undefined ? null : {
+        ...group,
+        has_permission: this.database.permissions.has(`${this.values[1]}:${group.id}`) ? 1 : 0,
+        has_active_subscription: this.database.activeSubscriptions.has(`${this.values[2]}:${group.id}`) ? 1 : 0,
+      }) as T | null
+    }
+    if (this.query.includes('FROM user_group_permissions')) {
+      return (this.database.permissions.has(`${this.values[0]}:${this.values[1]}`)
+        ? { user_id: String(this.values[0]) }
         : null) as T | null
     }
+    if (this.query.includes('FROM user_subscriptions')) return null
     if (this.query.includes('FROM api_keys')) {
-      return (this.database.keys.get(String(this.values[0])) ?? null) as T | null
+      const key = this.database.keys.get(String(this.values[0]))
+      return (key === undefined ? null : this.database.hydrate(key)) as T | null
     }
     throw new Error(`Unexpected first query: ${this.query}`)
   }
@@ -90,7 +111,9 @@ class KeyStatement {
       }
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
-    if (this.query.includes('UPDATE api_keys') && this.query.includes('SET name = ?')) {
+    if (this.query.includes('UPDATE api_keys') && this.query.includes('SET name =')) {
+      const guarded = this.query.includes('SET name = CASE')
+      const offset = guarded ? 5 : 0
       const [
         name,
         groupId,
@@ -101,15 +124,21 @@ class KeyStatement {
         controlVersion,
         updatedAt,
         id,
-      ] = this.values
+      ] = this.values.slice(offset)
       const key = this.database.keys.get(String(id))
       let changes = 0
+      if (guarded && !this.database.isAuthorized(
+        String(this.values[1]),
+        String(this.values[0]),
+      )) {
+        throw new Error('NOT NULL constraint failed: api_keys.name')
+      }
       if (key !== undefined && key.control_version !== Number(expectedControlVersion)) {
         throw new Error('CHECK constraint failed: control_version >= 0')
       }
       if (key !== undefined) {
         key.name = String(name)
-        key.group_id = String(groupId)
+        key.group_id = groupId === null ? null : String(groupId)
         key.enabled = Number(enabled)
         key.expires_at_ms = expiresAt === null ? null : Number(expiresAt)
         key.auth_version = Number(authVersion)
@@ -124,7 +153,30 @@ class KeyStatement {
       }
     }
     if (this.query.includes('INSERT INTO api_keys')) {
-      const [id, userId, keyHash, name, expiresAt, now, _updatedAt, groupId, keyPrefix] = this.values
+      const [
+        id,
+        userId,
+        keyHash,
+        groupId,
+        permissionUserId,
+        subscriptionUserId,
+        _startsAt,
+        _expiresAt,
+        name,
+        expiresAt,
+        now,
+        _updatedAt,
+        persistedGroupId,
+        keyPrefix,
+      ] = this.values
+      if (
+        permissionUserId !== userId ||
+        subscriptionUserId !== userId ||
+        groupId !== persistedGroupId ||
+        !this.database.isAuthorized(String(userId), String(groupId))
+      ) {
+        throw new Error('NOT NULL constraint failed: api_keys.name')
+      }
       this.database.keys.set(String(id), {
         id: String(id),
         user_id: String(userId),
@@ -135,12 +187,19 @@ class KeyStatement {
         last_used_at_ms: null,
         created_at_ms: Number(now),
         updated_at_ms: Number(now),
-        group_id: String(groupId),
+        group_id: String(persistedGroupId),
         key_prefix: String(keyPrefix),
         auth_version: 1,
         control_version: 0,
         revoked_at_ms: null,
       })
+      return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
+    }
+    if (this.query.includes('INSERT OR IGNORE INTO user_group_permissions')) {
+      const group = this.database.groups.get(String(this.values[2]))
+      if (group?.enabled === 1 && group.group_type === 'standard' && group.is_exclusive === 1) {
+        this.database.permissions.add(`${this.values[0]}:${this.values[2]}`)
+      }
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
     throw new Error(`Unexpected run query: ${this.query}`)
@@ -157,7 +216,8 @@ class KeyStatement {
       success: true,
       results: [...this.database.keys.values()]
         .filter((key) => key.user_id === userId)
-        .slice(offset, offset + limit) as T[],
+        .slice(offset, offset + limit)
+        .map((key) => this.database.hydrate(key)) as T[],
       meta: {} as D1Meta & Record<string, unknown>,
     }
   }
@@ -166,8 +226,43 @@ class KeyStatement {
 class KeyDatabase {
   readonly keys = new Map<string, ApiKeyRow>()
   readonly idempotency = new Map<string, Record<string, unknown>>()
+  readonly permissions = new Set<string>()
+  readonly activeSubscriptions = new Set<string>()
+  readonly groups = new Map<string, GroupRow>(['group-1', 'group-2'].map((id) => [id, {
+    id,
+    name: id,
+    description: `${id} description`,
+    platform: 'openai',
+    enabled: 1,
+    rate_multiplier_ppm: 1_000_000,
+    group_type: 'standard' as const,
+    is_exclusive: 1,
+  }]))
   beforeApiKeyUpdate: (() => void) | undefined
   failControlIdempotencyInsertOnce = false
+
+  hydrate(key: ApiKeyRow): ApiKeyRow & Record<string, unknown> {
+    const group = key.group_id === null ? undefined : this.groups.get(key.group_id)
+    return {
+      ...key,
+      group_name: group?.name ?? null,
+      group_description: group?.description ?? null,
+      group_platform: group?.platform ?? null,
+      group_enabled: group?.enabled ?? null,
+      group_rate_multiplier_ppm: group?.rate_multiplier_ppm ?? null,
+      group_type: group?.group_type ?? null,
+      group_is_exclusive: group?.is_exclusive ?? null,
+    }
+  }
+
+  isAuthorized(userId: string, groupId: string): boolean {
+    const group = this.groups.get(groupId)
+    if (group?.enabled !== 1) return false
+    if (group.group_type === 'subscription') {
+      return this.activeSubscriptions.has(`${userId}:${groupId}`)
+    }
+    return group.is_exclusive === 0 || this.permissions.has(`${userId}:${groupId}`)
+  }
 
   prepare(query: string): KeyStatement {
     return new KeyStatement(query, this)
@@ -180,6 +275,7 @@ class KeyDatabase {
     const idempotencyBefore = new Map(
       [...this.idempotency].map(([key, value]) => [key, { ...value }]),
     )
+    const permissionsBefore = new Set(this.permissions)
     try {
       const results: D1Result<unknown>[] = []
       for (const statement of statements) {
@@ -190,7 +286,7 @@ class KeyDatabase {
             results: [{ total: [...this.keys.values()].filter((key) => key.user_id === userId).length }],
             meta: {} as D1Meta & Record<string, unknown>,
           })
-        } else if (statement.query.includes('INSERT INTO') || statement.query.includes('UPDATE ')) {
+        } else if (statement.query.includes('INSERT') || statement.query.includes('UPDATE ')) {
           results.push(await statement.run())
         } else {
           results.push(await statement.all())
@@ -202,6 +298,8 @@ class KeyDatabase {
       for (const [id, key] of keysBefore) this.keys.set(id, key)
       this.idempotency.clear()
       for (const [key, value] of idempotencyBefore) this.idempotency.set(key, value)
+      this.permissions.clear()
+      for (const permission of permissionsBefore) this.permissions.add(permission)
       throw error
     }
   }
@@ -268,6 +366,7 @@ describe('admin API keys', () => {
     expect(persisted.key_hash).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(persisted)).not.toContain(firstBody.data.api_key)
     expect(firstBody.data).not.toHaveProperty('key_hash')
+    expect(database.permissions).toContain('user-1:group-1')
   })
 
   it('lists redacted keys and revokes a key without incrementing its auth version twice', async () => {
@@ -308,6 +407,14 @@ describe('admin API keys', () => {
     const listBody = (await listed.json()) as { data: { items: Array<Record<string, unknown>> } }
     expect(listBody.data.items).toHaveLength(1)
     expect(listBody.data.items[0]).not.toHaveProperty('key_hash')
+    expect(listBody.data.items[0]).toMatchObject({
+      group: {
+        id: 'group-1',
+        name: 'group-1',
+        platform: 'openai',
+        subscription_type: 'standard',
+      },
+    })
     expect(revoked.status).toBe(200)
     expect(replayed.status).toBe(200)
     await expect(replayed.json()).resolves.toMatchObject({
@@ -352,13 +459,158 @@ describe('admin API keys', () => {
     expect(replay.status).toBe(200)
     await expect(replay.json()).resolves.toMatchObject({
       code: 0,
-      data: { id: 'key-1', group_id: 'group-2', auth_version: 2, control_version: 1 },
+      data: {
+        api_key: {
+          id: 'key-1',
+          group_id: 'group-2',
+          status: 'active',
+          auth_version: 2,
+          control_version: 1,
+        },
+        auto_granted_group_access: true,
+        granted_group_id: 'group-2',
+        granted_group_name: 'group-2',
+      },
     })
     expect(database.keys.get('key-1')).toMatchObject({
       group_id: 'group-2',
       auth_version: 2,
       control_version: 1,
     })
+    expect(database.permissions).toContain('user-1:group-2')
+  })
+
+  it('accepts an explicit null group and returns the frontend update shape', async () => {
+    const database = new KeyDatabase()
+    database.keys.set('key-1', {
+      id: 'key-1',
+      user_id: 'user-1',
+      key_hash: 'f'.repeat(64),
+      name: 'automation',
+      enabled: 1,
+      expires_at_ms: null,
+      last_used_at_ms: null,
+      created_at_ms: 100,
+      updated_at_ms: 100,
+      group_id: 'group-1',
+      key_prefix: 'sk-sub2api-abcd',
+      auth_version: 1,
+      control_version: 0,
+      revoked_at_ms: null,
+    })
+
+    const response = await createApp().request('/api/v1/admin/api-keys/key-1', {
+      method: 'PUT',
+      headers: { ...headers, 'idempotency-key': 'unbind-key-update-0001' },
+      body: JSON.stringify({ group_id: null }),
+    }, env(database))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        api_key: { id: 'key-1', group_id: null, status: 'active', auth_version: 2 },
+        auto_granted_group_access: false,
+      },
+    })
+    expect(database.keys.get('key-1')).toMatchObject({
+      group_id: null,
+      auth_version: 2,
+      control_version: 1,
+    })
+  })
+
+  it('requires an active subscription for create and same-group reactivation', async () => {
+    const database = new KeyDatabase()
+    database.groups.get('group-2')!.group_type = 'subscription'
+    database.permissions.add('user-1:group-2')
+    database.keys.set('subscription-key', {
+      id: 'subscription-key',
+      user_id: 'user-1',
+      key_hash: 'e'.repeat(64),
+      name: 'subscription',
+      enabled: 0,
+      expires_at_ms: null,
+      last_used_at_ms: null,
+      created_at_ms: 100,
+      updated_at_ms: 100,
+      group_id: 'group-2',
+      key_prefix: 'sk-sub2api-sub',
+      auth_version: 1,
+      control_version: 0,
+      revoked_at_ms: null,
+    })
+
+    const deniedCreate = await createApp().request('/api/v1/admin/users/user-1/api-keys', {
+      method: 'POST',
+      headers: { ...headers, 'idempotency-key': 'subscription-create-denied' },
+      body: JSON.stringify({ name: 'subscription', group_id: 'group-2' }),
+    }, env(database))
+    const deniedReactivation = await createApp().request(
+      '/api/v1/admin/api-keys/subscription-key',
+      {
+        method: 'PUT',
+        headers: { ...headers, 'idempotency-key': 'subscription-reactivate-denied' },
+        body: JSON.stringify({ status: 'active' }),
+      },
+      env(database),
+    )
+
+    expect(deniedCreate.status).toBe(409)
+    expect(deniedReactivation.status).toBe(409)
+    await expect(deniedCreate.json()).resolves.toMatchObject({ code: 'subscription_required' })
+    await expect(deniedReactivation.json()).resolves.toMatchObject({ code: 'subscription_required' })
+    expect(database.keys.get('subscription-key')?.enabled).toBe(0)
+
+    database.activeSubscriptions.add('user-1:group-2')
+    const created = await createApp().request('/api/v1/admin/users/user-1/api-keys', {
+      method: 'POST',
+      headers: { ...headers, 'idempotency-key': 'subscription-create-allowed' },
+      body: JSON.stringify({ name: 'subscription', group_id: 'group-2' }),
+    }, env(database))
+    const reactivated = await createApp().request('/api/v1/admin/api-keys/subscription-key', {
+      method: 'PUT',
+      headers: { ...headers, 'idempotency-key': 'subscription-reactivate-allowed' },
+      body: JSON.stringify({ status: 'active' }),
+    }, env(database))
+    expect(created.status).toBe(201)
+    expect(reactivated.status).toBe(200)
+    expect(database.keys.get('subscription-key')?.enabled).toBe(1)
+  })
+
+  it('rolls back an exclusive-group grant if authorization changes before the guarded CAS', async () => {
+    const database = new KeyDatabase()
+    database.keys.set('key-1', {
+      id: 'key-1',
+      user_id: 'user-1',
+      key_hash: 'f'.repeat(64),
+      name: 'automation',
+      enabled: 1,
+      expires_at_ms: null,
+      last_used_at_ms: null,
+      created_at_ms: 100,
+      updated_at_ms: 100,
+      group_id: 'group-1',
+      key_prefix: 'sk-sub2api-abcd',
+      auth_version: 1,
+      control_version: 0,
+      revoked_at_ms: null,
+    })
+    database.beforeApiKeyUpdate = () => {
+      database.groups.get('group-2')!.enabled = 0
+    }
+
+    const response = await createApp().request('/api/v1/admin/api-keys/key-1', {
+      method: 'PUT',
+      headers: { ...headers, 'idempotency-key': 'group-disabled-during-update' },
+      body: JSON.stringify({ group_id: 'group-2' }),
+    }, env(database))
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({ code: 'group_disabled' })
+    expect(database.keys.get('key-1')).toMatchObject({ group_id: 'group-1', control_version: 0 })
+    expect(database.permissions).not.toContain('user-1:group-2')
+    expect(database.idempotency).toHaveLength(0)
   })
 
   it('rejects a stale API key update instead of rolling back a concurrent change', async () => {

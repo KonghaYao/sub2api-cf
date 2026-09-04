@@ -21,6 +21,133 @@ export interface LiveCapability {
   reason?: string
 }
 
+type WorkerGroupProjection = AdminGroup & {
+  id: string | number
+  control_version: number
+  enabled?: boolean
+  rate_multiplier_ppm?: number
+  catalog_mode?: 'all_routable' | 'allowlist'
+  group_type?: 'standard' | 'subscription'
+  daily_quota_micros?: number | null
+  weekly_quota_micros?: number | null
+  monthly_quota_micros?: number | null
+}
+
+const groupControlVersions = new Map<string, number>()
+
+function rememberGroup(group: AdminGroup): void {
+  const projection = group as WorkerGroupProjection
+  if (Number.isSafeInteger(projection.control_version) && projection.control_version >= 0) {
+    groupControlVersions.set(String(projection.id), projection.control_version)
+  }
+}
+
+function rememberGroups(groups: AdminGroup[]): void {
+  groups.forEach(rememberGroup)
+}
+
+function newControlOperationKey(scope: string): string {
+  const requestID = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${scope}-${requestID}`
+}
+
+function requireGroupControlVersion(id: string | number): number {
+  const version = groupControlVersions.get(String(id))
+  if (version === undefined) {
+    throw Object.assign(
+      new Error('Reload this group before changing it'),
+      { code: 'group_version_not_loaded' }
+    )
+  }
+  return version
+}
+
+function quotaUsdToMicros(value: number | null, field: string): number | null {
+  if (value === null) return null
+  const micros = Math.round(value * 1_000_000)
+  if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(micros)) {
+    throw Object.assign(
+      new Error(`${field} must be a non-negative amount representable in USD micros`),
+      { code: 'invalid_group_quota' }
+    )
+  }
+  return micros
+}
+
+function adaptWorkerGroup(group: AdminGroup): AdminGroup {
+  const projection = group as WorkerGroupProjection
+  const adapted = { ...group } as AdminGroup
+  if (Number.isSafeInteger(projection.rate_multiplier_ppm) && projection.rate_multiplier_ppm! >= 0) {
+    adapted.rate_multiplier = projection.rate_multiplier_ppm! / 1_000_000
+  }
+  if (projection.group_type !== undefined) adapted.subscription_type = projection.group_type
+  for (const [workerField, legacyField] of [
+    ['daily_quota_micros', 'daily_limit_usd'],
+    ['weekly_quota_micros', 'weekly_limit_usd'],
+    ['monthly_quota_micros', 'monthly_limit_usd']
+  ] as const) {
+    const value = projection[workerField]
+    if (value === null) adapted[legacyField] = null
+    else if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+      adapted[legacyField] = value / 1_000_000
+    }
+  }
+  return adapted
+}
+
+function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unknown> {
+  const payload: Record<string, unknown> = { name: group.name }
+  if (group.description !== undefined) payload.description = group.description
+  if (group.platform !== undefined) payload.platform = group.platform
+  if (group.rate_multiplier !== undefined) {
+    payload.rate_multiplier_ppm = Math.round(group.rate_multiplier * 1_000_000)
+  }
+  if (group.is_exclusive !== undefined) payload.is_exclusive = group.is_exclusive
+  if (group.subscription_type !== undefined) payload.group_type = group.subscription_type
+  if (group.daily_limit_usd !== undefined) {
+    payload.daily_quota_micros = quotaUsdToMicros(group.daily_limit_usd, 'daily_limit_usd')
+  }
+  if (group.weekly_limit_usd !== undefined) {
+    payload.weekly_quota_micros = quotaUsdToMicros(group.weekly_limit_usd, 'weekly_limit_usd')
+  }
+  if (group.monthly_limit_usd !== undefined) {
+    payload.monthly_quota_micros = quotaUsdToMicros(group.monthly_limit_usd, 'monthly_limit_usd')
+  }
+  return payload
+}
+
+function workerUpdateGroupPayload(group: UpdateGroupRequest): Record<string, unknown> {
+  const payload: Record<string, unknown> = {}
+  if (group.name !== undefined) payload.name = group.name
+  if (group.description !== undefined) payload.description = group.description
+  if (group.platform !== undefined) payload.platform = group.platform
+  if (group.status !== undefined) payload.enabled = group.status === 'active'
+  if (group.rate_multiplier !== undefined) {
+    payload.rate_multiplier_ppm = Math.round(group.rate_multiplier * 1_000_000)
+  }
+  if (group.is_exclusive !== undefined) payload.is_exclusive = group.is_exclusive
+  if (group.subscription_type !== undefined) payload.group_type = group.subscription_type
+  if (group.daily_limit_usd !== undefined) {
+    payload.daily_quota_micros = quotaUsdToMicros(group.daily_limit_usd, 'daily_limit_usd')
+  }
+  if (group.weekly_limit_usd !== undefined) {
+    payload.weekly_quota_micros = quotaUsdToMicros(group.weekly_limit_usd, 'weekly_limit_usd')
+  }
+  if (group.monthly_limit_usd !== undefined) {
+    payload.monthly_quota_micros = quotaUsdToMicros(group.monthly_limit_usd, 'monthly_limit_usd')
+  }
+  const workerFields = group as UpdateGroupRequest & {
+    enabled?: boolean
+    sort_order?: number
+    catalog_mode?: 'all_routable' | 'allowlist'
+  }
+  if (workerFields.enabled !== undefined) payload.enabled = workerFields.enabled
+  if (workerFields.sort_order !== undefined) payload.sort_order = workerFields.sort_order
+  if (workerFields.catalog_mode !== undefined) payload.catalog_mode = workerFields.catalog_mode
+  return payload
+}
+
 /**
  * List all groups with pagination
  * @param page - Page number (default: 1)
@@ -51,7 +178,9 @@ export async function list(
     },
     signal: options?.signal
   })
-  return data
+  const result = { ...data, items: data.items.map(adaptWorkerGroup) }
+  rememberGroups(result.items)
+  return result
 }
 
 /**
@@ -63,7 +192,9 @@ export async function getAll(platform?: GroupPlatform): Promise<AdminGroup[]> {
   const { data } = await apiClient.get<AdminGroup[]>('/admin/groups/all', {
     params: platform ? { platform } : undefined
   })
-  return data
+  const groups = data.map(adaptWorkerGroup)
+  rememberGroups(groups)
+  return groups
 }
 
 /**
@@ -74,7 +205,9 @@ export async function getAllIncludingInactive(): Promise<AdminGroup[]> {
   const { data } = await apiClient.get<AdminGroup[]>('/admin/groups/all', {
     params: { include_inactive: true }
   })
-  return data
+  const groups = data.map(adaptWorkerGroup)
+  rememberGroups(groups)
+  return groups
 }
 
 /**
@@ -97,9 +230,11 @@ export async function getLiveCapability(): Promise<LiveCapability> {
  * @param id - Group ID
  * @returns Group details
  */
-export async function getById(id: number): Promise<AdminGroup> {
+export async function getById(id: string | number): Promise<AdminGroup> {
   const { data } = await apiClient.get<AdminGroup>(`/admin/groups/${id}`)
-  return data
+  const group = adaptWorkerGroup(data)
+  rememberGroup(group)
+  return group
 }
 
 /**
@@ -125,8 +260,14 @@ export async function getModelsListCandidates(
  * @returns Created group
  */
 export async function create(groupData: CreateGroupRequest): Promise<AdminGroup> {
-  const { data } = await apiClient.post<AdminGroup>('/admin/groups', groupData)
-  return data
+  const { data } = await apiClient.post<AdminGroup>(
+    '/admin/groups',
+    workerCreateGroupPayload(groupData),
+    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-create') } }
+  )
+  const group = adaptWorkerGroup(data)
+  rememberGroup(group)
+  return group
 }
 
 /**
@@ -206,7 +347,7 @@ export async function duplicate(id: number): Promise<AdminGroup> {
     duplicateOperationKeys.delete(scope.key)
     storeDuplicateOperationKey(scope.key, null)
   }
-  return data
+  return adaptWorkerGroup(data)
 }
 
 /**
@@ -215,9 +356,21 @@ export async function duplicate(id: number): Promise<AdminGroup> {
  * @param updates - Fields to update
  * @returns Updated group
  */
-export async function update(id: number, updates: UpdateGroupRequest): Promise<AdminGroup> {
-  const { data } = await apiClient.put<AdminGroup>(`/admin/groups/${id}`, updates)
-  return data
+export async function update(id: string | number, updates: UpdateGroupRequest): Promise<AdminGroup> {
+  const version = requireGroupControlVersion(id)
+  const { data } = await apiClient.put<AdminGroup>(
+    `/admin/groups/${id}`,
+    workerUpdateGroupPayload(updates),
+    {
+      headers: {
+        'Idempotency-Key': newControlOperationKey('admin-group-update'),
+        'If-Match': `"${version}"`
+      }
+    }
+  )
+  const group = adaptWorkerGroup(data)
+  rememberGroup(group)
+  return group
 }
 
 /**
@@ -225,9 +378,17 @@ export async function update(id: number, updates: UpdateGroupRequest): Promise<A
  * @param id - Group ID
  * @returns Success confirmation
  */
-export async function deleteGroup(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/groups/${id}`)
-  return data
+export async function deleteGroup(id: string | number): Promise<AdminGroup> {
+  const version = requireGroupControlVersion(id)
+  const { data } = await apiClient.delete<AdminGroup>(`/admin/groups/${id}`, {
+    headers: {
+      'Idempotency-Key': newControlOperationKey('admin-group-disable'),
+      'If-Match': `"${version}"`
+    }
+  })
+  const group = adaptWorkerGroup(data)
+  rememberGroup(group)
+  return group
 }
 
 /**
@@ -236,7 +397,7 @@ export async function deleteGroup(id: number): Promise<{ message: string }> {
  * @param status - New status
  * @returns Updated group
  */
-export async function toggleStatus(id: number, status: 'active' | 'inactive'): Promise<AdminGroup> {
+export async function toggleStatus(id: string | number, status: 'active' | 'inactive'): Promise<AdminGroup> {
   return update(id, { status })
 }
 

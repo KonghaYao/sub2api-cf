@@ -36,16 +36,16 @@ import {
   validateBaseUrl,
 } from './repository'
 import {
-  cancelUserReservation,
+  cancelBillingReservation,
   disablePoolAccount,
-  prepareUserReservation,
+  prepareBillingReservation,
   recordPoolFailure,
   releasePoolLease,
   RENEW_AFTER_MS,
   renewPoolLease,
-  renewUserReservation,
+  renewBillingReservation,
   reservePoolAccount,
-  settleUserReservation,
+  settleBillingReservation,
   syncPoolAccounts,
 } from './state-client'
 import type {
@@ -272,6 +272,7 @@ async function handleGeminiCountTokens(
       principal.group_id,
       publicModel,
       'responses',
+      principal.user_id,
     )
     const converted = convertGeminiGenerateContentToResponsesRequest(parsed.body, {
       publicModel,
@@ -394,6 +395,7 @@ export async function handleAnthropicCountTokens(
       principal.group_id,
       request.model,
       'responses',
+      principal.user_id,
     )
     const upstreamBody = toOpenAIResponsesInputTokensRequest(
       request,
@@ -491,6 +493,7 @@ export async function handleResponsesInputTokens(
       principal.group_id,
       requestedModel,
       'responses',
+      principal.user_id,
     )
     const upstreamBody: Record<string, unknown> = {
       ...parsed.body,
@@ -692,18 +695,25 @@ async function dispatchGateway(
       principal.group_id,
       requestedModel,
       endpoint,
+      principal.user_id,
     )
     const model = route.model
     const upstreamBody = prepared.upstreamBody(model)
-    const reservationMicros = reservationForRequest(
+    const pricedReservationMicros = reservationForRequest(
       model,
       upstreamBody,
       parsed.bytes.byteLength,
       endpoint,
     )
+    // A zero effective multiplier is an explicitly free subscription tier. Its
+    // worst-case billed cost is zero, so it must not require a positive quota hold.
+    const reservationMicros = principal.billing.type === 'subscription' &&
+      model.rate_multiplier_ppm === 0
+      ? 0
+      : pricedReservationMicros
     const candidates = route.candidates
 
-    await prepareUserReservation(context.env, principal, requestId, reservationMicros)
+    await prepareBillingReservation(context.env, principal, requestId, reservationMicros)
     let pool: DurableObjectStub
     try {
       pool = await syncPoolAccounts(
@@ -714,7 +724,7 @@ async function dispatchGateway(
         candidates,
       )
     } catch (error) {
-      await bestEffort(() => cancelUserReservation(context.env, principal.user_id, requestId))
+      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
       throw error
     }
 
@@ -733,7 +743,7 @@ async function dispatchGateway(
       context.req.raw.signal,
       prepared.upstreamOperation,
     ).catch(async (error) => {
-      await bestEffort(() => cancelUserReservation(context.env, principal.user_id, requestId))
+      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
       throw error
     })
 
@@ -750,7 +760,7 @@ async function dispatchGateway(
       }
       await bestEffort(async () => acquired.response.body?.cancel())
       await bestEffort(() => releasePoolLease(pool, acquired.leaseId))
-      await bestEffort(() => cancelUserReservation(context.env, principal.user_id, requestId))
+      await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
       throw mapUpstreamStatus(acquired.response)
     }
 
@@ -762,7 +772,7 @@ async function dispatchGateway(
     ) {
       if (acquired.response.body === null) {
         await bestEffort(() => releasePoolLease(pool, acquired.leaseId))
-        await bestEffort(() => cancelUserReservation(context.env, principal.user_id, requestId))
+        await bestEffort(() => cancelBillingReservation(context.env, principal, requestId))
         throw new GatewayError(502, 'empty_upstream_stream', 'Upstream returned an empty stream', 'server_error')
       }
       return createStreamingResponse({
@@ -1242,7 +1252,7 @@ function createStreamingResponse(input: FinalizeInput & {
             outcome,
           )
         } else {
-          await cancelUserReservation(input.env, input.principal.user_id, input.requestId)
+          await cancelBillingReservation(input.env, input.principal, input.requestId)
         }
       } finally {
         await bestEffort(() => releasePoolLease(input.pool, input.leaseId))
@@ -1263,7 +1273,7 @@ function createStreamingResponse(input: FinalizeInput & {
             userRenewal += 1
             poolRenewal += 1
             await Promise.all([
-              renewUserReservation(input.env, input.principal.user_id, input.requestId, userRenewal),
+              renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
               renewPoolLease(input.pool, input.leaseId, poolRenewal),
             ])
             lastRenewedAt = Date.now()
@@ -1283,7 +1293,7 @@ function createStreamingResponse(input: FinalizeInput & {
             userRenewal += 1
             poolRenewal += 1
             await Promise.all([
-              renewUserReservation(input.env, input.principal.user_id, input.requestId, userRenewal),
+              renewBillingReservation(input.env, input.principal, input.requestId, userRenewal),
               renewPoolLease(input.pool, input.leaseId, poolRenewal),
             ])
             lastRenewedAt = Date.now()
@@ -1342,6 +1352,10 @@ async function settleAndProject(
     user_id: input.principal.user_id,
     api_key_id: input.principal.api_key_id,
     group_id: input.principal.group_id,
+    billing_type: input.principal.billing.type,
+    subscription_id: input.principal.billing.type === 'subscription'
+      ? input.principal.billing.subscription_id
+      : null,
     account_id: input.accountId,
     price_id: input.model.price_id,
     requested_model: input.requestedModel,
@@ -1360,7 +1374,7 @@ async function settleAndProject(
   try {
     await persistSettlementRecovery(
       input.env,
-      input.principal.user_id,
+      input.principal,
       input.requestId,
       cost.amount_micros,
       event,
@@ -1375,9 +1389,9 @@ async function settleAndProject(
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await settleUserReservation(
+      await settleBillingReservation(
         input.env,
-        input.principal.user_id,
+        input.principal,
         input.requestId,
         cost.amount_micros,
         event,

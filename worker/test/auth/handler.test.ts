@@ -67,7 +67,10 @@ class AuthStatement {
 class AuthDatabase {
   readonly users = new Map<string, UserRow>()
   readonly sessions = new Map<string, SessionRow>()
+  readonly reads: Array<{ query: string; values: unknown[] }> = []
   readonly writes: Array<{ query: string; values: unknown[] }> = []
+
+  constructor(private readonly events?: string[]) {}
 
   prepare(query: string): AuthStatement {
     return new AuthStatement(query, this)
@@ -78,6 +81,8 @@ class AuthDatabase {
   }
 
   first(query: string, values: unknown[]): Record<string, unknown> | null {
+    this.events?.push('db:read')
+    this.reads.push({ query, values })
     if (query.includes('FROM users') && query.includes('WHERE email = ?')) {
       const email = String(values[0])
       const user = Array.from(this.users.values()).find((value) => value.email === email)
@@ -104,6 +109,7 @@ class AuthDatabase {
   }
 
   run(query: string, values: unknown[]): number {
+    this.events?.push('db:write')
     this.writes.push({ query, values })
     if (query.includes('INSERT INTO users')) {
       const [
@@ -222,21 +228,82 @@ class AuthDatabase {
   }
 }
 
-function authEnv(database: AuthDatabase): Env {
-  return {
+class FakeAuthRateLimitNamespace {
+  readonly objectNames: string[] = []
+  readonly requests: Array<{ path: string; body: Record<string, unknown> }> = []
+
+  constructor(
+    private readonly failure: {
+      path: '/check' | '/attempt'
+      type: 'blocked' | 'unavailable'
+    } | null = null,
+    private readonly retryAfterSeconds = 17,
+    private readonly events?: string[],
+  ) {}
+
+  idFromName(name: string): DurableObjectId {
+    this.objectNames.push(name)
+    return { toString: () => name } as DurableObjectId
+  }
+
+  get(): DurableObjectStub {
+    return {
+      fetch: async (request: Request) => {
+        const body = await request.clone().json() as Record<string, unknown>
+        const path = new URL(request.url).pathname
+        this.requests.push({ path, body })
+        this.events?.push(`limiter:${path}`)
+        if (this.failure?.path === path && this.failure.type === 'unavailable') {
+          return new Response('limiter unavailable', { status: 503 })
+        }
+        if (this.failure?.path === path && this.failure.type === 'blocked') {
+          return Response.json({
+            schema_version: 1,
+            allowed: false,
+            retry_after_seconds: this.retryAfterSeconds,
+            blocked_by: ['account'],
+          }, {
+            status: 429,
+            headers: { 'retry-after': String(this.retryAfterSeconds) },
+          })
+        }
+        if (path === '/failure') {
+          return Response.json({ schema_version: 1, recorded: true })
+        }
+        if (path === '/success') {
+          return Response.json({ schema_version: 1, cleared: ['account'] })
+        }
+        return Response.json({ schema_version: 1, allowed: true })
+      },
+    } as unknown as DurableObjectStub
+  }
+}
+
+function authEnv(
+  database: AuthDatabase,
+  rateLimit: FakeAuthRateLimitNamespace | null = new FakeAuthRateLimitNamespace(),
+  settings: { registration_enabled: boolean; turnstile_enabled: boolean } = {
+    registration_enabled: true,
+    turnstile_enabled: false,
+  },
+): Env {
+  const env: Env = {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',
     API_KEY_PEPPER: 'p'.repeat(32),
+    TURNSTILE_SECRET_KEY: 'turnstile-test-secret',
     ASSETS: { fetch: async () => new Response('asset') } as unknown as Fetcher,
     DB: database as unknown as D1Database,
     CONFIG_KV: {
-      get: async () => ({ registration_enabled: true, turnstile_enabled: false }),
+      get: async () => settings,
     } as unknown as KVNamespace,
     OBJECTS: {} as R2Bucket,
     EVENTS_QUEUE: {} as Queue,
     USER_STATE: {} as DurableObjectNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
   }
+  if (rateLimit !== null) env.AUTH_RATE_LIMIT = rateLimit as unknown as DurableObjectNamespace
+  return env
 }
 
 describe('password identity and rotating sessions', () => {
@@ -279,7 +346,8 @@ describe('password identity and rotating sessions', () => {
 
   it('uses a generic login error and does not create a session for a wrong password', async () => {
     const database = new AuthDatabase()
-    const env = authEnv(database)
+    const rateLimit = new FakeAuthRateLimitNamespace()
+    const env = authEnv(database, rateLimit)
     const app = createApp()
     await app.request('/api/v1/auth/register', {
       method: 'POST',
@@ -300,6 +368,215 @@ describe('password identity and rotating sessions', () => {
       message: 'Invalid email or password',
     })
     expect(database.sessions.size).toBe(sessionCount)
+    expect(rateLimit.requests.slice(-2).map((request) => request.path)).toEqual([
+      '/attempt',
+      '/failure',
+    ])
+  })
+
+  it.each(['/check', '/attempt'] as const)(
+    'blocks password work with 429 and Retry-After when %s rejects admission',
+    async (blockedPath) => {
+      const database = new AuthDatabase()
+      const rateLimit = new FakeAuthRateLimitNamespace({ path: blockedPath, type: 'blocked' }, 17)
+      const env = authEnv(database, rateLimit)
+      const passwordWork = vi.spyOn(crypto.subtle, 'deriveBits')
+      const app = createApp()
+
+      const response = await app.request('/api/v1/auth/register', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.4',
+        },
+        body: JSON.stringify({ email: 'Alice@Example.com', password: 'correct horse battery staple' }),
+      }, env)
+
+      expect(response.status).toBe(429)
+      expect(response.headers.get('retry-after')).toBe('17')
+      await expect(response.json()).resolves.toMatchObject({
+        code: 'auth_rate_limited',
+        error: { type: 'rate_limit_error' },
+      })
+      expect(rateLimit.requests.map((request) => request.path)).toEqual(
+        blockedPath === '/check' ? ['/check'] : ['/check', '/attempt'],
+      )
+      expect(database.writes).toHaveLength(0)
+      expect(database.reads).toHaveLength(0)
+      expect(passwordWork).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['/check', '/attempt'] as const)(
+    'fails closed before database and password work when %s is unavailable',
+    async (unavailablePath) => {
+      const database = new AuthDatabase()
+      const rateLimit = new FakeAuthRateLimitNamespace({
+        path: unavailablePath,
+        type: 'unavailable',
+      })
+      const env = authEnv(database, rateLimit)
+      const passwordWork = vi.spyOn(crypto.subtle, 'deriveBits')
+      const app = createApp()
+
+      const response = await app.request('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'alice@example.com', password: 'plausible-password' }),
+      }, env)
+
+      expect(response.status).toBe(503)
+      await expect(response.json()).resolves.toMatchObject({ code: 'auth_rate_limit_unavailable' })
+      expect(rateLimit.requests.map((request) => request.path)).toEqual(
+        unavailablePath === '/check' ? ['/check'] : ['/check', '/attempt'],
+      )
+      expect(database.writes).toHaveLength(0)
+      expect(database.reads).toHaveLength(0)
+      expect(passwordWork).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['/api/v1/auth/register', 400, 'invalid_password'],
+    ['/api/v1/auth/login', 401, 'invalid_credentials'],
+  ] as const)('does not consume quota for invalid password input at %s', async (path, status, code) => {
+    const database = new AuthDatabase()
+    const rateLimit = new FakeAuthRateLimitNamespace()
+    const env = authEnv(database, rateLimit)
+    const passwordWork = vi.spyOn(crypto.subtle, 'deriveBits')
+    const app = createApp()
+
+    const response = await app.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'alice@example.com', password: 'short' }),
+    }, env)
+
+    expect(response.status).toBe(status)
+    await expect(response.json()).resolves.toMatchObject({ code })
+    expect(rateLimit.requests).toHaveLength(0)
+    expect(database.writes).toHaveLength(0)
+    expect(database.reads).toHaveLength(0)
+    expect(passwordWork).not.toHaveBeenCalled()
+  })
+
+  it('checks limits before Turnstile but does not consume quota when Turnstile fails', async () => {
+    const database = new AuthDatabase()
+    const rateLimit = new FakeAuthRateLimitNamespace()
+    const env = authEnv(database, rateLimit, {
+      registration_enabled: true,
+      turnstile_enabled: true,
+    })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ success: false }))
+    const app = createApp()
+
+    const response = await app.request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'alice@example.com',
+        password: 'plausible-password',
+        turnstile_token: 'invalid-test-token',
+      }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ code: 'captcha_invalid' })
+    expect(rateLimit.requests.map((request) => request.path)).toEqual(['/check'])
+    expect(database.writes).toHaveLength(0)
+    expect(database.reads).toHaveLength(0)
+  })
+
+  it('commits admission before database and PBKDF2 work', async () => {
+    const events: string[] = []
+    const database = new AuthDatabase(events)
+    const rateLimit = new FakeAuthRateLimitNamespace(null, 17, events)
+    const settings = { registration_enabled: true, turnstile_enabled: false }
+    const env = authEnv(database, rateLimit, settings)
+    const app = createApp()
+    await app.request('/api/v1/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'alice@example.com', password: 'correct horse battery staple' }),
+    }, env)
+    events.length = 0
+    settings.turnstile_enabled = true
+
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async () => {
+      events.push('turnstile')
+      return Response.json({ success: true })
+    })
+    const deriveBits = crypto.subtle.deriveBits.bind(crypto.subtle)
+    vi.spyOn(crypto.subtle, 'deriveBits').mockImplementation((algorithm, baseKey, length) => {
+      events.push('password:derive')
+      return deriveBits(algorithm, baseKey, length)
+    })
+    const response = await app.request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'alice@example.com',
+        password: 'totally wrong password',
+        turnstile_token: 'valid-test-token',
+      }),
+    }, env)
+
+    expect(response.status).toBe(401)
+    expect(events).toEqual([
+      'limiter:/check',
+      'turnstile',
+      'limiter:/attempt',
+      'db:read',
+      'password:derive',
+      'limiter:/failure',
+      'db:write',
+    ])
+  })
+
+  it('sends only keyed digests and gives normalized email variants the same account identity', async () => {
+    const database = new AuthDatabase()
+    const rateLimit = new FakeAuthRateLimitNamespace({ path: '/attempt', type: 'blocked' })
+    const env = authEnv(database, rateLimit)
+    const app = createApp()
+
+    for (const email of ['Alice@Example.com', ' alice@example.com ']) {
+      await app.request('/api/v1/auth/login', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.4',
+        },
+        body: JSON.stringify({ email, password: 'wrong password' }),
+      }, env)
+    }
+
+    const attempts = rateLimit.requests.filter((request) => request.path === '/attempt')
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0].body.account_digest).toBe(attempts[1].body.account_digest)
+    expect(attempts[0].body.account_digest).toMatch(/^[a-f0-9]{64}$/)
+    expect(attempts[0].body.ip_digest).toMatch(/^[a-f0-9]{64}$/)
+    expect(attempts[0].body).not.toHaveProperty('email')
+    expect(attempts[0].body).not.toHaveProperty('ip')
+    expect(JSON.stringify(rateLimit.requests)).not.toContain('alice@example.com')
+    expect(JSON.stringify(rateLimit.requests)).not.toContain('203.0.113.4')
+    expect(rateLimit.objectNames).toEqual(Array(4).fill('test:auth-rate-limit:v1'))
+  })
+
+  it('fails closed before database and password work when the limiter binding is unavailable', async () => {
+    const database = new AuthDatabase()
+    const env = authEnv(database, null)
+    const app = createApp()
+
+    const response = await app.request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'alice@example.com', password: 'wrong password' }),
+    }, env)
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({ code: 'auth_rate_limit_unavailable' })
+    expect(database.writes).toHaveLength(0)
+    expect(database.reads).toHaveLength(0)
   })
 
   it('rotates refresh tokens atomically and revokes the family when an old token is replayed', async () => {

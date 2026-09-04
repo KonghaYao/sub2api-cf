@@ -3,12 +3,14 @@ import type {
   PlatformEvent,
   UsageSettledPayload,
   UserStateChangedPayload,
+  SubscriptionStateChangedPayload,
 } from '../env'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
 
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
+const SUBSCRIPTION_STATE_CONSUMER = 'subscription-state-projection-v1'
 
 export function createUsageEvent(
   payload: UsageSettledPayload,
@@ -55,6 +57,11 @@ export async function consumeEvents(
         message.ack()
         continue
       }
+      if (isSubscriptionStateEvent(message.body)) {
+        await projectSubscriptionStateEvent(message.body, env)
+        message.ack()
+        continue
+      }
       const event = requireUsageEvent(message.body)
       const digest = await sha256Hex(JSON.stringify(event))
       const existing = await env.DB.prepare(
@@ -79,7 +86,8 @@ export async function consumeEvents(
              group_id, price_id, requested_model, upstream_model, cache_read_tokens,
              input_amount_micros, output_amount_micros, cache_amount_micros,
              base_amount_micros, outcome, stream, duration_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             , billing_type, subscription_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -104,6 +112,8 @@ export async function consumeEvents(
           payload.outcome,
           payload.stream ? 1 : 0,
           payload.duration_ms,
+          payload.billing_type,
+          payload.subscription_id,
         ),
         env.DB.prepare(
           `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
@@ -128,6 +138,83 @@ export async function consumeEvents(
       message.retry()
     }
   }
+}
+
+async function projectSubscriptionStateEvent(
+  event: PlatformEvent<SubscriptionStateChangedPayload>,
+  env: Env,
+): Promise<void> {
+  const digest = await sha256Hex(JSON.stringify(event))
+  const existing = await env.DB.prepare(
+    'SELECT result_digest FROM inbox WHERE consumer = ? AND event_id = ?',
+  ).bind(SUBSCRIPTION_STATE_CONSUMER, event.event_id).first<{ result_digest: string | null }>()
+  if (existing !== null) {
+    if (existing.result_digest !== digest) {
+      throw new Error(`Conflicting replay for subscription state event ${event.event_id}`)
+    }
+    return
+  }
+  const payload = event.payload
+  const windowAssignments = (start: number) => [
+    start,
+    payload.amount_micros,
+    start,
+    payload.amount_micros,
+    start,
+    start,
+  ] as const
+  const dailyWindowAssignments = [
+    payload.quota_reset_epoch,
+    payload.daily_window_start_ms,
+    payload.amount_micros,
+    payload.daily_window_start_ms,
+    payload.amount_micros,
+    payload.quota_reset_epoch,
+    payload.daily_window_start_ms,
+    payload.daily_window_start_ms,
+  ] as const
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE user_subscriptions
+          SET daily_used_micros = CASE
+                WHEN quota_reset_epoch <> ? THEN daily_used_micros
+                WHEN daily_window_start_ms IS NULL OR daily_window_start_ms < ? THEN ?
+                WHEN daily_window_start_ms = ? THEN daily_used_micros + ?
+                ELSE daily_used_micros END,
+              daily_window_start_ms = CASE
+                WHEN quota_reset_epoch <> ? THEN daily_window_start_ms
+                WHEN daily_window_start_ms IS NULL OR daily_window_start_ms < ? THEN ?
+                ELSE daily_window_start_ms END,
+              weekly_used_micros = CASE
+                WHEN weekly_window_start_ms IS NULL OR weekly_window_start_ms < ? THEN ?
+                WHEN weekly_window_start_ms = ? THEN weekly_used_micros + ?
+                ELSE weekly_used_micros END,
+              weekly_window_start_ms = CASE
+                WHEN weekly_window_start_ms IS NULL OR weekly_window_start_ms < ? THEN ?
+                ELSE weekly_window_start_ms END,
+              monthly_used_micros = CASE
+                WHEN monthly_window_start_ms IS NULL OR monthly_window_start_ms < ? THEN ?
+                WHEN monthly_window_start_ms = ? THEN monthly_used_micros + ?
+                ELSE monthly_used_micros END,
+              monthly_window_start_ms = CASE
+                WHEN monthly_window_start_ms IS NULL OR monthly_window_start_ms < ? THEN ?
+                ELSE monthly_window_start_ms END,
+              updated_at_ms = MAX(updated_at_ms, ?)
+        WHERE id = ? AND user_id = ? AND group_id = ?`,
+    ).bind(
+      ...dailyWindowAssignments,
+      ...windowAssignments(payload.weekly_window_start_ms),
+      ...windowAssignments(payload.monthly_window_start_ms),
+      payload.updated_at_ms,
+      payload.subscription_id,
+      payload.user_id,
+      payload.group_id,
+    ),
+    env.DB.prepare(
+      `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(SUBSCRIPTION_STATE_CONSUMER, event.event_id, Date.now(), digest),
+  ])
 }
 
 async function projectUserStateEvent(
@@ -169,7 +256,7 @@ async function projectUserStateEvent(
 }
 
 function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
-  const event = value as PlatformEvent | null
+  let event = value as PlatformEvent | null
   if (
     event === null ||
     typeof event !== 'object' ||
@@ -183,7 +270,24 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
   ) {
     throw new Error('Unsupported queue event')
   }
-  const payload = event.payload as Partial<UsageSettledPayload>
+  let payload = event.payload as Partial<UsageSettledPayload>
+  const hasBillingType = Object.hasOwn(payload, 'billing_type')
+  const hasSubscriptionId = Object.hasOwn(payload, 'subscription_id')
+  if (!hasBillingType && !hasSubscriptionId) {
+    const { request_id, user_id, api_key_id, group_id, ...legacyFields } = payload
+    payload = {
+      request_id,
+      user_id,
+      api_key_id,
+      group_id,
+      billing_type: 'balance',
+      subscription_id: null,
+      ...legacyFields,
+    }
+    event = { ...event, payload }
+  } else if (hasBillingType !== hasSubscriptionId) {
+    throw new Error('Incomplete usage billing reference')
+  }
   if (event.aggregate_id !== payload.user_id) throw new Error('Usage aggregate does not match user')
   for (const field of [
     'request_id',
@@ -198,6 +302,16 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     if (typeof payload[field] !== 'string' || payload[field] === '') {
       throw new Error(`Invalid usage payload field ${field}`)
     }
+  }
+  if (!['balance', 'subscription'].includes(payload.billing_type ?? '')) {
+    throw new Error('Invalid usage billing type')
+  }
+  if (
+    (payload.billing_type === 'balance' && payload.subscription_id !== null) ||
+    (payload.billing_type === 'subscription' &&
+      (typeof payload.subscription_id !== 'string' || payload.subscription_id === ''))
+  ) {
+    throw new Error('Invalid usage subscription reference')
   }
   for (const field of [
     'input_tokens',
@@ -230,6 +344,38 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     throw new Error('Usage amount does not match its cost components')
   }
   return event as PlatformEvent<UsageSettledPayload>
+}
+
+function isSubscriptionStateEvent(
+  value: unknown,
+): value is PlatformEvent<SubscriptionStateChangedPayload> {
+  if (value === null || typeof value !== 'object') return false
+  const event = value as Partial<PlatformEvent<Partial<SubscriptionStateChangedPayload>>>
+  const payload = event.payload
+  if (
+    event.schema_version !== 1 ||
+    event.event_type !== 'subscription.usage.settled.v1' ||
+    event.aggregate_type !== 'subscription' ||
+    typeof event.aggregate_id !== 'string' ||
+    typeof event.event_id !== 'string' ||
+    payload === null || typeof payload !== 'object'
+  ) return false
+  for (const field of ['request_id', 'subscription_id', 'user_id', 'group_id'] as const) {
+    if (typeof payload[field] !== 'string' || payload[field] === '') return false
+  }
+  for (const field of [
+    'amount_micros',
+    'daily_window_start_ms',
+    'weekly_window_start_ms',
+    'monthly_window_start_ms',
+    'quota_reset_epoch',
+    'updated_at_ms',
+  ] as const) {
+    if (!Number.isSafeInteger(payload[field]) || (payload[field] as number) < 0) return false
+  }
+  return event.aggregate_id === payload.subscription_id &&
+    event.event_id === `subscription-usage:${payload.request_id}` &&
+    event.occurred_at_ms === payload.updated_at_ms
 }
 
 function isSettlementRetryEvent(

@@ -12,7 +12,7 @@ import type { UserSubscription, SubscriptionProgress } from '@/types'
 export interface SubscriptionSummary {
   active_count: number
   subscriptions: Array<{
-    id: number
+    id: string | number
     group_name: string
     status: string
     daily_progress: number | null
@@ -59,7 +59,7 @@ export async function getSubscriptionSummary(): Promise<SubscriptionSummary> {
  * Get progress for a specific subscription
  */
 export async function getSubscriptionProgress(
-  subscriptionId: number
+  subscriptionId: string | number
 ): Promise<SubscriptionProgress> {
   const response = await apiClient.get<SubscriptionProgress>(
     `/subscriptions/${subscriptionId}/progress`

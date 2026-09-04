@@ -9,7 +9,30 @@ export interface GatewayPrincipal {
   platform: string
   balance_micros: number
   user_state_version: number
+  billing: GatewayBilling
 }
+
+export type GatewayBilling =
+  | { type: 'balance' }
+  | {
+      type: 'subscription'
+      subscription_id: string
+      starts_at_ms: number
+      expires_at_ms: number
+      daily_quota_micros: number | null
+      weekly_quota_micros: number | null
+      monthly_quota_micros: number | null
+      daily_used_micros: number
+      weekly_used_micros: number
+      monthly_used_micros: number
+      daily_anchor_ms: number
+      daily_window_start_ms: number | null
+      weekly_window_start_ms: number | null
+      monthly_window_start_ms: number | null
+      quota_reset_epoch: number
+      quota_reset_generation: number
+      control_version: number
+    }
 
 export interface ModelRoute {
   config_revision: number
@@ -26,6 +49,9 @@ export interface ModelRoute {
   cache_read_micros_per_million: number
   per_request_micros: number
   minimum_reservation_micros: number
+  group_rate_multiplier_ppm: number
+  user_rate_multiplier_ppm: number | null
+  /** Effective multiplier used for reservation and settlement calculations. */
   rate_multiplier_ppm: number
   max_output_tokens: number
   default_max_output_tokens: number

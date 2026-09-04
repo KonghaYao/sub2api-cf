@@ -441,7 +441,7 @@ async function redirectToPaymentResult(state: PaymentRecoverySnapshot): Promise<
 
 function buildWechatOAuthAuthorizeUrl(
   authorizeUrl: string,
-  context: { paymentType: string; orderType: OrderType; planId?: number; orderAmount: number },
+  context: { paymentType: string; orderType: OrderType; planId?: string | number; orderAmount: number },
 ): string {
   const normalizedUrl = authorizeUrl.trim()
   if (!normalizedUrl || typeof window === 'undefined') {
@@ -764,7 +764,7 @@ async function confirmSubscribe() {
   await createOrder(selectedPlan.value.price, 'subscription', selectedPlan.value.id)
 }
 
-async function createOrder(orderAmount: number, orderType: OrderType, planId?: number, options: CreateOrderOptions = {}) {
+async function createOrder(orderAmount: number, orderType: OrderType, planId?: string | number, options: CreateOrderOptions = {}) {
   submitting.value = true
   errorMessage.value = ''
   errorHintMessage.value = ''
@@ -953,7 +953,7 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
 interface MobileQrFallbackContext {
   orderAmount: number
   orderType: OrderType
-  planId?: number
+  planId?: string | number
   paymentType: string
   attempted: boolean
 }

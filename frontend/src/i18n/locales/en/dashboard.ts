@@ -95,6 +95,7 @@ export default {
     created: 'Created',
     copyToClipboard: 'Copy to clipboard',
     copied: 'Copied!',
+    plaintextUnavailable: 'The full API key is only shown when it is created. Create a new key to use this action.',
     importToCcSwitch: 'Import to CCS',
     enable: 'Enable',
     disable: 'Disable',
@@ -852,6 +853,23 @@ export default {
       deleteConfirm: 'Delete “{name}”? You will no longer be able to sign in with it.',
       deleted: 'Passkey deleted.',
       deleteFailed: 'Failed to delete passkey.'
+    },
+    sessions: {
+      title: 'Signed-in devices',
+      description: 'Review active sessions and sign out devices you no longer use.',
+      empty: 'There are no active login sessions.',
+      unknownDevice: 'Unknown device',
+      current: 'Current device',
+      createdAt: 'Signed in {date}',
+      lastSeen: 'Last active {date}',
+      revoke: 'Sign out',
+      revokeOthers: 'Sign out other devices',
+      revokeConfirm: 'Sign out this device? It will need to sign in again.',
+      revokeOthersConfirm: 'Sign out every device except this one?',
+      revoked: 'Device signed out.',
+      othersRevoked: 'Other devices signed out.',
+      loadFailed: 'Failed to load signed-in devices.',
+      revokeFailed: 'Failed to sign out the device.'
     },
     balanceNotify: {
       title: 'Balance Low Notification',

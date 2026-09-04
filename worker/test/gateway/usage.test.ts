@@ -20,6 +20,8 @@ const model: ModelRoute = {
   cache_read_micros_per_million: 500_000,
   per_request_micros: 3,
   minimum_reservation_micros: 1,
+  group_rate_multiplier_ppm: 1_000_000,
+  user_rate_multiplier_ppm: null,
   rate_multiplier_ppm: 1_000_000,
   max_output_tokens: 16_384,
   default_max_output_tokens: 4_096,

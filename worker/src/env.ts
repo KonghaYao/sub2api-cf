@@ -8,7 +8,11 @@ export interface Env {
   OBJECTS: R2Bucket
   EVENTS_QUEUE: Queue<PlatformEvent>
   USER_STATE: DurableObjectNamespace
+  /** Subscription quota authority. Optional only so unrelated unit fixtures stay compact; billing fails closed. */
+  SUBSCRIPTION_STATE?: DurableObjectNamespace
   POOL_STATE: DurableObjectNamespace
+  /** Password-entry limiter. Optional in types so non-auth fixtures remain small; auth fails closed. */
+  AUTH_RATE_LIMIT?: DurableObjectNamespace
 
   /** HMAC key for customer API keys. Must be a high-entropy Worker secret. */
   API_KEY_PEPPER?: string
@@ -35,6 +39,8 @@ export interface UsageSettledPayload {
   user_id: string
   api_key_id: string
   group_id: string
+  billing_type: 'balance' | 'subscription'
+  subscription_id: string | null
   account_id: string
   price_id: string
   requested_model: string
@@ -59,5 +65,20 @@ export interface UserStateChangedPayload {
   state_version: number
   balance_micros: number
   enabled: boolean
+  updated_at_ms: number
+}
+
+/** Idempotent D1 projection delta emitted by the authoritative subscription Durable Object. */
+export interface SubscriptionStateChangedPayload {
+  request_id: string
+  subscription_id: string
+  user_id: string
+  group_id: string
+  amount_micros: number
+  daily_window_start_ms: number
+  weekly_window_start_ms: number
+  monthly_window_start_ms: number
+  /** Reservation-captured discriminator for daily resets or restarted terms sharing a UTC anchor. */
+  quota_reset_epoch: number
   updated_at_ms: number
 }

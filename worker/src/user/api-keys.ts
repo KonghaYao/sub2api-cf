@@ -20,6 +20,7 @@ import {
 import type { Env } from '../env'
 import { apiKeyDigest, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { requireUserGroupAccess } from './groups'
 
 type UserBindings = { Bindings: Env }
 
@@ -50,6 +51,7 @@ interface UpdateApiKeyPatch {
   name?: string
   group_id?: string
   expires_at_ms?: number | null
+  enabled?: boolean
 }
 
 export async function listUserApiKeys(context: Context<UserBindings>): Promise<Response> {
@@ -116,7 +118,7 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
       })
     }
 
-    await requireEnabledGroup(context.env, input.group_id, 'create')
+    await requireUserGroupAccess(context.env, user.id, input.group_id, 'create')
 
     const keyId = await deterministicUuid(
       'user.api_keys.create.v1',
@@ -214,9 +216,19 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
     const expiresAtMs = Object.hasOwn(patch, 'expires_at_ms')
       ? patch.expires_at_ms ?? null
       : row.expires_at_ms
-    if (groupId !== row.group_id) await requireEnabledGroup(context.env, groupId, 'bind')
+    const enabled = patch.enabled ?? row.enabled === 1
+    const reactivating = enabled && row.enabled !== 1
+    if (enabled && row.revoked_at_ms !== null) {
+      throw new GatewayError(409, 'api_key_revoked', 'A revoked API key cannot be re-enabled')
+    }
+    if (groupId !== row.group_id || reactivating) {
+      await requireUserGroupAccess(context.env, user.id, groupId, 'bind')
+    }
 
-    const authChanged = groupId !== row.group_id || expiresAtMs !== row.expires_at_ms
+    const authChanged =
+      groupId !== row.group_id ||
+      expiresAtMs !== row.expires_at_ms ||
+      enabled !== (row.enabled === 1)
     if (name === row.name && !authChanged) return controlSuccess(publicApiKey(row))
     const authVersion = row.auth_version + (authChanged ? 1 : 0)
     const controlVersion = row.control_version + 1
@@ -232,13 +244,14 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
       await context.env.DB.batch([
         context.env.DB.prepare(
           `UPDATE api_keys
-              SET name = ?, group_id = ?, expires_at_ms = ?, auth_version = ?,
+              SET name = ?, group_id = ?, enabled = ?, expires_at_ms = ?, auth_version = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ? AND user_id = ?`,
         ).bind(
           name,
           groupId,
+          enabled ? 1 : 0,
           expiresAtMs,
           authVersion,
           row.control_version,
@@ -363,6 +376,12 @@ function parseUpdatePatch(body: Record<string, unknown>): UpdateApiKeyPatch {
   if (Object.hasOwn(body, 'expires_at') || Object.hasOwn(body, 'expires_at_ms')) {
     patch.expires_at_ms = parseExpiresAt(body)
   }
+  if (Object.hasOwn(body, 'status')) {
+    if (body.status !== 'active' && body.status !== 'inactive') {
+      throw new GatewayError(400, 'invalid_status', 'status must be active or inactive')
+    }
+    patch.enabled = body.status === 'active'
+  }
   return patch
 }
 
@@ -413,23 +432,6 @@ async function findOwnedApiKey(env: Env, id: string, userId: string): Promise<Ap
   return env.DB.prepare(`${apiKeySelect()} WHERE id = ? AND user_id = ?`)
     .bind(id, userId)
     .first<ApiKeyRow>()
-}
-
-async function requireEnabledGroup(
-  env: Env,
-  groupId: string,
-  action: 'create' | 'bind',
-): Promise<void> {
-  const group = await env.DB.prepare(
-    'SELECT id, enabled FROM "groups" WHERE id = ?',
-  ).bind(groupId).first<{ id: string; enabled: number }>()
-  if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
-  if (group.enabled !== 1) {
-    const message = action === 'create'
-      ? 'Cannot create an API key for a disabled group'
-      : 'Cannot bind an API key to a disabled group'
-    throw new GatewayError(409, 'group_disabled', message)
-  }
 }
 
 function apiKeyAuditInsert(

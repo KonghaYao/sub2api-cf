@@ -34,6 +34,11 @@ export const paymentAPI = {
     return apiClient.get<SubscriptionPlan[]>('/payment/plans')
   },
 
+  /** Get one enabled subscription plan by its opaque Worker or legacy ID. */
+  getPlan(id: string | number) {
+    return apiClient.get<SubscriptionPlan>(`/payment/plans/${id}`)
+  },
+
   /** Get all checkout page data in a single call */
   getCheckoutInfo() {
     return apiClient.get<CheckoutInfoResponse>('/payment/checkout-info')

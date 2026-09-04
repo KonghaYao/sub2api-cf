@@ -80,7 +80,7 @@ export interface BuildCreateOrderPayloadInput {
   amount: number
   paymentType: string
   orderType: OrderType
-  planId?: number
+  planId?: string | number
   origin?: string
   isMobile: boolean
   isWechatBrowser: boolean

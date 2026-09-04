@@ -516,7 +516,7 @@ export interface ValidationError {
 // ==================== Table/List Types ====================
 
 export interface SortConfig {
-  key: string
+  key?: string
   order: 'asc' | 'desc'
 }
 
@@ -712,21 +712,24 @@ export interface CompositeRouteDecision {
 }
 
 export interface ApiKey {
-  id: number
-  user_id: number
-  key: string
+  id: string | number
+  user_id: string | number
+  /** Plaintext is returned once, only by the create operation. */
+  key?: string
+  key_prefix: string
   name: string
-  group_id: number | null
+  group_id: string | number | null
   status: 'active' | 'inactive' | 'quota_exhausted' | 'expired'
   ip_whitelist: string[]
   ip_blacklist: string[]
   last_used_at: string | null
   last_used_ip: string | null
-  quota: number // Quota limit in USD (0 = unlimited)
-  quota_used: number // Used quota amount in USD
+  quota: number // Quota limit in USD (legacy deployment only)
+  quota_used: number // Used quota amount in USD (legacy deployment only)
   expires_at: string | null // Expiration time (null = never expires)
   created_at: string
   updated_at: string
+  revoked_at?: string | null
   current_concurrency: number
   group?: Group
   rate_limit_5h: number
@@ -745,7 +748,8 @@ export interface ApiKey {
 
 export interface CreateApiKeyRequest {
   name: string
-  group_id?: number | null
+  group_id: string | number
+  expires_at_ms?: number | null
   custom_key?: string // Optional custom API Key
   ip_whitelist?: string[]
   ip_blacklist?: string[]
@@ -758,7 +762,7 @@ export interface CreateApiKeyRequest {
 
 export interface UpdateApiKeyRequest {
   name?: string
-  group_id?: number | null
+  group_id?: string | number | null
   status?: 'active' | 'inactive'
   ip_whitelist?: string[]
   ip_blacklist?: string[]
@@ -1781,28 +1785,31 @@ export interface UsageCleanupTask {
 }
 
 export interface RedeemCode {
-  id: number
+  id: string | number
   code: string
   type: RedeemCodeType
   value: number
-  status: 'active' | 'used' | 'expired' | 'unused' | 'disabled'
-  used_by: number | null
+  status: 'active' | 'used' | 'expired' | 'unused' | 'disabled' | 'processing'
+  used_by: string | number | null
   used_at: string | null
   created_at: string
   expires_at?: string | null
   updated_at?: string
   notes?: string
-  group_id?: number | null // 订阅类型专用
+  group_id?: string | number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
   user?: User
   group?: Group // 关联的分组
+  value_micros?: number
+  control_version?: number
 }
 
 export interface GenerateRedeemCodesRequest {
   count: number
   type: RedeemCodeType
-  value: number
-  group_id?: number | null // 订阅类型专用
+  value?: number
+  value_micros?: number
+  group_id?: string | number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
   expires_at?: string | null
   expires_in_days?: number
@@ -1812,11 +1819,11 @@ export interface BatchUpdateRedeemCodeFields {
   status?: 'unused' | 'disabled'
   expires_at?: string | null
   notes?: string
-  group_id?: number | null
+  group_id?: string | number | null
 }
 
 export interface BatchUpdateRedeemCodesRequest {
-  ids: number[]
+  ids: Array<string | number>
   fields: BatchUpdateRedeemCodeFields
 }
 
@@ -2017,9 +2024,9 @@ export interface ChangePasswordRequest {
 // ==================== User Subscription Types ====================
 
 export interface UserSubscription {
-  id: number
-  user_id: number
-  group_id: number
+  id: string | number
+  user_id: string | number
+  group_id: string | number
   status: 'active' | 'expired' | 'revoked' | 'suspended'
   starts_at: string
   daily_usage_usd: number
@@ -2030,6 +2037,8 @@ export interface UserSubscription {
   monthly_window_start: string | null
   created_at: string
   updated_at: string
+  /** Worker optimistic-concurrency token used by admin subscription mutations. */
+  control_version?: number
   revoked_at?: string | null
   expires_at: string | null
   user?: User
@@ -2037,7 +2046,7 @@ export interface UserSubscription {
 }
 
 export interface SubscriptionProgress {
-  subscription_id: number
+  subscription_id: string | number
   daily: {
     used: number
     limit: number | null
@@ -2061,15 +2070,17 @@ export interface SubscriptionProgress {
 }
 
 export interface AssignSubscriptionRequest {
-  user_id: number
-  group_id: number
+  user_id: string | number
+  group_id: string | number
   validity_days?: number
+  notes?: string
 }
 
 export interface BulkAssignSubscriptionRequest {
-  user_ids: number[]
-  group_id: number
+  user_ids: Array<string | number>
+  group_id: string | number
   validity_days?: number
+  notes?: string
 }
 
 export interface ExtendSubscriptionRequest {

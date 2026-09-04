@@ -14,7 +14,7 @@
           <div class="flex items-start justify-between">
             <div class="min-w-0 flex-1">
               <div class="mb-1 flex items-center gap-2"><span class="font-medium text-gray-900 dark:text-white">{{ key.name }}</span><span :class="['badge text-xs', key.status === 'active' ? 'badge-success' : 'badge-danger']">{{ key.status }}</span></div>
-              <p class="truncate font-mono text-sm text-gray-500">{{ key.key.substring(0, 20) }}...{{ key.key.substring(key.key.length - 8) }}</p>
+              <p class="truncate font-mono text-sm text-gray-500">{{ key.key_prefix }}…</p>
             </div>
           </div>
           <div class="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
@@ -124,19 +124,19 @@ const appStore = useAppStore()
 const apiKeys = ref<ApiKey[]>([])
 const allGroups = ref<AdminGroup[]>([])
 const loading = ref(false)
-const updatingKeyIds = ref(new Set<number>())
-const groupSelectorKeyId = ref<number | null>(null)
+const updatingKeyIds = ref(new Set<string | number>())
+const groupSelectorKeyId = ref<string | number | null>(null)
 const dropdownPosition = ref<{ top: number; left: number } | null>(null)
 const dropdownRef = ref<HTMLElement | null>(null)
 const scrollContainerRef = ref<HTMLElement | null>(null)
-const groupButtonRefs = ref<Map<number, HTMLElement>>(new Map())
+const groupButtonRefs = ref<Map<string | number, HTMLElement>>(new Map())
 
 const selectedKeyForGroup = computed(() => {
   if (groupSelectorKeyId.value === null) return null
   return apiKeys.value.find((k) => k.id === groupSelectorKeyId.value) || null
 })
 
-const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance | null) => {
+const setGroupButtonRef = (keyId: string | number, el: Element | ComponentPublicInstance | null) => {
   if (el instanceof HTMLElement) {
     groupButtonRefs.value.set(keyId, el)
   } else {
@@ -202,7 +202,7 @@ const closeGroupSelector = () => {
   dropdownPosition.value = null
 }
 
-const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
+const changeGroup = async (key: ApiKey, newGroupId: string | number | null) => {
   closeGroupSelector()
   if (key.group_id === newGroupId || (!key.group_id && newGroupId === null)) return
 
@@ -212,7 +212,10 @@ const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
     // Update local data
     const idx = apiKeys.value.findIndex((k) => k.id === key.id)
     if (idx !== -1) {
-      apiKeys.value[idx] = result.api_key
+      const group = newGroupId === null
+        ? undefined
+        : allGroups.value.find((candidate) => String(candidate.id) === String(newGroupId))
+      apiKeys.value[idx] = { ...result.api_key, group_id: newGroupId, group }
     }
     if (result.auto_granted_group_access && result.granted_group_name) {
       appStore.showSuccess(t('admin.users.groupChangedWithGrant', { group: result.granted_group_name }))

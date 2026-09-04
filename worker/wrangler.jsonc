@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.5.0"
+    "APP_VERSION": "0.6.0"
   },
   "assets": {
     "directory": "../frontend/dist",
@@ -76,8 +76,16 @@
         "class_name": "UserStateDO"
       },
       {
+        "name": "SUBSCRIPTION_STATE",
+        "class_name": "SubscriptionStateDO"
+      },
+      {
         "name": "POOL_STATE",
         "class_name": "PoolStateDO"
+      },
+      {
+        "name": "AUTH_RATE_LIMIT",
+        "class_name": "AuthRateLimitDO"
       }
     ]
   },
@@ -85,6 +93,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["UserStateDO", "PoolStateDO"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AuthRateLimitDO"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["SubscriptionStateDO"]
     }
   ],
   "env": {
@@ -92,7 +108,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.5.0"
+        "APP_VERSION": "0.6.0"
       },
       "d1_databases": [
         {
@@ -138,8 +154,16 @@
             "class_name": "UserStateDO"
           },
           {
+            "name": "SUBSCRIPTION_STATE",
+            "class_name": "SubscriptionStateDO"
+          },
+          {
             "name": "POOL_STATE",
             "class_name": "PoolStateDO"
+          },
+          {
+            "name": "AUTH_RATE_LIMIT",
+            "class_name": "AuthRateLimitDO"
           }
         ]
       },
@@ -151,7 +175,7 @@
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.5.0"
+        "APP_VERSION": "0.6.0"
       },
       "d1_databases": [
         {
@@ -197,8 +221,16 @@
             "class_name": "UserStateDO"
           },
           {
+            "name": "SUBSCRIPTION_STATE",
+            "class_name": "SubscriptionStateDO"
+          },
+          {
             "name": "POOL_STATE",
             "class_name": "PoolStateDO"
+          },
+          {
+            "name": "AUTH_RATE_LIMIT",
+            "class_name": "AuthRateLimitDO"
           }
         ]
       },

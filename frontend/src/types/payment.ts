@@ -102,15 +102,16 @@ export interface PaymentOrder {
   refund_requested_at?: string
   refund_requested_by?: number
   refund_request_reason?: string
-  plan_id?: number
+  plan_id?: string | number
   provider_instance_id?: string
 }
 
 // ==================== Plans & Channels ====================
 
 export interface SubscriptionPlan {
-  id: number
-  group_id: number
+  /** Legacy installations use numeric IDs; the Worker uses opaque UUIDs. */
+  id: string | number
+  group_id: string | number
   group_platform?: string
   group_name?: string
   rate_multiplier?: number
@@ -170,7 +171,7 @@ export interface CreateOrderRequest {
   amount: number
   payment_type: string
   order_type: string
-  plan_id?: number
+  plan_id?: string | number
   return_url?: string
   payment_source?: string
   openid?: string

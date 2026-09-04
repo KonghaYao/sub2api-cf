@@ -394,6 +394,11 @@ export function deriveWeChatConnectStoredMode(
  * System settings interface
  */
 export interface SystemSettings {
+  /** Present when this response came from the versioned Cloudflare control plane. */
+  cloudflare_worker_contract?: true;
+  control_version?: number;
+  schema_version?: number;
+  updated_at_ms?: number;
   // Registration settings
   registration_enabled: boolean;
   email_verify_enabled: boolean;
@@ -835,7 +840,7 @@ export interface UpdateSettingsRequest {
   smtp_use_tls?: boolean;
   turnstile_enabled?: boolean;
   turnstile_site_key?: string;
-  turnstile_secret_key?: string;
+  turnstile_secret_key?: string | null;
   tencent_captcha_enabled?: boolean;
   tencent_captcha_app_id?: string;
   tencent_captcha_app_secret_key?: string;
@@ -1044,9 +1049,78 @@ export interface UpdateSettingsRequest {
  * Get all system settings
  * @returns System settings
  */
+interface WorkerAdminSettings {
+  schema_version: 1;
+  control_version: number;
+  public: {
+    site_name: string;
+    registration_enabled: boolean;
+    email_verification_enabled: boolean;
+    turnstile_enabled: boolean;
+    turnstile_site_key: string;
+  };
+  secrets: { turnstile_secret_key_configured: boolean };
+  updated_at_ms: number;
+}
+
+interface WorkerSettingsPatch {
+  public?: Partial<WorkerAdminSettings["public"]>;
+  secrets?: { turnstile_secret_key: string | null };
+}
+
+let workerSettingsETag: string | null = null;
+let pendingWorkerSettingsUpdate: { fingerprint: string; key: string } | null = null;
+
+function isWorkerAdminSettings(value: unknown): value is WorkerAdminSettings {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<WorkerAdminSettings>;
+  return (
+    candidate.schema_version === 1 &&
+    Number.isSafeInteger(candidate.control_version) &&
+    candidate.public !== null &&
+    typeof candidate.public === "object" &&
+    candidate.secrets !== null &&
+    typeof candidate.secrets === "object"
+  );
+}
+
+function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
+  return {
+    cloudflare_worker_contract: true,
+    schema_version: settings.schema_version,
+    control_version: settings.control_version,
+    updated_at_ms: settings.updated_at_ms,
+    site_name: settings.public.site_name,
+    registration_enabled: settings.public.registration_enabled,
+    email_verify_enabled: settings.public.email_verification_enabled,
+    turnstile_enabled: settings.public.turnstile_enabled,
+    turnstile_site_key: settings.public.turnstile_site_key,
+    turnstile_secret_key_configured: settings.secrets.turnstile_secret_key_configured,
+  } as SystemSettings;
+}
+
+function newOperationKey(scope: string): string {
+  const requestID = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${scope}-${requestID}`;
+}
+
+function settingsContractError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
 export async function getSettings(): Promise<SystemSettings> {
-  const { data } = await apiClient.get<SystemSettings>("/admin/settings");
-  return data;
+  const response = await apiClient.get<WorkerAdminSettings | SystemSettings>("/admin/settings");
+  if (!isWorkerAdminSettings(response.data)) {
+    workerSettingsETag = null;
+    return response.data;
+  }
+
+  const headerETag = response.headers?.etag;
+  workerSettingsETag = typeof headerETag === "string"
+    ? headerETag
+    : `"${response.data.control_version}"`;
+  return adaptWorkerSettings(response.data);
 }
 
 /**
@@ -1057,11 +1131,62 @@ export async function getSettings(): Promise<SystemSettings> {
 export async function updateSettings(
   settings: UpdateSettingsRequest,
 ): Promise<SystemSettings> {
-  const { data } = await apiClient.put<SystemSettings>(
+  if (workerSettingsETag === null) {
+    throw settingsContractError(
+      "settings_version_not_loaded",
+      "Reload Cloudflare Worker settings before saving",
+    );
+  }
+
+  const publicPatch: WorkerSettingsPatch["public"] = {};
+  if (settings.site_name !== undefined) publicPatch.site_name = settings.site_name;
+  if (settings.registration_enabled !== undefined) {
+    publicPatch.registration_enabled = settings.registration_enabled;
+  }
+  if (settings.email_verify_enabled !== undefined) {
+    publicPatch.email_verification_enabled = settings.email_verify_enabled;
+  }
+  if (settings.turnstile_enabled !== undefined) {
+    publicPatch.turnstile_enabled = settings.turnstile_enabled;
+  }
+  if (settings.turnstile_site_key !== undefined) {
+    publicPatch.turnstile_site_key = settings.turnstile_site_key;
+  }
+
+  const patch: WorkerSettingsPatch = {};
+  if (Object.keys(publicPatch).length > 0) patch.public = publicPatch;
+  if (settings.turnstile_secret_key !== undefined && settings.turnstile_secret_key !== "") {
+    patch.secrets = { turnstile_secret_key: settings.turnstile_secret_key };
+  }
+  if (patch.public === undefined && patch.secrets === undefined) {
+    throw settingsContractError(
+      "worker_feature_not_supported",
+      "None of these settings are supported by the Cloudflare Worker version",
+    );
+  }
+
+  const fingerprint = JSON.stringify([workerSettingsETag, patch]);
+  if (pendingWorkerSettingsUpdate?.fingerprint !== fingerprint) {
+    pendingWorkerSettingsUpdate = {
+      fingerprint,
+      key: newOperationKey("admin-settings-update"),
+    };
+  }
+  const response = await apiClient.put<WorkerAdminSettings>(
     "/admin/settings",
-    settings,
+    patch,
+    {
+      headers: {
+        "Idempotency-Key": pendingWorkerSettingsUpdate.key,
+        "If-Match": workerSettingsETag,
+      },
+    },
   );
-  return data;
+  pendingWorkerSettingsUpdate = null;
+  workerSettingsETag = typeof response.headers?.etag === "string"
+    ? response.headers.etag
+    : `"${response.data.control_version}"`;
+  return adaptWorkerSettings(response.data);
 }
 
 /**

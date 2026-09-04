@@ -6,23 +6,34 @@
 import { apiClient } from '../client'
 import type { ApiKey } from '@/types'
 
+function operationKey(scope: string, resourceId: string | number): string {
+  const requestId = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${scope}-${resourceId}-${requestId}`
+}
+
 export interface UpdateApiKeyGroupResult {
   api_key: ApiKey
   auto_granted_group_access: boolean
-  granted_group_id?: number
+  granted_group_id?: string | number
   granted_group_name?: string
 }
 
 /**
  * Update an API key's group binding
  * @param id - API Key ID
- * @param groupId - Group ID (0 to unbind, positive to bind, null/undefined to skip)
+ * @param groupId - Group UUID, or null to request unbinding on compatible backends
  * @returns Updated API key with auto-grant info
  */
-export async function updateApiKeyGroup(id: number, groupId: number | null): Promise<UpdateApiKeyGroupResult> {
-  const { data } = await apiClient.put<UpdateApiKeyGroupResult>(`/admin/api-keys/${id}`, {
-    group_id: groupId === null ? 0 : groupId
-  })
+export async function updateApiKeyGroup(
+  id: string | number,
+  groupId: string | number | null
+): Promise<UpdateApiKeyGroupResult> {
+  const { data } = await apiClient.put<UpdateApiKeyGroupResult>(
+    `/admin/api-keys/${id}`,
+    { group_id: groupId },
+    { headers: { 'Idempotency-Key': operationKey('admin-api-key-group', id) } }
+  )
   return data
 }
 

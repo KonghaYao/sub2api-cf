@@ -17,12 +17,57 @@ interface PoolLeaseBody {
   lease?: { account_id?: string; status?: string }
 }
 
-export async function prepareUserReservation(
+export interface BillingReference {
+  user_id: string
+  billing: { type: 'balance' } | { type: 'subscription'; subscription_id: string }
+}
+
+export async function prepareBillingReservation(
   env: Env,
   principal: GatewayPrincipal,
   requestId: string,
   amountMicros: number,
 ): Promise<void> {
+  if (principal.billing.type === 'subscription') {
+    const stub = subscriptionStub(env, principal.billing.subscription_id)
+    await requireStateOk(post(stub, '/configure', {
+      schema_version: STATE_SCHEMA_VERSION,
+      subscription_id: principal.billing.subscription_id,
+      user_id: principal.user_id,
+      group_id: principal.group_id,
+      starts_at_ms: principal.billing.starts_at_ms,
+      expires_at_ms: principal.billing.expires_at_ms,
+      daily_quota_micros: principal.billing.daily_quota_micros,
+      weekly_quota_micros: principal.billing.weekly_quota_micros,
+      monthly_quota_micros: principal.billing.monthly_quota_micros,
+      daily_used_micros: principal.billing.daily_used_micros,
+      weekly_used_micros: principal.billing.weekly_used_micros,
+      monthly_used_micros: principal.billing.monthly_used_micros,
+      daily_anchor_ms: principal.billing.daily_anchor_ms,
+      daily_window_start_ms: principal.billing.daily_window_start_ms,
+      weekly_window_start_ms: principal.billing.weekly_window_start_ms,
+      monthly_window_start_ms: principal.billing.monthly_window_start_ms,
+      quota_reset_epoch: principal.billing.quota_reset_epoch,
+      quota_reset_generation: principal.billing.quota_reset_generation,
+      control_version: principal.billing.control_version,
+    }))
+    await requireStateOk(post(stub, '/authorize', {
+      schema_version: STATE_SCHEMA_VERSION,
+      request_id: requestId,
+      subscription_id: principal.billing.subscription_id,
+      user_id: principal.user_id,
+      group_id: principal.group_id,
+      api_key_id: principal.api_key_id,
+      api_key_auth_version: principal.api_key_auth_version,
+    }))
+    await requireStateOk(post(stub, '/reserve', {
+      schema_version: STATE_SCHEMA_VERSION,
+      request_id: requestId,
+      amount_micros: amountMicros,
+      reservation_ttl_ms: RESERVATION_TTL_MS,
+    }))
+    return
+  }
   const stub = userStub(env, principal.user_id)
   const configured = await post(stub, '/configure', {
     schema_version: STATE_SCHEMA_VERSION,
@@ -54,14 +99,14 @@ export async function prepareUserReservation(
   )
 }
 
-export async function renewUserReservation(
+export async function renewBillingReservation(
   env: Env,
-  userId: string,
+  billing: BillingReference,
   requestId: string,
   renewalSequence: number,
 ): Promise<void> {
   await requireStateOk(
-    post(userStub(env, userId), '/renew', {
+    post(billingStub(env, billing), '/renew', {
       schema_version: STATE_SCHEMA_VERSION,
       request_id: requestId,
       renewal_sequence: renewalSequence,
@@ -70,21 +115,22 @@ export async function renewUserReservation(
   )
 }
 
-export async function settleUserReservation(
+export async function settleBillingReservation(
   env: Env,
-  userId: string,
+  billing: BillingReference,
   requestId: string,
   amountMicros: number,
   usageEvent: PlatformEvent<UsageSettledPayload>,
-): Promise<{ balance_micros: number; settled_micros: number }> {
+): Promise<void> {
   const response = await requireStateOk(
-    post(userStub(env, userId), '/settle', {
+    post(billingStub(env, billing), '/settle', {
       schema_version: STATE_SCHEMA_VERSION,
       request_id: requestId,
       amount_micros: amountMicros,
       usage_event: usageEvent,
     }),
   )
+  if (billing.billing.type === 'subscription') return
   const body = (await response.json()) as {
     profile?: { balance_micros?: number; settled_micros?: number }
   }
@@ -94,14 +140,14 @@ export async function settleUserReservation(
   ) {
     throw new GatewayError(500, 'invalid_user_state', 'User state returned an invalid settlement', 'server_error')
   }
-  return {
-    balance_micros: body.profile!.balance_micros!,
-    settled_micros: body.profile!.settled_micros!,
-  }
 }
 
-export async function cancelUserReservation(env: Env, userId: string, requestId: string): Promise<void> {
-  const response = await post(userStub(env, userId), '/cancel', {
+export async function cancelBillingReservation(
+  env: Env,
+  billing: BillingReference,
+  requestId: string,
+): Promise<void> {
+  const response = await post(billingStub(env, billing), '/cancel', {
     schema_version: STATE_SCHEMA_VERSION,
     request_id: requestId,
   })
@@ -228,6 +274,19 @@ function userStub(env: Env, userId: string): DurableObjectStub {
   return env.USER_STATE.get(env.USER_STATE.idFromName(userId))
 }
 
+function subscriptionStub(env: Env, subscriptionId: string): DurableObjectStub {
+  if (env.SUBSCRIPTION_STATE === undefined) {
+    throw new GatewayError(503, 'subscription_billing_unavailable', 'Subscription billing state is unavailable', 'server_error')
+  }
+  return env.SUBSCRIPTION_STATE.get(env.SUBSCRIPTION_STATE.idFromName(subscriptionId))
+}
+
+function billingStub(env: Env, reference: BillingReference): DurableObjectStub {
+  return reference.billing.type === 'subscription'
+    ? subscriptionStub(env, reference.billing.subscription_id)
+    : userStub(env, reference.user_id)
+}
+
 function poolStub(
   env: Env,
   groupId: string,
@@ -279,5 +338,10 @@ async function stateResponseError(response: Response): Promise<GatewayError> {
   const code = body.error?.code ?? 'state_operation_failed'
   const message = body.error?.message ?? 'Internal state operation failed'
   const status = response.status >= 400 && response.status < 500 ? response.status : 503
-  return new GatewayError(status, code, message, status === 403 ? 'permission_error' : 'server_error')
+  const type = status === 403
+    ? 'permission_error'
+    : status === 429
+      ? 'rate_limit_error'
+      : 'server_error'
+  return new GatewayError(status, code, message, type)
 }
