@@ -12,7 +12,6 @@ import {
 import type {
   User,
   ChangePasswordRequest,
-  NotifyEmailEntry,
   UserAuthProvider,
   UserAffiliateDetail,
   AffiliateTransferResponse,
@@ -38,7 +37,7 @@ export async function updateProfile(profile: {
   avatar_url?: string | null
   balance_notify_enabled?: boolean
   balance_notify_threshold?: number | null
-  balance_notify_extra_emails?: NotifyEmailEntry[]
+  notification_preferences_version?: number
 }): Promise<User> {
   const { data } = await apiClient.put<User>('/user', profile)
   return data
@@ -75,25 +74,48 @@ export async function sendNotifyEmailCode(email: string): Promise<void> {
  * @param email - Email address to add
  * @param code - Verification code
  */
-export async function verifyNotifyEmail(email: string, code: string): Promise<void> {
-  await apiClient.post('/user/notify-email/verify', { email, code })
+export async function verifyNotifyEmail(
+  email: string,
+  code: string,
+  notificationPreferencesVersion: number
+): Promise<User> {
+  const { data } = await apiClient.post<User>('/user/notify-email/verify', {
+    email,
+    code,
+    notification_preferences_version: notificationPreferencesVersion
+  })
+  return data
 }
 
 /**
  * Remove a notify email
  * @param email - Email address to remove
  */
-export async function removeNotifyEmail(email: string): Promise<void> {
-  await apiClient.delete('/user/notify-email', { data: { email } })
+export async function removeNotifyEmail(
+  email: string,
+  notificationPreferencesVersion: number
+): Promise<User> {
+  const { data } = await apiClient.delete<User>('/user/notify-email', {
+    data: { email, notification_preferences_version: notificationPreferencesVersion }
+  })
+  return data
 }
 
 /**
  * Toggle a notify email's disabled state
- * @param email - Email address (empty string for primary email placeholder)
+ * @param email - Verified notification email address
  * @param disabled - Whether to disable the email
  */
-export async function toggleNotifyEmail(email: string, disabled: boolean): Promise<User> {
-  const { data } = await apiClient.put<User>('/user/notify-email/toggle', { email, disabled })
+export async function toggleNotifyEmail(
+  email: string,
+  disabled: boolean,
+  notificationPreferencesVersion: number
+): Promise<User> {
+  const { data } = await apiClient.put<User>('/user/notify-email/toggle', {
+    email,
+    disabled,
+    notification_preferences_version: notificationPreferencesVersion
+  })
   return data
 }
 

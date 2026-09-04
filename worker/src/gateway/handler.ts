@@ -43,6 +43,7 @@ import {
   resolveGatewayRoute,
   validateBaseUrl,
 } from './repository'
+import { readGatewayJsonBody } from './request-body'
 import {
   cancelBillingReservation,
   disablePoolAccount,
@@ -74,7 +75,6 @@ import {
 
 type GatewayBindings = { Bindings: Env }
 
-const MAX_REQUEST_BYTES = 2 * 1024 * 1024
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const HEADER_TIMEOUT_MS = 30_000
 const BODY_IDLE_TIMEOUT_MS = 120_000
@@ -269,7 +269,7 @@ async function handleGeminiCountTokens(
   let pool: DurableObjectStub | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const parsed = await readGatewayBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     convertGeminiGenerateContentToResponsesRequest(parsed.body, {
       publicModel,
@@ -395,7 +395,7 @@ export async function handleAnthropicCountTokens(
   let pool: DurableObjectStub | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const parsed = await readGatewayBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     const request = parseAnthropicCountTokensRequest(parsed.body)
     const route = await resolveGatewayRoute(
@@ -488,7 +488,7 @@ export async function handleResponsesInputTokens(
   let pool: DurableObjectStub | null = null
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const parsed = await readGatewayBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw)
     validateClientControls(parsed.body)
     const requestedModel = requiredModel(parsed.body)
     const allowed = new Set(['model', 'instructions', 'input', 'tools', 'tool_choice'])
@@ -713,7 +713,7 @@ async function dispatchGateway(
   const startedAt = Date.now()
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const parsed = await readGatewayBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw)
     const prepared = prepare(parsed.body)
     const { requestedModel, stream } = prepared
     const route = await resolveGatewayRoute(
@@ -1541,28 +1541,6 @@ async function settleAndProject(
     return
   }
   throw lastError
-}
-
-async function readGatewayBody(request: Request): Promise<{ body: Record<string, unknown>; bytes: Uint8Array }> {
-  const contentLength = Number(request.headers.get('content-length') ?? '0')
-  if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
-    throw new GatewayError(413, 'request_too_large', 'Request body exceeds the 2 MiB limit')
-  }
-  const bytes = new Uint8Array(await request.arrayBuffer())
-  if (bytes.byteLength === 0) throw new GatewayError(400, 'empty_body', 'Request body is required')
-  if (bytes.byteLength > MAX_REQUEST_BYTES) {
-    throw new GatewayError(413, 'request_too_large', 'Request body exceeds the 2 MiB limit')
-  }
-  let value: unknown
-  try {
-    value = JSON.parse(new TextDecoder().decode(bytes))
-  } catch {
-    throw new GatewayError(400, 'invalid_json', 'Request body must be valid JSON')
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new GatewayError(400, 'invalid_body', 'Request body must be a JSON object')
-  }
-  return { body: value as Record<string, unknown>, bytes }
 }
 
 function validateClientControls(body: Record<string, unknown>): void {

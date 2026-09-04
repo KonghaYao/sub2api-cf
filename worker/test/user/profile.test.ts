@@ -162,12 +162,40 @@ describe('user profile HTTP contract', () => {
     ).get()).toEqual({ total: 4 })
   })
 
-  it('rejects unsupported, malformed, and oversized profile avatar updates without a false-success write', async () => {
+  it('routes notification preferences and rejects malformed or oversized profile updates without a false-success write', async () => {
     const test = await fixture()
-    const unsupported = await request(test, '/api/v1/user', {
-      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ balance_notify_enabled: true }),
+    const notification = await request(test, '/api/v1/user', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ balance_notify_enabled: false, notification_preferences_version: 0 }),
     })
-    expect(unsupported.status).toBe(400)
+    expect(notification.status).toBe(200)
+    expect((await responseBody(notification)).data).toMatchObject({
+      balance_notify_enabled: false,
+      notification_preferences_version: 1,
+    })
+    const combined = await request(test, '/api/v1/user', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        username: 'Alice Combined',
+        balance_notify_threshold: 2.5,
+        notification_preferences_version: 1,
+      }),
+    })
+    expect(combined.status).toBe(200)
+    expect((await responseBody(combined)).data).toMatchObject({
+      username: 'Alice Combined',
+      balance_notify_enabled: false,
+      balance_notify_threshold: 2.5,
+      notification_preferences_version: 2,
+    })
+    const missingVersion = await request(test, '/api/v1/user', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'Must Not Apply', balance_notify_enabled: true }),
+    })
+    expect(missingVersion.status).toBe(428)
+    expect(test.raw.prepare('SELECT display_name FROM users WHERE id = ?').get('alice')).toEqual({
+      display_name: 'Alice Combined',
+    })
     const emailChange = await request(test, '/api/v1/user', {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'changed@example.com' }),
     })

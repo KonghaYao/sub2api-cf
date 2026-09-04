@@ -1,52 +1,51 @@
 export default {
   audit: {
-    title: 'Audit Logs',
-    description: 'Records management-plane operations by admins and users. Header credentials keep only their first/last characters and request bodies are redacted. Entries cannot be deleted individually; clearing all requires two-factor verification.',
-    clearAll: 'Clear All',
-    empty: 'No audit logs yet',
-    loadFailed: 'Failed to load audit logs',
+    title: 'Audit Events',
+    description: 'Read-only management, authentication, and payment events. Sensitive identifiers are masked and detail metadata is allow-listed.',
+    empty: 'No audit events yet',
+    loadFailed: 'Failed to load audit events',
     filters: {
       all: 'All',
-      q: 'Keyword',
-      qPlaceholder: 'Path / action / actor email',
-      actorEmail: 'Actor Email',
+      category: 'Category',
       action: 'Action',
-      clientIp: 'Client IP',
-      method: 'Method',
-      authMethod: 'Auth Method',
-      result: 'Result',
-      resultSuccess: 'Success',
-      resultFailure: 'Failure',
-      startTime: 'Start Time',
-      endTime: 'End Time'
+      outcome: 'Outcome',
+      actorUserId: 'Actor user ID',
+      resourceType: 'Resource type',
+      resourceId: 'Resource ID'
+    },
+    categories: {
+      settings: 'Settings',
+      rbac: 'RBAC',
+      auth: 'Authentication',
+      payment: 'Payment'
+    },
+    outcomes: {
+      succeeded: 'Succeeded',
+      failed: 'Failed',
+      blocked: 'Blocked',
+      recorded: 'Recorded'
     },
     columns: {
       time: 'Time',
+      category: 'Category',
       actor: 'Actor',
       action: 'Action',
-      method: 'Method',
-      result: 'Result',
-      clientIp: 'Client IP',
+      outcome: 'Outcome',
+      resource: 'Resource',
       detail: 'Detail'
     },
-    detail: {
-      title: 'Audit Log Detail',
-      actorRole: 'Role',
-      methodPath: 'Method / Path',
-      latency: 'Latency',
-      requestId: 'Request ID',
-      credential: 'Credential (masked)',
-      userAgent: 'User-Agent',
-      requestBody: 'Request Body (redacted)',
-      extra: 'Extra'
+    pagination: {
+      page: 'Page {page}',
+      previous: 'Previous audit page',
+      next: 'Next audit page'
     },
-    clearConfirm: {
-      title: 'Clear All Audit Logs',
-      message: 'This permanently deletes all audit logs and cannot be undone. The clear action itself is recorded. Continue?',
-      totpTitle: 'Enter Two-Factor Code',
-      totpHint: 'Clearing audit logs requires a fresh TOTP verification.',
-      success: 'Cleared {count} audit log(s)',
-      failed: 'Failed to clear audit logs'
+    detail: {
+      title: 'Audit Event Detail',
+      actor: 'Actor',
+      origin: 'Origin',
+      resource: 'Resource',
+      version: 'version {version}',
+      metadata: 'Allow-listed metadata'
     }
   }
 }

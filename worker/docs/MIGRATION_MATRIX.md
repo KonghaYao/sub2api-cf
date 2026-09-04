@@ -20,7 +20,7 @@ Status meanings:
 | Route inventory | Every original public, user, admin, and gateway route maps to Done, Replace, or Remove | Partial |
 | Gateway compatibility | Protocol fixtures, streaming, error mapping, accounting, limits, and failover tests pass | Partial |
 | Commercial integrity | Auth, subscription, redemption, order, webhook, refund, and affiliate tests pass | Partial |
-| Operations integrity | RBAC, audit, monitoring, alert, retention, recovery, and backup tests pass | Planned |
+| Operations integrity | RBAC, audit, monitoring, alert, retention, recovery, and backup tests pass | Partial |
 | Storage correctness | D1 migrations plus Durable Object, Queue, KV, and R2 integration tests pass | Partial |
 | Frontend compatibility | User and admin UI smoke/E2E suites pass against the Worker | Partial |
 | Deployment | Remote migrations, Worker deploy, production smoke, and rollback notes are verified | Partial |
@@ -45,7 +45,7 @@ Status meanings:
 | Usage and billing API | `/v1/usage` and `/v1/sub2api/billing` with immutable price version | Partial | Routes and balance/subscription billing attribution exist; complete legacy aggregate/filter coverage |
 | Media generation | Images, async/batch images, video, voice/live and task polling | Planned | Provider fixtures, R2 artifacts, Queue workflow tests |
 | Search extensions | Web/X search and provider-specific alpha routes | Planned | Explicit compatibility fixtures |
-| Request policy | Body/multipart limits, prompt policy, sensitive-data redaction | Planned | Boundary and adversarial tests |
+| Request policy | Bounded JSON bodies, gzip/deflate decoding, prompt policy and sensitive-data redaction | Partial | Raw and decompressed 2 MiB limits, encoding rejection, lenient-client JSON and pre-reservation failure tests pass; multipart, prompt policy and broader redaction remain |
 | Realtime/WebSocket | Responses realtime session relay with Workers WebSocket pairs | Planned | Upgrade, relay, accounting, timeout and close-code tests |
 
 ## 2. Identity, user, and commercial plane
@@ -59,7 +59,7 @@ Status meanings:
 | OAuth identities | Provider adapters and safe identity linking | Planned | Callback/link-conflict tests |
 | TOTP and step-up | Encrypted TOTP secret, recovery codes and privileged-action challenge | Planned | TOTP and recovery-code tests |
 | Passkeys | WebAuthn challenge state and credential lifecycle | Planned | Port passkey handler tests |
-| User profile | Profile, password security, R2 avatar, linked identities and notification preferences | Partial | Profile/update/password/avatar routes have owner, immutable asset and session-revocation tests; linked identities and notification preferences remain |
+| User profile | Profile, password security, R2 avatar, linked identities and notification preferences | Partial | Profile/update/password/avatar routes plus D1-versioned notification settings and verified notification-email lifecycle have owner, CAS, bounded-rate, Queue lease and native/compatibility delivery tests; linked identities remain |
 | User API keys | Create/list/update/revoke; raw token returned once | Done | Hashing, redaction, expiry, revocation, owner isolation and private/subscription-group access tests |
 | Usage/dashboard | User usage pages, aggregates, model plaza and quota windows | Partial | Owner-scoped list/detail/stats/trend/model/snapshot/API-key daily usage routes and frontend contracts pass; model plaza and platform-quota views remain |
 | Subscription plans | Plans, user subscriptions, renewals and usage windows | Partial | Public/admin plan CRUD, user list/progress, redeem assignment/extension and gateway quota enforcement pass; payment renewal remains |
@@ -104,6 +104,7 @@ Commercial storage rules:
 | Accounts/channels | OpenAI account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual health probe exist; channels, quota and provider lifecycle remain | Partial | Account control tests and Pool stale-revision tests; add deployed-binding E2E and provider probes |
 | Usage/finance | Request ledger, aggregates, reconciliation and corrective workflows | Partial | Owner-scoped user aggregates and subscription projections exist; admin reconciliation and corrective workflows remain |
 | Settings | Typed versioned settings, audit and KV invalidation | Done | Versioned read/write, optimistic concurrency, idempotency, secret redaction and KV invalidation tests |
+| Unified audit trail | Read-only cross-domain D1 event stream with stable cursor and allowlisted detail | Partial | Settings, RBAC, auth and payment events share bounded list/detail routes behind `admin.audit.read`; frontend uses cursor pagination and exposes no destructive clear action. Request/error, retention and remaining domain sources remain |
 | Announcements/compliance | Editorial lifecycle, audit views and risk actions | Planned | RBAC and lifecycle tests |
 | Admin dashboard | Payment summaries exist; broader hourly/daily operational facts remain | Partial | Cross-currency payment dashboard, filters and UTC-series tests pass |
 | Request/error explorer | D1 metadata index, R2 payload/archive, redaction and retention | Planned | Search, authorization, redaction and expiry tests |
@@ -174,15 +175,17 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
    request/error/stream conversion fixtures; rate and concurrency integration; failover, cooldown,
    request-size policy, and accounting reconciliation.
-3. **Identity completion**: email verification and password reset are implemented in the Worker;
-   production still needs a verified Email Service sender and deployed delivery E2E. Next are OAuth
-   linking, TOTP step-up/recovery codes, passkeys, linked identities, and notification preferences.
+3. **Identity completion**: email verification, password reset, and versioned notification-email
+   preferences are implemented in the Worker; production still needs a verified Email Service
+   sender and deployed delivery E2E. Next are OAuth linking, TOTP step-up/recovery codes, passkeys,
+   and linked identities.
 4. **Media and realtime**: image/audio/video task APIs backed by Queue and R2, task polling and
    cancellation, followed by WebSocket realtime relay. Legacy provider-specific variants may be
    collapsed into one capability-based task contract.
-5. **Operations and governance**: granular admin RBAC, immutable audit trails, dashboard facts,
-   request/error explorer, alerts and silences, channel health jobs, reconciliation/corrections,
-   DLQ replay, retention, and verified D1/R2 export-and-restore.
+5. **Operations and governance**: granular admin RBAC and a bounded immutable audit reader exist;
+   remaining work is broader audit sources, dashboard facts, request/error explorer, alerts and
+   silences, channel health jobs, reconciliation/corrections, DLQ replay, retention, and verified
+   D1/R2 export-and-restore.
 6. **Secondary product features**: invitations, promotions, affiliate attribution/payouts,
    announcements, model plaza, platform quotas, search extensions, and prompt audit. These follow
    the core gateway and commercial path unless a production dependency promotes them earlier.

@@ -7,6 +7,7 @@ import type { ModelRoute } from '../../src/gateway/types'
 const masterKey = 'm'.repeat(32)
 const accountId = 'account-1'
 const secretId = 'secret-1'
+const maxGatewayRequestBytes = 2 * 1024 * 1024
 
 const model: ModelRoute = {
   config_revision: 1,
@@ -227,6 +228,14 @@ async function harness(): Promise<{
   return { env, database, user, subscription, pool, poolNames, queued }
 }
 
+async function compressGatewayBody(
+  format: 'gzip' | 'deflate',
+  body: string,
+): Promise<ArrayBuffer> {
+  const stream = new Blob([body]).stream().pipeThrough(new CompressionStream(format))
+  return new Response(stream).arrayBuffer()
+}
+
 describe('OpenAI-compatible gateway', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
@@ -266,6 +275,266 @@ describe('OpenAI-compatible gateway', () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ object: 'list' })
+  })
+
+  it('stops reading and cancels an unknown-length request as soon as it exceeds the limit', async () => {
+    const { env, user, pool } = await harness()
+    let pulls = 0
+    let cancelled = false
+    let finishPendingPull: (() => void) | undefined
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        if (pulls <= 2) {
+          controller.enqueue(new Uint8Array(maxGatewayRequestBytes / 2).fill(0x20))
+        } else if (pulls === 3) {
+          controller.enqueue(new Uint8Array([0x20]))
+        } else {
+          return new Promise<void>((resolve) => {
+            finishPendingPull = resolve
+          })
+        }
+      },
+      cancel() {
+        cancelled = true
+        finishPendingPull?.()
+      },
+    })
+    const request = new Request('https://gateway.test/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      },
+      body: source,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' })
+
+    const response = await createApp().request(request, undefined, env)
+
+    expect(response.status).toBe(413)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'request_too_large', type: 'invalid_request_error' },
+    })
+    // The stream implementation may prefetch one pull, but it must not keep
+    // consuming the attacker-controlled body after the first excess byte.
+    expect(pulls).toBeLessThanOrEqual(4)
+    expect(cancelled).toBe(true)
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('accepts the original gateway leniency for a UTF-8 BOM and raw control bytes inside strings', async () => {
+    const { env } = await harness()
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      model: 'gpt-upstream',
+      choices: [],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+    const body = '\uFEFF{"model":"gpt-public","messages":[{"role":"user","content":"hello\u0000world\u001b"}]}'
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body,
+    }, env)
+
+    expect(response.status).toBe(200)
+    const [, init] = upstream.mock.calls[0]
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      messages: [{ role: 'user', content: 'hello\u0000world\u001b' }],
+    })
+  })
+
+  it.each(['gzip', 'deflate'] as const)('accepts a bounded %s-compressed JSON request', async (encoding) => {
+    const { env } = await harness()
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      model: 'gpt-upstream',
+      choices: [],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+    const body = JSON.stringify({
+      model: 'gpt-public',
+      messages: [{ role: 'user', content: `hello from ${encoding}` }],
+    })
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': encoding,
+      },
+      body: await compressGatewayBody(encoding, body),
+    }, env)
+
+    expect(response.status).toBe(200)
+    const [, init] = upstream.mock.calls[0]
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'gpt-upstream',
+      messages: [{ role: 'user', content: `hello from ${encoding}` }],
+    })
+    expect(new Headers(init?.headers).has('content-encoding')).toBe(false)
+  })
+
+  it('preserves an explicitly identity-encoded request', async () => {
+    const { env } = await harness()
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      model: 'gpt-upstream',
+      choices: [],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': 'identity',
+      },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    expect(upstream).toHaveBeenCalledOnce()
+  })
+
+  it.each(['br', 'gzip, deflate'])('rejects unsupported Content-Encoding %s before reservation', async (encoding) => {
+    const { env, user, pool } = await harness()
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': encoding,
+      },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(415)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_content_encoding', type: 'invalid_request_error' },
+    })
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('returns a sanitized error for a corrupt compressed stream before reservation', async () => {
+    const { env, user, pool } = await harness()
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      },
+      body: new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef]).buffer,
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(text).toContain('invalid_compressed_body')
+    expect(text).not.toContain('incorrect header')
+    expect(text).not.toContain('unexpected end')
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('stops a compressed-body expansion at the decompressed request limit', async () => {
+    const { env, user, pool } = await harness()
+    const expanded = JSON.stringify({
+      model: 'gpt-public',
+      messages: [{ role: 'user', content: 'x'.repeat(maxGatewayRequestBytes) }],
+    })
+    const compressed = await compressGatewayBody('gzip', expanded)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      },
+      body: compressed,
+    }, env)
+
+    expect(compressed.byteLength).toBeLessThan(maxGatewayRequestBytes)
+    expect(response.status).toBe(413)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'request_too_large', type: 'invalid_request_error' },
+    })
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('applies the request limit again after lenient JSON normalization', async () => {
+    const { env, user, pool } = await harness()
+    const body = `{"model":"gpt-public","messages":[{"role":"user","content":"${'\u0000'.repeat(350_000)}"}]}`
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body,
+    }, env)
+
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThan(maxGatewayRequestBytes)
+    expect(response.status).toBe(413)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'request_too_large', type: 'invalid_request_error' },
+    })
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('keeps malformed JSON with a control byte outside a string invalid', async () => {
+    const { env, user, pool } = await harness()
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: '{"model":"gpt-public",\u0000"messages":[]}',
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'invalid_json', type: 'invalid_request_error' },
+    })
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
+  it('sanitizes request-stream read failures before any reservation or upstream call', async () => {
+    const { env, user, pool } = await harness()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const source = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new Error('secret transport failure')
+      },
+    })
+    const request = new Request('https://gateway.test/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+      },
+      body: source,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' })
+
+    const response = await createApp().request(request, undefined, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(text).toContain('request_body_read_error')
+    expect(text).not.toContain('secret transport failure')
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
   })
 
   it('serves a complete, cache-validatable Codex model manifest', async () => {

@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.8.0"
+    "APP_VERSION": "0.9.0"
   },
   "assets": {
     "directory": "../frontend/dist",
@@ -108,7 +108,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.8.0"
+        "APP_VERSION": "0.9.0"
       },
       "d1_databases": [
         {
@@ -175,7 +175,7 @@
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.8.0"
+        "APP_VERSION": "0.9.0"
       },
       "d1_databases": [
         {

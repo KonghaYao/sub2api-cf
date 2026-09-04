@@ -10,6 +10,10 @@ import {
   consumeEmailChallengeDelivery,
   isEmailChallengeDeliveryEvent,
 } from '../auth/email-challenges'
+import {
+  consumeNotificationEmailVerificationDelivery,
+  isNotificationEmailVerificationEvent,
+} from '../user/notification-preferences'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
 
@@ -54,6 +58,11 @@ export async function consumeEvents(
     try {
       if (isEmailChallengeDeliveryEvent(message.body)) {
         await consumeEmailChallengeDelivery(message.body, env)
+        message.ack()
+        continue
+      }
+      if (isNotificationEmailVerificationEvent(message.body)) {
+        await consumeNotificationEmailVerificationDelivery(message.body, env)
         message.ack()
         continue
       }

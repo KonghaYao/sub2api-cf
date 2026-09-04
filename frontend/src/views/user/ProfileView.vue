@@ -39,6 +39,7 @@
         :enabled="user.balance_notify_enabled ?? true"
         :threshold="user.balance_notify_threshold"
         :extra-emails="user.balance_notify_extra_emails ?? []"
+        :notification-preferences-version="user.notification_preferences_version ?? 0"
         :system-default-threshold="systemDefaultThreshold"
         :user-email="user.email"
       />

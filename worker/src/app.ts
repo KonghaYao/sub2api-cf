@@ -37,6 +37,7 @@ import {
   testAdminAccount,
   updateAdminAccount,
 } from './control/accounts'
+import { getAdminAuditEvent, listAdminAuditEvents } from './control/audit'
 import {
   recoverAdminSession,
   requireAdminSession,
@@ -151,8 +152,14 @@ import {
   changeUserPassword,
   getUserAvatar,
   getUserProfile,
-  updateUserProfile,
+  updateCurrentUser,
 } from './user/profile'
+import {
+  removeNotificationEmail,
+  sendNotificationEmailVerificationCode,
+  toggleNotificationEmail,
+  verifyNotificationEmail,
+} from './user/notification-preferences'
 import {
   dashboardApiKeysUsage,
   dashboardModels,
@@ -303,9 +310,13 @@ export function createApp() {
   app.delete('/api/v1/auth/sessions/:id', revokeUserSession)
 
   app.get('/api/v1/user/profile', getUserProfile)
-  app.put('/api/v1/user', updateUserProfile)
+  app.put('/api/v1/user', updateCurrentUser)
   app.put('/api/v1/user/password', changeUserPassword)
   app.get('/api/v1/user/avatar/:id', getUserAvatar)
+  app.post('/api/v1/user/notify-email/send-code', sendNotificationEmailVerificationCode)
+  app.post('/api/v1/user/notify-email/verify', verifyNotificationEmail)
+  app.delete('/api/v1/user/notify-email', removeNotificationEmail)
+  app.put('/api/v1/user/notify-email/toggle', toggleNotificationEmail)
   app.get('/api/v1/user/api-keys/:id/usage/daily', getUserApiKeyDailyUsage)
   app.get('/api/v1/usage/stats', usageStats)
   app.get('/api/v1/usage/dashboard/stats', dashboardStats)
@@ -422,6 +433,8 @@ export function createApp() {
     requireAdminPermission('admin.audit.read'),
     listAdminRbacAuditEvents,
   )
+  app.get('/api/v1/admin/audit/events', listAdminAuditEvents)
+  app.get('/api/v1/admin/audit/events/:category/:id', getAdminAuditEvent)
 
   app.get('/api/v1/keys', listUserApiKeys)
   app.post('/api/v1/keys', createUserApiKey)

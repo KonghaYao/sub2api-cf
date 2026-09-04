@@ -24,6 +24,10 @@ The first Worker-native gateway slice supports:
 - `POST /v1/responses` (plus the `/responses` compatibility alias)
 - native JSON and SSE pass-through for OpenAI-compatible HTTPS upstreams
 
+Gateway JSON requests are capped at 2 MiB before and after gzip/deflate
+decompression. Unknown or stacked content encodings are rejected before any
+account lease or billing reservation is created.
+
 Set three independent production secrets before accepting traffic:
 
 ```sh
@@ -66,8 +70,19 @@ Cloudflare Email Service binding named `SEND_EMAIL` and set
 does not put an environment-specific sender address in `wrangler.jsonc`.
 
 The optional `EMAIL_DELIVERY` Worker service binding remains available as a
-compatibility adapter. Queue delivery fails explicitly (and is retried) when
-neither binding is configured; when both exist, `SEND_EMAIL` is used.
+compatibility adapter. Registration, reset, account verification, and user
+notification-email codes all pass through the Queue consumer with a D1 delivery
+lease. Delivery fails explicitly (and is retried) when neither binding is
+configured; when both exist, `SEND_EMAIL` is used.
+
+User notification preferences are stored independently from profile rows and
+use `notification_preferences_version` (or `If-Match`) for optimistic writes.
+The profile response returns that version and verified notification addresses.
+
+The read-only administrative audit stream is available at
+`GET /api/v1/admin/audit/events`, with category-scoped detail under
+`/api/v1/admin/audit/events/:category/:id`. It requires `admin.audit.read` and
+has no clear/delete endpoint.
 
 ## Checks
 

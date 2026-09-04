@@ -104,6 +104,22 @@ describe('production admin route permission matrix', () => {
     })
   })
 
+  it('isolates the immutable audit stream behind the audit read permission', async () => {
+    grantRole('audit-reader', ['admin.audit.read'])
+
+    const audit = await request('/api/v1/admin/audit/events')
+    const operations = await request('/api/v1/admin/payment/dashboard')
+
+    expect(audit.status).toBe(200)
+    await expect(audit.json()).resolves.toMatchObject({
+      data: { items: [], has_more: false, next_cursor: null },
+    })
+    expect(operations.status).toBe(403)
+    await expect(operations.json()).resolves.toMatchObject({
+      error: { code: 'admin_permission_required' },
+    })
+  })
+
   function grantRole(roleId: string, permissions: string[]): void {
     const now = Date.now()
     raw.prepare(

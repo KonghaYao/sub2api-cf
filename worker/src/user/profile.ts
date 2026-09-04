@@ -5,11 +5,22 @@ import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { authenticateUserRequest, publicUser, type UserRow } from '../auth/handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from '../auth/password'
+import {
+  prepareUserNotificationPreferencesUpdate,
+  projectUserNotificationPreferences,
+} from './notification-preferences'
 
 type UserBindings = { Bindings: Env }
 
 const MAX_AVATAR_BYTES = 32 * 1024
 const MAX_AVATAR_DATA_URL_CHARS = 48 * 1024
+const PROFILE_FIELDS = new Set(['username', 'display_name', 'avatar_url'])
+const NOTIFICATION_FIELDS = new Set([
+  'balance_notify_enabled',
+  'balance_notify_threshold',
+  'expected_version',
+  'notification_preferences_version',
+])
 
 type AvatarAction =
   | { type: 'unchanged' }
@@ -20,25 +31,48 @@ type AvatarContentType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 
 export async function getUserProfile(context: Context<UserBindings>): Promise<Response> {
   try {
-    return controlSuccess(publicUser(await authenticateUserRequest(context.req.raw, context.env)))
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    return controlSuccess(await projectUserNotificationPreferences(
+      context.env,
+      user.id,
+      publicUser(user),
+    ))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
 }
 
-export async function updateUserProfile(context: Context<UserBindings>): Promise<Response> {
+/** Atomically updates legacy profile fields and Worker-native notification preferences. */
+export async function updateCurrentUser(context: Context<UserBindings>): Promise<Response> {
   let uploadedObjectKey: string | null = null
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const body = await readJsonObject(context.req.raw)
-    rejectUnsupportedProfileFields(body)
+    rejectUnsupportedUserFields(body)
+    const fields = Object.keys(body)
+    const hasProfileField = fields.some((field) => PROFILE_FIELDS.has(field))
+    const hasNotificationField = fields.some((field) => NOTIFICATION_FIELDS.has(field))
     const displayName = parseDisplayName(body, user.display_name)
     const avatar = parseAvatarAction(body)
-    if (displayName === user.display_name && avatar.type === 'unchanged') {
+    const profileChanged = displayName !== user.display_name || avatar.type !== 'unchanged'
+    if (!hasProfileField && !hasNotificationField) {
       throw new GatewayError(400, 'empty_profile_update', 'At least one profile field is required')
     }
 
     const now = Date.now()
+    const notificationUpdate = hasNotificationField
+      ? await prepareUserNotificationPreferencesUpdate(
+        context.env,
+        user.id,
+        context.req.raw,
+        body,
+        now,
+      )
+      : null
+    if (!hasNotificationField && !profileChanged) {
+      throw new GatewayError(400, 'empty_profile_update', 'At least one profile field is required')
+    }
+
     let avatarObjectKey = user.avatar_object_key
     let avatarContentType = user.avatar_content_type
     let avatarUpdatedAt = user.avatar_updated_at_ms
@@ -56,29 +90,39 @@ export async function updateUserProfile(context: Context<UserBindings>): Promise
       avatarUpdatedAt = null
     }
 
-    const next = {
+    const statements: D1PreparedStatement[] = []
+    if (profileChanged) {
+      statements.push(context.env.DB.prepare(
+        `UPDATE users
+            SET display_name = ?, avatar_object_key = ?, avatar_content_type = ?, avatar_updated_at_ms = ?, updated_at_ms = ?
+          WHERE id = ?`,
+      ).bind(displayName, avatarObjectKey, avatarContentType, avatarUpdatedAt, now, user.id))
+      statements.push(await profileAuditInsert(context.env, user, 'profile.update', {
+        display_name_changed: displayName !== user.display_name,
+        avatar_changed: avatar.type !== 'unchanged',
+      }, now))
+    }
+    if (notificationUpdate?.statement) {
+      statements.push(notificationUpdate.statement)
+    }
+    if (statements.length > 0) await context.env.DB.batch(statements)
+
+    const next = profileChanged ? {
       ...user,
       display_name: displayName,
       avatar_object_key: avatarObjectKey,
       avatar_content_type: avatarContentType,
       avatar_updated_at_ms: avatarUpdatedAt,
       updated_at_ms: now,
-    }
-    await context.env.DB.batch([
-      context.env.DB.prepare(
-        `UPDATE users
-            SET display_name = ?, avatar_object_key = ?, avatar_content_type = ?, avatar_updated_at_ms = ?, updated_at_ms = ?
-          WHERE id = ?`,
-      ).bind(displayName, avatarObjectKey, avatarContentType, avatarUpdatedAt, now, user.id),
-      await profileAuditInsert(context.env, user, 'profile.update', {
-        display_name_changed: displayName !== user.display_name,
-        avatar_changed: avatar.type !== 'unchanged',
-      }, now),
-    ])
-    if (user.avatar_object_key !== null && user.avatar_object_key !== avatarObjectKey) {
+    } : user
+    if (profileChanged && user.avatar_object_key !== null && user.avatar_object_key !== avatarObjectKey) {
       await deleteAvatarObject(context.env, user.avatar_object_key)
     }
-    return controlSuccess(publicUser(next))
+    return controlSuccess(await projectUserNotificationPreferences(
+      context.env,
+      next.id,
+      publicUser(next),
+    ))
   } catch (error) {
     if (uploadedObjectKey !== null) await deleteAvatarObject(context.env, uploadedObjectKey)
     return controlError(normalizeProfileError(error))
@@ -214,8 +258,8 @@ function parseAvatarAction(body: Record<string, unknown>): AvatarAction {
   return { type: 'upload', contentType: match[1].toLowerCase() as AvatarContentType, bytes }
 }
 
-function rejectUnsupportedProfileFields(body: Record<string, unknown>): void {
-  const allowed = new Set(['username', 'display_name', 'avatar_url'])
+function rejectUnsupportedUserFields(body: Record<string, unknown>): void {
+  const allowed = new Set([...PROFILE_FIELDS, ...NOTIFICATION_FIELDS])
   for (const field of Object.keys(body)) {
     if (!allowed.has(field)) {
       throw new GatewayError(400, 'unsupported_profile_field', `${field} is not supported by this profile endpoint`)
@@ -284,6 +328,13 @@ function normalizeProfileError(error: unknown): GatewayError {
   const message = error instanceof Error ? error.message : ''
   if (message.includes('CHECK constraint failed: auth_version')) {
     return new GatewayError(409, 'concurrent_security_update', 'Security settings changed; retry with a new session')
+  }
+  if (/CHECK constraint failed: version >= 0|user_notification_preferences\.version/i.test(message)) {
+    return new GatewayError(
+      409,
+      'notification_preferences_version_conflict',
+      'Notification preferences changed; reload and retry',
+    )
   }
   return asGatewayError(error)
 }

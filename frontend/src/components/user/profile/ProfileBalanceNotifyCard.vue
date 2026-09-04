@@ -181,6 +181,7 @@ const props = defineProps<{
   enabled: boolean
   threshold: number | null
   extraEmails: NotifyEmailEntry[]
+  notificationPreferencesVersion: number
   systemDefaultThreshold: number
   userEmail: string
 }>()
@@ -190,8 +191,9 @@ const authStore = useAuthStore()
 const appStore = useAppStore()
 
 const notifyEnabled = ref(props.enabled)
-const customThreshold = ref<number | null>(props.threshold)
+const customThreshold = ref<number | null | ''>(props.threshold)
 const emailEntries = ref<NotifyEmailEntry[]>([...props.extraEmails])
+const preferenceVersion = ref(props.notificationPreferencesVersion)
 const pendingEmails = ref<PendingEmail[]>([])
 const newEmail = ref('')
 const savingThreshold = ref(false)
@@ -211,6 +213,13 @@ const canAddMore = computed(() => {
 watch(() => props.enabled, (val) => { notifyEnabled.value = val })
 watch(() => props.threshold, (val) => { customThreshold.value = val })
 watch(() => props.extraEmails, (val) => { emailEntries.value = [...val] })
+watch(() => props.notificationPreferencesVersion, (val) => { preferenceVersion.value = val })
+
+function applyUpdatedUser(updated: NonNullable<typeof authStore.user>) {
+  authStore.user = updated
+  preferenceVersion.value = updated.notification_preferences_version ?? preferenceVersion.value
+  emailEntries.value = [...(updated.balance_notify_extra_emails ?? [])]
+}
 
 // When list is empty on mount, pre-fill the add input with user's email
 onMounted(() => {
@@ -228,8 +237,11 @@ onUnmounted(() => {
 
 const handleToggle = async () => {
   try {
-    const updated = await userAPI.updateProfile({ balance_notify_enabled: notifyEnabled.value })
-    authStore.user = updated
+    const updated = await userAPI.updateProfile({
+      balance_notify_enabled: notifyEnabled.value,
+      notification_preferences_version: preferenceVersion.value
+    })
+    applyUpdatedUser(updated)
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
     notifyEnabled.value = !notifyEnabled.value
@@ -239,9 +251,14 @@ const handleToggle = async () => {
 const handleThresholdUpdate = async () => {
   savingThreshold.value = true
   try {
-    const threshold = customThreshold.value && customThreshold.value > 0 ? customThreshold.value : 0
-    const updated = await userAPI.updateProfile({ balance_notify_threshold: threshold })
-    authStore.user = updated
+    const threshold = customThreshold.value === '' || customThreshold.value === null
+      ? null
+      : Math.max(0, customThreshold.value)
+    const updated = await userAPI.updateProfile({
+      balance_notify_threshold: threshold,
+      notification_preferences_version: preferenceVersion.value
+    })
+    applyUpdatedUser(updated)
     appStore.showSuccess(t('common.saved'))
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
@@ -253,9 +270,8 @@ const handleThresholdUpdate = async () => {
 async function handleEmailToggle(entry: NotifyEmailEntry) {
   const newDisabled = !entry.disabled
   try {
-    const updated = await userAPI.toggleNotifyEmail(entry.email, newDisabled)
-    authStore.user = updated
-    emailEntries.value = [...updated.balance_notify_extra_emails]
+    const updated = await userAPI.toggleNotifyEmail(entry.email, newDisabled, preferenceVersion.value)
+    applyUpdatedUser(updated)
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
@@ -303,13 +319,11 @@ async function verifyPending(idx: number) {
   if (!pe || !pe.code || pe.code.length !== 6) return
   pe.verifying = true
   try {
-    await userAPI.verifyNotifyEmail(pe.email, pe.code)
+    const verified = await userAPI.verifyNotifyEmail(pe.email, pe.code, preferenceVersion.value)
+    applyUpdatedUser(verified)
     if (pe.timer) clearInterval(pe.timer)
     pendingEmails.value.splice(idx, 1)
     appStore.showSuccess(t('profile.balanceNotify.verifySuccess'))
-    const updated = await userAPI.getProfile()
-    authStore.user = updated
-    emailEntries.value = [...updated.balance_notify_extra_emails]
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
@@ -319,11 +333,9 @@ async function verifyPending(idx: number) {
 
 const handleRemoveEmail = async (email: string) => {
   try {
-    await userAPI.removeNotifyEmail(email)
+    const removed = await userAPI.removeNotifyEmail(email, preferenceVersion.value)
+    applyUpdatedUser(removed)
     appStore.showSuccess(t('profile.balanceNotify.removeSuccess'))
-    const updated = await userAPI.getProfile()
-    authStore.user = updated
-    emailEntries.value = [...updated.balance_notify_extra_emails]
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
@@ -357,14 +369,12 @@ async function verifySavedEmail(email: string) {
   if (!verifyCode.value || verifyCode.value.length !== 6) return
   verifyingSaved.value = true
   try {
-    await userAPI.verifyNotifyEmail(email, verifyCode.value)
+    const verified = await userAPI.verifyNotifyEmail(email, verifyCode.value, preferenceVersion.value)
+    applyUpdatedUser(verified)
     verifyingEmail.value = ''
     verifyCode.value = ''
     if (verifyTimer) { clearInterval(verifyTimer); verifyTimer = null }
     appStore.showSuccess(t('profile.balanceNotify.verifySuccess'))
-    const updated = await userAPI.getProfile()
-    authStore.user = updated
-    emailEntries.value = [...updated.balance_notify_extra_emails]
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
