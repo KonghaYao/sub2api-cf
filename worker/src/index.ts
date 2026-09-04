@@ -1,5 +1,6 @@
 import { app } from './app'
 import { recoverPendingSubscriptionState } from './control/subscriptions'
+import { scheduleAccountHealthLifecycle } from './control/account-lifecycle'
 import type { Env } from './env'
 import { consumeEvents } from './gateway/queue'
 import { recoverPendingSettlements } from './gateway/recovery'
@@ -16,6 +17,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverPendingPaymentFulfillments(env),
     recoverExpiredPaymentOrders(env),
     recoverPendingRefundClawbacks(env),
+    scheduleAccountHealthLifecycle(env),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -26,6 +28,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'payment_fulfillments',
           'payment_order_expiry',
           'refund_clawbacks',
+          'account_health_lifecycle',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

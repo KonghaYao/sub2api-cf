@@ -14,6 +14,7 @@ export const STATE_SCHEMA_VERSION = 1
 export const RESERVATION_TTL_MS = 10 * 60_000
 export const LEASE_TTL_MS = 60_000
 export const RENEW_AFTER_MS = 20_000
+export const POOL_AFFINITY_TTL_MS = 60 * 60_000
 
 export interface ApiKeyAdmissionLease {
   stub: DurableObjectStub
@@ -449,12 +450,19 @@ export async function disablePoolAccount(
 export async function reservePoolAccount(
   stub: DurableObjectStub,
   leaseId: string,
+  affinityKey?: string,
 ): Promise<string> {
   const response = await requireStateOk(
     post(stub, '/reserve', {
       schema_version: STATE_SCHEMA_VERSION,
       request_id: leaseId,
       lease_ttl_ms: LEASE_TTL_MS,
+      ...(affinityKey === undefined
+        ? {}
+        : {
+            affinity_key: affinityKey,
+            affinity_ttl_ms: POOL_AFFINITY_TTL_MS,
+          }),
     }),
   )
   const body = (await response.json()) as PoolLeaseBody
@@ -537,10 +545,18 @@ function poolStub(
   endpoint: GatewayEndpoint,
 ): DurableObjectStub {
   return env.POOL_STATE.get(
-    env.POOL_STATE.idFromName(
-      `group:${groupId}:platform:openai:model:${modelId}:endpoint:${endpoint}:shard:0`,
-    ),
+    env.POOL_STATE.idFromName(poolStateName(groupId, modelId, endpoint)),
   )
+}
+
+export function poolStateName(
+  groupId: string,
+  modelId: string,
+  endpoint: GatewayEndpoint,
+): string {
+  // Keep the legacy namespace stable. Model IDs are globally unique and the
+  // current production pools were created with this historical platform tag.
+  return `group:${groupId}:platform:openai:model:${modelId}:endpoint:${endpoint}:shard:0`
 }
 
 function post(

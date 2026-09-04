@@ -259,6 +259,95 @@ describe('API Client', () => {
       )
     })
 
+    it('将 Worker 嵌套错误 envelope 提升为可识别的语义错误', async () => {
+      const adapter = vi.fn().mockRejectedValue({
+        response: {
+          status: 403,
+          data: {
+            error: {
+              code: 'STEP_UP_TOTP_NOT_ENABLED',
+              message: 'Enable TOTP first',
+              type: 'permission_error',
+            },
+          },
+        },
+        config: { method: 'post', url: '/admin/users', headers: {} },
+        code: 'ERR_BAD_REQUEST',
+        message: 'Request failed with status code 403',
+      })
+      apiClient.defaults.adapter = adapter
+
+      await expect(apiClient.post('/admin/users', {})).rejects.toMatchObject({
+        status: 403,
+        code: 'STEP_UP_TOTP_NOT_ENABLED',
+        message: 'Enable TOTP first',
+      })
+    })
+
+    it('全局 step-up 成功后只重放一次任意管理写请求', async () => {
+      const { registerAdminStepUpPrompt } = await import('@/api/adminStepUpRecovery')
+      const prompt = vi.fn().mockResolvedValue(true)
+      const unregister = registerAdminStepUpPrompt(prompt)
+      const adapter = vi.fn()
+        .mockRejectedValueOnce({
+          response: {
+            status: 403,
+            data: {
+              error: {
+                code: 'STEP_UP_REQUIRED',
+                message: 'Recent TOTP verification is required',
+              },
+            },
+          },
+          config: { method: 'delete', url: '/admin/accounts/account-1', headers: {} },
+          code: 'ERR_BAD_REQUEST',
+          message: 'Request failed with status code 403',
+        })
+        .mockResolvedValueOnce({
+          status: 200,
+          data: { code: 0, data: { deleted: true } },
+          headers: {},
+          config: {},
+          statusText: 'OK',
+        })
+      apiClient.defaults.adapter = adapter
+
+      try {
+        await expect(apiClient.delete('/admin/accounts/account-1')).resolves.toMatchObject({
+          data: { deleted: true },
+        })
+      } finally {
+        unregister()
+      }
+
+      expect(prompt).toHaveBeenCalledOnce()
+      expect(adapter).toHaveBeenCalledTimes(2)
+    })
+
+    it('全局 step-up 被取消后返回取消标记且不重放请求', async () => {
+      const { registerAdminStepUpPrompt } = await import('@/api/adminStepUpRecovery')
+      const unregister = registerAdminStepUpPrompt(vi.fn().mockResolvedValue(false))
+      const adapter = vi.fn().mockRejectedValue({
+        response: {
+          status: 403,
+          data: { error: { code: 'STEP_UP_REQUIRED', message: 'TOTP required' } },
+        },
+        config: { method: 'post', url: '/admin/accounts/account-1/test', headers: {} },
+        code: 'ERR_BAD_REQUEST',
+        message: 'Request failed with status code 403',
+      })
+      apiClient.defaults.adapter = adapter
+
+      try {
+        await expect(apiClient.post('/admin/accounts/account-1/test')).rejects.toMatchObject({
+          code: 'STEP_UP_CANCELLED',
+        })
+      } finally {
+        unregister()
+      }
+      expect(adapter).toHaveBeenCalledOnce()
+    })
+
     it('部署与运营合规未确认时广播事件且保留登录态', async () => {
       localStorage.setItem('auth_token', 'admin-token')
       const listener = vi.fn()

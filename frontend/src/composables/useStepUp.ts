@@ -18,6 +18,7 @@ import { ref } from 'vue'
 const STEP_UP_REQUIRED = 'STEP_UP_REQUIRED'
 const STEP_UP_TOTP_NOT_ENABLED = 'STEP_UP_TOTP_NOT_ENABLED'
 const STEP_UP_ADMIN_API_KEY_FORBIDDEN = 'STEP_UP_ADMIN_API_KEY_FORBIDDEN'
+const STEP_UP_CANCELLED = 'STEP_UP_CANCELLED'
 
 /**
  * Thrown by run() when the user dismisses the TOTP dialog.
@@ -32,7 +33,7 @@ export class StepUpCancelledError extends Error {
 }
 
 export function isStepUpCancelled(err: unknown): boolean {
-  return err instanceof StepUpCancelledError
+  return err instanceof StepUpCancelledError || markerOf(err) === STEP_UP_CANCELLED
 }
 
 interface ApiError {

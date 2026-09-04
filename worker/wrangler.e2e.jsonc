@@ -1,0 +1,71 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sub2api-worker-binding-e2e",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ENVIRONMENT": "e2e",
+    "APP_VERSION": "binding-e2e",
+    "ADMIN_TOKEN": "e2e-admin-token-32-bytes-minimum-value",
+    "API_KEY_PEPPER": "e2e-api-key-pepper-32-bytes-minimum-value",
+    "CREDENTIALS_MASTER_KEY": "e2e-credentials-master-key-32-byte-value"
+  },
+  "assets": {
+    "directory": "test/e2e/fixtures/assets",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sub2api-binding-e2e",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "CONFIG_KV",
+      "id": "00000000000000000000000000000001"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "OBJECTS",
+      "bucket_name": "sub2api-binding-e2e"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EVENTS_QUEUE",
+        "queue": "sub2api-events-binding-e2e"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "sub2api-events-binding-e2e",
+        "max_batch_size": 1,
+        "max_batch_timeout": 0,
+        "max_retries": 1,
+        "dead_letter_queue": "sub2api-events-binding-e2e-dlq"
+      }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "USER_STATE", "class_name": "UserStateDO" },
+      { "name": "SUBSCRIPTION_STATE", "class_name": "SubscriptionStateDO" },
+      { "name": "POOL_STATE", "class_name": "PoolStateDO" },
+      { "name": "AUTH_RATE_LIMIT", "class_name": "AuthRateLimitDO" },
+      { "name": "API_KEY_LIMIT_STATE", "class_name": "ApiKeyLimitDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["UserStateDO", "PoolStateDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["AuthRateLimitDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["SubscriptionStateDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["ApiKeyLimitDO"] }
+  ]
+}

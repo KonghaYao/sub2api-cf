@@ -21,6 +21,23 @@ function poolWithAccount(maxConcurrency = 1) {
   ).state;
 }
 
+function poolWithTwoAccounts() {
+  return applyPoolCommand(
+    createPoolMachineState(),
+    {
+      schema_version: 1,
+      type: "sync_accounts",
+      config_revision: 1,
+      config_fingerprint: "1".repeat(64),
+      accounts: [
+        { account_id: "account-1", max_concurrency: 2, priority: 1, weight: 1 },
+        { account_id: "account-2", max_concurrency: 2, priority: 0, weight: 1 },
+      ],
+    },
+    1_000,
+  ).state;
+}
+
 describe("pool state machine", () => {
   it("atomically replaces configured accounts and rejects stale configuration revisions", () => {
     const revisionTwo = applyPoolCommand(
@@ -208,6 +225,178 @@ describe("pool state machine", () => {
     });
     expect(repeated.idempotent).toBe(true);
     expect(repeated.lease).toEqual(first.lease);
+  });
+
+  it("binds a hashed session affinity and prefers its healthy account on later requests", () => {
+    const affinityKey = "a".repeat(64);
+    const first = applyPoolCommand(
+      poolWithTwoAccounts(),
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        lease_ttl_ms: 5_000,
+        affinity_key: affinityKey,
+        affinity_ttl_ms: 60_000,
+      },
+      2_000,
+    );
+    const released = applyPoolCommand(
+      first.state,
+      { schema_version: 1, type: "release", request_id: "request-1" },
+      2_100,
+    );
+    const reprioritized = applyPoolCommand(
+      released.state,
+      {
+        schema_version: 1,
+        type: "upsert_account",
+        account_id: "account-1",
+        enabled: true,
+        max_concurrency: 2,
+        priority: 0,
+        weight: 1,
+      },
+      2_200,
+    );
+    const second = applyPoolCommand(
+      reprioritized.state,
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-2",
+        lease_ttl_ms: 5_000,
+        affinity_key: affinityKey,
+        affinity_ttl_ms: 60_000,
+      },
+      2_300,
+    );
+
+    expect(first.lease?.account_id).toBe("account-2");
+    expect(first.state.affinities[affinityKey]).toMatchObject({
+      account_id: "account-2",
+      expires_at_ms: 62_000,
+    });
+    expect(second.lease?.account_id).toBe("account-2");
+    expect(second.state.affinities[affinityKey]?.expires_at_ms).toBe(62_300);
+  });
+
+  it("clears a failed sticky account and rebinds the next attempt to another account", () => {
+    const affinityKey = "b".repeat(64);
+    const first = applyPoolCommand(
+      poolWithTwoAccounts(),
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        lease_ttl_ms: 5_000,
+        affinity_key: affinityKey,
+        affinity_ttl_ms: 60_000,
+      },
+      2_000,
+    );
+    const failed = applyPoolCommand(
+      first.state,
+      {
+        schema_version: 1,
+        type: "failure",
+        event_id: "failure-1",
+        account_id: "account-2",
+        cooldown_ms: 30_000,
+      },
+      2_100,
+    );
+    const released = applyPoolCommand(
+      failed.state,
+      { schema_version: 1, type: "release", request_id: "request-1" },
+      2_200,
+    );
+    const second = applyPoolCommand(
+      released.state,
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-2",
+        lease_ttl_ms: 5_000,
+        affinity_key: affinityKey,
+        affinity_ttl_ms: 60_000,
+      },
+      2_300,
+    );
+
+    expect(failed.state.affinities[affinityKey]).toBeUndefined();
+    expect(second.lease?.account_id).toBe("account-1");
+    expect(second.state.affinities[affinityKey]?.account_id).toBe("account-1");
+  });
+
+  it("removes affinities for accounts omitted by a newer pool snapshot", () => {
+    const affinityKey = "d".repeat(64);
+    const bound = applyPoolCommand(
+      poolWithTwoAccounts(),
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-1",
+        lease_ttl_ms: 5_000,
+        affinity_key: affinityKey,
+        affinity_ttl_ms: 60_000,
+      },
+      2_000,
+    );
+    const synced = applyPoolCommand(
+      bound.state,
+      {
+        schema_version: 1,
+        type: "sync_accounts",
+        config_revision: 2,
+        config_fingerprint: "2".repeat(64),
+        accounts: [
+          { account_id: "account-1", max_concurrency: 2, priority: 0, weight: 1 },
+        ],
+      },
+      2_100,
+    );
+
+    expect(bound.state.affinities[affinityKey]?.account_id).toBe("account-2");
+    expect(synced.state.accounts["account-2"]?.enabled).toBe(false);
+    expect(synced.state.affinities[affinityKey]).toBeUndefined();
+  });
+
+  it("rejects raw or partially configured affinity values", () => {
+    expect(() =>
+      applyPoolCommand(
+        poolWithTwoAccounts(),
+        {
+          schema_version: 1,
+          type: "reserve",
+          request_id: "request-1",
+          lease_ttl_ms: 5_000,
+          affinity_key: "raw-session-id",
+          affinity_ttl_ms: 60_000,
+        },
+        2_000,
+      ),
+    ).toThrowError(new PoolStateMachineError(
+      "invalid_affinity_key",
+      "affinity_key must be a lowercase SHA-256 digest",
+    ));
+
+    expect(() =>
+      applyPoolCommand(
+        poolWithTwoAccounts(),
+        {
+          schema_version: 1,
+          type: "reserve",
+          request_id: "request-2",
+          lease_ttl_ms: 5_000,
+          affinity_key: "c".repeat(64),
+        },
+        2_000,
+      ),
+    ).toThrowError(new PoolStateMachineError(
+      "invalid_affinity_ttl",
+      "affinity_key and affinity_ttl_ms must be provided together",
+    ));
   });
 
   it("does not reserve beyond account concurrency", () => {

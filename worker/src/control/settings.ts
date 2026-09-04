@@ -36,6 +36,7 @@ export interface AdminSystemSettings {
   schema_version: typeof PUBLIC_SETTINGS_SCHEMA_VERSION
   control_version: number
   public: PublicSystemSettings
+  security: { step_up_enabled: boolean }
   secrets: { turnstile_secret_key_configured: boolean }
   updated_at_ms: number
 }
@@ -52,8 +53,13 @@ interface SecretSettingsPatch {
   turnstile_secret_key?: string | null
 }
 
+interface SecuritySettingsPatch {
+  step_up_enabled?: boolean
+}
+
 interface SettingsPatch {
   public?: PublicSettingsPatch
+  security?: SecuritySettingsPatch
   secrets?: SecretSettingsPatch
 }
 
@@ -72,6 +78,7 @@ interface SettingsRow {
   schema_version: number
   control_version: number
   public_json: string
+  step_up_enabled: number
   updated_at_ms: number
   turnstile_secret_key_configured: number
   turnstile_secret_key_version: number | null
@@ -120,11 +127,27 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
     const actor = await requireAdminActor(context)
     const nextVersion = current.control_version + 1
     const nextPublic = applyPublicPatch(current.public, patch.public)
+    const nextStepUpEnabled = patch.security?.step_up_enabled ?? current.security.step_up_enabled
+    const requiresTotpForEnable = !current.security.step_up_enabled && nextStepUpEnabled
     const now = Date.now()
+    if (!current.security.step_up_enabled && nextStepUpEnabled) {
+      const totp = await context.env.DB.prepare(
+        'SELECT 1 AS enabled FROM user_totp_credentials WHERE user_id = ? LIMIT 1',
+      ).bind(actor.user_id).first<{ enabled: number }>()
+      if (totp === null) {
+        throw new GatewayError(
+          403,
+          'STEP_UP_TOTP_NOT_ENABLED',
+          'Enable TOTP before enabling privileged-operation step-up',
+          'permission_error',
+        )
+      }
+    }
     const next: AdminSystemSettings = {
       schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
       control_version: nextVersion,
       public: nextPublic,
+      security: { step_up_enabled: nextStepUpEnabled },
       secrets: {
         turnstile_secret_key_configured:
           patch.secrets?.turnstile_secret_key === undefined
@@ -137,9 +160,24 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
       context.env.DB.prepare(
         `UPDATE system_settings
             SET control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
-                public_json = ?, updated_at_ms = ?
+                public_json = ?,
+                step_up_enabled = CASE
+                  WHEN ? = 1 AND NOT EXISTS (
+                    SELECT 1 FROM user_totp_credentials WHERE user_id = ?
+                  ) THEN -1
+                  ELSE ?
+                END,
+                updated_at_ms = ?
           WHERE id = 'global'`,
-      ).bind(current.control_version, nextVersion, JSON.stringify(nextPublic), now),
+      ).bind(
+        current.control_version,
+        nextVersion,
+        JSON.stringify(nextPublic),
+        requiresTotpForEnable ? 1 : 0,
+        actor.user_id,
+        nextStepUpEnabled ? 1 : 0,
+        now,
+      ),
     ]
     const secretPatch = patch.secrets?.turnstile_secret_key
     if (secretPatch === null) {
@@ -194,6 +232,14 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
         await publishLatestPublicSettings(context.env)
         return settingsResponse(replay)
       }
+      if (isStepUpEnablementError(error)) {
+        throw new GatewayError(
+          403,
+          'STEP_UP_TOTP_NOT_ENABLED',
+          'Enable TOTP before enabling privileged-operation step-up',
+          'permission_error',
+        )
+      }
       if (isSettingsVersionError(error)) throw settingsVersionConflict()
       throw error
     }
@@ -229,7 +275,7 @@ export async function readSystemSettingSecret(
 
 async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   const row = await env.DB.prepare(
-    `SELECT s.schema_version, s.control_version, s.public_json, s.updated_at_ms,
+    `SELECT s.schema_version, s.control_version, s.public_json, s.step_up_enabled, s.updated_at_ms,
             CASE WHEN secret.key IS NULL THEN 0 ELSE 1 END AS turnstile_secret_key_configured,
             secret.key_version AS turnstile_secret_key_version
        FROM system_settings s
@@ -248,6 +294,7 @@ function publicAdminSettings(row: SettingsRow): AdminSystemSettings {
     row.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(row.control_version) ||
     row.control_version < 0 ||
+    ![0, 1].includes(row.step_up_enabled) ||
     !Number.isSafeInteger(row.updated_at_ms) ||
     row.updated_at_ms < 0
   ) {
@@ -266,6 +313,7 @@ function publicAdminSettings(row: SettingsRow): AdminSystemSettings {
     schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
     control_version: row.control_version,
     public: publicSettings,
+    security: { step_up_enabled: row.step_up_enabled === 1 },
     secrets: { turnstile_secret_key_configured: row.turnstile_secret_key_configured === 1 },
     updated_at_ms: row.updated_at_ms,
   }
@@ -306,7 +354,7 @@ function requireSettingsVersion(request: Request): number {
 }
 
 function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
-  rejectUnknownKeys(body, ['public', 'secrets'])
+  rejectUnknownKeys(body, ['public', 'security', 'secrets'])
   const patch: SettingsPatch = {}
   if (body.public !== undefined) {
     const value = requireObject(body.public, 'public')
@@ -338,6 +386,15 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (Object.keys(publicPatch).length > 0) patch.public = publicPatch
   }
+  if (body.security !== undefined) {
+    const value = requireObject(body.security, 'security')
+    rejectUnknownKeys(value, ['step_up_enabled'])
+    const securityPatch: SecuritySettingsPatch = {}
+    if (value.step_up_enabled !== undefined) {
+      securityPatch.step_up_enabled = settingBoolean(value.step_up_enabled, 'step_up_enabled')
+    }
+    if (Object.keys(securityPatch).length > 0) patch.security = securityPatch
+  }
   if (body.secrets !== undefined) {
     const value = requireObject(body.secrets, 'secrets')
     rejectUnknownKeys(value, ['turnstile_secret_key'])
@@ -354,7 +411,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (Object.keys(secretsPatch).length > 0) patch.secrets = secretsPatch
   }
-  if (patch.public === undefined && patch.secrets === undefined) {
+  if (patch.public === undefined && patch.security === undefined && patch.secrets === undefined) {
     throw new GatewayError(400, 'settings_patch_required', 'At least one system setting is required')
   }
   return patch
@@ -401,6 +458,7 @@ function applyPublicPatch(
 
 function changedFields(patch: SettingsPatch): string[] {
   const fields = Object.keys(patch.public ?? {}).map((key) => `public.${key}`).sort()
+  fields.push(...Object.keys(patch.security ?? {}).map((key) => `security.${key}`).sort())
   if (patch.secrets?.turnstile_secret_key !== undefined) {
     fields.push(`secrets.turnstile_secret_key:${patch.secrets.turnstile_secret_key === null ? 'clear' : 'set'}`)
   }
@@ -485,11 +543,15 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
     !Number.isSafeInteger(value.updated_at_ms) ||
     value.updated_at_ms < 0 ||
     !isPublicSystemSettings(value.public) ||
-    typeof value.secrets?.turnstile_secret_key_configured !== 'boolean'
+    typeof value.secrets?.turnstile_secret_key_configured !== 'boolean' ||
+    (value.security !== undefined && typeof value.security.step_up_enabled !== 'boolean')
   ) {
     throw new GatewayError(503, 'invalid_idempotency_record', 'Idempotency record is invalid', 'server_error')
   }
-  return value
+  return {
+    ...value,
+    security: value.security ?? { step_up_enabled: false },
+  }
 }
 
 function requireSettingsMasterKey(env: Env): string {
@@ -511,4 +573,9 @@ function settingsVersionConflict(): GatewayError {
 function isSettingsVersionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return /CHECK constraint failed:.*control_version/i.test(message)
+}
+
+function isStepUpEnablementError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /CHECK constraint failed:.*step_up_enabled/i.test(message)
 }

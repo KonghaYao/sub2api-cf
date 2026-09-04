@@ -1,6 +1,6 @@
 {
   "name": "sub2api-worker",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "deploy:production": "pnpm run check && pnpm run build:assets && pnpm run db:migrate:production && wrangler deploy --env production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "pnpm run typecheck && pnpm run test",
+    "test:e2e:bindings": "vitest run --config vitest.e2e.config.ts",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run test:e2e:bindings",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
@@ -25,6 +26,7 @@
     "hono": "^4.13.5"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.4",
     "@cloudflare/workers-types": "^5.20260903.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",

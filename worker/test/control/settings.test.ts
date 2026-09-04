@@ -29,6 +29,7 @@ interface SettingsResponse {
       turnstile_enabled: boolean
       turnstile_site_key: string
     }
+    security: { step_up_enabled: boolean }
     secrets: { turnstile_secret_key_configured: boolean }
     updated_at_ms: number
   }
@@ -140,6 +141,7 @@ describe('admin system settings', () => {
           turnstile_enabled: false,
           turnstile_site_key: '',
         },
+        security: { step_up_enabled: false },
         secrets: { turnstile_secret_key_configured: false },
         updated_at_ms: expect.any(Number),
       },
@@ -220,6 +222,38 @@ describe('admin system settings', () => {
       'public.turnstile_site_key',
       'secrets.turnstile_secret_key:set',
     ])
+  })
+
+  it('enables privileged-operation step-up only for an administrator with TOTP', async () => {
+    const denied = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('enable-step-up-without-totp'),
+      body: JSON.stringify({ security: { step_up_enabled: true } }),
+    }, subject.env)
+    expect(denied.status).toBe(403)
+    await expect(responseJson(denied)).resolves.toMatchObject({
+      code: 'STEP_UP_TOTP_NOT_ENABLED',
+    })
+
+    const now = Date.now()
+    subject.raw.prepare(
+      `INSERT INTO user_totp_credentials (
+         user_id, nonce_b64, ciphertext_b64, enabled_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(ADMIN_ID, 'A'.repeat(16), 'B'.repeat(24), now, now, now)
+    const enabled = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('enable-step-up-with-totp'),
+      body: JSON.stringify({ security: { step_up_enabled: true } }),
+    }, subject.env)
+    expect(enabled.status).toBe(200)
+    await expect(responseJson(enabled)).resolves.toMatchObject({
+      data: { security: { step_up_enabled: true }, control_version: 1 },
+    })
+    expect(subject.raw.prepare(
+      "SELECT step_up_enabled FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ step_up_enabled: 1 })
+    expect(subject.kv.puts.at(-1)?.value).not.toContain('step_up_enabled')
   })
 
   it('requires If-Match and Idempotency-Key, rejects stale versions, and replays without another mutation', async () => {

@@ -11,6 +11,7 @@ export interface AdminActor {
   user_id: string
   session_id: string
   session_type: 'user_access' | 'admin_recovery'
+  step_up_expires_at_ms: number | null
 }
 
 const adminActorCache = new WeakMap<Request, Promise<AdminActor>>()
@@ -46,6 +47,70 @@ export const requireAdminSession: MiddlewareHandler<AdminBindings> = async (cont
     return gatewayErrorResponse(asGatewayError(error))
   }
   await next()
+}
+
+/**
+ * Protects browser-originated admin mutations and, when enabled in D1, requires
+ * a recent TOTP grant on the exact signed-in user session. Safe reads and the
+ * dedicated break-glass recovery boundary are intentionally unaffected.
+ */
+export const requireAdminMutationSecurity: MiddlewareHandler<AdminBindings> = async (
+  context,
+  next,
+) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(context.req.method.toUpperCase())) {
+    await next()
+    return
+  }
+  try {
+    requireTrustedAdminOrigin(context.req.raw)
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    // A recovery session is minted only after presenting the independent
+    // break-glass Worker secret. Treat it as an emergency elevation so an
+    // operator can recover even when the user's TOTP device is unavailable.
+    if (actor.session_type === 'admin_recovery') {
+      await next()
+      return
+    }
+    const setting = await context.env.DB.prepare(
+      "SELECT step_up_enabled FROM system_settings WHERE id = 'global'",
+    ).first<{ step_up_enabled: number }>()
+    if (setting === null || ![0, 1].includes(setting.step_up_enabled)) {
+      throw new GatewayError(
+        503,
+        'STEP_UP_UNAVAILABLE',
+        'Step-up verification service unavailable',
+        'server_error',
+      )
+    }
+    if (setting.step_up_enabled === 0) {
+      await next()
+      return
+    }
+
+    const totp = await context.env.DB.prepare(
+      'SELECT 1 AS enabled FROM user_totp_credentials WHERE user_id = ? LIMIT 1',
+    ).bind(actor.user_id).first<{ enabled: number }>()
+    if (totp === null) {
+      throw new GatewayError(
+        403,
+        'STEP_UP_TOTP_NOT_ENABLED',
+        'This operation requires two-factor authentication; enable TOTP first',
+        'permission_error',
+      )
+    }
+    if (actor.step_up_expires_at_ms === null || actor.step_up_expires_at_ms <= Date.now()) {
+      throw new GatewayError(
+        403,
+        'STEP_UP_REQUIRED',
+        'This operation requires recent two-factor verification',
+        'permission_error',
+      )
+    }
+    await next()
+  } catch (error) {
+    return gatewayErrorResponse(asGatewayError(error))
+  }
 }
 
 /**
@@ -99,6 +164,7 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
       user_id: user.id,
       session_id: user.session_id,
       session_type: 'user_access',
+      step_up_expires_at_ms: user.step_up_expires_at_ms,
     }
   }
   const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
@@ -123,7 +189,39 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
   return {
     ...session,
     session_type: 'admin_recovery',
+    step_up_expires_at_ms: null,
   }
+}
+
+function requireTrustedAdminOrigin(request: Request): void {
+  const origin = request.headers.get('origin')
+  const fetchSite = request.headers.get('sec-fetch-site')?.trim().toLowerCase()
+  if (fetchSite === 'cross-site') {
+    throw adminOriginForbidden()
+  }
+  if (origin === null) return
+  let requestOrigin: string
+  let suppliedOrigin: string
+  try {
+    requestOrigin = new URL(request.url).origin
+    suppliedOrigin = new URL(origin).origin
+  } catch {
+    throw adminOriginForbidden()
+  }
+  if (
+    origin === 'null' ||
+    suppliedOrigin !== requestOrigin ||
+    origin !== suppliedOrigin
+  ) throw adminOriginForbidden()
+}
+
+function adminOriginForbidden(): GatewayError {
+  return new GatewayError(
+    403,
+    'admin_origin_forbidden',
+    'Cross-origin administrative mutations are not allowed',
+    'permission_error',
+  )
 }
 
 export async function recoverAdminSession(context: Context<AdminBindings>): Promise<Response> {

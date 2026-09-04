@@ -19,23 +19,30 @@
         <slot />
       </main>
     </div>
+
+    <TotpStepUpDialog :controller="globalAdminStepUp" />
   </div>
 </template>
 
 <script setup lang="ts">
 import '@/styles/onboarding.css'
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { registerAdminStepUpPrompt } from '@/api/adminStepUpRecovery'
+import { useStepUp } from '@/composables/useStepUp'
 import { useAppStore } from '@/stores'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingTour } from '@/composables/useOnboardingTour'
 import { useOnboardingStore } from '@/stores/onboarding'
 import AppSidebar from './AppSidebar.vue'
 import AppHeader from './AppHeader.vue'
+import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const sidebarCollapsed = computed(() => appStore.sidebarCollapsed)
 const isAdmin = computed(() => authStore.user?.role === 'admin')
+const globalAdminStepUp = useStepUp()
+const unregisterAdminStepUpPrompt = registerAdminStepUpPrompt(globalAdminStepUp.prompt)
 
 const { replayTour } = useOnboardingTour({
   storageKey: isAdmin.value ? 'admin_guide' : 'user_guide',
@@ -46,6 +53,11 @@ const onboardingStore = useOnboardingStore()
 
 onMounted(() => {
   onboardingStore.setReplayCallback(replayTour)
+})
+
+onBeforeUnmount(() => {
+  unregisterAdminStepUpPrompt()
+  globalAdminStepUp.onCancel()
 })
 
 defineExpose({ replayTour })

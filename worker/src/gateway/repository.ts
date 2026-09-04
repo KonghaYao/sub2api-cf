@@ -309,6 +309,7 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
             JOIN accounts a ON a.id = ag.account_id
             JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
            WHERE ag.group_id = gm.group_id AND a.enabled = 1
+             AND a.health_status <> 'unhealthy'
              AND m.platform = g.platform AND a.platform = g.platform
              AND (
                (m.endpoint = 'chat_completions' AND am.chat_completions = 1) OR
@@ -401,6 +402,7 @@ function accountCandidatesStatement(
        JOIN models m ON m.id = am.model_id AND m.platform = g.platform
        CROSS JOIN gateway_config_revision revision
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
+        AND a.health_status <> 'unhealthy'
         AND m.public_name = ?
         AND ${capabilityColumn} = 1
       ORDER BY ag.priority ASC, a.id ASC`,
@@ -428,6 +430,7 @@ export async function getAccountCredential(
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
         AND ${capabilityColumn} = 1 AND a.enabled = 1
+        AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL
       LIMIT 1`,
   )

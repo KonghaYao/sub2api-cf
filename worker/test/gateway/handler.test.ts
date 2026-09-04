@@ -52,7 +52,11 @@ class FakeStatement {
     }
     if (this.query.includes('FROM accounts a') && this.query.includes('account_secrets')) {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) return null
-      return this.database.credential as T
+      const requestedAccountId = this.values[0]
+      const credential = requestedAccountId === accountId
+        ? this.database.credential
+        : this.database.additionalCredentials.get(String(requestedAccountId))
+      return (credential ?? null) as T | null
     }
     if (this.query.includes('FROM inbox')) return null
     if (this.query.includes('FROM settlement_recovery')) return this.database.recovery as T
@@ -103,24 +107,27 @@ class FakeStatement {
       if (this.database.chatOnly && this.query.includes('am.responses = 1')) {
         return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
       }
+      const credentials = [
+        this.database.credential,
+        ...this.database.additionalCredentials.values(),
+      ]
       return {
         success: true,
-        results: [
-          {
-            account_id: accountId,
-            platform: this.database.credential.platform,
-            protocol: this.database.credential.protocol,
-            auth_scheme: this.database.credential.auth_scheme,
-            provider_config_json: this.database.credential.provider_config_json,
-            base_url: this.database.credential.base_url,
+        results: credentials.map((credential) =>
+          ({
+            account_id: credential.account_id,
+            platform: credential.platform,
+            protocol: credential.protocol,
+            auth_scheme: credential.auth_scheme,
+            provider_config_json: credential.provider_config_json,
+            base_url: credential.base_url,
             max_concurrency: 4,
             priority: 0,
             weight: 1,
             config_version: 1,
             config_revision: 1,
             model_id: 'model-1',
-          } as T,
-        ],
+          } as T)),
         meta: {} as D1Meta & Record<string, unknown>,
       }
     }
@@ -131,6 +138,7 @@ class FakeStatement {
 class FakeDatabase {
   readonly bindings: Array<{ query: string; values: unknown[] }> = []
   credential: Record<string, unknown> = {}
+  readonly additionalCredentials = new Map<string, Record<string, unknown>>()
   recovery: Record<string, unknown> | null = null
   failRecoveryWrites = false
   chatOnly = false
@@ -198,6 +206,8 @@ class FakeStateStub {
   readonly calls: Array<{ path: string; body: Record<string, unknown> }> = []
   settleFailures = 0
   snapshotAccounts: Array<Record<string, unknown>> = []
+  readonly affinityAccounts = new Map<string, string>()
+  reserveAccountIds: string[] = []
 
   constructor(private readonly kind: 'user' | 'subscription' | 'pool' | 'limit') {}
 
@@ -209,7 +219,18 @@ class FakeStateStub {
     const body = (await request.json()) as Record<string, unknown>
     this.calls.push({ path, body })
     if (this.kind === 'pool' && path === '/reserve') {
-      return Response.json({ lease: { account_id: accountId, status: 'active' } })
+      const affinityKey = typeof body.affinity_key === 'string' ? body.affinity_key : undefined
+      const selected = this.reserveAccountIds.shift() ??
+        (affinityKey === undefined ? undefined : this.affinityAccounts.get(affinityKey)) ??
+        accountId
+      if (affinityKey !== undefined) this.affinityAccounts.set(affinityKey, selected)
+      return Response.json({ lease: { account_id: selected, status: 'active' } })
+    }
+    if (this.kind === 'pool' && path === '/failure') {
+      for (const [affinityKey, boundAccountId] of this.affinityAccounts) {
+        if (boundAccountId === body.account_id) this.affinityAccounts.delete(affinityKey)
+      }
+      return Response.json({})
     }
     if (this.kind === 'user' && path === '/settle') {
       if (this.settleFailures > 0) {
@@ -295,6 +316,30 @@ async function harness(): Promise<{
     EVENTS_QUEUE: { send: async (value: unknown) => void queued.push(value) } as unknown as Queue,
   }
   return { env, database, user, subscription, pool, limit, poolNames, queued }
+}
+
+async function addGatewayAccount(
+  database: FakeDatabase,
+  addedAccountId: string,
+  baseUrl: string,
+): Promise<void> {
+  const addedSecretId = `secret-${addedAccountId}`
+  const encrypted = await encryptCredential(
+    { api_key: `sk-${addedAccountId}` },
+    masterKey,
+    `test/${addedAccountId}/${addedSecretId}/1`,
+  )
+  database.additionalCredentials.set(addedAccountId, {
+    account_id: addedAccountId,
+    platform: 'openai',
+    protocol: 'openai',
+    base_url: baseUrl,
+    auth_scheme: 'bearer',
+    provider_config_json: '{}',
+    secret_id: addedSecretId,
+    key_version: 1,
+    ...encrypted,
+  })
 }
 
 async function compressGatewayBody(
@@ -2290,6 +2335,262 @@ describe('OpenAI-compatible gateway', () => {
       usage_event: { payload: { input_tokens: 6, output_tokens: 0 } },
     })
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('retries an embeddings account access-state failure on a second account exactly once', async () => {
+    const { env, database, user, pool, limit } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async (request: RequestInfo | URL) =>
+      String(request).includes('upstream-two')
+        ? Response.json({
+            object: 'list',
+            model: 'gpt-upstream',
+            data: [{ object: 'embedding', index: 0, embedding: [0.5] }],
+            usage: { prompt_tokens: 3, total_tokens: 3 },
+          })
+        : Response.json(
+            { error: { code: 'deactivated_workspace', message: 'request rejected' } },
+            { status: 400 },
+          ),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/embeddings', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    expect(upstream.mock.calls.map(([request]) => String(request))).toEqual([
+      'https://upstream.example/v1/embeddings',
+      'https://upstream-two.example/v1/embeddings',
+    ])
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(0)
+    expect(limit.calls.filter((call) => call.path === '/monetary/reserve')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(0)
+  })
+
+  it('bounds stalled embeddings error-body classification before failing over', async () => {
+    const { env, database, pool } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).includes('upstream-two')) {
+        return Response.json({
+          object: 'list',
+          model: 'gpt-upstream',
+          data: [{ object: 'embedding', index: 0, embedding: [0.5] }],
+          usage: { prompt_tokens: 3, total_tokens: 3 },
+        })
+      }
+      return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', upstream)
+
+    let guard: ReturnType<typeof setTimeout> | undefined
+    let response: Response
+    try {
+      response = await Promise.race([
+        createApp().request('/v1/embeddings', {
+          method: 'POST',
+          headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+        }, env),
+        new Promise<never>((_resolve, reject) => {
+          guard = setTimeout(
+            () => reject(new Error('embeddings error classification did not finish')),
+            750,
+          )
+        }),
+      ])
+    } finally {
+      if (guard !== undefined) clearTimeout(guard)
+    }
+
+    expect(response.status).toBe(200)
+    expect(upstream).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry deterministic or untyped-403 embeddings failures', async () => {
+    const cases = [
+      {
+        status: 400,
+        payload: { error: { type: 'invalid_request_error', code: 'invalid_input', message: 'bad input' } },
+      },
+      {
+        status: 403,
+        payload: { error: { type: 'permission_error', code: 'insufficient_permissions', message: 'forbidden' } },
+      },
+      {
+        status: 403,
+        payload: { error: { message: 'Your account is deactivated' } },
+      },
+      {
+        status: 404,
+        payload: { error: { type: 'invalid_request_error', code: 'model_not_found', message: 'missing' } },
+      },
+      {
+        status: 503,
+        payload: { error: { type: 'invalid_request_error', code: 'context_length_exceeded', message: 'too long' } },
+      },
+    ]
+
+    for (const fixture of cases) {
+      const { env, database, user, pool, limit } = await harness()
+      await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+      pool.reserveAccountIds.push('account-1', 'account-2')
+      const upstream = vi.fn(async () => Response.json(fixture.payload, { status: fixture.status }))
+      vi.stubGlobal('fetch', upstream)
+
+      const response = await createApp().request('/v1/embeddings', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+      }, env)
+
+      expect(response.status).toBe(fixture.status === 403 || fixture.status >= 500 ? 502 : fixture.status)
+      expect(upstream, JSON.stringify(fixture)).toHaveBeenCalledOnce()
+      expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
+      expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+      expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+      expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(0)
+      expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(1)
+      expect(limit.calls.filter((call) => call.path === '/monetary/reserve')).toHaveLength(1)
+      expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(0)
+      expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
+    }
+  })
+
+  it('stops embeddings failover after each configured account has failed', async () => {
+    const { env, database, user, pool, limit } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2', 'account-1')
+    const upstream = vi.fn(async () =>
+      Response.json({ error: { code: 'server_is_overloaded', message: 'busy' } }, { status: 503 }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/embeddings', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(502)
+    expect(upstream).toHaveBeenCalledTimes(2)
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(2)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/reserve')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
+  })
+
+  it('keeps a hashed session sticky, clears it on failure, and rebinds the fallback account', async () => {
+    const { env, database, user, pool, limit } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-2')
+    let secondAccountCalls = 0
+    const upstream = vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).includes('upstream-two')) {
+        secondAccountCalls += 1
+        if (secondAccountCalls === 2) {
+          return Response.json({ error: { code: 'server_is_overloaded', message: 'busy' } }, { status: 503 })
+        }
+      }
+      return Response.json({
+        object: 'list',
+        model: 'gpt-upstream',
+        data: [{ object: 'embedding', index: 0, embedding: [0.5] }],
+        usage: { prompt_tokens: 3, total_tokens: 3 },
+      })
+    })
+    vi.stubGlobal('fetch', upstream)
+    const request = () => createApp().request('/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'session-id': 'private-session-value',
+      },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    const first = await request()
+    const second = await request()
+
+    expect([first.status, second.status]).toEqual([200, 200])
+    expect(upstream.mock.calls.map(([upstreamRequest]) => String(upstreamRequest))).toEqual([
+      'https://upstream-two.example/v1/embeddings',
+      'https://upstream-two.example/v1/embeddings',
+      'https://upstream.example/v1/embeddings',
+    ])
+    const reserves = pool.calls.filter((call) => call.path === '/reserve')
+    expect(reserves).toHaveLength(3)
+    expect(reserves.map((call) => call.body.affinity_key)).toEqual([
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+    ])
+    expect(new Set(reserves.map((call) => call.body.affinity_key)).size).toBe(1)
+    expect(JSON.stringify(reserves)).not.toContain('private-session-value')
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(1)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(3)
+    expect([...pool.affinityAccounts.values()]).toEqual(['account-1'])
+    expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(2)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(2)
+    expect(limit.calls.filter((call) => call.path === '/monetary/reserve')).toHaveLength(2)
+    expect(limit.calls.filter((call) => call.path === '/monetary/settle')).toHaveLength(2)
+  })
+
+  it('does not carry a sticky binding across API-key groups', async () => {
+    const { env, database, pool, poolNames } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-2')
+    const upstream = vi.fn(async (_requestInfo: RequestInfo | URL) => Response.json({
+      object: 'list',
+      model: 'gpt-upstream',
+      data: [{ object: 'embedding', index: 0, embedding: [0.5] }],
+      usage: { prompt_tokens: 3, total_tokens: 3 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+    const request = () => createApp().request('/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-customer',
+        'content-type': 'application/json',
+        'session-id': 'same-session',
+      },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect((await request()).status).toBe(200)
+    database.principal.group_id = 'group-2'
+    expect((await request()).status).toBe(200)
+
+    const reserves = pool.calls.filter((call) => call.path === '/reserve')
+    expect(reserves.map((call) => call.body.affinity_key)).toHaveLength(2)
+    expect(reserves[0]?.body.affinity_key).not.toBe(reserves[1]?.body.affinity_key)
+    expect(upstream.mock.calls.map(([requestInfo]) => String(requestInfo))).toEqual([
+      'https://upstream-two.example/v1/embeddings',
+      'https://upstream.example/v1/embeddings',
+    ])
+    expect(poolNames).toContain(
+      'group:group-1:platform:openai:model:model-1:endpoint:embeddings:shard:0',
+    )
+    expect(poolNames).toContain(
+      'group:group-2:platform:openai:model:model-1:endpoint:embeddings:shard:0',
+    )
   })
 
   it('rejects streaming embeddings before reserving funds or upstream capacity', async () => {

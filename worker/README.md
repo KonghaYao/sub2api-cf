@@ -90,6 +90,21 @@ Run `pnpm run check` for TypeScript and unit tests. The Worker deliberately
 returns an explicit 404 for API routes that have not migrated yet instead of
 silently serving the SPA shell.
 
+Run `pnpm run test:e2e:bindings` for the fully local Cloudflare binding E2E.
+It uses the official `@cloudflare/vitest-plugin` and a dedicated
+`wrangler.e2e.jsonc`; every invocation starts from isolated Miniflare storage,
+applies every D1 migration, and never reads production bindings or secrets. The
+suite drives the real Worker fetch router through bootstrap, password
+registration/login, user API-key creation, a non-streaming Chat Completions
+request, Durable Object admission/billing/pool state, Queue production and
+consumption, and final D1 usage/balance projections. It also executes real local
+KV and R2 bindings. Outbound provider traffic is handled by a deterministic
+test-only Workerd outbound service and cannot reach a real provider.
+
+This command proves local binding compatibility only. It does not replace a
+staging/production smoke run against deployed bindings, Cloudflare routing, or
+a real provider account.
+
 ## Deployment
 
 Use `pnpm run deploy:staging` or `pnpm run deploy:production`. These are the

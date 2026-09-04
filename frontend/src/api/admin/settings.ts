@@ -1059,12 +1059,14 @@ interface WorkerAdminSettings {
     turnstile_enabled: boolean;
     turnstile_site_key: string;
   };
+  security?: { step_up_enabled: boolean };
   secrets: { turnstile_secret_key_configured: boolean };
   updated_at_ms: number;
 }
 
 interface WorkerSettingsPatch {
   public?: Partial<WorkerAdminSettings["public"]>;
+  security?: { step_up_enabled: boolean };
   secrets?: { turnstile_secret_key: string | null };
 }
 
@@ -1095,6 +1097,7 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     email_verify_enabled: settings.public.email_verification_enabled,
     turnstile_enabled: settings.public.turnstile_enabled,
     turnstile_site_key: settings.public.turnstile_site_key,
+    step_up_enabled: settings.security?.step_up_enabled ?? false,
     turnstile_secret_key_configured: settings.secrets.turnstile_secret_key_configured,
   } as SystemSettings;
 }
@@ -1155,6 +1158,9 @@ export async function updateSettings(
 
   const patch: WorkerSettingsPatch = {};
   if (Object.keys(publicPatch).length > 0) patch.public = publicPatch;
+  if (settings.step_up_enabled !== undefined) {
+    patch.security = { step_up_enabled: settings.step_up_enabled };
+  }
   if (settings.turnstile_secret_key !== undefined && settings.turnstile_secret_key !== "") {
     patch.secrets = { turnstile_secret_key: settings.turnstile_secret_key };
   }

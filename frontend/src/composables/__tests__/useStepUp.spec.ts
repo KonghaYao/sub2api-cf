@@ -82,6 +82,7 @@ describe('useStepUp.run', () => {
     expect(isStepUpCancelled(cancelled)).toBe(true)
     expect(isStepUpRequired(cancelled)).toBe(false)
     expect(isStepUpBlocked(cancelled)).toBe(false)
+    expect(isStepUpCancelled({ code: 'STEP_UP_CANCELLED' })).toBe(true)
     expect(isStepUpCancelled({ status: 403, code: 'STEP_UP_REQUIRED' })).toBe(false)
   })
 })

@@ -5,6 +5,7 @@ import {
   nextActiveLeaseAlarmAt,
   reclaimExpiredLeases,
   type PoolAccountState,
+  type PoolAffinityState,
   type PoolCommand,
   type PoolLeaseState,
   type PoolMachineState,
@@ -47,6 +48,15 @@ interface PoolLeaseRow {
   updated_at_ms: number;
 }
 
+interface PoolAffinityRow {
+  schema_version: number;
+  affinity_key: string;
+  account_id: string;
+  expires_at_ms: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 const TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export class PoolStateDO {
@@ -56,6 +66,7 @@ export class PoolStateDO {
       const nowMs = Date.now();
       this.state.storage.transactionSync(() => {
         this.cleanupTombstones(nowMs);
+        this.cleanupExpiredAffinities(nowMs);
         this.reclaimPersistedLeases(nowMs);
       });
       await this.scheduleNextLeaseAlarm();
@@ -87,6 +98,7 @@ export class PoolStateDO {
     const nowMs = Date.now();
     this.state.storage.transactionSync(() => {
       this.cleanupTombstones(nowMs);
+      this.cleanupExpiredAffinities(nowMs);
       this.reclaimPersistedLeases(nowMs);
     });
     await this.scheduleNextLeaseAlarm();
@@ -106,6 +118,7 @@ export class PoolStateDO {
     const nowMs = Date.now();
     const response = this.state.storage.transactionSync(() => {
       this.cleanupTombstones(nowMs);
+      this.cleanupExpiredAffinities(nowMs);
       const reclaimed = this.reclaimPersistedLeases(nowMs).state;
       const activeCounts = activeLeaseCounts(reclaimed);
       return json({
@@ -131,6 +144,7 @@ export class PoolStateDO {
     const nowMs = Date.now();
     const response = this.state.storage.transactionSync(() => {
       this.cleanupTombstones(nowMs);
+      this.cleanupExpiredAffinities(nowMs);
       const { reclaimedCount } = this.reclaimPersistedLeases(nowMs);
       return json({
         schema_version: STATE_API_SCHEMA_VERSION,
@@ -154,9 +168,34 @@ export class PoolStateDO {
       const requestId = "request_id" in command ? command.request_id : undefined;
       const eventId = "event_id" in command ? command.event_id : undefined;
       const failureAccountId = command.type === "failure" ? command.account_id : undefined;
-      const current = this.loadMachineState(requestId, eventId);
+      const affinityKey = command.type === "reserve" ? command.affinity_key : undefined;
+      const affinityAccountId = command.type === "failure" ||
+          (command.type === "upsert_account" && !command.enabled)
+        ? command.account_id
+        : undefined;
+      this.cleanupExpiredAffinities(nowMs);
+      const current = this.loadMachineState(
+        requestId,
+        eventId,
+        affinityKey,
+        affinityAccountId,
+      );
       const transition = applyPoolCommand(current, command, nowMs);
       this.persistTransition(current, transition.state, eventId, failureAccountId, nowMs);
+      if (
+        command.type === "sync_accounts" &&
+        transition.state.config_revision !== current.config_revision
+      ) {
+        // Account sync is hot and normally idempotent, so avoid loading every
+        // affinity row into memory. A revision change still converges storage
+        // immediately by deleting bindings whose accounts were just disabled.
+        this.state.storage.sql.exec(
+          `DELETE FROM pool_affinities
+            WHERE account_id IN (
+              SELECT account_id FROM pool_accounts WHERE enabled = 0
+            )`,
+        );
+      }
       return json({
         schema_version: STATE_API_SCHEMA_VERSION,
         idempotent: transition.idempotent,
@@ -247,6 +286,16 @@ export class PoolStateDO {
         processed_at_ms INTEGER NOT NULL CHECK (processed_at_ms >= 0)
       ) STRICT
     `);
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pool_affinities (
+        affinity_key TEXT PRIMARY KEY CHECK (length(affinity_key) = 64),
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        account_id TEXT NOT NULL,
+        expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+        created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) STRICT
+    `);
     this.state.storage.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_pool_leases_active_expiry ON pool_leases(status, expires_at_ms)",
     );
@@ -259,9 +308,20 @@ export class PoolStateDO {
     this.state.storage.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_pool_failure_events_cleanup ON pool_failure_events(processed_at_ms)",
     );
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_affinities_account ON pool_affinities(account_id)",
+    );
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_pool_affinities_expiry ON pool_affinities(expires_at_ms)",
+    );
   }
 
-  private loadMachineState(requestId?: string, failureEventId?: string): PoolMachineState {
+  private loadMachineState(
+    requestId?: string,
+    failureEventId?: string,
+    affinityKey?: string,
+    affinityAccountId?: string,
+  ): PoolMachineState {
     const state = createPoolMachineState();
     const config = Array.from(
       this.state.storage.sql.exec(
@@ -315,6 +375,28 @@ export class PoolStateDO {
       )[0] as { event_id: string; account_id: string } | undefined;
       if (existing !== undefined) state.failure_events[failureEventId] = existing.account_id;
     }
+    if (affinityKey !== undefined) {
+      for (const value of this.state.storage.sql.exec(
+        `SELECT schema_version, affinity_key, account_id, expires_at_ms, created_at_ms, updated_at_ms
+           FROM pool_affinities
+          WHERE affinity_key = ?`,
+        affinityKey,
+      )) {
+        const affinity = toAffinityState(value);
+        state.affinities[affinity.affinity_key] = affinity;
+      }
+    }
+    if (affinityAccountId !== undefined) {
+      for (const value of this.state.storage.sql.exec(
+        `SELECT schema_version, affinity_key, account_id, expires_at_ms, created_at_ms, updated_at_ms
+           FROM pool_affinities
+          WHERE account_id = ?`,
+        affinityAccountId,
+      )) {
+        const affinity = toAffinityState(value);
+        state.affinities[affinity.affinity_key] = affinity;
+      }
+    }
     return state;
   }
 
@@ -342,6 +424,17 @@ export class PoolStateDO {
     for (const [requestId, lease] of Object.entries(after.leases)) {
       if (lease === before.leases[requestId]) continue;
       this.persistLease(lease);
+    }
+    for (const affinityKey of Object.keys(before.affinities)) {
+      if (after.affinities[affinityKey] !== undefined) continue;
+      this.state.storage.sql.exec(
+        "DELETE FROM pool_affinities WHERE affinity_key = ?",
+        affinityKey,
+      );
+    }
+    for (const [affinityKey, affinity] of Object.entries(after.affinities)) {
+      if (affinity === before.affinities[affinityKey]) continue;
+      this.persistAffinity(affinity);
     }
     if (
       failureEventId !== undefined &&
@@ -419,6 +512,26 @@ export class PoolStateDO {
     );
   }
 
+  private persistAffinity(affinity: PoolAffinityState): void {
+    this.state.storage.sql.exec(
+      `INSERT INTO pool_affinities (
+         affinity_key, schema_version, account_id, expires_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(affinity_key) DO UPDATE SET
+         schema_version = excluded.schema_version,
+         account_id = excluded.account_id,
+         expires_at_ms = excluded.expires_at_ms,
+         created_at_ms = excluded.created_at_ms,
+         updated_at_ms = excluded.updated_at_ms`,
+      affinity.affinity_key,
+      affinity.schema_version,
+      affinity.account_id,
+      affinity.expires_at_ms,
+      affinity.created_at_ms,
+      affinity.updated_at_ms,
+    );
+  }
+
   private reclaimPersistedLeases(nowMs: number): {
     state: PoolMachineState;
     reclaimedCount: number;
@@ -456,6 +569,13 @@ export class PoolStateDO {
     this.state.storage.sql.exec(
       "DELETE FROM pool_failure_events WHERE processed_at_ms < ?",
       cutoffMs,
+    );
+  }
+
+  private cleanupExpiredAffinities(nowMs: number): void {
+    this.state.storage.sql.exec(
+      "DELETE FROM pool_affinities WHERE expires_at_ms <= ?",
+      nowMs,
     );
   }
 }
@@ -502,6 +622,13 @@ function parseCommand(
       };
     case "reserve": {
       const preferredAccountId = optionalString(body, "preferred_account_id");
+      const affinityKey = optionalString(body, "affinity_key");
+      const affinityTtlMs = body.affinity_ttl_ms === undefined
+        ? undefined
+        : requireSafeInteger(body, "affinity_ttl_ms", {
+            minimum: 1,
+            maximum: 30 * 24 * 60 * 60 * 1_000,
+          });
       return {
         schema_version: STATE_API_SCHEMA_VERSION,
         type,
@@ -513,6 +640,8 @@ function parseCommand(
         ...(preferredAccountId === undefined
           ? {}
           : { preferred_account_id: preferredAccountId }),
+        ...(affinityKey === undefined ? {} : { affinity_key: affinityKey }),
+        ...(affinityTtlMs === undefined ? {} : { affinity_ttl_ms: affinityTtlMs }),
       };
     }
     case "renew":
@@ -596,6 +725,33 @@ function toLeaseState(value: object): PoolLeaseState {
     expires_at_ms: row.expires_at_ms,
     renewal_sequence: row.renewal_sequence,
     last_renewal_ttl_ms: row.last_renewal_ttl_ms,
+    created_at_ms: row.created_at_ms,
+    updated_at_ms: row.updated_at_ms,
+  };
+}
+
+function toAffinityState(value: object): PoolAffinityState {
+  const row = value as PoolAffinityRow;
+  assertSchemaVersion(row.schema_version);
+  if (
+    typeof row.affinity_key !== "string" ||
+    !/^[a-f0-9]{64}$/.test(row.affinity_key) ||
+    typeof row.account_id !== "string" ||
+    row.account_id.length === 0 ||
+    !Number.isSafeInteger(row.expires_at_ms) ||
+    row.expires_at_ms < 0 ||
+    !Number.isSafeInteger(row.created_at_ms) ||
+    row.created_at_ms < 0 ||
+    !Number.isSafeInteger(row.updated_at_ms) ||
+    row.updated_at_ms < 0
+  ) {
+    throw new PoolStateMachineError("invalid_persisted_state", "Persisted affinity is invalid");
+  }
+  return {
+    schema_version: 1,
+    affinity_key: row.affinity_key,
+    account_id: row.account_id,
+    expires_at_ms: row.expires_at_ms,
     created_at_ms: row.created_at_ms,
     updated_at_ms: row.updated_at_ms,
   };

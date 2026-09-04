@@ -20,6 +20,10 @@ import {
 } from '../user/totp'
 import { sha256Hex } from './crypto'
 import { settleRecoveryRequest } from './recovery'
+import {
+  consumeAccountHealthProbe,
+  isAccountHealthProbeEvent,
+} from '../control/account-lifecycle'
 
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
@@ -77,6 +81,11 @@ export async function consumeEvents(
       }
       if (isPaymentFulfillmentEvent(message.body)) {
         await fulfillPaymentOrder(env, message.body.payload.order_id)
+        message.ack()
+        continue
+      }
+      if (isAccountHealthProbeEvent(message.body)) {
+        await consumeAccountHealthProbe(message.body, env)
         message.ack()
         continue
       }

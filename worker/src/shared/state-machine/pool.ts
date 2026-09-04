@@ -26,12 +26,22 @@ export interface PoolLeaseState {
   updated_at_ms: number;
 }
 
+export interface PoolAffinityState {
+  schema_version: typeof POOL_SCHEMA_VERSION;
+  affinity_key: string;
+  account_id: string;
+  expires_at_ms: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 export interface PoolMachineState {
   schema_version: typeof POOL_SCHEMA_VERSION;
   config_revision: number;
   config_fingerprint: string;
   accounts: Record<string, PoolAccountState>;
   leases: Record<string, PoolLeaseState>;
+  affinities: Record<string, PoolAffinityState>;
   failure_events: Record<string, string>;
 }
 
@@ -63,6 +73,8 @@ export type PoolCommand = PoolCommandEnvelope &
         request_id: string;
         lease_ttl_ms: number;
         preferred_account_id?: string;
+        affinity_key?: string;
+        affinity_ttl_ms?: number;
       }
     | {
         type: "renew";
@@ -102,6 +114,7 @@ export function createPoolMachineState(): PoolMachineState {
     config_fingerprint: "",
     accounts: {},
     leases: {},
+    affinities: {},
     failure_events: {},
   };
 }
@@ -116,7 +129,7 @@ export function applyPoolCommand(
     throw new PoolStateMachineError("unsupported_schema_version", "Unsupported schema_version");
   }
 
-  const state = reclaimExpiredLeases(inputState, nowMs);
+  const state = reclaimExpiredAffinities(reclaimExpiredLeases(inputState, nowMs), nowMs);
   switch (command.type) {
     case "sync_accounts":
       return syncAccounts(state, command, nowMs);
@@ -206,6 +219,9 @@ function syncAccounts(
       config_revision: command.config_revision,
       config_fingerprint: command.config_fingerprint,
       accounts,
+      affinities: Object.fromEntries(
+        Object.entries(state.affinities).filter(([, affinity]) => configuredIds.has(affinity.account_id)),
+      ),
     },
     idempotent: false,
     lease: null,
@@ -224,6 +240,16 @@ export function reclaimExpiredLeases(state: PoolMachineState, nowMs: number): Po
     };
   }
   return leases === state.leases ? state : { ...state, leases };
+}
+
+export function reclaimExpiredAffinities(state: PoolMachineState, nowMs: number): PoolMachineState {
+  let affinities = state.affinities;
+  for (const [affinityKey, affinity] of Object.entries(state.affinities)) {
+    if (affinity.expires_at_ms > nowMs) continue;
+    if (affinities === state.affinities) affinities = { ...state.affinities };
+    delete affinities[affinityKey];
+  }
+  return affinities === state.affinities ? state : { ...state, affinities };
 }
 
 function upsertAccount(
@@ -250,7 +276,10 @@ function upsertAccount(
     existing?.enabled === command.enabled &&
     existing.max_concurrency === command.max_concurrency &&
     existing.priority === priority &&
-    existing.weight === weight
+    existing.weight === weight &&
+    (command.enabled || !Object.values(state.affinities).some(
+      (affinity) => affinity.account_id === command.account_id,
+    ))
   ) {
     return { state, idempotent: true, lease: null };
   }
@@ -267,7 +296,13 @@ function upsertAccount(
     updated_at_ms: nowMs,
   };
   return {
-    state: { ...state, accounts: { ...state.accounts, [account.account_id]: account } },
+    state: {
+      ...state,
+      accounts: { ...state.accounts, [account.account_id]: account },
+      affinities: command.enabled
+        ? state.affinities
+        : withoutAccountAffinities(state.affinities, command.account_id),
+    },
     idempotent: false,
     lease: null,
   };
@@ -284,6 +319,38 @@ function reserve(
   }
   if (nowMs > Number.MAX_SAFE_INTEGER - command.lease_ttl_ms) {
     throw new PoolStateMachineError("invalid_lease_ttl", "Lease expiry exceeds safe integer range");
+  }
+  const hasAffinityKey = command.affinity_key !== undefined;
+  const hasAffinityTtl = command.affinity_ttl_ms !== undefined;
+  if (hasAffinityKey !== hasAffinityTtl) {
+    throw new PoolStateMachineError(
+      "invalid_affinity_ttl",
+      "affinity_key and affinity_ttl_ms must be provided together",
+    );
+  }
+  if (command.affinity_key !== undefined && !/^[a-f0-9]{64}$/.test(command.affinity_key)) {
+    throw new PoolStateMachineError(
+      "invalid_affinity_key",
+      "affinity_key must be a lowercase SHA-256 digest",
+    );
+  }
+  if (
+    command.affinity_ttl_ms !== undefined &&
+    (!Number.isSafeInteger(command.affinity_ttl_ms) || command.affinity_ttl_ms <= 0)
+  ) {
+    throw new PoolStateMachineError(
+      "invalid_affinity_ttl",
+      "affinity_ttl_ms must be a positive safe integer",
+    );
+  }
+  if (
+    command.affinity_ttl_ms !== undefined &&
+    nowMs > Number.MAX_SAFE_INTEGER - command.affinity_ttl_ms
+  ) {
+    throw new PoolStateMachineError(
+      "invalid_affinity_ttl",
+      "Affinity expiry exceeds safe integer range",
+    );
   }
 
   const existingLease = state.leases[command.request_id];
@@ -304,6 +371,12 @@ function reserve(
     const preferred = candidates.find(
       (account) => account.account_id === command.preferred_account_id,
     );
+    if (preferred !== undefined) candidates = [preferred];
+  } else if (command.affinity_key !== undefined) {
+    const affinity = state.affinities[command.affinity_key];
+    const preferred = affinity === undefined
+      ? undefined
+      : candidates.find((account) => account.account_id === affinity.account_id);
     if (preferred !== undefined) candidates = [preferred];
   }
 
@@ -337,8 +410,25 @@ function reserve(
     created_at_ms: nowMs,
     updated_at_ms: nowMs,
   };
+  let affinities = state.affinities;
+  if (command.affinity_key !== undefined && command.affinity_ttl_ms !== undefined) {
+    const existingAffinity = state.affinities[command.affinity_key];
+    const affinity: PoolAffinityState = {
+      schema_version: POOL_SCHEMA_VERSION,
+      affinity_key: command.affinity_key,
+      account_id: account.account_id,
+      expires_at_ms: nowMs + command.affinity_ttl_ms,
+      created_at_ms: existingAffinity?.created_at_ms ?? nowMs,
+      updated_at_ms: nowMs,
+    };
+    affinities = { ...state.affinities, [affinity.affinity_key]: affinity };
+  }
   return {
-    state: { ...state, leases: { ...state.leases, [lease.request_id]: lease } },
+    state: {
+      ...state,
+      leases: { ...state.leases, [lease.request_id]: lease },
+      affinities,
+    },
     idempotent: false,
     lease,
   };
@@ -467,11 +557,23 @@ function recordFailure(
     state: {
       ...state,
       accounts: { ...state.accounts, [account.account_id]: updatedAccount },
+      affinities: withoutAccountAffinities(state.affinities, account.account_id),
       failure_events: { ...state.failure_events, [command.event_id]: command.account_id },
     },
     idempotent: false,
     lease: null,
   };
+}
+
+function withoutAccountAffinities(
+  affinities: Record<string, PoolAffinityState>,
+  accountId: string,
+): Record<string, PoolAffinityState> {
+  const matches = Object.entries(affinities).filter(([, affinity]) => affinity.account_id === accountId);
+  if (matches.length === 0) return affinities;
+  const next = { ...affinities };
+  for (const [affinityKey] of matches) delete next[affinityKey];
+  return next;
 }
 
 export function activeLeaseCounts(state: PoolMachineState): Record<string, number> {

@@ -12,6 +12,7 @@ import {
   shouldMarkAdminUIRequest,
   shouldMarkUserUIRequest,
 } from './adminUIRequest'
+import { requestAdminStepUp } from './adminStepUpRecovery'
 import { refreshAuthTokens } from './tokenRefresh'
 import { getAPIBaseURL } from './url'
 export { buildApiUrl, buildGatewayUrl } from './url'
@@ -107,7 +108,10 @@ apiClient.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
+    const originalRequest = error.config as InternalAxiosRequestConfig & {
+      _retry?: boolean
+      _stepUpRetry?: boolean
+    }
 
     // Handle common errors
     if (error.response) {
@@ -116,6 +120,15 @@ apiClient.interceptors.response.use(
 
       // Validate `data` shape to avoid HTML error pages breaking our error handling.
       const apiData = (typeof data === 'object' && data !== null ? data : {}) as Record<string, any>
+      const nestedError = (
+        typeof apiData.error === 'object' && apiData.error !== null && !Array.isArray(apiData.error)
+          ? apiData.error
+          : {}
+      ) as Record<string, any>
+      const semanticCode = apiData.code ?? nestedError.code
+      const semanticReason = apiData.reason ?? nestedError.reason
+      const semanticMessage =
+        apiData.message || apiData.detail || nestedError.message || error.message
 
       // Ops monitoring disabled: treat as feature-flagged 404, and proactively redirect away
       // from ops pages to avoid broken UI states.
@@ -158,6 +171,26 @@ apiClient.interceptors.response.use(
           message: apiData.message || error.message,
           metadata: apiData.metadata,
         })
+      }
+
+      if (
+        status === 403 &&
+        semanticCode === 'STEP_UP_REQUIRED' &&
+        !originalRequest._stepUpRetry &&
+        isUnsafeAdminRequest(originalRequest)
+      ) {
+        originalRequest._stepUpRetry = true
+        const stepUpResult = await requestAdminStepUp()
+        if (stepUpResult === true) {
+          return apiClient(originalRequest)
+        }
+        if (stepUpResult === false) {
+          return Promise.reject({
+            status,
+            code: 'STEP_UP_CANCELLED',
+            message: 'Step-up verification cancelled.',
+          })
+        }
       }
 
       // 401: Try to refresh the token if we have a refresh token
@@ -246,11 +279,11 @@ apiClient.interceptors.response.use(
       // Return structured error
       return Promise.reject({
         status,
-        code: apiData.code,
-        reason: apiData.reason,
+        code: semanticCode,
+        reason: semanticReason,
         error: apiData.error,
-        message: apiData.message || apiData.detail || error.message,
-        metadata: apiData.metadata,
+        message: semanticMessage,
+        metadata: apiData.metadata ?? nestedError.metadata,
       })
     }
 
@@ -261,5 +294,13 @@ apiClient.interceptors.response.use(
     })
   }
 )
+
+function isUnsafeAdminRequest(
+  request: Pick<InternalAxiosRequestConfig, 'method' | 'url'>,
+): boolean {
+  const method = String(request.method || 'get').toLowerCase()
+  return !['get', 'head', 'options'].includes(method) &&
+    shouldMarkAdminUIRequest(String(request.url || ''), '/')
+}
 
 export default apiClient

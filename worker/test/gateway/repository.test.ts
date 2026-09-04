@@ -74,6 +74,61 @@ describe('gateway repository embeddings routing', () => {
     ).rejects.toMatchObject({ status: 404, code: 'model_not_found' })
     raw.close()
   })
+
+  it('keeps unknown accounts schedulable while excluding unhealthy accounts from every route seam', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    raw.exec(`
+      INSERT INTO accounts (
+        id, platform, name, credential_ref, enabled, max_concurrency,
+        created_at_ms, updated_at_ms, protocol, base_url, auth_scheme, config_version,
+        health_status
+      ) VALUES (
+        'account-2', 'openai', 'unknown-health', 'secret-2', 1, 4,
+        1, 1, 'openai', 'https://upstream-two.example/v1', 'bearer', 1,
+        'unknown'
+      );
+      INSERT INTO account_secrets (
+        id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
+      ) VALUES ('secret-2', 'account-2', 1, 'nonce-2', 'ciphertext-2', 1, 1);
+      INSERT INTO account_groups (
+        account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+      ) VALUES ('account-2', 'group-1', 1, 1, 1, 1);
+      INSERT INTO account_models (
+        account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
+      ) VALUES ('account-2', 'model-1', 0, 0, 1, 1, 1);
+      UPDATE accounts SET health_status = 'unhealthy' WHERE id = 'account-1';
+    `)
+    const testEnv = { DB: d1 } as Env
+
+    await expect(listModels(testEnv, 'group-1')).resolves.toHaveLength(1)
+    const route = await resolveGatewayRoute(
+      testEnv,
+      'group-1',
+      'embed-public',
+      'embeddings',
+      'user-1',
+    )
+    expect(route.candidates.map((candidate) => candidate.account_id)).toEqual(['account-2'])
+    await expect(
+      getAccountCredential(testEnv, 'group-1', 'model-1', 'embeddings', 'account-1'),
+    ).rejects.toMatchObject({ status: 503, code: 'credential_unavailable' })
+    await expect(
+      getAccountCredential(testEnv, 'group-1', 'model-1', 'embeddings', 'account-2'),
+    ).resolves.toMatchObject({ account_id: 'account-2' })
+
+    raw.prepare("UPDATE accounts SET health_status = 'unhealthy' WHERE id = ?").run('account-2')
+    await expect(listModels(testEnv, 'group-1')).resolves.toEqual([])
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-1',
+      'embed-public',
+      'embeddings',
+      'user-1',
+    )).rejects.toMatchObject({ status: 503, code: 'no_upstream_accounts' })
+    raw.close()
+  })
 })
 
 describe('gateway repository provider routing', () => {

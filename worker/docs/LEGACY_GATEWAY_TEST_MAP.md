@@ -57,7 +57,7 @@ Status vocabulary:
 | Same: complex Claude tools/thinking and cross-platform Claude↔Gemini routing | Pending | Pure codecs cover core tools, but there is no full deployed-binding cross-provider test yet |
 | `openai_embeddings_test.go`: upstream URL, batch input pass-through, public model restoration and input-only usage | Retain | `test/gateway/handler.test.ts` — embeddings success/billing contract |
 | Same: invalid/streaming embedding input is rejected before billing/capacity | Retain | `test/gateway/legacy-gateway-routes.test.ts` |
-| Same: embeddings-specific access-state/non-access failover distinction | Replace | Unified Pool Durable Object failover supersedes Go account error types; generic failover is tested, but an embeddings-specific retry case remains Pending |
+| Same: embeddings-specific access-state/non-access failover distinction | Replace | `test/gateway/handler.test.ts` proves structured access-state, account-capacity and provider-transient failures switch accounts, while request/permission/model failures do not; every attempt has one Pool lease while billing and API-key monetary reservation/settlement remain request-scoped and exactly once |
 | Gemini `embedContent` conversion and native result shape | Retain | `test/gateway/handler.test.ts` — Gemini embedding contract |
 
 ## Multiplatform scheduling suites
@@ -71,7 +71,7 @@ The following classifications apply test-by-test by behavioral family in
 | No accounts, all excluded and no model support return typed capacity failures | Replace | Worker repository/Pool and sanitized handler error contracts; provider-specific cases remain Pending |
 | Priority, weight, least-recently-used/load-aware selection and exclusion on retry | Replace | Pool Durable Object selection tests; no Go in-memory scheduler is retained |
 | Platform forcing and composite alias ownership | Replace | Explicit `(group, model, endpoint)` D1 routes and account-model capabilities; native provider-adapter routing tests must remain green |
-| Sticky session hit/clear/model mismatch/in-group rules | Pending | Pool admission currently owns concurrency/failover, but the legacy session-affinity contract has not been fully reproduced |
+| Sticky session hit/clear/model mismatch/in-group rules | Replace | `test/state/pool-state-machine.test.ts`, `test/e2e/pool-affinity.e2e.ts`, `test/gateway/handler.test.ts`, and repository routing fixtures prove route-scoped Pool affinity hit, TTL refresh, failed/disabled/removed-account clearing and fallback rebinding. Only explicit sanitized session headers or `prompt_cache_key` participate; their API-key/user/group/model/endpoint-scoped HMAC is persisted, never raw prompts, identifiers, or credentials. Group/model changes select a distinct canonical Pool namespace and digest, so a mismatched binding cannot hit. Legacy content-derived fallback and sticky waiting are intentionally not retained. |
 | Gemini OAuth preference over API key, forced platform fallback and OAuth model snapshots | Pending | Provider credential adapters are being migrated separately; API-key-only behavior must not be counted as OAuth coverage |
 | Reusing context group / lite fetch / fallback-cycle resolution | Remove | Gin request-context and repository-fetch optimizations are process-specific. Worker performs one D1 route projection and has no equivalent mutable context cache |
 | Mixed-scheduling feature flags tied to Go account types | Replace | D1 account capabilities plus Pool state replace Go type switches; exact mixed-provider preference coverage is still Pending |
@@ -128,8 +128,9 @@ The following classifications apply test-by-test by behavioral family in
    arguments in both directions.
 3. Add native Anthropic→Responses SSE conversion (including signed thinking,
    images and cache-control accounting).
-4. Add embeddings-specific retry/failover and production-binding E2E.
+4. Add production-binding E2E for the remaining embeddings providers and error classes.
 5. Add deployed Worker E2E for complex Claude tools and both cross-provider
    Claude↔Gemini paths.
-6. Implement and test Worker-native session affinity if it remains a product
-   requirement; current Pool tests do not prove legacy sticky behavior.
+6. Extend Worker-native session affinity only where a protocol has a stable,
+   explicit conversation signal; do not restore prompt-content hashing or
+   process-local sticky waiting.

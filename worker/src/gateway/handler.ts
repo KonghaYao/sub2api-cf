@@ -2,7 +2,7 @@ import type { Context } from 'hono'
 import type { Env, UsageSettledPayload } from '../env'
 import { bootstrapGateway } from './bootstrap'
 import { codexModelsResponse } from './codex-models'
-import { decryptCredential } from './crypto'
+import { apiKeyDigest, decryptCredential } from './crypto'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from './errors'
 import { createUsageEvent } from './queue'
 import {
@@ -966,6 +966,14 @@ async function dispatchGateway(
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint
     const provider = providerForCandidates(route.candidates)
+    const affinityKey = await gatewaySessionAffinityKey(
+      context.req.raw.headers,
+      parsed.body,
+      context.env,
+      principal,
+      model.model_id,
+      upstreamEndpoint,
+    )
     const providerDispatch = prepared.resolveUpstream(model, upstreamEndpoint, provider)
     const upstreamBody = providerDispatch.body
     const pricedReservationMicros = reservationForRequest(
@@ -1011,13 +1019,14 @@ async function dispatchGateway(
       context.req.raw.signal,
       providerDispatch.operation,
       model.upstream_name,
+      affinityKey,
     ).catch(async (error) => {
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
     })
 
     if (!acquired.response.ok) {
-      if (isRetryableStatus(acquired.response.status)) {
+      if (acquired.retryableFailure) {
         await bestEffort(() =>
           recordPoolFailure(
             pool,
@@ -1152,6 +1161,7 @@ interface AcquiredUpstream {
   response: Response
   accountId: string
   leaseId: string
+  retryableFailure: boolean
 }
 
 type UpstreamOperation = ProviderOperation
@@ -1169,14 +1179,17 @@ async function acquireUpstream(
   clientSignal: AbortSignal,
   operation: UpstreamOperation = endpoint,
   upstreamModel?: string,
+  affinityKey?: string,
 ): Promise<AcquiredUpstream> {
   let lastError: GatewayError | null = null
-  const attempts = Math.min(4, candidateCount + 1)
+  const attempts = endpoint === 'embeddings'
+    ? Math.min(4, candidateCount)
+    : Math.min(4, candidateCount + 1)
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const leaseId = `${requestId}:${attempt}`
     let accountId: string | null = null
     try {
-      accountId = await reservePoolAccount(pool, leaseId)
+      accountId = await reservePoolAccount(pool, leaseId, affinityKey)
       const account = await getAccountCredential(env, groupId, modelId, endpoint, accountId)
       if (!env.CREDENTIALS_MASTER_KEY) {
         throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
@@ -1205,17 +1218,26 @@ async function acquireUpstream(
         await bestEffort(async () => response.body?.cancel())
         throw new GatewayError(502, 'upstream_redirect_rejected', 'Upstream redirect was rejected', 'server_error')
       }
-      if (!response.ok && isRetryableStatus(response.status) && attempt + 1 < attempts) {
+      const retryableFailure = !response.ok && (
+        endpoint === 'embeddings'
+          ? await isRetryableEmbeddingsResponse(response)
+          : isRetryableStatus(response.status)
+      )
+      if (retryableFailure && attempt + 1 < attempts) {
         lastError = mapUpstreamStatus(response)
         await bestEffort(async () => response.body?.cancel())
         await bestEffort(() => recordPoolFailure(pool, accountId!, `${requestId}:failure:${attempt}`, FAILURE_COOLDOWN_MS))
         await bestEffort(() => releasePoolLease(pool, leaseId))
         continue
       }
-      return { response, accountId, leaseId }
+      return { response, accountId, leaseId, retryableFailure }
     } catch (error) {
       const currentError = asGatewayError(error)
       if (currentError.code === 'no_capacity' && lastError !== null) break
+      if (!isRetryableAttemptError(currentError, endpoint)) {
+        await bestEffort(() => releasePoolLease(pool, leaseId))
+        throw currentError
+      }
       lastError = currentError
       if (accountId !== null) {
         if (currentError.code === 'credential_unavailable') {
@@ -2330,6 +2352,209 @@ function mapUpstreamStatus(response: Response): GatewayError {
 
 function isRetryableStatus(status: number): boolean {
   return status === 401 || status === 403 || status === 429 || status >= 500
+}
+
+const EMBEDDINGS_ERROR_CLASSIFICATION_BYTES = 64 * 1024
+const EMBEDDINGS_ERROR_CLASSIFICATION_TIMEOUT_MS = 250
+const SESSION_AFFINITY_HEADERS = [
+  'session-id',
+  'session_id',
+  'conversation_id',
+  'x-session-affinity',
+  'x-session-id',
+  'x-opencode-session',
+  'x-conversation-id',
+  'x-claude-code-session-id',
+] as const
+
+async function isRetryableEmbeddingsResponse(response: Response): Promise<boolean> {
+  const descriptor = await embeddingsErrorDescriptor(response)
+  if (isEmbeddingsAccessStateCode(descriptor.code)) return true
+  if (isEmbeddingsCapacityCode(descriptor.code) || isEmbeddingsCapacityMessage(descriptor.message)) {
+    return true
+  }
+  // These statuses describe the selected credential/account rather than the
+  // embedding document. Another configured account may still serve it.
+  if (response.status === 401 || response.status === 402) return true
+  if (isDeterministicEmbeddingsFailure(descriptor)) return false
+  return response.status === 408 ||
+    response.status === 425 ||
+    response.status === 429 ||
+    response.status === 529 ||
+    response.status >= 500
+}
+
+function isRetryableAttemptError(error: GatewayError, endpoint: GatewayEndpoint): boolean {
+  if (error.code === 'no_capacity') return true
+  if (endpoint !== 'embeddings') return true
+  return error.code === 'credential_unavailable' ||
+    error.code === 'upstream_connection_error' ||
+    error.code === 'upstream_timeout' ||
+    error.code === 'upstream_redirect_rejected'
+}
+
+async function embeddingsErrorDescriptor(
+  response: Response,
+): Promise<{ code: string; type: string; message: string }> {
+  let text = ''
+  try {
+    const body = response.clone().body
+    if (body !== null) {
+      const reader = body.getReader()
+      const decoder = new TextDecoder()
+      let bytesRead = 0
+      let finished = false
+      try {
+        while (bytesRead < EMBEDDINGS_ERROR_CLASSIFICATION_BYTES) {
+          const result = await readEmbeddingsErrorChunk(reader)
+          if (result === null) break
+          const { done, value } = result
+          if (done) {
+            finished = true
+            text += decoder.decode()
+            break
+          }
+          const remaining = EMBEDDINGS_ERROR_CLASSIFICATION_BYTES - bytesRead
+          const chunk = value.byteLength <= remaining ? value : value.slice(0, remaining)
+          bytesRead += chunk.byteLength
+          text += decoder.decode(chunk, { stream: bytesRead < EMBEDDINGS_ERROR_CLASSIFICATION_BYTES })
+          if (chunk.byteLength !== value.byteLength) break
+        }
+      } finally {
+        // Cancelling one branch of a cloned/tee'd body can wait for the other
+        // branch. Do not let an oversized diagnostic block the actual response.
+        if (!finished) void reader.cancel().catch(() => undefined)
+      }
+    }
+  } catch {
+    // Status-only classification remains safe if a provider error body cannot be read.
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown
+    const root = objectValue(parsed)
+    const error = objectValue(root?.error)
+    const responseError = objectValue(objectValue(root?.response)?.error)
+    const detail = objectValue(root?.detail)
+    return {
+      code: firstNormalizedString(error?.code, responseError?.code, detail?.code, root?.code),
+      type: firstNormalizedString(error?.type, responseError?.type, detail?.type, root?.type),
+      message: firstNormalizedString(error?.message, responseError?.message, detail?.message, root?.message),
+    }
+  } catch {
+    return { code: '', type: '', message: text.trim().toLowerCase() }
+  }
+}
+
+async function readEmbeddingsErrorChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadableStreamReadResult<Uint8Array> | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(resolve, EMBEDDINGS_ERROR_CLASSIFICATION_TIMEOUT_MS, null)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function firstNormalizedString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value.trim().toLowerCase()
+  }
+  return ''
+}
+
+function isEmbeddingsAccessStateCode(code: string): boolean {
+  if (code === 'deactivated_workspace') return true
+  return /^(workspace|account|organization|org)_(deactivated|disabled|suspended)$/.test(code) ||
+    /^(deactivated|disabled|suspended)_(workspace|account|organization|org)$/.test(code)
+}
+
+function isEmbeddingsCapacityCode(code: string): boolean {
+  return code === 'server_is_overloaded' ||
+    code === 'slow_down' ||
+    code === 'rate_limit_exceeded' ||
+    code === 'insufficient_quota' ||
+    code === 'billing_hard_limit_reached'
+}
+
+function isEmbeddingsCapacityMessage(message: string): boolean {
+  return message.includes('server is overloaded') ||
+    message.includes('servers are overloaded') ||
+    message.includes('servers are currently overloaded') ||
+    message.includes('selected model is at capacity') ||
+    message.includes('an error occurred while processing your request')
+}
+
+function isDeterministicEmbeddingsFailure(
+  descriptor: { code: string; type: string; message: string },
+): boolean {
+  if (
+    descriptor.type === 'invalid_request_error' ||
+    descriptor.type === 'permission_error' ||
+    descriptor.type === 'content_policy_error'
+  ) return true
+  return descriptor.code === 'cyber_policy' ||
+    descriptor.code === 'content_policy_violation' ||
+    descriptor.code === 'context_length_exceeded' ||
+    descriptor.code === 'context_too_large' ||
+    descriptor.code === 'model_not_found' ||
+    descriptor.code === 'permission_denied' ||
+    descriptor.code === 'insufficient_permissions' ||
+    descriptor.code.startsWith('invalid_') ||
+    descriptor.code.startsWith('unsupported_')
+}
+
+async function gatewaySessionAffinityKey(
+  headers: Headers,
+  body: Record<string, unknown>,
+  env: Env,
+  principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>,
+  modelId: string,
+  endpoint: GatewayEndpoint,
+): Promise<string | undefined> {
+  const signal = sessionAffinitySignal(headers, body)
+  if (signal === undefined || !env.API_KEY_PEPPER) return undefined
+  return apiKeyDigest(
+    [
+      'gateway-session-affinity:v1',
+      principal.user_id,
+      principal.api_key_id,
+      principal.group_id,
+      modelId,
+      endpoint,
+      signal,
+    ].join('\0'),
+    env.API_KEY_PEPPER,
+  )
+}
+
+function sessionAffinitySignal(
+  headers: Headers,
+  body: Record<string, unknown>,
+): string | undefined {
+  for (const header of SESSION_AFFINITY_HEADERS) {
+    const value = safeSessionAffinitySignal(headers.get(header))
+    if (value !== undefined) return value
+  }
+  return safeSessionAffinitySignal(
+    typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : null,
+  )
+}
+
+function safeSessionAffinitySignal(value: string | null): string | undefined {
+  if (value === null) return undefined
+  const trimmed = value.trim()
+  if (
+    trimmed === '' ||
+    [...trimmed].length > 255 ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) return undefined
+  return trimmed
 }
 
 function safeRetryAfter(value: string | null): string | undefined {

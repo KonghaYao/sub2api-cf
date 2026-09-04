@@ -31,6 +31,7 @@ describe('admin settings Cloudflare Worker contract', () => {
           turnstile_enabled: true,
           turnstile_site_key: 'site-key'
         },
+        security: { step_up_enabled: true },
         secrets: { turnstile_secret_key_configured: true },
         updated_at_ms: 1_788_451_200_000
       },
@@ -44,6 +45,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       email_verify_enabled: false,
       turnstile_enabled: true,
       turnstile_site_key: 'site-key',
+      step_up_enabled: true,
       turnstile_secret_key_configured: true,
       cloudflare_worker_contract: true,
       control_version: 7
@@ -62,6 +64,7 @@ describe('admin settings Cloudflare Worker contract', () => {
           turnstile_enabled: false,
           turnstile_site_key: ''
         },
+        security: { step_up_enabled: false },
         secrets: { turnstile_secret_key_configured: false },
         updated_at_ms: 1
       },
@@ -78,6 +81,7 @@ describe('admin settings Cloudflare Worker contract', () => {
           turnstile_enabled: true,
           turnstile_site_key: 'new-site-key'
         },
+        security: { step_up_enabled: true },
         secrets: { turnstile_secret_key_configured: true },
         updated_at_ms: 2
       },
@@ -93,6 +97,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       turnstile_enabled: true,
       turnstile_site_key: 'new-site-key',
       turnstile_secret_key: 'new-secret',
+      step_up_enabled: true,
       payment_enabled: true
     })
 
@@ -104,6 +109,7 @@ describe('admin settings Cloudflare Worker contract', () => {
         turnstile_enabled: true,
         turnstile_site_key: 'new-site-key'
       },
+      security: { step_up_enabled: true },
       secrets: { turnstile_secret_key: 'new-secret' }
     }, {
       headers: {

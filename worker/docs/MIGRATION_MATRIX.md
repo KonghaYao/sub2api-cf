@@ -30,16 +30,16 @@ Status meanings:
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
 | OpenAI model list | D1-backed group/model catalog at `/v1/models` and `/models` | Partial | Worker handler tests and root alias; add deployed-binding contract |
-| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Worker gateway fixtures cover terminal-without-EOF for Chat/Responses plus native Anthropic/Gemini streams, exact-usage disconnect draining, 10s idle/30s total drain bounds, and single settlement/release; deployed E2E and remaining legacy variants remain |
+| Chat Completions | `/v1/chat/completions` and `/chat/completions`, streaming and non-streaming | Partial | Worker gateway fixtures cover terminal-without-EOF for Chat/Responses plus native Anthropic/Gemini streams, exact-usage disconnect draining, 10s idle/30s total drain bounds, and single settlement/release. The isolated Workerd binding E2E proves authenticated non-streaming routing through D1, admission/billing/pool Durable Objects, Queue consumption and exact usage projection; deployed E2E and remaining legacy variants remain |
 | Responses | `/v1/responses`, `/responses`, compact and input-token subroutes | Partial | Existing core tests; add subroute fixtures |
-| Embeddings | OpenAI-compatible request/response and token billing | Partial | Worker protocol/handler fixtures pass; port the remaining original embedding handler/service fixtures |
+| Embeddings | OpenAI-compatible request/response and token billing | Partial | Worker handler fixtures cover URL/body/model restoration, input-only exact billing, access/account-capacity/provider-transient failover, deterministic request/permission/model no-retry, all-account exhaustion and exactly-once Pool/reservation cleanup; add deployed cross-provider E2E and remaining original variants |
 | Anthropic Messages | `/v1/messages`, token counting, Anthropic SSE/errors | Partial | Native Anthropic URL/auth/body, synchronous usage, SSE terminal/usage/cancellation, count-tokens and retry fixtures pass; port the remaining `apicompat` variants and add deployed E2E |
 | Gemini generateContent | `/v1beta/models/*`, streaming and Gemini error translation | Partial | Native Gemini generate/stream/countTokens/embedContent URL/auth/body, usage and terminal fixtures pass; port remaining multiplatform variants and add deployed E2E |
 | Codex backend API | `/backend-api/codex/*`, manifest, Responses transport | Partial | Codex Responses now uses the provider planner with server-owned Bearer/account/originator headers and `store:false`; add authenticated deployed E2E and provider lifecycle coverage |
 | Protocol conversion | Strict allow-listed Responses-to-Chat fallback plus Anthropic/Gemini Responses adapters | Partial | Responses request, synchronous response, SSE lifecycle and integrated Chat-only account fixtures pass; reverse Chat-to-Responses routing and remaining legacy `apicompat` fixtures remain |
 | Model aliases/capabilities | Group-visible names, upstream override, endpoint and account capabilities | Partial | Repository selection and model visibility tests |
-| Multi-provider accounts | OpenAI-compatible, Anthropic, Gemini and Codex credential/config adapters | Partial | Migration 0023, D1-backed admin CRUD, versioned AES-GCM rotation and strict contracts pass; gateway repository selects same-platform accounts and handler fetches through provider plans. Native Anthropic/Gemini and Codex Responses fixtures pass, unsupported cross-protocol operations fail before fetch/state mutation, and the Worker frontend supports provider-specific create/edit/health contracts. Deployed E2E and scheduled lifecycle probes remain |
-| Account scheduling | Weighted priority, concurrency leases, cooldown, sticky affinity, failover | Partial | Durable Object state-machine plus integration tests |
+| Multi-provider accounts | OpenAI-compatible, Anthropic, Gemini and Codex credential/config adapters | Partial | Migrations 0023/0026, D1-backed admin CRUD, versioned AES-GCM rotation and strict contracts pass; gateway repository selects same-platform accounts and handler fetches through provider plans. Native Anthropic/Gemini and Codex Responses fixtures pass, unsupported cross-protocol operations fail before fetch/state mutation, and the Worker frontend supports provider-specific create/edit/health contracts. Credential-free Cron/Queue jobs now run every provider's bounded probe adapter with CAS stale-result rejection; deployed E2E remains |
+| Account scheduling | Weighted priority, concurrency leases, cooldown, sticky affinity, failover | Partial | Pool state-machine, handler and isolated Workerd binding tests cover renewable/idempotent leases, cooldown, bounded failover, and one-hour route-scoped HMAC affinity with failure/config invalidation and fallback rebinding. D1 excludes `unhealthy` accounts while retaining `unknown`; remaining mixed-provider preference variants and deployed E2E keep this Partial |
 | User ingress limits on API-key requests | User-wide concurrency and user-wide RPM hard ceiling across every key/group | Done | These are user limits, not per-key RPM or concurrency fields. Migration 0022, user control/profile contracts and a user-partitioned SQLite Durable Object implement the original limits across all of a user's keys, using server-time fixed-minute windows, renewable leases, expiry reclaim, replay/release idempotency and fail-closed admission; state and every upstream gateway path have race/retry/disconnect contract tests |
 | Group-scoped RPM policy | Group RPM plus per-(user, group) override, while preserving the user hard ceiling | Done | Migration 0022, group CRUD, bounded set-replacement override control APIs, frontend contracts and atomic admission enforcement pass group/override/user-ceiling, replay and isolation tests |
 | API-key monetary limits | Per-key total quota plus 5h/1d/7d amount windows and reset lifecycle | Done | Migrations 0024/0025, Admin/User CAS contracts and the Keys UI use exact integer micros with independent total/window reset epochs. A user-sharded SQLite Durable Object enforces anti-oversell before Pool/fetch, tracks unlimited keys, renews long streams and rejects stale reset generations. Main billing, per-key settlement and monotonic D1 projection are persisted as three independently replayable recovery stages; race, reset, expiry, disconnect and migration fixtures pass locally. |
@@ -99,21 +99,21 @@ Commercial storage rules:
 | Capability | Worker design | Status | Acceptance evidence |
 | --- | --- | --- | --- |
 | Break-glass admin auth | Constant-time Bearer secret for bootstrap and recovery only | Done | `test/control/admin-auth.test.ts` |
-| Admin sessions/RBAC | D1 sessions plus granular roles, immutable permission grants, assignment audit, deny-by-default route authorization and last-super-admin protection | Partial | RBAC lifecycle, CAS/idempotency, immutable built-ins, route permission categories and recovery tests pass; normal login, step-up and explicit CSRF/origin enforcement remain |
-| User management | List/create/detail/update/disable, password reset, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Admin-created login-capable users, password reset with session revocation, concurrency/RPM fields and the frontend UUID adapter pass route/state/SQLite and concurrency tests; add deployed-binding E2E and normal admin authentication |
-| API-key management | User key create/list/update/revoke, persistent idempotency/CAS, HMAC storage and one-time secret display | Partial | Admin and user self-service routes cover hashing, one-time secrets, group authorization, exact monetary limits, independent usage resets, optimistic concurrency and hot-usage lost-update protection; the Worker frontend exposes the retained lifecycle. Add deployed-binding E2E and normal admin authentication. |
-| Groups/models/prices | Core group/model CRUD, CAS, catalog visibility, integer multiplier and append-only active prices exist; duplicate, atomic batch sort and advanced pricing remain | Partial | Worker control/gateway unit tests plus manual local migration and trigger checks; add binding E2E |
-| Accounts/channels | OpenAI, Anthropic, Gemini and Codex account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual provider health probes exist; channels, quota and provider lifecycle remain | Partial | Real SQLite/D1 provider CRUD/migration/repository tests, request/health/handler-native provider fixtures and frontend provider create/edit/health contracts pass; add deployed-binding E2E and scheduled lifecycle probes |
+| Admin sessions/RBAC | D1 sessions plus granular roles, immutable permission grants, assignment audit, deny-by-default route authorization and last-super-admin protection | Partial | Normal user-access and independent break-glass recovery sessions, RBAC lifecycle, CAS/idempotency, immutable built-ins, route permission categories and last-super-admin protection pass. Migration 0027 adds an opt-in, D1-authoritative, session-bound TOTP step-up gate for unsafe methods plus exact same-origin enforcement; recovery sessions deliberately remain emergency elevation but still pass the origin boundary. Deployed browser/admin E2E remains |
+| User management | List/create/detail/update/disable, password reset, persistent idempotency, metadata CAS and DO-versioned balance mutation | Partial | Admin-created login-capable users, password reset with session revocation, concurrency/RPM fields and the frontend UUID adapter pass route/state/SQLite and concurrency tests. The isolated Workerd binding E2E proves password registration/login plus recovery-admin balance mutation through real D1/AuthRateLimitDO/UserStateDO/Queue bindings; production E2E and normal admin authentication remain |
+| API-key management | User key create/list/update/revoke, persistent idempotency/CAS, HMAC storage and one-time secret display | Partial | Admin and user self-service routes cover hashing, one-time secrets, group authorization, exact monetary limits, independent usage resets, optimistic concurrency and hot-usage lost-update protection; the Worker frontend exposes the retained lifecycle. The isolated Workerd binding E2E proves one-time key creation, digest-only D1 persistence and exact monetary projection; production E2E and normal admin authentication remain. |
+| Groups/models/prices | Core group/model CRUD, CAS, catalog visibility, integer multiplier and append-only active prices exist; duplicate, atomic batch sort and advanced pricing remain | Partial | Worker control/gateway unit tests, manual local trigger checks, and an isolated Workerd E2E that bootstraps a model/price and publishes its group through the admin API pass; advanced catalog behavior and production smoke remain |
+| Accounts/channels | OpenAI, Anthropic, Gemini and Codex account CRUD, AES-GCM credential rotation, group/model links, revisioned Pool sync and bounded manual/automatic provider health probes exist; provider quota contracts remain | Partial | Real SQLite/D1 provider CRUD/migration/repository tests, request/health/handler-native provider fixtures and frontend provider create/edit/health contracts pass. Migration 0026 adds paginated due scheduling, expiring leases, a bounded credential-free Queue outbox, exponential probe backoff, stale/duplicate suppression, routing-revision bumps and replayable Pool synchronization. The isolated Workerd E2E bootstraps an encrypted mock account and routes through a real PoolStateDO with a network-blocking outbound test service; production E2E remains |
 | Usage/finance | Request ledger, aggregates, reconciliation and corrective workflows | Partial | Owner-scoped user aggregates and subscription projections exist; admin reconciliation and corrective workflows remain |
-| Settings | Typed versioned settings, audit and KV invalidation | Done | Versioned read/write, optimistic concurrency, idempotency, secret redaction and KV invalidation tests |
+| Settings | Typed versioned settings, audit and KV invalidation | Done | Versioned read/write, optimistic concurrency, idempotency, secret redaction, D1-authoritative privileged-operation step-up and KV invalidation tests |
 | Unified audit trail | Read-only cross-domain D1 event stream with stable cursor and allowlisted detail | Partial | Settings, RBAC, auth and payment events share bounded list/detail routes behind `admin.audit.read`; frontend uses cursor pagination and exposes no destructive clear action. Request/error, retention and remaining domain sources remain |
 | Announcements/compliance | Editorial lifecycle, audit views and risk actions | Planned | RBAC and lifecycle tests |
 | Admin dashboard | Payment summaries exist; broader hourly/daily operational facts remain | Partial | Cross-currency payment dashboard, filters and UTC-series tests pass |
 | Request/error explorer | D1 metadata index, R2 payload/archive, redaction and retention | Planned | Search, authorization, redaction and expiry tests |
 | Alerts/silences/reports | Scheduled rules, HTTP/email/webhook delivery, retries and silences | Planned | Scheduler and delivery fixtures |
-| Channel monitor | Scheduled account/model tests and bounded failure actions | Planned | Due-job and state-transition tests |
-| Account lifecycle | Token refresh, quota sync, cooldown and reactivation | Planned | Provider adapter and alarm/Queue tests |
-| Maintenance jobs | Cursorized cleanup, aggregation, backfill and recovery | Partial | Settlement, subscription-state and payment-fulfillment recovery exist; add due-job/retention suites |
+| Channel monitor | Scheduled account/model tests and bounded failure actions | Partial | Cron pages due accounts into Queue; provider probes, timeout/HTTP failure classification, Pool removal/reactivation and terminal retry bounds pass on real SQLite/D1. Per-model synthetic inference probes remain |
+| Account lifecycle | Token refresh, quota sync, cooldown and reactivation | Partial | Migration 0026 and Cron/Queue tests cover encrypted credential re-read, all four provider health adapters, CAS generations, exponential cooldown, successful reactivation and monotonic Pool revisions. Token refresh is not applicable to the current API-key credential contract; quota synchronization remains intentionally unimplemented until a provider exposes a documented stable quota API |
+| Maintenance jobs | Cursorized cleanup, aggregation, backfill and recovery | Partial | Settlement, subscription-state, payment-fulfillment and leased account-health outbox recovery exist; add retention suites |
 | Prompt audit | Policy events and protected payload storage | Planned | Redaction and retention tests |
 | Backup/restore | Export versioned D1 records and R2 manifests; verified restore workflow | Planned | Round-trip restore test |
 
@@ -142,6 +142,13 @@ workflows so operators are never offered an action that Workers cannot perform.
 
 The original repository remains the behavioral reference. Migration work must port or supersede the
 following suites rather than relying only on newly invented happy-path tests:
+
+The repeatable local binding gate is `pnpm run test:e2e:bindings` from
+`worker/`. It uses `wrangler.e2e.jsonc`, all D1 migrations and isolated
+Miniflare storage, and executes the D1, KV, R2, Queue producer/consumer,
+UserStateDO, AuthRateLimitDO, ApiKeyLimitDO and PoolStateDO bindings. It does
+not claim deployed-production coverage; a separate authenticated deployed smoke
+remains part of the Deployment acceptance gate.
 
 - Gateway routing: `backend/internal/server/routes/gateway_test.go` and
   `backend/internal/integration/e2e_gateway_test.go`.
@@ -176,20 +183,22 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
    non-Stripe providers. The order state machine and webhook verification are production
    implementations, not stubs.
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
-   request/error/stream conversion fixtures; failover, cooldown, request-size policy, and accounting
-   reconciliation. User concurrency, user/group RPM admission, and API-key total plus 5h/1d/7d
-   monetary windows are Worker-native and atomically enforced before Pool leases.
+   request/error/stream conversion fixtures; bounded failover, cooldown, route-scoped session affinity,
+   request-size policy, and accounting reconciliation are Worker-native. User concurrency, user/group
+   RPM admission, and API-key total plus 5h/1d/7d monetary windows are atomically enforced before
+   Pool leases. Remaining work is the long tail of original protocol variants and deployed
+   cross-provider E2E.
 3. **Identity completion**: email verification, password reset, and versioned notification-email
    preferences are implemented in the Worker; production still needs a verified Email Service
-   sender and deployed delivery E2E. Next are OAuth linking, TOTP step-up/recovery codes, passkeys,
-   and linked identities.
+   sender and deployed delivery E2E. TOTP and privileged-operation step-up are implemented; next are
+   OAuth linking, recovery codes, passkeys, and linked identities.
 4. **Media and realtime**: image/audio/video task APIs backed by Queue and R2, task polling and
    cancellation, followed by WebSocket realtime relay. Legacy provider-specific variants may be
    collapsed into one capability-based task contract.
 5. **Operations and governance**: granular admin RBAC and a bounded immutable audit reader exist;
    remaining work is broader audit sources, dashboard facts, request/error explorer, alerts and
-   silences, channel health jobs, reconciliation/corrections, DLQ replay, retention, and verified
-   D1/R2 export-and-restore.
+   silences, per-model synthetic channel probes, reconciliation/corrections, DLQ replay, retention,
+   and verified D1/R2 export-and-restore.
 6. **Secondary product features**: invitations, promotions, affiliate attribution/payouts,
    announcements, model plaza, platform quotas, search extensions, and prompt audit. These follow
    the core gateway and commercial path unless a production dependency promotes them earlier.

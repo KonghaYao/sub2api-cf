@@ -41,6 +41,7 @@ import {
 import { getAdminAuditEvent, listAdminAuditEvents } from './control/audit'
 import {
   recoverAdminSession,
+  requireAdminMutationSecurity,
   requireAdminSession,
   requireAdminToken,
 } from './control/admin-auth'
@@ -354,7 +355,12 @@ export function createApp() {
 
   app.post('/api/v1/admin/bootstrap', requireAdminToken, handleBootstrap)
   app.post('/api/v1/admin/session/recover', requireAdminToken, recoverAdminSession)
-  app.use('/api/v1/admin/*', requireAdminSession, requireAdminRoutePermission)
+  app.use(
+    '/api/v1/admin/*',
+    requireAdminSession,
+    requireAdminRoutePermission,
+    requireAdminMutationSecurity,
+  )
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
   app.get('/api/v1/admin/users', listAdminUsers)
