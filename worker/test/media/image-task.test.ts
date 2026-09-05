@@ -75,11 +75,13 @@ async function fixture() {
   const objects = new Map<string, StoredObject>()
   let outputPutCount = 0
   let failedOutputPut = Number.POSITIVE_INFINITY
+  let failedResultPut = false
   const putObject = async (key: string, value: string | ArrayBuffer | ArrayBufferView) => {
     if (key.includes('/outputs/')) {
       outputPutCount += 1
       if (outputPutCount === failedOutputPut) throw new Error('R2 write failed')
     }
+    if (key.endsWith('/result.json') && failedResultPut) throw new Error('R2 result write failed')
     const bytes = typeof value === 'string'
       ? new TextEncoder().encode(value)
       : value instanceof ArrayBuffer
@@ -138,6 +140,9 @@ async function fixture() {
     created: 1710000000,
     data: [{ b64_json: encodeBase64(imageBytes), revised_prompt: 'A quiet lighthouse' }],
   }))
+  const downloadFetch = vi.fn<typeof fetch>(async () => {
+    throw new Error('unexpected image download')
+  })
   const env = {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',
@@ -153,10 +158,12 @@ async function fixture() {
     ASSETS: {} as Fetcher,
     SYNC_IMAGE_BILLING: billing,
     SYNC_IMAGE_UPSTREAM_FETCH: upstreamFetch,
+    ASYNC_IMAGE_DOWNLOAD_FETCH: downloadFetch,
   } as unknown as Env
   return {
-    raw, env, objects, queued, upstreamFetch, reserve, settle, cancel, imageBytes,
+    raw, env, objects, queued, upstreamFetch, downloadFetch, reserve, settle, cancel, imageBytes,
     failOutputPutAt: (index: number) => { failedOutputPut = index },
+    failResultPut: () => { failedResultPut = true },
   }
 }
 
@@ -409,6 +416,204 @@ describe('ordinary asynchronous Images contract', () => {
     expect(content.headers.get('content-type')).toBe('image/png')
     expect(new Uint8Array(await content.arrayBuffer())).toEqual(test.imageBytes)
     expect([...test.objects.keys()].some((key) => key.endsWith('/input.bin'))).toBe(false)
+  })
+
+  it('offloads a mixed-case image data URL without making a download request', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      created: 1710000000,
+      data: [{
+        url: `DATA:image/jpeg;name="generated;image.png";BaSe64,${encodeBase64(test.imageBytes)}`,
+        revised_prompt: 'Stored data URL',
+      }],
+    }))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const completed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(completed.json()).resolves.toMatchObject({
+      status: 'completed',
+      result: {
+        data: [{
+          url: `/v1/images/tasks/${taskId}/content/0`,
+          revised_prompt: 'Stored data URL',
+        }],
+      },
+    })
+    expect(test.downloadFetch).not.toHaveBeenCalled()
+    expect([...test.objects.keys()].filter((key) => key.includes('/outputs/')))
+      .toEqual([`test/image-tasks/${taskId}/outputs/0.png`])
+  })
+
+  it('prefers trimmed b64_json over a URL source', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      data: [{
+        b64_json: `  ${encodeBase64(test.imageBytes)}  `,
+        url: 'https://127.0.0.1/must-not-be-used.png',
+      }],
+    }))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const completed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(completed.json()).resolves.toMatchObject({ status: 'completed' })
+    expect(test.downloadFetch).not.toHaveBeenCalled()
+  })
+
+  it('fails a provider data array containing a non-image item', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({ data: [null] }))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const failed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(failed.json()).resolves.toMatchObject({ status: 'failed', http_status: 502 })
+    expect([...test.objects.keys()].filter((key) => key.includes(taskId))).toEqual([])
+  })
+
+  it('downloads a public HTTPS image with redirects disabled and offloads it to R2', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      created: 1710000000,
+      data: [{ url: 'https://cdn.example.test/generated/lighthouse.png?token=opaque' }],
+    }))
+    test.downloadFetch.mockResolvedValueOnce(new Response(test.imageBytes, {
+      status: 206,
+      headers: { 'content-type': 'image/jpeg', 'content-length': String(test.imageBytes.byteLength) },
+    }))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const completed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(completed.json()).resolves.toMatchObject({
+      status: 'completed',
+      result: { data: [{ url: `/v1/images/tasks/${taskId}/content/0` }] },
+    })
+    expect(test.downloadFetch).toHaveBeenCalledTimes(1)
+    const [url, init] = test.downloadFetch.mock.calls[0]
+    expect(String(url)).toBe('https://cdn.example.test/generated/lighthouse.png?token=opaque')
+    expect(init).toMatchObject({ method: 'GET', redirect: 'manual' })
+    expect([...test.objects.keys()].filter((key) => key.includes('/outputs/')))
+      .toEqual([`test/image-tasks/${taskId}/outputs/0.png`])
+  })
+
+  it('rejects private remote image URLs before making a download request', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      data: [{ url: 'https://169.254.169.254/latest/meta-data/' }],
+    }))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const failed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(failed.json()).resolves.toMatchObject({
+      status: 'failed',
+      http_status: 502,
+      error: { code: 'IMAGE_TASK_OFFLOAD_FAILED' },
+    })
+    expect(test.downloadFetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['redirect response', (bytes: Uint8Array) => new Response(new Uint8Array(bytes).buffer, {
+      status: 302, headers: { location: 'https://127.0.0.1/private.png' },
+    })],
+    ['oversized Content-Length', (bytes: Uint8Array) => new Response(new Uint8Array(bytes).buffer, {
+      headers: { 'content-length': String(32 * 1024 * 1024 + 1) },
+    })],
+    ['spoofed image MIME', () => new Response('<html>not an image</html>', {
+      headers: { 'content-type': 'image/png' },
+    })],
+  ])('fails closed for a remote %s', async (_name, remoteResponse) => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      data: [{ url: 'https://cdn.example.test/generated/untrusted.png' }],
+    }))
+    test.downloadFetch.mockResolvedValueOnce(remoteResponse(test.imageBytes))
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const failed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(failed.json()).resolves.toMatchObject({
+      status: 'failed',
+      http_status: 502,
+      error: { code: 'IMAGE_TASK_OFFLOAD_FAILED' },
+    })
+    expect([...test.objects.keys()].filter((key) => key.includes(taskId))).toEqual([])
+  })
+
+  it('removes output rows and objects when writing result.json fails', async () => {
+    const test = await fixture()
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+    test.failResultPut()
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    expect(test.raw.prepare('SELECT count(*) AS count FROM image_task_outputs').get()).toEqual({ count: 0 })
+    expect([...test.objects.keys()].filter((key) => key.includes(taskId))).toEqual([])
+    const content = await app().request(`/v1/images/tasks/${taskId}/content/0`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    expect(content.status).toBe(404)
+  })
+
+  it('preserves a completed result when D1 commits but the completion acknowledgement is lost', async () => {
+    const test = await fixture()
+    const originalPrepare = test.env.DB.prepare.bind(test.env.DB)
+    vi.spyOn(test.env.DB, 'prepare').mockImplementation((query: string) => {
+      const statement = originalPrepare(query)
+      if (!query.includes("SET status='completed'")) return statement
+      const originalBind = statement.bind.bind(statement)
+      vi.spyOn(statement, 'bind').mockImplementation((...values: unknown[]) => {
+        const bound = originalBind(...values)
+        const originalRun = bound.run.bind(bound)
+        vi.spyOn(bound, 'run').mockImplementation(async () => {
+          await originalRun()
+          throw new Error('lost D1 acknowledgement')
+        })
+        return bound
+      })
+      return statement
+    })
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+
+    await consumeImageTaskExecute(test.queued[0], test.env)
+
+    const completed = await app().request(`/v1/images/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(completed.json()).resolves.toMatchObject({
+      status: 'completed',
+      result: { data: [{ url: `/v1/images/tasks/${taskId}/content/0` }] },
+    })
+    expect([...test.objects.keys()].filter((key) => key.includes('/outputs/'))).toHaveLength(1)
   })
 
   it('fails stale claimed work without regenerating it', async () => {

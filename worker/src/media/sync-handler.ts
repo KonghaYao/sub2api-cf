@@ -65,6 +65,9 @@ export interface SyncImageEnv extends Env {
   SYNC_IMAGE_MODERATOR?: SyncImageModerator
   SYNC_IMAGE_RENEW_AFTER_MS?: number
   SYNC_IMAGE_RESPONSES_MODEL?: string
+  ASYNC_IMAGE_DOWNLOAD_FETCH?: typeof fetch
+  ASYNC_IMAGE_DOWNLOAD_TIMEOUT_MS?: number
+  ASYNC_IMAGE_DOWNLOAD_HOSTS?: string
 }
 
 export interface SyncImageModerator {

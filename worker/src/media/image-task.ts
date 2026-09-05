@@ -10,10 +10,10 @@ import {
   type SyncImageEnv,
 } from './sync-handler'
 import type { SyncImageOperation } from './sync-domain'
+import { resolveImageAsset } from './image-asset'
 
 const TASK_TTL_MS = 24 * 60 * 60_000
 const STALE_RUNNING_MS = 30 * 60_000
-const MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 
 type Bindings = { Bindings: SyncImageEnv }
 
@@ -120,7 +120,8 @@ export async function getAsyncImageTaskContent(context: Context<Bindings>): Prom
   try {
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const taskId = taskIdParam(context)
-    await ownedTask(context.env, principal, taskId)
+    const task = await ownedTask(context.env, principal, taskId)
+    if (task.status !== 'completed') throw notFound()
     const imageIndex = boundedIndex(context.req.param('index'))
     const output = await context.env.DB.prepare(
       'SELECT object_key,mime_type FROM image_task_outputs WHERE task_id = ? AND image_index = ?',
@@ -234,12 +235,16 @@ export async function consumeImageTaskExecute(value: unknown, env: Env): Promise
        WHERE id=? AND status='running' AND attempt_token=?`,
     ).bind(resultObjectKey, response.status, completedAt, completedAt, completedAt + TASK_TTL_MS, task.id, attemptToken).run()
     if ((completed.meta.changes ?? 0) !== 1) {
-      await bestEffort(() => env.OBJECTS.delete(resultObjectKey))
+      const current = await findTask(env, task.id)
+      if (current?.status !== 'completed') await cleanupGeneratedResult(env, task.id)
     } else {
       await bestEffort(() => env.OBJECTS.delete(task.input_object_key))
     }
   } catch {
-    await failClaimedTask(env, task.id, attemptToken, 502, 'IMAGE_TASK_OFFLOAD_FAILED', 'Failed to store generated image')
+    const failed = await failClaimedTask(
+      env, task.id, attemptToken, 502, 'IMAGE_TASK_OFFLOAD_FAILED', 'Failed to store generated image',
+    )
+    if (failed) await cleanupGeneratedResult(env, task.id)
   }
   return true
 }
@@ -308,6 +313,22 @@ async function deleteImageTaskObjects(env: Env, taskId: string): Promise<void> {
   } while (cursor !== undefined)
 }
 
+async function cleanupGeneratedResult(env: Env, taskId: string): Promise<void> {
+  await bestEffort(async () => {
+    await env.DB.prepare('DELETE FROM image_task_outputs WHERE task_id=?').bind(taskId).run()
+  })
+  const prefix = `${imageTaskPrefix(env, taskId)}outputs/`
+  await bestEffort(async () => {
+    let cursor: string | undefined
+    do {
+      const page = await env.OBJECTS.list({ prefix, ...(cursor === undefined ? {} : { cursor }) })
+      for (const object of page.objects) await env.OBJECTS.delete(object.key)
+      cursor = page.truncated ? page.cursor : undefined
+    } while (cursor !== undefined)
+  })
+  await bestEffort(() => env.OBJECTS.delete(imageTaskResultKey(env, taskId)))
+}
+
 async function enqueueImageTask(env: Env, taskId: string): Promise<void> {
   await env.EVENTS_QUEUE.send(createImageTaskExecuteEvent(taskId))
 }
@@ -356,26 +377,23 @@ async function offloadResult(env: Env, task: ImageTaskRow, bytes: Uint8Array): P
   try {
     for (const candidate of root.data) {
       const item = record(candidate)
-      if (item === null) { data.push(candidate); continue }
-      const encoded = typeof item.b64_json === 'string' ? item.b64_json : null
-      if (encoded === null) { data.push({ ...item }); continue }
-      const image = decodeBase64(encoded)
-      if (image.byteLength === 0 || image.byteLength > MAX_OUTPUT_BYTES) throw new Error('image output too large')
-      const mime = imageMime(image, root.output_format)
+      if (item === null) throw new Error('invalid image output')
+      const image = await resolveImageAsset(item, env)
+      const mime = image.mime
       const objectKey = imageTaskOutputKey(env, task.id, imageIndex, mime)
-      await env.OBJECTS.put(objectKey, bytesBuffer(image), {
+      await env.OBJECTS.put(objectKey, image.bytes, {
         httpMetadata: { contentType: mime }, customMetadata: { taskId: task.id, imageIndex: String(imageIndex) },
       })
       uploadedKeys.push(objectKey)
       statements.push(env.DB.prepare(
         `INSERT OR IGNORE INTO image_task_outputs(task_id,image_index,object_key,mime_type,byte_length,created_at_ms)
          VALUES(?,?,?,?,?,?)`,
-      ).bind(task.id, imageIndex, objectKey, mime, image.byteLength, Date.now()))
+      ).bind(task.id, imageIndex, objectKey, mime, image.bytes.byteLength, Date.now()))
       const { b64_json: _removed, ...rest } = item
       data.push({ ...rest, url: `/v1/images/tasks/${task.id}/content/${imageIndex}` })
       imageIndex += 1
     }
-    if (imageIndex === 0 && data.length === 0) throw new Error('image output missing')
+    if (imageIndex === 0) throw new Error('image output missing')
     if (statements.length > 0) await env.DB.batch(statements)
     return { ...root, data }
   } catch (error) {
@@ -386,7 +404,7 @@ async function offloadResult(env: Env, task: ImageTaskRow, bytes: Uint8Array): P
 
 async function failClaimedTask(
   env: Env, taskId: string, token: string, status: number, code: string, error: unknown,
-): Promise<void> {
+): Promise<boolean> {
   const now = Date.now()
   const task = await env.DB.prepare(
     'SELECT input_object_key FROM image_tasks WHERE id=?',
@@ -402,6 +420,7 @@ async function failClaimedTask(
   if ((result.meta.changes ?? 0) === 1 && task !== null) {
     await bestEffort(() => env.OBJECTS.delete(task.input_object_key))
   }
+  return (result.meta.changes ?? 0) === 1
 }
 
 async function ownedTask(env: Env, principal: GatewayPrincipal, id: string): Promise<ImageTaskRow> {
@@ -467,15 +486,8 @@ function imageTaskOutputKey(env: Env, id: string, index: number, mime: string): 
   return `${imageTaskPrefix(env, id)}outputs/${index}.${extension(mime)}`
 }
 function extension(mime: string): string { return mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png' }
-function imageMime(bytes: Uint8Array, declared: unknown): 'image/png' | 'image/jpeg' | 'image/webp' {
-  if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg'
-  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[8] === 0x57 && bytes[9] === 0x45) return 'image/webp'
-  if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png'
-  return declared === 'jpeg' || declared === 'jpg' ? 'image/jpeg' : declared === 'webp' ? 'image/webp' : 'image/png'
-}
 function safeJson(bytes: Uint8Array): unknown { return JSON.parse(new TextDecoder().decode(bytes)) }
 function record(value: unknown): Record<string, any> | null { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null }
-function decodeBase64(value: string): Uint8Array { const decoded = atob(value); return Uint8Array.from(decoded, (char) => char.charCodeAt(0)) }
 function bytesBuffer(bytes: Uint8Array): ArrayBuffer { const copy = new Uint8Array(bytes.byteLength); copy.set(bytes); return copy.buffer }
 function notFound(): GatewayError { return new GatewayError(404, 'IMAGE_TASK_NOT_FOUND', 'image task not found', 'not_found_error') }
 async function bestEffort(action: () => Promise<unknown>): Promise<void> { try { await action() } catch { /* scheduled recovery owns it */ } }

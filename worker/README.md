@@ -62,6 +62,16 @@ HMAC-SHA-256 digest. The upstream key is encrypted with AES-256-GCM and bound
 to the account/secret version as authenticated data. Client-supplied proxy,
 base URL, SOCKS, uTLS, JA3, and transport controls are rejected.
 
+Ordinary asynchronous Images tasks keep request, result, and image payloads in
+private R2 objects. Remote provider image URLs are downloaded only over HTTPS,
+without redirects, with a 60-second and 32 MiB remote-image bound. Inline
+Base64/data-URL outputs are capped at 8 MiB to stay within the Worker's 128 MiB
+memory ceiling while JSON, UTF-16 and decoded representations overlap. For the
+strongest DNS-rebinding boundary, set `ASYNC_IMAGE_DOWNLOAD_HOSTS` to a JSON
+array (or comma-separated list) of trusted provider CDN hosts; exact hosts and
+their subdomains are accepted. If it is unset, public hostnames are accepted
+while private/local names and IP ranges remain blocked.
+
 ## Email delivery
 
 Before enabling email verification or password reset in production, configure a

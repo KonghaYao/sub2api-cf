@@ -1,4 +1,5 @@
 import { GatewayError } from '../gateway/errors'
+import { decodeImageDataUrl } from './image-asset'
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024
 const DEFAULT_RESPONSE_LIMIT = 48 * 1024 * 1024
@@ -167,17 +168,19 @@ function normalizePublicImage(item: Record<string, unknown>): {
 } | null {
   const publicItem: Record<string, unknown> = {}
   let output: NormalizedSyncImageOutput
-  if (typeof item.b64_json === 'string' && item.b64_json !== '') {
-    const bytes = decodeBase64(item.b64_json)
+  const encoded = typeof item.b64_json === 'string' ? item.b64_json.trim() : ''
+  const imageUrl = typeof item.url === 'string' ? item.url.trim() : ''
+  if (encoded !== '') {
+    const bytes = decodeBase64(encoded)
     if (bytes === null) {
       throw new GatewayError(502, 'IMAGE_INVALID_PROVIDER_OUTPUT', 'Image provider returned malformed image data', 'server_error')
     }
-    publicItem.b64_json = item.b64_json
+    publicItem.b64_json = encoded
     output = { bytes }
-  } else if (typeof item.url === 'string' && item.url !== '') {
-    const parsed = safeImageUrl(item.url)
-    publicItem.url = item.url
-    output = parsed.bytes === undefined ? { url: item.url } : { bytes: parsed.bytes }
+  } else if (imageUrl !== '') {
+    const parsed = safeImageUrl(imageUrl)
+    publicItem.url = imageUrl
+    output = parsed.bytes === undefined ? { url: imageUrl } : { bytes: parsed.bytes }
   } else {
     return null
   }
@@ -188,12 +191,8 @@ function normalizePublicImage(item: Record<string, unknown>): {
 }
 
 function safeImageUrl(value: string): { bytes?: Uint8Array } {
-  if (value.startsWith('data:image/')) {
-    const match = /^data:image\/(?:png|jpeg|jpg|webp);base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value)
-    if (match === null) invalidUrl()
-    const bytes = decodeBase64(match[1])
-    if (bytes === null) invalidUrl()
-    return { bytes }
+  if (/^data:image\//i.test(value)) {
+    try { return { bytes: decodeImageDataUrl(value, MAX_IMAGE_BYTES) } } catch { return invalidUrl() }
   }
   let parsed: URL
   try { parsed = new URL(value) } catch { return invalidUrl() }
