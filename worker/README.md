@@ -72,6 +72,15 @@ array (or comma-separated list) of trusted provider CDN hosts; exact hosts and
 their subdomains are accepted. If it is unset, public hostnames are accepted
 while private/local names and IP ranges remain blocked.
 
+Synchronous and asynchronous Images settlement uses the outputs actually
+completed by the provider, even when a provider returns more images than the
+requested `n`. A versioned recovery command first commits the final amount in
+the balance/subscription, API-key and platform-quota Durable Objects; only
+after every authority accepts the same amount may any settlement run. If a
+balance hold cannot fully fund already-completed provider work, the remainder
+is recorded as user spend debt and future credits repay it before becoming
+spendable.
+
 ## Email delivery
 
 Before enabling email verification or password reset in production, configure a

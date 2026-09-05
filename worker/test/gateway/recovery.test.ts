@@ -15,6 +15,8 @@ interface RecoveryRow {
   api_key_settled: number
   api_key_usage_json: string | null
   api_key_projected: number
+  initial_reserved_micros: number | null
+  reservations_ensured: number
 }
 
 class RecoveryStatement {
@@ -46,6 +48,7 @@ class RecoveryStatement {
         row.api_key_usage_json = this.values[0] as string
       }
       if (this.query.includes('SET api_key_projected = 1')) row.api_key_projected = 1
+      if (this.query.includes('SET reservations_ensured = 1')) row.reservations_ensured = 1
       if (this.query.includes('SET attempts = attempts + 1')) row.attempts += 1
       if (this.query.includes('DELETE FROM settlement_recovery')) this.database.row = null
     }
@@ -123,6 +126,8 @@ function recoveryRow(overrides: Partial<RecoveryRow> = {}): RecoveryRow {
     api_key_settled: 0,
     api_key_usage_json: null,
     api_key_projected: 0,
+    initial_reserved_micros: null,
+    reservations_ensured: 1,
     ...overrides,
   }
 }
@@ -152,6 +157,63 @@ function namespace(fetch: (request: Request) => Promise<Response>): DurableObjec
 }
 
 describe('settlement recovery', () => {
+  it('settles nothing until every over-delivery reservation is committed', async () => {
+    const database = new RecoveryDatabase(recoveryRow({
+      amount_micros: 20,
+      initial_reserved_micros: 10,
+      reservations_ensured: 0,
+    }))
+    const billingPaths: string[] = []
+    const billingFetch = vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname
+      billingPaths.push(path)
+      return path === '/settle'
+        ? Response.json({ profile: { balance_micros: 980, settled_micros: 20 } })
+        : Response.json({})
+    })
+    const keyPaths: string[] = []
+    let ensureFailures = 1
+    const keyFetch = vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname
+      keyPaths.push(path)
+      if (path === '/monetary/ensure' && ensureFailures > 0) {
+        ensureFailures -= 1
+        return Response.json(
+          { error: { code: 'temporary_failure', message: 'retry ensure' } },
+          { status: 503 },
+        )
+      }
+      if (path === '/monetary/ensure') return Response.json({})
+      if (path === '/monetary/settle') return Response.json({ usage: monetaryUsage() })
+      throw new Error(`unexpected key state call: ${path}`)
+    })
+    const env = {
+      DB: database as unknown as D1Database,
+      USER_STATE: namespace(billingFetch),
+      API_KEY_LIMIT_STATE: namespace(keyFetch),
+    } as Env
+
+    await expect(settleRecoveryRequest(env, 'request-1', true)).resolves.toBe(false)
+
+    expect(billingPaths).toEqual(['/ensure'])
+    expect(keyPaths).toEqual(['/monetary/ensure'])
+    expect(billingPaths).not.toContain('/settle')
+    expect(keyPaths).not.toContain('/monetary/settle')
+    expect(database.row).toMatchObject({
+      reservations_ensured: 0,
+      billing_settled: 0,
+      api_key_settled: 0,
+    })
+    expect(database.executed.find((statement) =>
+      statement.query.includes('SET attempts = attempts + 1'),
+    )?.values[0]).toBe(Number.MAX_SAFE_INTEGER)
+
+    await expect(settleRecoveryRequest(env, 'request-1', true)).resolves.toBe(true)
+    expect(billingPaths).toEqual(['/ensure', '/ensure', '/settle'])
+    expect(keyPaths).toEqual(['/monetary/ensure', '/monetary/ensure', '/monetary/settle'])
+    expect(database.row).toBeNull()
+  })
+
   it('parks a permanently failing command after bounded automatic retries', async () => {
     const database = new RecoveryDatabase(recoveryRow({ attempts: 19 }))
     const env = {

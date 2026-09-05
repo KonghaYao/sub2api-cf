@@ -11,6 +11,7 @@ interface StoredProfile {
   balance_micros: number;
   reserved_micros: number;
   settled_micros: number;
+  spend_debt_micros: number;
   updated_at_ms: number;
 }
 
@@ -33,6 +34,9 @@ interface StoredRequest {
   status: string;
   reserved_micros: number;
   settled_micros: number | null;
+  committed: number;
+  funded_micros: number;
+  expired: number;
   reservation_expires_at_ms: number | null;
   reservation_ttl_ms: number | null;
   renewal_sequence: number;
@@ -46,6 +50,25 @@ class FakeUserStateStorage {
   stateVersion = 0;
   readonly ledger = new Map<string, StoredLedgerEntry>();
   readonly requests = new Map<string, StoredRequest>();
+  readonly profileColumns = new Set([
+    "schema_version", "user_id", "enabled", "balance_micros", "reserved_micros",
+    "settled_micros", "spend_debt_micros", "updated_at_ms",
+  ]);
+  readonly requestColumns = new Set([
+    "schema_version", "request_id", "status", "reserved_micros", "settled_micros",
+    "committed", "funded_micros", "expired", "reservation_expires_at_ms",
+    "reservation_ttl_ms", "renewal_sequence", "last_renewal_ttl_ms", "authorized_at_ms",
+    "updated_at_ms",
+  ]);
+
+  constructor(legacySchema = false) {
+    if (legacySchema) {
+      this.profileColumns.delete("spend_debt_micros");
+      this.requestColumns.delete("committed");
+      this.requestColumns.delete("funded_micros");
+      this.requestColumns.delete("expired");
+    }
+  }
 
   readonly sql = {
     exec: (query: string, ...params: unknown[]): object[] => this.exec(query, params),
@@ -60,6 +83,37 @@ class FakeUserStateStorage {
   private exec(query: string, params: unknown[]): object[] {
     const normalized = query.replace(/\s+/g, " ").trim();
     if (normalized.startsWith("CREATE ")) return [];
+    if (normalized === "PRAGMA table_info(user_profile)") {
+      return Array.from(this.profileColumns, (name) => ({ name }));
+    }
+    if (normalized === "PRAGMA table_info(user_requests)") {
+      return Array.from(this.requestColumns, (name) => ({ name }));
+    }
+    if (normalized.startsWith("ALTER TABLE user_profile ADD COLUMN spend_debt_micros")) {
+      this.profileColumns.add("spend_debt_micros");
+      return [];
+    }
+    if (normalized.startsWith("ALTER TABLE user_requests ADD COLUMN")) {
+      const column = normalized.split(" ")[5];
+      if (column !== undefined) this.requestColumns.add(column);
+      return [];
+    }
+    if (normalized.startsWith("UPDATE user_requests SET funded_micros = reserved_micros")) {
+      for (const request of this.requests.values()) {
+        if (request.status === "reserved") request.funded_micros = request.reserved_micros;
+      }
+      return [];
+    }
+    if (normalized.startsWith("UPDATE user_requests SET expired = 1")) {
+      for (const request of this.requests.values()) {
+        if (
+          request.status === "cancelled" &&
+          request.reservation_expires_at_ms !== null &&
+          request.updated_at_ms >= request.reservation_expires_at_ms
+        ) request.expired = 1;
+      }
+      return [];
+    }
     if (normalized.startsWith("INSERT OR IGNORE INTO user_state_metadata")) return [];
     if (normalized.includes("SELECT state_version FROM user_state_metadata")) {
       return [{ state_version: this.stateVersion }];
@@ -101,7 +155,8 @@ class FakeUserStateStorage {
         balance_micros: params[3] as number,
         reserved_micros: params[4] as number,
         settled_micros: params[5] as number,
-        updated_at_ms: params[6] as number,
+        spend_debt_micros: params[6] as number,
+        updated_at_ms: params[7] as number,
       };
       return [];
     }
@@ -129,12 +184,15 @@ class FakeUserStateStorage {
         status: params[2] as string,
         reserved_micros: params[3] as number,
         settled_micros: params[4] as number | null,
-        reservation_expires_at_ms: params[5] as number | null,
-        reservation_ttl_ms: params[6] as number | null,
-        renewal_sequence: params[7] as number,
-        last_renewal_ttl_ms: params[8] as number | null,
-        authorized_at_ms: params[9] as number,
-        updated_at_ms: params[10] as number,
+        committed: params[5] as number,
+        funded_micros: params[6] as number,
+        expired: params[7] as number,
+        reservation_expires_at_ms: params[8] as number | null,
+        reservation_ttl_ms: params[9] as number | null,
+        renewal_sequence: params[10] as number,
+        last_renewal_ttl_ms: params[11] as number | null,
+        authorized_at_ms: params[12] as number,
+        updated_at_ms: params[13] as number,
       };
       this.requests.set(request.request_id, request);
       return [];
@@ -143,8 +201,11 @@ class FakeUserStateStorage {
   }
 }
 
-function createHarness(env?: Env): { object: UserStateDO; storage: FakeUserStateStorage } {
-  const storage = new FakeUserStateStorage();
+function createHarness(
+  env?: Env,
+  options: { legacySchema?: boolean } = {},
+): { object: UserStateDO; storage: FakeUserStateStorage } {
+  const storage = new FakeUserStateStorage(options.legacySchema);
   const state = {
     storage,
     blockConcurrencyWhile: (callback: () => Promise<void>) => callback(),
@@ -171,6 +232,15 @@ const opening = {
 };
 
 describe("UserStateDO balance contract", () => {
+  it("adds commitment and spend-debt columns to existing SQLite tables", () => {
+    const { storage } = createHarness(undefined, { legacySchema: true });
+
+    expect(storage.profileColumns.has("spend_debt_micros")).toBe(true);
+    expect(storage.requestColumns.has("committed")).toBe(true);
+    expect(storage.requestColumns.has("funded_micros")).toBe(true);
+    expect(storage.requestColumns.has("expired")).toBe(true);
+  });
+
   it("rechecks group entitlement before each authorization transition", async () => {
     const { raw, d1 } = createSqliteD1();
     applyMigrations(raw);
@@ -313,6 +383,244 @@ describe("UserStateDO balance contract", () => {
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toMatchObject({
       error: { code: "mutation_conflict" },
+    });
+  });
+
+  it("commits an underfunded reservation through POST /ensure", async () => {
+    const { object, storage } = createHarness();
+    await post(object, "/configure", opening);
+    storage.profile!.reserved_micros = 40;
+    storage.requests.set("request-overdelivery", {
+      schema_version: 1,
+      request_id: "request-overdelivery",
+      status: "reserved",
+      reserved_micros: 40,
+      settled_micros: null,
+      committed: 0,
+      funded_micros: 40,
+      expired: 0,
+      reservation_expires_at_ms: Date.now() + 300_000,
+      reservation_ttl_ms: 300_000,
+      renewal_sequence: 0,
+      last_renewal_ttl_ms: null,
+      authorized_at_ms: Date.now(),
+      updated_at_ms: Date.now(),
+    });
+
+    const response = await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-overdelivery",
+      target_amount_micros: 1_200,
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      idempotent: false,
+      profile: {
+        balance_micros: 1_000,
+        reserved_micros: 1_000,
+        spend_debt_micros: 0,
+      },
+      available_micros: 0,
+      request: {
+        status: "reserved",
+        reserved_micros: 1_200,
+        committed: true,
+        funded_micros: 1_000,
+      },
+    });
+  });
+
+  it("settles an underfunded commitment for its exact target and persists spend debt", async () => {
+    const { object, storage } = createHarness();
+    await post(object, "/configure", opening);
+    storage.profile!.reserved_micros = 40;
+    storage.requests.set("request-debt", {
+      schema_version: 1,
+      request_id: "request-debt",
+      status: "reserved",
+      reserved_micros: 40,
+      settled_micros: null,
+      committed: 0,
+      funded_micros: 40,
+      expired: 0,
+      reservation_expires_at_ms: Date.now() + 300_000,
+      reservation_ttl_ms: 300_000,
+      renewal_sequence: 0,
+      last_renewal_ttl_ms: null,
+      authorized_at_ms: Date.now(),
+      updated_at_ms: Date.now(),
+    });
+    expect((await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-debt",
+      target_amount_micros: 1_200,
+    })).status).toBe(200);
+
+    const settlement = await post(object, "/settle", {
+      schema_version: 1,
+      request_id: "request-debt",
+      amount_micros: 1_200,
+    });
+
+    expect(settlement.status).toBe(200);
+    await expect(settlement.json()).resolves.toMatchObject({
+      profile: {
+        balance_micros: 0,
+        reserved_micros: 0,
+        settled_micros: 1_200,
+        spend_debt_micros: 200,
+      },
+      request: {
+        status: "settled",
+        committed: true,
+        funded_micros: 1_000,
+        settled_micros: 1_200,
+      },
+    });
+    expect(storage.ledger.get("settlement:request-debt")).toMatchObject({
+      amount_delta_micros: -1_200,
+      balance_after_micros: 0,
+    });
+  });
+
+  it("keeps commitment retries exact and rejects cancellation or a different target", async () => {
+    const { object, storage } = createHarness();
+    await post(object, "/configure", opening);
+    storage.profile!.reserved_micros = 40;
+    storage.requests.set("request-exact", {
+      schema_version: 1,
+      request_id: "request-exact",
+      status: "reserved",
+      reserved_micros: 40,
+      settled_micros: null,
+      committed: 0,
+      funded_micros: 40,
+      expired: 0,
+      reservation_expires_at_ms: Date.now() + 300_000,
+      reservation_ttl_ms: 300_000,
+      renewal_sequence: 0,
+      last_renewal_ttl_ms: null,
+      authorized_at_ms: Date.now(),
+      updated_at_ms: Date.now(),
+    });
+    expect((await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-exact",
+      target_amount_micros: 100,
+    })).status).toBe(200);
+
+    const replay = await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-exact",
+      target_amount_micros: 100,
+    });
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({ idempotent: true });
+
+    for (const [path, body, code] of [
+      ["/ensure", { target_amount_micros: 101 }, "reservation_commitment_conflict"],
+      ["/cancel", {}, "invalid_transition"],
+    ] as const) {
+      const response = await post(object, path, {
+        schema_version: 1,
+        request_id: "request-exact",
+        ...body,
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: { code } });
+    }
+
+    expect((await post(object, "/settle", {
+      schema_version: 1,
+      request_id: "request-exact",
+      amount_micros: 100,
+    })).status).toBe(200);
+    const settledReplay = await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-exact",
+      target_amount_micros: 100,
+    });
+    expect(settledReplay.status).toBe(200);
+    await expect(settledReplay.json()).resolves.toMatchObject({ idempotent: true });
+  });
+
+  it("commits naturally expired requests but rejects manually cancelled requests", async () => {
+    const { object, storage } = createHarness();
+    await post(object, "/configure", opening);
+    const storedRequest = (request_id: string, expired: 0 | 1): StoredRequest => ({
+      schema_version: 1,
+      request_id,
+      status: "cancelled",
+      reserved_micros: 40,
+      settled_micros: null,
+      committed: 0,
+      funded_micros: 40,
+      expired,
+      reservation_expires_at_ms: Date.now() - 1,
+      reservation_ttl_ms: 300_000,
+      renewal_sequence: 0,
+      last_renewal_ttl_ms: null,
+      authorized_at_ms: Date.now() - 300_001,
+      updated_at_ms: Date.now(),
+    });
+    storage.requests.set("request-expired", storedRequest("request-expired", 1));
+    storage.requests.set("request-cancelled", storedRequest("request-cancelled", 0));
+
+    const recovered = await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-expired",
+      target_amount_micros: 1_200,
+    });
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({
+      request: { status: "reserved", committed: true, funded_micros: 1_000 },
+    });
+
+    const rejected = await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-cancelled",
+      target_amount_micros: 40,
+    });
+    expect(rejected.status).toBe(409);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: "invalid_transition" },
+    });
+  });
+
+  it("uses positive balance adjustments to repay spend debt before increasing balance", async () => {
+    const { object, storage } = createHarness();
+    const configured = await post(object, "/configure", {
+      ...opening,
+      spend_debt_micros: 50,
+    });
+    expect(configured.status).toBe(200);
+    await expect(configured.json()).resolves.toMatchObject({
+      profile: { balance_micros: 1_000, spend_debt_micros: 50 },
+    });
+
+    const partialRepayment = await post(object, "/balance/adjust", {
+      schema_version: 1,
+      mutation_id: "repay-partial",
+      amount_delta_micros: 30,
+    });
+    expect(partialRepayment.status).toBe(200);
+    await expect(partialRepayment.json()).resolves.toMatchObject({
+      profile: { balance_micros: 1_000, spend_debt_micros: 20 },
+    });
+
+    const repaymentWithRemainder = await post(object, "/balance/adjust", {
+      schema_version: 1,
+      mutation_id: "repay-rest",
+      amount_delta_micros: 50,
+    });
+    expect(repaymentWithRemainder.status).toBe(200);
+    await expect(repaymentWithRemainder.json()).resolves.toMatchObject({
+      profile: { balance_micros: 1_030, spend_debt_micros: 0 },
+    });
+    expect(storage.ledger.get("balance:repay-partial")).toMatchObject({
+      amount_delta_micros: 30,
+      balance_after_micros: 1_000,
     });
   });
 

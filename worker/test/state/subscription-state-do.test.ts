@@ -11,6 +11,7 @@ const DAY_MS = 86_400_000
 class TestSqlStorage {
   readonly database = new DatabaseSync(':memory:')
   alarm: number | null = null
+  readonly alarmWrites: number[] = []
 
   readonly sql = {
     exec: (query: string, ...params: unknown[]): object[] => {
@@ -33,6 +34,7 @@ class TestSqlStorage {
 
   async setAlarm(timestamp: number): Promise<void> {
     this.alarm = timestamp
+    this.alarmWrites.push(timestamp)
   }
 }
 
@@ -144,6 +146,18 @@ async function settle(
     schema_version: 1,
     request_id: requestId,
     amount_micros: amountMicros,
+  })
+}
+
+async function ensure(
+  object: SubscriptionStateDO,
+  requestId: string,
+  targetAmountMicros: number,
+): Promise<Response> {
+  return post(object, '/ensure', {
+    schema_version: 1,
+    request_id: requestId,
+    target_amount_micros: targetAmountMicros,
   })
 }
 
@@ -281,6 +295,7 @@ describe('SubscriptionStateDO quota contract', () => {
       requests: expect.arrayContaining([
         expect.objectContaining({
           request_id: 'legacy-current',
+          committed: 0,
           term_generation: 1,
           quota_reset_epoch: 3,
         }),
@@ -795,6 +810,178 @@ describe('SubscriptionStateDO quota contract', () => {
     expect(settleConflict.status).toBe(409)
     await expect(settleConflict.json()).resolves.toMatchObject({
       error: { code: 'settlement_conflict' },
+    })
+  })
+
+  it('commits a grown absolute reservation target and holds the full quota', async () => {
+    const { object } = harness()
+    await post(object, '/configure', config())
+    expect((await reserve(object, 'overdelivery', 40)).status).toBe(200)
+
+    const committed = await ensure(object, 'overdelivery', 100)
+
+    expect(committed.status).toBe(200)
+    await expect(committed.json()).resolves.toMatchObject({
+      idempotent: false,
+      request: { reserved_micros: 100, committed: 1 },
+    })
+    expect((await reserve(object, 'blocked-by-commit', 1)).status).toBe(429)
+  })
+
+  it('recovers an expired reservation as committed liability in its original windows', async () => {
+    const { object } = harness()
+    await post(object, '/configure', config())
+    expect((await reserve(object, 'expired-overdelivery', 40, 1_000)).status).toBe(200)
+    vi.advanceTimersByTime(1_000)
+    await object.alarm()
+
+    const committed = await ensure(object, 'expired-overdelivery', 100)
+
+    expect(committed.status).toBe(200)
+    await expect(committed.json()).resolves.toMatchObject({
+      idempotent: false,
+      request: { status: 'expired', committed: 1, reserved_micros: 100 },
+    })
+    expect((await reserve(object, 'blocked-by-expired-commit', 1)).status).toBe(429)
+  })
+
+  it('does not expire, cancel, or tombstone a committed reservation', async () => {
+    const { object, storage } = harness()
+    await post(object, '/configure', config())
+    expect((await reserve(object, 'durable-commit', 40, 1_000)).status).toBe(200)
+    expect((await ensure(object, 'durable-commit', 100)).status).toBe(200)
+
+    vi.advanceTimersByTime(1_000)
+    await object.alarm()
+    expect(storage.alarmWrites).toHaveLength(1)
+    const cancellation = await post(object, '/cancel', {
+      schema_version: 1,
+      request_id: 'durable-commit',
+    })
+    expect(cancellation.status).toBe(409)
+
+    vi.advanceTimersByTime(8 * DAY_MS)
+    await object.alarm()
+    const snapshot = await object.fetch(new Request('https://subscription-state.test/snapshot'))
+    await expect(snapshot.json()).resolves.toMatchObject({
+      requests: expect.arrayContaining([
+        expect.objectContaining({ request_id: 'durable-commit', status: 'reserved', committed: 1 }),
+      ]),
+    })
+  })
+
+  it('makes commitment retries exact and preserves terminal request decisions', async () => {
+    const { object } = harness()
+    await post(object, '/configure', config({ daily_quota_micros: 1_000 }))
+
+    await reserve(object, 'committed-retry', 40)
+    expect((await ensure(object, 'committed-retry', 100)).status).toBe(200)
+    await expect((await ensure(object, 'committed-retry', 100)).json()).resolves.toMatchObject({
+      idempotent: true,
+      request: { committed: 1, reserved_micros: 100 },
+    })
+    const conflictingCommit = await ensure(object, 'committed-retry', 101)
+    expect(conflictingCommit.status).toBe(409)
+    await expect(conflictingCommit.json()).resolves.toMatchObject({
+      error: { code: 'reservation_commitment_conflict' },
+    })
+
+    await reserve(object, 'commit-cannot-shrink', 40)
+    const shrinkingCommit = await ensure(object, 'commit-cannot-shrink', 39)
+    expect(shrinkingCommit.status).toBe(409)
+    await expect(shrinkingCommit.json()).resolves.toMatchObject({
+      error: { code: 'reservation_commitment_decrease' },
+    })
+
+    await reserve(object, 'already-settled', 50)
+    expect((await settle(object, 'already-settled', 30)).status).toBe(200)
+    await expect((await ensure(object, 'already-settled', 30)).json()).resolves.toMatchObject({
+      idempotent: true,
+      request: { status: 'settled', settled_micros: 30 },
+    })
+    expect((await ensure(object, 'already-settled', 31)).status).toBe(409)
+
+    await reserve(object, 'already-cancelled', 10)
+    expect((await post(object, '/cancel', {
+      schema_version: 1,
+      request_id: 'already-cancelled',
+    })).status).toBe(200)
+    expect((await ensure(object, 'already-cancelled', 10)).status).toBe(409)
+  })
+
+  it('settles exactly the committed target after a quota reduction and preserves overage debt', async () => {
+    const { object } = harness()
+    await post(object, '/configure', config())
+    await reserve(object, 'committed-overage', 40)
+    expect((await ensure(object, 'committed-overage', 150)).status).toBe(200)
+
+    const underSettlement = await settle(object, 'committed-overage', 149)
+    expect(underSettlement.status).toBe(409)
+    await expect(underSettlement.json()).resolves.toMatchObject({
+      error: { code: 'settlement_commitment_conflict' },
+    })
+
+    expect((await post(object, '/configure', config({
+      daily_quota_micros: 50,
+      weekly_quota_micros: 50,
+      monthly_quota_micros: 50,
+      control_version: 1,
+    }))).status).toBe(200)
+    expect((await settle(object, 'committed-overage', 150)).status).toBe(200)
+
+    const snapshot = await object.fetch(new Request('https://subscription-state.test/snapshot'))
+    await expect(snapshot.json()).resolves.toMatchObject({
+      windows: expect.arrayContaining([
+        expect.objectContaining({ kind: 'daily', used_micros: 150, reserved_micros: 0 }),
+        expect.objectContaining({ kind: 'weekly', used_micros: 150, reserved_micros: 0 }),
+        expect.objectContaining({ kind: 'monthly', used_micros: 150, reserved_micros: 0 }),
+      ]),
+    })
+    expect((await reserve(object, 'blocked-by-settled-overage', 1)).status).toBe(429)
+  })
+
+  it('settles a committed request against its captured windows after expiry and a new term', async () => {
+    const { object } = harness()
+    const oldExpiresAt = Date.now() + 1_000
+    const oldStartsAt = oldExpiresAt - DAY_MS
+    await post(object, '/configure', config({
+      starts_at_ms: oldStartsAt,
+      expires_at_ms: oldExpiresAt,
+      daily_anchor_ms: oldStartsAt,
+      daily_window_start_ms: oldStartsAt,
+      weekly_window_start_ms: oldStartsAt,
+      monthly_window_start_ms: oldStartsAt,
+    }))
+    await reserve(object, 'old-term-commit', 40, 1_000)
+    expect((await ensure(object, 'old-term-commit', 150)).status).toBe(200)
+
+    vi.advanceTimersByTime(1_000)
+    await object.alarm()
+    const newStartsAt = Date.now()
+    expect((await post(object, '/configure', config({
+      starts_at_ms: newStartsAt,
+      expires_at_ms: newStartsAt + 31 * DAY_MS,
+      control_version: 1,
+      quota_reset_epoch: 1,
+    }))).status).toBe(200)
+
+    const settlement = await settle(object, 'old-term-commit', 150)
+    expect(settlement.status).toBe(200)
+    await expect(settlement.json()).resolves.toMatchObject({
+      request: {
+        status: 'settled',
+        committed: 1,
+        settled_micros: 150,
+        term_generation: 1,
+        quota_reset_epoch: 0,
+      },
+    })
+    const snapshot = await object.fetch(new Request('https://subscription-state.test/snapshot'))
+    await expect(snapshot.json()).resolves.toMatchObject({
+      profile: { term_generation: 2, quota_reset_epoch: 1 },
+      windows: expect.arrayContaining([
+        expect.objectContaining({ kind: 'daily', used_micros: 0, reserved_micros: 0 }),
+      ]),
     })
   })
 

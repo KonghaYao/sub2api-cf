@@ -321,13 +321,16 @@ async function executeSyncImages(
               billingOutputs.push(snapshot.metadata.size === '' ? {} : { size: snapshot.metadata.size })
             }
             const outputBilling = resolveOutputBilling(manifest, billingOutputs)
-            const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> = {
+            const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
+              initialReservedMicros: number
+            } = {
               requestId,
               accountId: ownedAccountId,
               priceId: route.model.price_id,
               requestedModel: manifest.model,
               upstreamModel: route.model.upstream_name,
               amountMicros: calculateSyncImageActualCost(pricing, outputBilling.tiers),
+              initialReservedMicros: reservedMicros,
               operation,
               ...outputBilling.dimensions,
               startedAt,
@@ -433,13 +436,16 @@ async function executeSyncImages(
     }
     const outputBilling = resolveOutputBilling(manifest, completed.normalized.outputs)
     const actualMicros = calculateSyncImageActualCost(pricing, outputBilling.tiers)
-    const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> = {
+    const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
+      initialReservedMicros: number
+    } = {
       requestId,
       accountId: completed.accountId,
       priceId: route.model.price_id,
       requestedModel: manifest.model,
       upstreamModel: route.model.upstream_name,
       amountMicros: actualMicros,
+      initialReservedMicros: reservedMicros,
       operation,
       ...outputBilling.dimensions,
       startedAt,
@@ -587,7 +593,7 @@ async function executeDirectImages(input: ImageExecutionInput & {
 }): Promise<ImageExecutionResult> {
   const response = await executeDirectImageRequest(input)
   const parsed = await readSyncImageResponse(response)
-  return directImageResult(parsed, response, input.manifest.n, input.requestId)
+  return directImageResult(parsed, response, SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, input.requestId)
 }
 
 function directImageResult(
@@ -850,7 +856,7 @@ async function prepareDirectImageLiveAttempt(input: ImageExecutionInput & {
       leaseSignal: input.leaseSignal,
       maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-      maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, input.manifest.n),
+      maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
       maxResponseBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxAggregateBytes: SYNC_IMAGE_SSE_AGGREGATE_LIMIT,
       waitUntil: input.waitUntil,
@@ -880,7 +886,13 @@ async function prepareDirectImageLiveAttempt(input: ImageExecutionInput & {
       return {
         kind: 'buffered',
         result: {
-          ...directImageResult(parsed, prelude, input.manifest.n, input.requestId, prelude.bytes),
+          ...directImageResult(
+            parsed,
+            prelude,
+            SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
+            input.requestId,
+            prelude.bytes,
+          ),
           upstreamEndpoint: directImageEndpoint(input.operation),
         },
       }
@@ -959,7 +971,7 @@ async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
       leaseSignal: input.leaseSignal,
       maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-      maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, input.manifest.n),
+      maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
       maxResponseBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxAggregateBytes: SYNC_IMAGE_SSE_AGGREGATE_LIMIT,
       waitUntil: input.waitUntil,
@@ -1085,7 +1097,7 @@ async function readSyncImageSseResponse(
     publicModel,
     maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
     maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-    maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, manifest.n),
+    maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
   })
   if (!retainFrames) transformer.disconnectOutput()
   const reader = response.body?.getReader()

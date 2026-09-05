@@ -160,6 +160,23 @@ export async function preparePlatformQuotaReservation(
   }))
 }
 
+export async function ensurePlatformQuotaReservation(
+  env: Env,
+  reference: PlatformQuotaReference,
+  requestId: string,
+  targetAmountMicros: number,
+): Promise<void> {
+  const policy = reference.platform_quota
+  if (reference.billing.type !== 'balance' || policy == null) return
+  await requireStateOk(post(apiKeyLimitStub(env, reference.user_id), '/platform-quota/ensure', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    user_id: reference.user_id,
+    platform: policy.platform,
+    target_amount_micros: targetAmountMicros,
+  }))
+}
+
 export async function settlePlatformQuotaReservation(
   env: Env,
   reference: PlatformQuotaReference,
@@ -293,6 +310,20 @@ export async function prepareApiKeyMonetaryReservation(
     control_version: policy.control_version,
     amount_micros: amountMicros,
     reservation_ttl_ms: RESERVATION_TTL_MS,
+  }))
+}
+
+export async function ensureApiKeyMonetaryReservation(
+  env: Env,
+  reference: ApiKeyMonetaryReference,
+  requestId: string,
+  targetAmountMicros: number,
+): Promise<void> {
+  await requireStateOk(post(apiKeyLimitStub(env, reference.user_id), '/monetary/ensure', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    api_key_id: reference.api_key_id,
+    target_amount_micros: targetAmountMicros,
   }))
 }
 
@@ -499,6 +530,19 @@ export async function renewBillingReservation(
       reservation_ttl_ms: RESERVATION_TTL_MS,
     }),
   )
+}
+
+export async function ensureBillingReservation(
+  env: Env,
+  billing: BillingReference,
+  requestId: string,
+  targetAmountMicros: number,
+): Promise<void> {
+  await requireStateOk(post(billingStub(env, billing), '/ensure', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    target_amount_micros: targetAmountMicros,
+  }))
 }
 
 export async function settleBillingReservation(

@@ -74,6 +74,7 @@ interface PlatformQuotaReservationRow {
   monthly_window_start_ms: number
   status: PlatformQuotaReservationStatus
   reserved_micros: number
+  committed: number
   settled_micros: number | null
   reservation_expires_at_ms: number
   reservation_ttl_ms: number
@@ -111,6 +112,7 @@ export class PlatformQuotaState {
   handle(pathname: string, body: Record<string, unknown>, now = Date.now()): Response {
     if (pathname === '/platform-quota/configure') return this.configure(body, now)
     if (pathname === '/platform-quota/reserve') return this.reserve(body, now)
+    if (pathname === '/platform-quota/ensure') return this.ensure(body, now)
     if (pathname === '/platform-quota/renew') return this.renew(body, now)
     if (pathname === '/platform-quota/settle') return this.settle(body, now)
     if (pathname === '/platform-quota/cancel') return this.cancel(body, now)
@@ -134,7 +136,7 @@ export class PlatformQuotaState {
   expireReservations(now = Date.now()): number {
     const row = firstRow<{ count: number }>(this.storage.sql.exec(
       `SELECT COUNT(*) AS count FROM platform_quota_reservations
-        WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+        WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
       now,
     ))
     const count = validCount(row?.count)
@@ -142,7 +144,7 @@ export class PlatformQuotaState {
       this.storage.sql.exec(
         `UPDATE platform_quota_reservations
             SET status = 'expired', updated_at_ms = ?
-          WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+          WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
         now,
         now,
       )
@@ -153,7 +155,7 @@ export class PlatformQuotaState {
   cleanup(now = Date.now()): void {
     this.storage.sql.exec(
       `DELETE FROM platform_quota_reservations
-        WHERE status <> 'reserved' AND updated_at_ms < ?`,
+        WHERE status <> 'reserved' AND committed = 0 AND updated_at_ms < ?`,
       now - TOMBSTONE_RETENTION_MS,
     )
   }
@@ -161,7 +163,7 @@ export class PlatformQuotaState {
   nextReservationExpiry(): number | null {
     const row = firstRow<{ expires_at_ms: number | null }>(this.storage.sql.exec(
       `SELECT MIN(reservation_expires_at_ms) AS expires_at_ms
-         FROM platform_quota_reservations WHERE status = 'reserved'`,
+         FROM platform_quota_reservations WHERE status = 'reserved' AND committed = 0`,
     ))
     return Number.isSafeInteger(row?.expires_at_ms) ? row!.expires_at_ms : null
   }
@@ -386,6 +388,13 @@ export class PlatformQuotaState {
         `Cannot settle a ${reservation.status} platform quota reservation`,
       )
     }
+    if (reservation.committed === 1 && amount !== reservation.reserved_micros) {
+      throw new StateApiError(
+        409,
+        'platform_quota_settlement_conflict',
+        'Committed platform quota reservation must settle its exact target amount',
+      )
+    }
     if (amount > reservation.reserved_micros) {
       throw new StateApiError(
         409,
@@ -415,6 +424,80 @@ export class PlatformQuotaState {
           SET status = 'settled', settled_micros = ?, updated_at_ms = ?
         WHERE request_id = ? AND status IN ('reserved', 'expired')`,
       amount,
+      now,
+      requestId,
+    )
+    return json({
+      schema_version: 1,
+      idempotent: false,
+      reservation: this.readReservation(requestId),
+      usage: this.usageSnapshot(userId, platform, now),
+    })
+  }
+
+  private ensure(body: Record<string, unknown>, now: number): Response {
+    const requestId = requireString(body, 'request_id', 256)
+    const userId = requireString(body, 'user_id', 128)
+    const platform = requirePlatform(body.platform)
+    const targetAmount = requireSafeInteger(body, 'target_amount_micros')
+    this.assertOwner(userId, false)
+    this.expireReservations(now)
+    const reservation = this.readReservation(requestId)
+    if (reservation === null) {
+      throw new StateApiError(404, 'platform_quota_reservation_not_found', 'Platform quota reservation was not found')
+    }
+    if (reservation.user_id !== userId || reservation.platform !== platform) {
+      throw new StateApiError(409, 'platform_quota_identity_conflict', 'Platform quota reservation belongs to another identity')
+    }
+    if (reservation.status === 'settled') {
+      if (reservation.settled_micros !== targetAmount) {
+        throw new StateApiError(
+          409,
+          'platform_quota_ensure_conflict',
+          'Settled platform quota amount does not match the committed target',
+        )
+      }
+      return json({
+        schema_version: 1,
+        idempotent: true,
+        reservation,
+        usage: this.usageSnapshot(userId, platform, now),
+      })
+    }
+    if (reservation.committed === 1) {
+      if (reservation.reserved_micros !== targetAmount) {
+        throw new StateApiError(
+          409,
+          'platform_quota_ensure_conflict',
+          'Platform quota reservation was already committed with a different amount',
+        )
+      }
+      return json({
+        schema_version: 1,
+        idempotent: true,
+        reservation,
+        usage: this.usageSnapshot(userId, platform, now),
+      })
+    }
+    if (targetAmount < reservation.reserved_micros) {
+      throw new StateApiError(
+        409,
+        'platform_quota_ensure_below_reservation',
+        'Committed amount cannot be less than the original reservation',
+      )
+    }
+    if (reservation.status !== 'reserved' && reservation.status !== 'expired') {
+      throw new StateApiError(
+        409,
+        'platform_quota_invalid_transition',
+        `Cannot commit a ${reservation.status} platform quota reservation`,
+      )
+    }
+    this.storage.sql.exec(
+      `UPDATE platform_quota_reservations
+          SET reserved_micros = ?, committed = 1, updated_at_ms = ?
+        WHERE request_id = ?`,
+      targetAmount,
       now,
       requestId,
     )
@@ -483,8 +566,12 @@ export class PlatformQuotaState {
     if (reservation.user_id !== userId || reservation.platform !== platform) {
       throw new StateApiError(409, 'platform_quota_identity_conflict', 'Platform quota reservation belongs to another identity')
     }
-    if (reservation.status === 'settled') {
-      throw new StateApiError(409, 'platform_quota_invalid_transition', 'Cannot cancel a settled platform quota reservation')
+    if (reservation.status === 'settled' || reservation.committed === 1) {
+      throw new StateApiError(
+        409,
+        'platform_quota_invalid_transition',
+        'Cannot cancel a settled or committed platform quota reservation',
+      )
     }
     if (reservation.status !== 'reserved') {
       return json({ schema_version: 1, idempotent: true, reservation })
@@ -568,7 +655,8 @@ export class PlatformQuotaState {
     const row = firstRow<{ amount: number }>(this.storage.sql.exec(
       `SELECT COALESCE(SUM(reserved_micros), 0) AS amount
          FROM platform_quota_reservations
-        WHERE platform = ? AND status = 'reserved'
+        WHERE platform = ?
+          AND (status = 'reserved' OR (status = 'expired' AND committed = 1))
           AND ${kind}_reset_epoch = ? AND ${kind}_window_start_ms = ?`,
       profile.platform,
       profile[`${kind}_reset_epoch`],
@@ -640,6 +728,7 @@ export class PlatformQuotaState {
         monthly_window_start_ms INTEGER NOT NULL CHECK (monthly_window_start_ms >= 0),
         status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'cancelled', 'expired')),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
+        committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1)),
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
         reservation_expires_at_ms INTEGER NOT NULL CHECK (reservation_expires_at_ms >= 0),
         reservation_ttl_ms INTEGER NOT NULL CHECK (reservation_ttl_ms > 0),
@@ -649,6 +738,10 @@ export class PlatformQuotaState {
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
       ) STRICT
     `)
+    this.ensureColumn(
+      'committed',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1))',
+    )
     this.ensureColumn(
       'renewal_sequence',
       'INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0)',
@@ -753,7 +846,7 @@ function reservationSelect(): string {
   return `SELECT request_id, user_id, platform, control_version,
     daily_reset_epoch, weekly_reset_epoch, monthly_reset_epoch,
     daily_window_start_ms, weekly_window_start_ms, monthly_window_start_ms,
-    status, reserved_micros, settled_micros,
+    status, reserved_micros, committed, settled_micros,
     reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
     last_renewal_ttl_ms, created_at_ms, updated_at_ms
     FROM platform_quota_reservations`

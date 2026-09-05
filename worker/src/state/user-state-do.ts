@@ -39,6 +39,7 @@ interface UserProfileRow {
   balance_micros: number;
   reserved_micros: number;
   settled_micros: number;
+  spend_debt_micros: number;
   updated_at_ms: number;
 }
 
@@ -48,6 +49,9 @@ interface UserRequestRow {
   status: UserRequestState["status"];
   reserved_micros: number;
   settled_micros: number | null;
+  committed: number;
+  funded_micros: number;
+  expired: number;
   reservation_expires_at_ms: number | null;
   reservation_ttl_ms: number | null;
   renewal_sequence: number;
@@ -80,6 +84,7 @@ export interface ConfigureUserCommand {
   mutation_id: string;
   user_id: string;
   balance_micros: number;
+  spend_debt_micros: number;
   enabled: boolean;
   initial_state_version: number;
 }
@@ -165,6 +170,7 @@ export class UserStateDO {
       const requests = Array.from(
         this.state.storage.sql.exec(
           `SELECT schema_version, request_id, status, reserved_micros, settled_micros,
+                  committed, funded_micros, expired,
                   reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
                   last_renewal_ttl_ms, authorized_at_ms, updated_at_ms
              FROM user_requests
@@ -239,6 +245,7 @@ export class UserStateDO {
       const profile = createUserMachineState({
         user_id: command.user_id,
         balance_micros: command.balance_micros,
+        spend_debt_micros: command.spend_debt_micros,
         enabled: command.enabled,
         now_ms: nowMs,
       }).profile;
@@ -294,7 +301,11 @@ export class UserStateDO {
         });
       }
 
-      const balanceAfterMicros = profile.balance_micros + command.amount_delta_micros;
+      const debtRepaymentMicros = command.amount_delta_micros > 0
+        ? Math.min(command.amount_delta_micros, profile.spend_debt_micros)
+        : 0;
+      const balanceDeltaMicros = command.amount_delta_micros - debtRepaymentMicros;
+      const balanceAfterMicros = profile.balance_micros + balanceDeltaMicros;
       if (!Number.isSafeInteger(balanceAfterMicros) || balanceAfterMicros < 0) {
         throw new StateApiError(
           409,
@@ -313,6 +324,7 @@ export class UserStateDO {
       const nextProfile: UserProfileState = {
         ...profile,
         balance_micros: balanceAfterMicros,
+        spend_debt_micros: profile.spend_debt_micros - debtRepaymentMicros,
         updated_at_ms: nowMs,
       };
       const ledgerEntry = createBalanceAdjustmentLedgerEntry({
@@ -567,10 +579,19 @@ export class UserStateDO {
         balance_micros INTEGER NOT NULL CHECK (balance_micros >= 0),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
         settled_micros INTEGER NOT NULL CHECK (settled_micros >= 0),
+        spend_debt_micros INTEGER NOT NULL DEFAULT 0 CHECK (spend_debt_micros >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
         CHECK (reserved_micros <= balance_micros)
       ) STRICT
     `);
+    const profileColumns = Array.from(
+      this.state.storage.sql.exec("PRAGMA table_info(user_profile)"),
+    ) as Array<{ name?: string }>;
+    if (!profileColumns.some((column) => column.name === "spend_debt_micros")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE user_profile ADD COLUMN spend_debt_micros INTEGER NOT NULL DEFAULT 0 CHECK (spend_debt_micros >= 0)",
+      );
+    }
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS user_state_metadata (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -616,6 +637,9 @@ export class UserStateDO {
         status TEXT NOT NULL CHECK (status IN ('authorized', 'reserved', 'cancelled', 'settled')),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
+        committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1)),
+        funded_micros INTEGER NOT NULL DEFAULT 0 CHECK (funded_micros >= 0),
+        expired INTEGER NOT NULL DEFAULT 0 CHECK (expired IN (0, 1)),
         reservation_expires_at_ms INTEGER CHECK (
           reservation_expires_at_ms IS NULL OR reservation_expires_at_ms >= 0
         ),
@@ -628,6 +652,34 @@ export class UserStateDO {
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
       ) STRICT
     `);
+    const requestColumns = Array.from(
+      this.state.storage.sql.exec("PRAGMA table_info(user_requests)"),
+    ) as Array<{ name?: string }>;
+    if (!requestColumns.some((column) => column.name === "committed")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE user_requests ADD COLUMN committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1))",
+      );
+    }
+    if (!requestColumns.some((column) => column.name === "funded_micros")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE user_requests ADD COLUMN funded_micros INTEGER NOT NULL DEFAULT 0 CHECK (funded_micros >= 0)",
+      );
+      this.state.storage.sql.exec(
+        "UPDATE user_requests SET funded_micros = reserved_micros WHERE status = 'reserved'",
+      );
+    }
+    if (!requestColumns.some((column) => column.name === "expired")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE user_requests ADD COLUMN expired INTEGER NOT NULL DEFAULT 0 CHECK (expired IN (0, 1))",
+      );
+      this.state.storage.sql.exec(
+        `UPDATE user_requests
+            SET expired = 1
+          WHERE status = 'cancelled'
+            AND reservation_expires_at_ms IS NOT NULL
+            AND updated_at_ms >= reservation_expires_at_ms`,
+      );
+    }
     this.state.storage.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_user_requests_status_updated ON user_requests(status, updated_at_ms)",
     );
@@ -666,7 +718,7 @@ export class UserStateDO {
     const row = Array.from(
       this.state.storage.sql.exec(
         `SELECT schema_version, user_id, enabled, balance_micros, reserved_micros,
-                settled_micros, updated_at_ms
+                settled_micros, spend_debt_micros, updated_at_ms
            FROM user_profile
           WHERE singleton = 1`,
       ),
@@ -680,11 +732,13 @@ export class UserStateDO {
       balance_micros: row.balance_micros,
       reserved_micros: row.reserved_micros,
       settled_micros: row.settled_micros,
+      spend_debt_micros: row.spend_debt_micros,
       updated_at_ms: row.updated_at_ms,
     };
     assertMicros(profile.balance_micros, "balance_micros");
     assertMicros(profile.reserved_micros, "reserved_micros");
     assertMicros(profile.settled_micros, "settled_micros");
+    assertMicros(profile.spend_debt_micros, "spend_debt_micros");
     return profile;
   }
 
@@ -692,6 +746,7 @@ export class UserStateDO {
     const row = Array.from(
       this.state.storage.sql.exec(
         `SELECT schema_version, request_id, status, reserved_micros, settled_micros,
+                committed, funded_micros, expired,
                 reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
                 last_renewal_ttl_ms, authorized_at_ms, updated_at_ms
            FROM user_requests
@@ -706,8 +761,8 @@ export class UserStateDO {
     this.state.storage.sql.exec(
       `INSERT INTO user_profile (
          singleton, schema_version, user_id, enabled, balance_micros, reserved_micros,
-         settled_micros, updated_at_ms
-       ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+         settled_micros, spend_debt_micros, updated_at_ms
+       ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(singleton) DO UPDATE SET
          schema_version = excluded.schema_version,
          user_id = excluded.user_id,
@@ -715,6 +770,7 @@ export class UserStateDO {
          balance_micros = excluded.balance_micros,
          reserved_micros = excluded.reserved_micros,
          settled_micros = excluded.settled_micros,
+         spend_debt_micros = excluded.spend_debt_micros,
          updated_at_ms = excluded.updated_at_ms`,
       profile.schema_version,
       profile.user_id,
@@ -722,6 +778,7 @@ export class UserStateDO {
       profile.balance_micros,
       profile.reserved_micros,
       profile.settled_micros,
+      profile.spend_debt_micros,
       profile.updated_at_ms,
     );
   }
@@ -759,14 +816,18 @@ export class UserStateDO {
     this.state.storage.sql.exec(
       `INSERT INTO user_requests (
          schema_version, request_id, status, reserved_micros, settled_micros,
+         committed, funded_micros, expired,
          reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
          last_renewal_ttl_ms, authorized_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(request_id) DO UPDATE SET
          schema_version = excluded.schema_version,
          status = excluded.status,
          reserved_micros = excluded.reserved_micros,
          settled_micros = excluded.settled_micros,
+         committed = excluded.committed,
+         funded_micros = excluded.funded_micros,
+         expired = excluded.expired,
          reservation_expires_at_ms = excluded.reservation_expires_at_ms,
          reservation_ttl_ms = excluded.reservation_ttl_ms,
          renewal_sequence = excluded.renewal_sequence,
@@ -778,6 +839,9 @@ export class UserStateDO {
       request.status,
       request.reserved_micros,
       request.settled_micros,
+      request.committed ? 1 : 0,
+      request.funded_micros,
+      request.expired ? 1 : 0,
       request.reservation_expires_at_ms,
       request.reservation_ttl_ms,
       request.renewal_sequence,
@@ -828,10 +892,11 @@ export class UserStateDO {
     const dueRequests = Array.from(
       this.state.storage.sql.exec(
         `SELECT schema_version, request_id, status, reserved_micros, settled_micros,
+                committed, funded_micros, expired,
                 reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
                 last_renewal_ttl_ms, authorized_at_ms, updated_at_ms
            FROM user_requests
-          WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+          WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
         nowMs,
       ),
     ).map(toRequestState);
@@ -895,6 +960,7 @@ export class UserStateDO {
       user_id: profile.user_id,
       state_version: stateVersion,
       balance_micros: profile.balance_micros,
+      spend_debt_micros: profile.spend_debt_micros,
       enabled: profile.enabled,
       updated_at_ms: profile.updated_at_ms,
     };
@@ -958,7 +1024,7 @@ export class UserStateDO {
       this.state.storage.sql.exec(
         `SELECT MIN(reservation_expires_at_ms) AS next_alarm_ms
            FROM user_requests
-          WHERE status = 'reserved'`,
+          WHERE status = 'reserved' AND committed = 0`,
       ),
     )[0] as { next_alarm_ms: number | null } | undefined;
     const outboxRow = Array.from(
@@ -1005,6 +1071,7 @@ export function userCommandTypeFor(method: string, pathname: string): UserComman
   if (pathname === "/authorize") return "authorize";
   if (pathname === "/reserve") return "reserve";
   if (pathname === "/renew") return "renew";
+  if (pathname === "/ensure") return "ensure";
   if (pathname === "/release" || pathname === "/cancel") return "cancel";
   if (pathname === "/settle") return "settle";
   return null;
@@ -1017,6 +1084,9 @@ export function parseConfigureUserCommand(body: Record<string, unknown>): Config
     mutation_id: requireString(body, "mutation_id"),
     user_id: requireString(body, "user_id"),
     balance_micros: requireSafeInteger(body, "balance_micros"),
+    spend_debt_micros: body.spend_debt_micros === undefined
+      ? 0
+      : requireSafeInteger(body, "spend_debt_micros"),
     enabled: requireBoolean(body, "enabled"),
     initial_state_version: body.initial_state_version === undefined
       ? 0
@@ -1077,6 +1147,14 @@ function parseCommand(
       }),
     };
   }
+  if (type === "ensure") {
+    return {
+      schema_version: STATE_SCHEMA_VERSION,
+      type,
+      request_id: requestId,
+      target_amount_micros: requireSafeInteger(body, "target_amount_micros"),
+    };
+  }
   if (type === "reserve" || type === "settle") {
     const reservationTtlMs =
       type === "reserve" && body.reservation_ttl_ms !== undefined
@@ -1108,12 +1186,19 @@ function toRequestState(value: object): UserRequestState {
   }
   assertMicros(row.reserved_micros, "reserved_micros");
   if (row.settled_micros !== null) assertMicros(row.settled_micros, "settled_micros");
+  if ((row.committed !== 0 && row.committed !== 1) || (row.expired !== 0 && row.expired !== 1)) {
+    throw new StateMachineError("invalid_persisted_state", "Persisted request flags are invalid");
+  }
+  assertMicros(row.funded_micros, "funded_micros");
   return {
     schema_version: STATE_SCHEMA_VERSION,
     request_id: row.request_id,
     status: row.status,
     reserved_micros: row.reserved_micros,
     settled_micros: row.settled_micros,
+    committed: row.committed === 1,
+    funded_micros: row.funded_micros,
+    expired: row.expired === 1,
     reservation_expires_at_ms: row.reservation_expires_at_ms,
     reservation_ttl_ms: row.reservation_ttl_ms,
     renewal_sequence: row.renewal_sequence,

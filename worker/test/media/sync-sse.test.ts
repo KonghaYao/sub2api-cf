@@ -101,6 +101,30 @@ describe('synchronous Images SSE transformer', () => {
     })
   })
 
+  it('deduplicates by image content rather than provider IDs or mutable metadata', () => {
+    const duplicateContent = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
+    })
+    duplicateContent.push(encoder.encode(
+      'data: {"type":"response.completed","response":{"status":"completed","output":[' +
+      '{"id":"img_1","type":"image_generation_call","result":"c2FtZQ==","output_format":"png"},' +
+      '{"id":"img_2","type":"image_generation_call","result":"c2FtZQ==","output_format":"webp"}' +
+      ']}}\n\n',
+    ))
+    expect(duplicateContent.snapshot()).toMatchObject({ imageCount: 1, paidOutputCount: 1 })
+
+    const reusedId = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
+    })
+    reusedId.push(encoder.encode(
+      'data: {"type":"response.completed","response":{"status":"completed","output":[' +
+      '{"id":"img_same","type":"image_generation_call","result":"Zmlyc3Q="},' +
+      '{"id":"img_same","type":"image_generation_call","result":"c2Vjb25k"}' +
+      ']}}\n\n',
+    ))
+    expect(reusedId.snapshot()).toMatchObject({ imageCount: 2, paidOutputCount: 2 })
+  })
+
   it('uses metadata from the first actual output in buffered JSON', () => {
     const transformer = createSyncImageSseTransformer({
       operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',

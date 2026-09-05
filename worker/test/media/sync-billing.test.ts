@@ -97,13 +97,17 @@ describe('synchronous image billing', () => {
     } as never, {
       requestId: 'image-request-queue', accountId: 'account-1', priceId: 'price-1',
       requestedModel: 'gpt-image-2', upstreamModel: 'gpt-image-2', amountMicros: 100_000,
-      operation: 'generations', startedAt: 1,
+      initialReservedMicros: 80_000, operation: 'generations', startedAt: 1,
     })
     expect(send).toHaveBeenCalledOnce()
     expect(isSettlementCommandEvent(send.mock.calls[0]?.[0])).toBe(true)
     expect(send.mock.calls[0]?.[0]).toMatchObject({
-      event_type: 'settlement.command.v1',
-      payload: { request_id: 'image-request-queue', amount_micros: 100_000 },
+      event_type: 'settlement.command.v2',
+      payload: {
+        request_id: 'image-request-queue',
+        initial_reserved_micros: 80_000,
+        amount_micros: 100_000,
+      },
     })
   })
 })

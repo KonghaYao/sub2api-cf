@@ -47,6 +47,7 @@ interface SubscriptionProfileRow {
 interface SubscriptionRequestRow {
   request_id: string
   status: RequestStatus
+  committed: number
   reserved_micros: number
   settled_micros: number | null
   reservation_expires_at_ms: number | null
@@ -132,6 +133,7 @@ export class SubscriptionStateDO {
       if (url.pathname === '/configure-reset') return await this.configureReset(body)
       if (url.pathname === '/authorize') return await this.authorize(body)
       if (url.pathname === '/reserve') return await this.reserve(body)
+      if (url.pathname === '/ensure') return await this.ensure(body)
       if (url.pathname === '/renew') return await this.renew(body)
       if (url.pathname === '/cancel' || url.pathname === '/release') return await this.cancel(body)
       if (url.pathname === '/settle') return await this.settle(body)
@@ -172,7 +174,7 @@ export class SubscriptionStateDO {
         profile,
         windows: windows.map((window) => this.windowSnapshot(window)),
         requests: Array.from(this.state.storage.sql.exec(
-          `SELECT request_id, status, reserved_micros, settled_micros,
+          `SELECT request_id, status, committed, reserved_micros, settled_micros,
                   reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
                   last_renewal_ttl_ms, daily_window_start_ms, weekly_window_start_ms,
                   monthly_window_start_ms, term_generation, quota_reset_epoch,
@@ -564,6 +566,48 @@ export class SubscriptionStateDO {
     return response
   }
 
+  private async ensure(body: Record<string, unknown>): Promise<Response> {
+    requireSchemaVersion(body)
+    const requestId = requireString(body, 'request_id')
+    const targetAmount = requireSafeInteger(body, 'target_amount_micros')
+    const now = Date.now()
+    return this.state.storage.transactionSync(() => {
+      this.expireDueReservations(now)
+      const request = this.requireRequest(requestId)
+      if (request.status === 'settled') {
+        if (request.settled_micros === targetAmount) {
+          return json({ schema_version: SCHEMA_VERSION, idempotent: true, request })
+        }
+        throw new StateApiError(409, 'reservation_commitment_conflict', 'Settled request has a different amount')
+      }
+      if (request.committed === 1) {
+        if (request.reserved_micros === targetAmount) {
+          return json({ schema_version: SCHEMA_VERSION, idempotent: true, request })
+        }
+        throw new StateApiError(409, 'reservation_commitment_conflict', 'Request already has a different committed reservation')
+      }
+      if (request.status !== 'reserved' && request.status !== 'expired') {
+        throw new StateApiError(409, 'invalid_transition', `Cannot commit a ${request.status} request`)
+      }
+      if (targetAmount < request.reserved_micros) {
+        throw new StateApiError(409, 'reservation_commitment_decrease', 'Committed target cannot be lower than the reservation')
+      }
+      this.state.storage.sql.exec(
+        `UPDATE subscription_requests
+            SET committed = 1, reserved_micros = ?, updated_at_ms = ?
+          WHERE request_id = ? AND committed = 0 AND status IN ('reserved', 'expired')`,
+        targetAmount,
+        now,
+        requestId,
+      )
+      return json({
+        schema_version: SCHEMA_VERSION,
+        idempotent: false,
+        request: this.requireRequest(requestId),
+      })
+    })
+  }
+
   private async cancel(body: Record<string, unknown>): Promise<Response> {
     requireSchemaVersion(body)
     const requestId = requireString(body, 'request_id')
@@ -573,6 +617,9 @@ export class SubscriptionStateDO {
       const request = this.loadRequest(requestId)
       if (request === null) {
         throw new StateApiError(404, 'request_not_authorized', 'Request is not authorized')
+      }
+      if (request.committed === 1) {
+        throw new StateApiError(409, 'invalid_transition', 'A committed request cannot be cancelled')
       }
       if (request.status === 'cancelled' || request.status === 'expired') {
         return json({ schema_version: SCHEMA_VERSION, idempotent: true, request })
@@ -610,6 +657,9 @@ export class SubscriptionStateDO {
       }
       if (request.status !== 'reserved' && request.status !== 'expired') {
         throw new StateApiError(409, 'invalid_transition', `Cannot settle a ${request.status} request`)
+      }
+      if (request.committed === 1 && amount !== request.reserved_micros) {
+        throw new StateApiError(409, 'settlement_commitment_conflict', 'Settlement must equal the committed reservation')
       }
       if (amount > request.reserved_micros) {
         throw new StateApiError(409, 'settlement_exceeds_reservation', 'Settlement exceeds the worst-case reservation')
@@ -774,6 +824,7 @@ export class SubscriptionStateDO {
       CREATE TABLE IF NOT EXISTS subscription_requests (
         request_id TEXT PRIMARY KEY,
         status TEXT NOT NULL CHECK (status IN ('authorized', 'reserved', 'cancelled', 'settled', 'expired')),
+        committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1)),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
         reservation_expires_at_ms INTEGER CHECK (reservation_expires_at_ms IS NULL OR reservation_expires_at_ms >= 0),
@@ -792,6 +843,11 @@ export class SubscriptionStateDO {
     const requestColumns = Array.from(this.state.storage.sql.exec(
       'PRAGMA table_info(subscription_requests)',
     )) as Array<{ name?: string }>
+    if (!requestColumns.some((column) => column.name === 'committed')) {
+      this.state.storage.sql.exec(
+        'ALTER TABLE subscription_requests ADD COLUMN committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1))',
+      )
+    }
     const addedRequestTermGeneration = !requestColumns.some((column) => column.name === 'term_generation')
     const addedRequestQuotaResetEpoch = !requestColumns.some((column) => column.name === 'quota_reset_epoch')
     if (addedRequestTermGeneration) {
@@ -982,7 +1038,7 @@ export class SubscriptionStateDO {
 
   private loadRequest(requestId: string): SubscriptionRequestRow | null {
     return firstRow<SubscriptionRequestRow>(this.state.storage.sql.exec(
-      `SELECT request_id, status, reserved_micros, settled_micros,
+      `SELECT request_id, status, committed, reserved_micros, settled_micros,
               reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
               last_renewal_ttl_ms, daily_window_start_ms, weekly_window_start_ms,
               monthly_window_start_ms, term_generation, quota_reset_epoch,
@@ -1085,7 +1141,8 @@ export class SubscriptionStateDO {
     const reserved = firstRow<{ reserved_micros: number }>(this.state.storage.sql.exec(
       `SELECT COALESCE(SUM(reserved_micros), 0) AS reserved_micros
          FROM subscription_requests
-        WHERE status = 'reserved' AND term_generation = ? AND ${column} = ?
+        WHERE (status = 'reserved' OR (status = 'expired' AND committed = 1))
+          AND term_generation = ? AND ${column} = ?
           AND (? <> 'daily' OR quota_reset_epoch = ?)`,
       window.term_generation,
       window.start_ms,
@@ -1134,13 +1191,13 @@ export class SubscriptionStateDO {
   private expireDueReservations(now: number): number {
     const due = firstRow<{ total: number }>(this.state.storage.sql.exec(
       `SELECT COUNT(*) AS total FROM subscription_requests
-        WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+        WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
       now,
     ))?.total ?? 0
     if (due > 0) {
       this.state.storage.sql.exec(
         `UPDATE subscription_requests SET status = 'expired', updated_at_ms = ?
-          WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+          WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
         now, now,
       )
     }
@@ -1150,7 +1207,7 @@ export class SubscriptionStateDO {
   private cleanupTombstones(now: number): void {
     this.state.storage.sql.exec(
       `DELETE FROM subscription_requests
-        WHERE status IN ('cancelled', 'settled', 'expired') AND updated_at_ms < ?`,
+        WHERE status IN ('cancelled', 'settled', 'expired') AND committed = 0 AND updated_at_ms < ?`,
       Math.max(0, now - TOMBSTONE_RETENTION_MS),
     )
     this.state.storage.sql.exec(
@@ -1248,7 +1305,7 @@ export class SubscriptionStateDO {
   private async scheduleNextAlarm(): Promise<void> {
     const reservation = firstRow<{ next_alarm_ms: number | null }>(this.state.storage.sql.exec(
       `SELECT MIN(reservation_expires_at_ms) AS next_alarm_ms FROM subscription_requests
-        WHERE status = 'reserved'`,
+        WHERE status = 'reserved' AND committed = 0`,
     ))?.next_alarm_ms
     const outbox = firstRow<{ next_alarm_ms: number | null }>(this.state.storage.sql.exec(
       `SELECT MIN(available_at_ms) AS next_alarm_ms FROM subscription_outbox

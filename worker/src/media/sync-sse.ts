@@ -520,7 +520,7 @@ export class SyncImageSseTransformer {
     if (image === null) {
       const url = safeImageUrl(payload.url)
       if (url !== '') {
-        const identity = boundedString(stringValue(payload.id ?? payload.call_id).trim(), 200) || `url:${url}`
+        const identity = `url:${url}`
         if (this.paidOutputs.size < this.maxCompletedImages) this.paidOutputs.add(identity)
         this.currentMeta = mergeMeta(this.currentMeta, metaFrom(payload))
         this.responseStatus = this.responseStatus || 'in_progress'
@@ -818,8 +818,12 @@ function imageFrom(value: Record<string, unknown>, fallback: ImageMeta): Pending
   }
 }
 
-function imageIdentity(image: Pick<PendingImage, 'id' | 'outputFormat' | 'b64'>): string {
-  return image.id === '' ? `${image.outputFormat}|${image.b64}` : `id:${image.id}`
+function imageIdentity(image: Pick<PendingImage, 'b64'>): string {
+  // Provider call IDs identify lifecycle events, not necessarily distinct
+  // image bytes. Content identity prevents duplicate charging when the same
+  // paid output is repeated under different event IDs, while still counting
+  // different outputs that accidentally reuse one provider ID.
+  return `b64:${image.b64}`
 }
 
 function safeImageUrl(value: unknown): string {

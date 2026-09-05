@@ -52,6 +52,7 @@ function post(
     | '/reclaim'
     | '/monetary/configure'
     | '/monetary/reserve'
+    | '/monetary/ensure'
     | '/monetary/renew'
     | '/monetary/settle'
     | '/monetary/cancel',
@@ -111,6 +112,19 @@ function monetarySettle(
     request_id: requestId,
     api_key_id: apiKeyId,
     amount_micros: amountMicros,
+  })
+}
+
+function monetaryEnsure(
+  object: ApiKeyLimitDO,
+  requestId: string,
+  targetAmountMicros: number,
+  apiKeyId = 'key-1',
+): Promise<Response> {
+  return post(object, '/monetary/ensure', {
+    request_id: requestId,
+    api_key_id: apiKeyId,
+    target_amount_micros: targetAmountMicros,
   })
 }
 
@@ -393,6 +407,168 @@ describe('ApiKeyLimitDO monetary quota contract', () => {
       reserved: false,
       error: { code: 'api_key_quota_exceeded' },
     })
+  })
+
+  it('commits a grown absolute reservation target even beyond the current key limit', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'overdelivery', 40)
+
+    const ensured = await monetaryEnsure(object, 'overdelivery', 120)
+
+    expect(ensured.status).toBe(200)
+    await expect(ensured.json()).resolves.toMatchObject({
+      idempotent: false,
+      reservation: {
+        request_id: 'overdelivery',
+        status: 'reserved',
+        reserved_micros: 120,
+        committed: 1,
+      },
+      usage: { active_reserved_micros: 120 },
+    })
+    const blocked = await monetaryReserve(object, 'blocked-by-commit', 1)
+    expect(blocked.status).toBe(429)
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: { code: 'api_key_quota_exceeded' },
+    })
+  })
+
+  it('replays ensure at one absolute target and rejects any conflicting target', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'ensure-replay', 40)
+
+    expect((await monetaryEnsure(object, 'ensure-replay', 80)).status).toBe(200)
+    const replay = await monetaryEnsure(object, 'ensure-replay', 80)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({ idempotent: true })
+
+    for (const conflictingTarget of [79, 81]) {
+      const conflict = await monetaryEnsure(object, 'ensure-replay', conflictingTarget)
+      expect(conflict.status).toBe(409)
+      await expect(conflict.json()).resolves.toMatchObject({
+        error: { code: 'api_key_monetary_ensure_conflict' },
+      })
+    }
+
+    await monetaryReserve(object, 'cancelled-ensure', 10)
+    await monetaryCancel(object, 'cancelled-ensure')
+    const cancelled = await monetaryEnsure(object, 'cancelled-ensure', 10)
+    expect(cancelled.status).toBe(409)
+    await expect(cancelled.json()).resolves.toMatchObject({
+      error: { code: 'api_key_monetary_invalid_transition' },
+    })
+
+    await monetaryReserve(object, 'cannot-shrink', 10)
+    const belowReservation = await monetaryEnsure(object, 'cannot-shrink', 9)
+    expect(belowReservation.status).toBe(409)
+    await expect(belowReservation.json()).resolves.toMatchObject({
+      error: { code: 'api_key_monetary_ensure_below_reservation' },
+    })
+  })
+
+  it('treats ensure of an already-settled exact amount as an idempotent replay', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'settled-ensure', 40)
+    await monetarySettle(object, 'settled-ensure', 25)
+
+    const replay = await monetaryEnsure(object, 'settled-ensure', 25)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({
+      idempotent: true,
+      reservation: { status: 'settled', settled_micros: 25 },
+    })
+    const conflict = await monetaryEnsure(object, 'settled-ensure', 26)
+    expect(conflict.status).toBe(409)
+    await expect(conflict.json()).resolves.toMatchObject({
+      error: { code: 'api_key_monetary_ensure_conflict' },
+    })
+  })
+
+  it('commits an expired reservation and makes it non-cancellable', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'expired-commit', 40, { reservation_ttl_ms: 1_000 })
+    vi.advanceTimersByTime(1_001)
+    await post(object, '/reclaim', {})
+
+    const ensured = await monetaryEnsure(object, 'expired-commit', 120)
+    expect(ensured.status).toBe(200)
+    await expect(ensured.json()).resolves.toMatchObject({
+      reservation: { status: 'expired', reserved_micros: 120, committed: 1 },
+      usage: { active_reserved_micros: 120 },
+    })
+
+    const cancelled = await monetaryCancel(object, 'expired-commit')
+    expect(cancelled.status).toBe(409)
+    await expect(cancelled.json()).resolves.toMatchObject({
+      error: { code: 'api_key_monetary_invalid_transition' },
+    })
+  })
+
+  it('holds a committed reservation through expiry cleanup and settles only its exact target', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig())
+    await monetaryReserve(object, 'permanent-commit', 40, { reservation_ttl_ms: 1_000 })
+    await monetaryEnsure(object, 'permanent-commit', 120)
+
+    vi.advanceTimersByTime(8 * 24 * 60 * 60_000)
+    const reclaimed = await post(object, '/reclaim', {})
+    await expect(reclaimed.json()).resolves.toMatchObject({ monetary_reclaimed: 0 })
+
+    const wrongAmount = await monetarySettle(object, 'permanent-commit', 119)
+    expect(wrongAmount.status).toBe(409)
+    await expect(wrongAmount.json()).resolves.toMatchObject({
+      error: { code: 'api_key_monetary_settlement_conflict' },
+    })
+
+    const settled = await monetarySettle(object, 'permanent-commit', 120)
+    expect(settled.status).toBe(200)
+    await expect(settled.json()).resolves.toMatchObject({
+      reservation: { status: 'settled', settled_micros: 120, committed: 1 },
+      usage: { total_settled_micros: 120, active_reserved_micros: 0 },
+    })
+    expect((await monetaryReserve(object, 'blocked-after-overlimit', 0)).status).toBe(429)
+  })
+
+  it('keeps a committed settlement attached to the epochs captured by its request', async () => {
+    const { object } = harness()
+    await post(object, '/monetary/configure', monetaryConfig({
+      limit_5h_micros: 100,
+      limit_1d_micros: 100,
+      limit_7d_micros: 100,
+    }))
+    await monetaryReserve(object, 'old-epoch-commit', 40)
+    await monetaryEnsure(object, 'old-epoch-commit', 120)
+
+    await post(object, '/monetary/configure', monetaryConfig({
+      control_version: 2,
+      quota_reset_epoch: 1,
+      rate_limit_reset_epoch: 1,
+      limit_5h_micros: 100,
+      limit_1d_micros: 100,
+      limit_7d_micros: 100,
+    }))
+    expect((await monetaryReserve(object, 'new-epoch', 100, { control_version: 2 })).status).toBe(200)
+
+    const oldSettlement = await monetarySettle(object, 'old-epoch-commit', 120)
+    expect(oldSettlement.status).toBe(200)
+    await expect(oldSettlement.json()).resolves.toMatchObject({
+      usage: {
+        quota_reset_epoch: 1,
+        rate_limit_reset_epoch: 1,
+        total_settled_micros: 0,
+        active_reserved_micros: 100,
+        windows: [
+          expect.objectContaining({ kind: '5h', settled_micros: 0 }),
+          expect.objectContaining({ kind: '1d', settled_micros: 0 }),
+          expect.objectContaining({ kind: '7d', settled_micros: 0 }),
+        ],
+      },
+    })
+    expect((await monetarySettle(object, 'new-epoch', 100)).status).toBe(200)
   })
 
   it('settles a reservation exactly once and rejects a conflicting replay', async () => {

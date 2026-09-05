@@ -56,6 +56,7 @@ interface MonetaryReservationRow {
   rate_limit_reset_epoch: number
   status: MonetaryReservationStatus
   reserved_micros: number
+  committed: number
   settled_micros: number | null
   tracks_total: number
   tracks_windows: number
@@ -163,6 +164,7 @@ export class ApiKeyLimitDO {
       if (url.pathname === '/reclaim') return await this.reclaim()
       if (url.pathname === '/monetary/configure') return await this.configureMonetary(body)
       if (url.pathname === '/monetary/reserve') return await this.reserveMonetary(body)
+      if (url.pathname === '/monetary/ensure') return await this.ensureMonetary(body)
       if (url.pathname === '/monetary/renew') return await this.renewMonetary(body)
       if (url.pathname === '/monetary/settle') return await this.settleMonetary(body)
       if (url.pathname === '/monetary/cancel') return await this.cancelMonetary(body)
@@ -274,7 +276,7 @@ export class ApiKeyLimitDO {
       const monetaryReservations = Array.from(this.state.storage.sql.exec(
         `SELECT request_id, api_key_id, control_version, quota_reset_epoch,
                 rate_limit_reset_epoch, status, reserved_micros,
-                settled_micros, tracks_total, tracks_windows,
+                committed, settled_micros, tracks_total, tracks_windows,
                 reservation_expires_at_ms, reservation_ttl_ms, created_at_ms, updated_at_ms
            FROM api_key_monetary_reservations
           ORDER BY created_at_ms ASC, request_id ASC`,
@@ -736,6 +738,88 @@ export class ApiKeyLimitDO {
     return response
   }
 
+  private async ensureMonetary(body: Record<string, unknown>): Promise<Response> {
+    const requestId = requireString(body, 'request_id', 256)
+    const apiKeyId = requireString(body, 'api_key_id', 128)
+    const targetAmount = requireSafeInteger(body, 'target_amount_micros')
+    const now = Date.now()
+    const response = this.state.storage.transactionSync(() => {
+      this.cleanup(now)
+      this.expireMonetaryReservations(now)
+      const reservation = this.readMonetaryReservation(requestId)
+      if (reservation === null) {
+        throw new StateApiError(404, 'api_key_monetary_reservation_not_found', 'Monetary reservation was not found')
+      }
+      if (reservation.api_key_id !== apiKeyId) {
+        throw new StateApiError(
+          409,
+          'api_key_monetary_identity_conflict',
+          'Monetary reservation belongs to another API key',
+        )
+      }
+      if (reservation.status === 'settled') {
+        if (reservation.settled_micros !== targetAmount) {
+          throw new StateApiError(
+            409,
+            'api_key_monetary_ensure_conflict',
+            'Settled monetary amount does not match the committed target',
+          )
+        }
+        return json({
+          schema_version: 1,
+          idempotent: true,
+          reservation,
+          usage: this.monetaryUsageSnapshot(apiKeyId),
+        })
+      }
+      if (reservation.committed === 1) {
+        if (reservation.reserved_micros !== targetAmount) {
+          throw new StateApiError(
+            409,
+            'api_key_monetary_ensure_conflict',
+            'Monetary reservation was already committed with a different amount',
+          )
+        }
+        return json({
+          schema_version: 1,
+          idempotent: true,
+          reservation,
+          usage: this.monetaryUsageSnapshot(apiKeyId),
+        })
+      }
+      if (targetAmount < reservation.reserved_micros) {
+        throw new StateApiError(
+          409,
+          'api_key_monetary_ensure_below_reservation',
+          'Committed amount cannot be less than the original reservation',
+        )
+      }
+      if (reservation.status !== 'reserved' && reservation.status !== 'expired') {
+        throw new StateApiError(
+          409,
+          'api_key_monetary_invalid_transition',
+          `Cannot commit a ${reservation.status} monetary reservation`,
+        )
+      }
+      this.state.storage.sql.exec(
+        `UPDATE api_key_monetary_reservations
+            SET reserved_micros = ?, committed = 1, updated_at_ms = ?
+          WHERE request_id = ?`,
+        targetAmount,
+        now,
+        requestId,
+      )
+      return json({
+        schema_version: 1,
+        idempotent: false,
+        reservation: this.readMonetaryReservation(requestId),
+        usage: this.monetaryUsageSnapshot(apiKeyId),
+      })
+    })
+    await this.scheduleAlarm()
+    return response
+  }
+
   private async settleMonetary(body: Record<string, unknown>): Promise<Response> {
     const requestId = requireString(body, 'request_id', 256)
     const apiKeyId = requireString(body, 'api_key_id', 128)
@@ -775,6 +859,13 @@ export class ApiKeyLimitDO {
           409,
           'api_key_monetary_invalid_transition',
           `Cannot settle a ${reservation.status} monetary reservation`,
+        )
+      }
+      if (reservation.committed === 1 && amount !== reservation.reserved_micros) {
+        throw new StateApiError(
+          409,
+          'api_key_monetary_settlement_conflict',
+          'Committed monetary reservation must settle its exact target amount',
         )
       }
       if (amount > reservation.reserved_micros) {
@@ -847,11 +938,11 @@ export class ApiKeyLimitDO {
           'Monetary reservation belongs to another API key',
         )
       }
-      if (reservation.status === 'settled') {
+      if (reservation.status === 'settled' || reservation.committed === 1) {
         throw new StateApiError(
           409,
           'api_key_monetary_invalid_transition',
-          'Cannot cancel a settled monetary reservation',
+          'Cannot cancel a settled or committed monetary reservation',
         )
       }
       if (reservation.status !== 'reserved') {
@@ -940,6 +1031,7 @@ export class ApiKeyLimitDO {
         rate_limit_reset_epoch INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0),
         status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'cancelled', 'expired')),
         reserved_micros INTEGER NOT NULL CHECK (reserved_micros >= 0),
+        committed INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1)),
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
         tracks_total INTEGER NOT NULL CHECK (tracks_total IN (0, 1)),
         tracks_windows INTEGER NOT NULL CHECK (tracks_windows IN (0, 1)),
@@ -971,6 +1063,11 @@ export class ApiKeyLimitDO {
       'api_key_monetary_reservations',
       'rate_limit_reset_epoch',
       'INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_reset_epoch >= 0)',
+    )
+    this.ensureColumn(
+      'api_key_monetary_reservations',
+      'committed',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1))',
     )
     this.ensureColumn(
       'api_key_monetary_reservations',
@@ -1048,7 +1145,7 @@ export class ApiKeyLimitDO {
     return (Array.from(this.state.storage.sql.exec(
       `SELECT request_id, api_key_id, control_version, quota_reset_epoch,
               rate_limit_reset_epoch, status, reserved_micros,
-              settled_micros, tracks_total, tracks_windows,
+              committed, settled_micros, tracks_total, tracks_windows,
               reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
               last_renewal_ttl_ms,
               created_at_ms, updated_at_ms
@@ -1066,7 +1163,8 @@ export class ApiKeyLimitDO {
     const row = Array.from(this.state.storage.sql.exec(
       `SELECT COALESCE(SUM(reserved_micros), 0) AS amount
          FROM api_key_monetary_reservations
-        WHERE api_key_id = ? AND status = 'reserved'
+        WHERE api_key_id = ?
+          AND (status = 'reserved' OR (status = 'expired' AND committed = 1))
           ${epochColumn === undefined ? '' : `AND ${epochColumn} = ?`}`,
       apiKeyId,
       ...(epochColumn === undefined ? [] : [epoch]),
@@ -1227,7 +1325,7 @@ export class ApiKeyLimitDO {
     const row = Array.from(this.state.storage.sql.exec(
       `SELECT COUNT(*) AS count
          FROM api_key_monetary_reservations
-        WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+        WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
       now,
     ))[0] as { count?: unknown } | undefined
     const count = Number.isSafeInteger(row?.count) ? row!.count as number : 0
@@ -1235,7 +1333,7 @@ export class ApiKeyLimitDO {
       this.state.storage.sql.exec(
         `UPDATE api_key_monetary_reservations
             SET status = 'expired', updated_at_ms = ?
-          WHERE status = 'reserved' AND reservation_expires_at_ms <= ?`,
+          WHERE status = 'reserved' AND committed = 0 AND reservation_expires_at_ms <= ?`,
         now,
         now,
       )
@@ -1253,7 +1351,8 @@ export class ApiKeyLimitDO {
       now - TOMBSTONE_RETENTION_MS,
     )
     this.state.storage.sql.exec(
-      "DELETE FROM api_key_monetary_reservations WHERE status <> 'reserved' AND updated_at_ms < ?",
+      `DELETE FROM api_key_monetary_reservations
+        WHERE status <> 'reserved' AND committed = 0 AND updated_at_ms < ?`,
       now - TOMBSTONE_RETENTION_MS,
     )
     this.state.storage.sql.exec(
@@ -1274,7 +1373,7 @@ export class ApiKeyLimitDO {
     ))[0] as { expires_at_ms?: unknown } | undefined
     const monetary = Array.from(this.state.storage.sql.exec(
       `SELECT MIN(reservation_expires_at_ms) AS expires_at_ms
-         FROM api_key_monetary_reservations WHERE status = 'reserved'`,
+         FROM api_key_monetary_reservations WHERE status = 'reserved' AND committed = 0`,
     ))[0] as { expires_at_ms?: unknown } | undefined
     const expirations = [
       admission?.expires_at_ms,

@@ -92,6 +92,8 @@ export interface UserStateChangedPayload {
   user_id: string
   state_version: number
   balance_micros: number
+  /** Added in migration 0048; absent only on pre-0048 queued events. */
+  spend_debt_micros?: number
   enabled: boolean
   updated_at_ms: number
 }

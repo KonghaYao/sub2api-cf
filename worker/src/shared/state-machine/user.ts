@@ -14,6 +14,7 @@ export interface UserProfileState {
   balance_micros: number;
   reserved_micros: number;
   settled_micros: number;
+  spend_debt_micros: number;
   updated_at_ms: number;
 }
 
@@ -23,6 +24,9 @@ export interface UserRequestState {
   status: UserRequestStatus;
   reserved_micros: number;
   settled_micros: number | null;
+  committed: boolean;
+  funded_micros: number;
+  expired: boolean;
   reservation_expires_at_ms: number | null;
   reservation_ttl_ms: number | null;
   renewal_sequence: number;
@@ -47,6 +51,7 @@ export type UserCommand = UserCommandEnvelope &
     | { type: "authorize" }
     | { type: "reserve"; amount_micros: number; reservation_ttl_ms?: number }
     | { type: "renew"; renewal_sequence: number; reservation_ttl_ms: number }
+    | { type: "ensure"; target_amount_micros: number }
     | { type: "cancel" }
     | { type: "settle"; amount_micros: number }
   );
@@ -90,10 +95,12 @@ function assertRequestId(requestId: string): void {
 export function createUserMachineState(input: {
   user_id: string;
   balance_micros: number;
+  spend_debt_micros?: number;
   enabled: boolean;
   now_ms: number;
 }): UserMachineState {
   assertMicros(input.balance_micros, "balance_micros");
+  assertMicros(input.spend_debt_micros ?? 0, "spend_debt_micros");
   assertTimestamp(input.now_ms);
   if (input.user_id.length === 0 || input.user_id.length > 128) {
     throw new StateMachineError("invalid_user_id", "user_id must be between 1 and 128 characters");
@@ -108,6 +115,7 @@ export function createUserMachineState(input: {
       balance_micros: input.balance_micros,
       reserved_micros: 0,
       settled_micros: 0,
+      spend_debt_micros: input.spend_debt_micros ?? 0,
       updated_at_ms: input.now_ms,
     },
     request: null,
@@ -141,6 +149,8 @@ export function applyUserCommand(
       );
     case "cancel":
       return cancel(state, nowMs);
+    case "ensure":
+      return ensure(state, command.target_amount_micros, nowMs);
     case "renew":
       return renew(
         state,
@@ -170,6 +180,9 @@ function authorize(state: UserMachineState, requestId: string, nowMs: number): U
         status: "authorized",
         reserved_micros: 0,
         settled_micros: null,
+        committed: false,
+        funded_micros: 0,
+        expired: false,
         reservation_expires_at_ms: null,
         reservation_ttl_ms: null,
         renewal_sequence: 0,
@@ -240,8 +253,78 @@ function reserve(
         request_id: requestId,
         status: "reserved",
         reserved_micros: amountMicros,
+        funded_micros: amountMicros,
+        expired: false,
         reservation_expires_at_ms: nowMs + reservationTtlMs,
         reservation_ttl_ms: reservationTtlMs,
+        updated_at_ms: nowMs,
+      },
+    },
+  };
+}
+
+function ensure(
+  state: UserMachineState,
+  targetAmountMicros: number,
+  nowMs: number,
+): UserTransition {
+  assertMicros(targetAmountMicros, "target_amount_micros");
+  const request = requireRequest(state);
+  if (request.status === "settled") {
+    if (request.settled_micros === targetAmountMicros) return { state, idempotent: true };
+    throw new StateMachineError("reservation_commitment_conflict", "Settled request has a different amount");
+  }
+  if (request.status === "cancelled" && !request.expired) {
+    throw new StateMachineError("invalid_transition", "A manually cancelled request cannot be committed");
+  }
+  if (request.status !== "reserved" && !(request.status === "cancelled" && request.expired)) {
+    throw new StateMachineError("invalid_transition", `Cannot commit a ${request.status} request`);
+  }
+  if (request.committed) {
+    if (request.reserved_micros === targetAmountMicros) return { state, idempotent: true };
+    throw new StateMachineError("reservation_commitment_conflict", "Request is committed to a different amount");
+  }
+  if (targetAmountMicros < request.reserved_micros) {
+    throw new StateMachineError(
+      "reservation_commitment_decrease",
+      "Committed target cannot be lower than the reservation",
+    );
+  }
+
+  const heldForRequest = request.status === "reserved" ? request.funded_micros : 0;
+  const otherReservations = state.profile.reserved_micros - heldForRequest;
+  if (!Number.isSafeInteger(otherReservations) || otherReservations < 0) {
+    throw new StateMachineError("invalid_persisted_state", "Request funding exceeds total reservations");
+  }
+  const availableMicros = state.profile.balance_micros - otherReservations;
+  if (!Number.isSafeInteger(availableMicros) || availableMicros < 0) {
+    throw new StateMachineError("invalid_persisted_state", "Reservations exceed the user balance");
+  }
+  const fundedMicros = Math.min(targetAmountMicros, availableMicros);
+  checkedAddMicros(state.profile.settled_micros, targetAmountMicros, "settled_micros");
+  checkedAddMicros(
+    state.profile.spend_debt_micros,
+    targetAmountMicros - fundedMicros,
+    "spend_debt_micros",
+  );
+
+  return {
+    idempotent: false,
+    state: {
+      schema_version: STATE_SCHEMA_VERSION,
+      profile: {
+        ...state.profile,
+        reserved_micros: otherReservations + fundedMicros,
+        updated_at_ms: nowMs,
+      },
+      request: {
+        ...request,
+        status: "reserved",
+        reserved_micros: targetAmountMicros,
+        committed: true,
+        funded_micros: fundedMicros,
+        expired: false,
+        reservation_expires_at_ms: null,
         updated_at_ms: nowMs,
       },
     },
@@ -308,8 +391,14 @@ function cancel(state: UserMachineState, nowMs: number): UserTransition {
   if (request.status === "settled") {
     throw new StateMachineError("invalid_transition", "A settled request cannot be cancelled");
   }
+  if (request.committed) {
+    throw new StateMachineError("invalid_transition", "A committed request cannot be cancelled");
+  }
 
-  const releasedMicros = request.status === "reserved" ? request.reserved_micros : 0;
+  const releasedMicros = request.status === "reserved" ? request.funded_micros : 0;
+  if (releasedMicros > state.profile.reserved_micros) {
+    throw new StateMachineError("invalid_persisted_state", "Request funding is not held");
+  }
   return {
     idempotent: false,
     state: {
@@ -322,6 +411,7 @@ function cancel(state: UserMachineState, nowMs: number): UserTransition {
       request: {
         ...request,
         status: "cancelled",
+        expired: false,
         updated_at_ms: nowMs,
       },
     },
@@ -337,6 +427,59 @@ function settle(state: UserMachineState, amountMicros: number, nowMs: number): U
   }
   if (request.status !== "reserved") {
     throw new StateMachineError("invalid_transition", `Cannot settle a ${request.status} request`);
+  }
+  if (request.committed) {
+    if (amountMicros !== request.reserved_micros) {
+      throw new StateMachineError("settlement_conflict", "Settlement differs from the committed amount");
+    }
+    const otherReservations = state.profile.reserved_micros - request.funded_micros;
+    if (!Number.isSafeInteger(otherReservations) || otherReservations < 0) {
+      throw new StateMachineError("invalid_persisted_state", "Committed request funding is not held");
+    }
+    const availableForRequest = state.profile.balance_micros - otherReservations;
+    if (!Number.isSafeInteger(availableForRequest) || availableForRequest < 0) {
+      throw new StateMachineError("invalid_persisted_state", "Reservations exceed the user balance");
+    }
+    const fundedAtSettlement = Math.min(amountMicros, availableForRequest);
+    const debtMicros = amountMicros - fundedAtSettlement;
+    if (!Number.isSafeInteger(debtMicros) || debtMicros < 0) {
+      throw new StateMachineError("invalid_persisted_state", "Committed request funding is invalid");
+    }
+    const settledMicros = checkedAddMicros(
+      state.profile.settled_micros,
+      amountMicros,
+      "settled_micros",
+    );
+    const spendDebtMicros = checkedAddMicros(
+      state.profile.spend_debt_micros,
+      debtMicros,
+      "spend_debt_micros",
+    );
+    if (
+      request.funded_micros > state.profile.reserved_micros
+    ) {
+      throw new StateMachineError("invalid_persisted_state", "Committed request funding is not held");
+    }
+    return {
+      idempotent: false,
+      state: {
+        schema_version: STATE_SCHEMA_VERSION,
+        profile: {
+          ...state.profile,
+          balance_micros: state.profile.balance_micros - fundedAtSettlement,
+          reserved_micros: state.profile.reserved_micros - request.funded_micros,
+          settled_micros: settledMicros,
+          spend_debt_micros: spendDebtMicros,
+          updated_at_ms: nowMs,
+        },
+        request: {
+          ...request,
+          status: "settled",
+          settled_micros: amountMicros,
+          updated_at_ms: nowMs,
+        },
+      },
+    };
   }
   const otherReservations = state.profile.reserved_micros - request.reserved_micros;
   const availableForRequest = state.profile.balance_micros - otherReservations;
@@ -380,12 +523,33 @@ export function reclaimExpiredUserReservation(
   assertTimestamp(nowMs);
   if (
     state.request?.status !== "reserved" ||
+    state.request.committed ||
     state.request.reservation_expires_at_ms === null ||
     state.request.reservation_expires_at_ms > nowMs
   ) {
     return { state, idempotent: true };
   }
-  return cancel(state, nowMs);
+  const request = state.request;
+  if (request.funded_micros > state.profile.reserved_micros) {
+    throw new StateMachineError("invalid_persisted_state", "Request funding is not held");
+  }
+  return {
+    idempotent: false,
+    state: {
+      schema_version: STATE_SCHEMA_VERSION,
+      profile: {
+        ...state.profile,
+        reserved_micros: state.profile.reserved_micros - request.funded_micros,
+        updated_at_ms: nowMs,
+      },
+      request: {
+        ...request,
+        status: "cancelled",
+        expired: true,
+        updated_at_ms: nowMs,
+      },
+    },
+  };
 }
 
 function checkedAddMicros(left: number, right: number, fieldName: string): number {

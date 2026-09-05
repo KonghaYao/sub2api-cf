@@ -1,10 +1,9 @@
 import type { Env, UsageSettledPayload } from '../env'
 import { createUsageEvent } from '../gateway/queue'
 import {
-  enqueueSettlementCommand,
+  enqueueSettlementCommandV2,
   persistSettlementRecovery,
   settleRecoveryRequest,
-  signalSettlementRecovery,
 } from '../gateway/recovery'
 import {
   cancelApiKeyMonetaryReservation,
@@ -57,7 +56,9 @@ export interface SyncImageBilling {
   settle(input: {
     env: Env
     principal: GatewayPrincipal
-    usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'>
+    usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
+      initialReservedMicros: number
+    }
   }): Promise<void>
   cancel(input: {
     env: Env
@@ -108,31 +109,58 @@ export async function cancelSyncImageBilling(
 export async function settleSyncImageBilling(
   env: Env,
   principal: GatewayPrincipal,
-  input: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'>,
+  input: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
+    initialReservedMicros: number
+  },
 ): Promise<void> {
+  const { initialReservedMicros, ...usageInput } = input
   const occurredAt = Date.now()
-  const payload = buildSyncImageUsagePayload({ ...input, principal, occurredAt })
+  const payload = buildSyncImageUsagePayload({ ...usageInput, principal, occurredAt })
   const event = createUsageEvent(payload, occurredAt)
   // Once the provider has produced an image this hold represents real cost.
   // A persistence outage must retain the hold so the caller can retry this
   // idempotent settlement; cancelling it would silently make paid work free.
   try {
-    await persistSettlementRecovery(env, principal, input.requestId, input.amountMicros, event)
+    await persistSettlementRecovery(
+      env,
+      principal,
+      usageInput.requestId,
+      usageInput.amountMicros,
+      event,
+      initialReservedMicros,
+    )
   } catch {
     // Queue stores the complete immutable command, not merely a D1 row id, so
     // settlement remains recoverable even while D1 itself is unavailable.
-    await enqueueSettlementCommand(env, principal, input.requestId, input.amountMicros, event)
+    await enqueueSettlementCommandV2(
+      env,
+      principal,
+      usageInput.requestId,
+      initialReservedMicros,
+      usageInput.amountMicros,
+      event,
+    )
     return
   }
   let completed = false
   try {
-    completed = await settleRecoveryRequest(env, input.requestId, true)
+    completed = await settleRecoveryRequest(env, usageInput.requestId, true)
   } catch {
     // The durable D1 command already owns recovery. Do not cancel or surface a
     // retry that could repeat a paid upstream image generation.
   }
   if (!completed) {
-    await signalSettlementRecovery(env, input.requestId)
+    // Keep the retry on the v2 command type. A rolling old Worker recognizes
+    // settlement.retry.v1 but does not understand the ensure barrier and could
+    // otherwise begin a partial settlement before every authority commits.
+    await enqueueSettlementCommandV2(
+      env,
+      principal,
+      usageInput.requestId,
+      initialReservedMicros,
+      usageInput.amountMicros,
+      event,
+    )
   }
 }
 

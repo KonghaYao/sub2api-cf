@@ -137,6 +137,41 @@ describe('synchronous image handler', () => {
     expect(test.stateCalls).toContain('/release')
   })
 
+  it('returns and bills every distinct provider output when the provider exceeds requested n', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      created: 1,
+      data: [
+        { b64_json: 'Zmlyc3Q=', size: '3840x2160' },
+        { b64_json: 'c2Vjb25k', size: '3840x2160' },
+      ],
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'surprise me', n: 1, size: '1024x1024' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(await response.json()).toMatchObject({
+      data: [
+        { b64_json: 'Zmlyc3Q=', size: '3840x2160' },
+        { b64_json: 'c2Vjb25k', size: '3840x2160' },
+      ],
+    })
+    expect(test.reserve).toHaveBeenCalledWith(expect.objectContaining({ amountMicros: 400_000 }))
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        initialReservedMicros: 400_000,
+        amountMicros: 800_000,
+        imageCount: 2,
+        imageSizeBreakdown: { '4K': 2 },
+      }),
+    }))
+    expect(test.cancel).not.toHaveBeenCalled()
+  })
+
   it('ignores an incompatible execution tuple without poisoning a valid route', async () => {
     const test = await fixture()
     const encrypted = await encryptCredential(
@@ -596,7 +631,7 @@ describe('synchronous image handler', () => {
     expect(test.cancel).not.toHaveBeenCalled()
   })
 
-  it('caps anomalous provider outputs to requested n so settlement cannot exceed its hold', async () => {
+  it('returns and bills distinct Codex outputs beyond requested n', async () => {
     const test = await fixture('codex')
     test.upstreamFetch.mockResolvedValueOnce(new Response([
       'event: response.completed',
@@ -613,9 +648,13 @@ describe('synchronous image handler', () => {
     }, test.env as never)
 
     expect(response.status, await response.clone().text()).toBe(200)
-    expect((await response.json() as { data: unknown[] }).data).toHaveLength(1)
+    expect((await response.json() as { data: unknown[] }).data).toHaveLength(2)
     expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
-      usage: expect.objectContaining({ amountMicros: 200_000, imageCount: 1 }),
+      usage: expect.objectContaining({
+        initialReservedMicros: 400_000,
+        amountMicros: 400_000,
+        imageCount: 2,
+      }),
     }))
   })
 

@@ -383,11 +383,14 @@ async function projectUserStateEvent(
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE users
-          SET balance_micros = ?, status = ?, state_version = ?,
+          SET balance_micros = ?,
+              spend_debt_micros = COALESCE(?, spend_debt_micros),
+              status = ?, state_version = ?,
               updated_at_ms = MAX(updated_at_ms, ?)
-        WHERE id = ? AND state_version < ?`,
+        WHERE id = ? AND state_version <= ?`,
     ).bind(
       payload.balance_micros,
+      payload.spend_debt_micros ?? null,
       payload.enabled ? 'active' : 'disabled',
       payload.state_version,
       payload.updated_at_ms,
@@ -627,6 +630,10 @@ function isUserStateEvent(
     (payload.state_version as number) >= 0 &&
     Number.isSafeInteger(payload.balance_micros) &&
     (payload.balance_micros as number) >= 0 &&
+    (payload.spend_debt_micros === undefined || (
+      Number.isSafeInteger(payload.spend_debt_micros) &&
+      (payload.spend_debt_micros as number) >= 0
+    )) &&
     typeof payload.enabled === 'boolean' &&
     Number.isSafeInteger(payload.updated_at_ms) &&
     (payload.updated_at_ms as number) >= 0 &&

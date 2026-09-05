@@ -240,6 +240,7 @@ describe('usage queue projection', () => {
       user_id: 'user-1',
       state_version: 7,
       balance_micros: 900_000,
+      spend_debt_micros: 25_000,
       enabled: false,
       updated_at_ms: 2_000,
     }))
@@ -249,9 +250,11 @@ describe('usage queue projection', () => {
     expect(item.ack).toHaveBeenCalledOnce()
     expect(database.batches).toHaveLength(1)
     expect(database.batches[0][0].query).toContain('UPDATE users')
-    expect(database.batches[0][0].query).toContain('state_version < ?')
+    expect(database.batches[0][0].query).toContain('state_version <= ?')
+    expect(database.batches[0][0].query).toContain('COALESCE(?, spend_debt_micros)')
     expect(database.batches[0][0].values).toEqual([
       900_000,
+      25_000,
       'disabled',
       7,
       2_000,
