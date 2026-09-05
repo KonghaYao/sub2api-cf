@@ -34,6 +34,9 @@ export interface SyncImageUsageInput {
   upstreamModel: string
   amountMicros: number
   operation: SyncImageOperation
+  stream?: boolean
+  outcome?: 'completed' | 'failed' | 'cancelled'
+  upstreamEndpoint?: string
   startedAt: number
   occurredAt: number
 }
@@ -150,12 +153,12 @@ export function buildSyncImageUsagePayload(input: SyncImageUsageInput): UsageSet
     cache_amount_micros: 0,
     base_amount_micros: input.amountMicros,
     amount_micros: input.amountMicros,
-    outcome: 'completed',
-    stream: false,
+    outcome: input.outcome ?? 'completed',
+    stream: input.stream ?? false,
     platform: input.principal.platform,
-    request_type: 1,
+    request_type: input.stream === true ? 2 : 1,
     inbound_endpoint: endpoint,
-    upstream_endpoint: endpoint,
+    upstream_endpoint: input.upstreamEndpoint ?? endpoint,
     billing_mode: 'image',
     native_compaction_v2: false,
     duration_ms: Math.max(0, input.occurredAt - input.startedAt),

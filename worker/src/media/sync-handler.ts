@@ -16,7 +16,9 @@ import {
   recordPoolFailure,
   releaseApiKeyAdmission,
   releasePoolLease,
+  renewApiKeyMonetaryReservation,
   renewApiKeyAdmission,
+  renewBillingReservation,
   renewPoolLease,
   reservePoolAccount,
   syncPoolAccounts,
@@ -54,6 +56,7 @@ import {
   createSyncImageSseTransformer,
   type SyncImageSseSnapshot,
 } from './sync-sse'
+import { prepareSyncImageLiveStream, type SyncImageLivePrelude } from './sync-stream-session'
 
 interface SyncImageEnv extends Env {
   SYNC_IMAGE_BILLING?: SyncImageBilling
@@ -100,6 +103,7 @@ export async function handleSyncImages(
   let activePool: DurableObjectStub | null = null
   let activeLeaseId: string | null = null
   let completeStartedLifecycle: () => void = () => undefined
+  let lifecycleTransferred = false
   try {
     principal = await authenticateGatewayRequest(context.req.raw, context.env)
     const manifest = await parseRequest(context.req.raw, operation)
@@ -127,7 +131,10 @@ export async function handleSyncImages(
     if (route.candidates.some((candidate) => candidate.platform !== 'openai' && candidate.platform !== 'codex')) {
       throw new GatewayError(503, 'IMAGE_PROVIDER_NOT_SUPPORTED', 'No compatible Images account is configured', 'server_error')
     }
-    if (manifest.options.stream === true && route.candidates.some((candidate) => candidate.platform === 'openai')) {
+    const candidates = manifest.options.stream === true
+      ? route.candidates.filter((candidate) => candidate.image_adapter === 'responses_image_tool')
+      : route.candidates
+    if (manifest.options.stream === true && candidates.length === 0) {
       throw new GatewayError(
         501,
         'IMAGE_DIRECT_STREAMING_NOT_IMPLEMENTED',
@@ -148,7 +155,7 @@ export async function handleSyncImages(
       principal.group_id,
       route.model.model_id,
       'images',
-      route.candidates,
+      candidates,
     )
     const startedLifecycle = new Promise<void>((resolve) => {
       completeStartedLifecycle = resolve
@@ -163,7 +170,7 @@ export async function handleSyncImages(
       headers: Headers
     } | null = null
     let lastError: GatewayError | null = null
-    const attempts = Math.min(4, route.candidates.length)
+    const attempts = Math.min(4, candidates.length)
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (context.req.raw.signal.aborted) {
         throw new GatewayError(499, 'client_cancelled', 'Client cancelled before image generation started')
@@ -175,6 +182,9 @@ export async function handleSyncImages(
       try {
         accountId = await reservePoolAccount(activePool, activeLeaseId)
         renewal = startLeaseRenewal(
+          context.env,
+          principal,
+          requestId,
           admission,
           activePool,
           activeLeaseId,
@@ -200,7 +210,111 @@ export async function handleSyncImages(
           throw new GatewayError(499, 'client_cancelled', 'Client cancelled before image generation started')
         }
         upstreamStarted = true
-        const result = account.platform === 'codex'
+        if (manifest.options.stream === true && account.image_adapter === 'responses_image_tool') {
+          const live = await prepareCodexImageLiveAttempt({
+            manifest,
+            account,
+            credential,
+            publicModel: manifest.model,
+            upstreamModel: route.model.upstream_name,
+            clientHeaders: context.req.raw.headers,
+            fetcher: context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch,
+            leaseSignal: renewal.signal,
+            remainingAccounts: Math.max(0, attempts - attempt - 1),
+            responsesModel: context.env.SYNC_IMAGE_RESPONSES_MODEL ?? SYNC_IMAGE_RESPONSES_MODEL,
+            waitUntil: (task) => registerExecutionTask(context, task),
+          })
+          const ownedRenewal = renewal
+          const ownedAdmission = admission
+          const ownedPool = activePool
+          const ownedLeaseId = activeLeaseId
+          const ownedAccountId = accountId
+          const ownedPrincipal = principal
+          const ownedCompleteLifecycle = completeStartedLifecycle
+          const liveTask = live.completion.then(async ({ snapshot, clientDisconnected, transportError }) => {
+            const classification = classifySyncImageProviderOutcome(snapshotOutcome(200, snapshot))
+            if (classification.kind === 'failure') {
+              const decision = decideSyncImageFailover(classification.failure, {
+                upstreamStarted: true,
+                outputCommitted: true,
+                clientDisconnected,
+                sameAccountRetries: 0,
+                accountSwitches: 0,
+                remainingAccounts: 0,
+                retryWindowElapsedMs: 0,
+              })
+              if (decision.cooldown.scope !== 'none') {
+                const cooldownMs = decision.cooldown.durationMs
+                await bestEffort(() => recordPoolFailure(
+                  ownedPool,
+                  ownedAccountId,
+                  `${requestId}:image:stream`,
+                  cooldownMs,
+                ))
+              }
+            } else if (transportError !== null && !clientDisconnected) {
+              await bestEffort(() => recordPoolFailure(
+                ownedPool,
+                ownedAccountId,
+                `${requestId}:image:stream-transport`,
+                FAILURE_COOLDOWN_MS,
+              ))
+            }
+            if (snapshot.completedImages.length === 0) {
+              await bestEffort(() => billing.cancel({
+                env: context.env,
+                principal: ownedPrincipal,
+                requestId,
+              }))
+              return
+            }
+            const actualTiers = outputBillingTiers(manifest, snapshot.completedImages.map((image) => ({
+              bytes: image.bytes,
+              ...(image.size === '' ? {} : { size: image.size }),
+            })))
+            const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> = {
+              requestId,
+              accountId: ownedAccountId,
+              priceId: route.model.price_id,
+              requestedModel: manifest.model,
+              upstreamModel: route.model.upstream_name,
+              amountMicros: calculateSyncImageActualCost(pricing, actualTiers),
+              operation,
+              startedAt,
+              stream: true,
+              outcome: clientDisconnected ? 'cancelled' : snapshot.state === 'completed' ? 'completed' : 'failed',
+              upstreamEndpoint: '/backend-api/codex/responses',
+            }
+            await retrySettlement(() => billing.settle({
+              env: context.env,
+              principal: ownedPrincipal,
+              usage,
+            }))
+          }).finally(async () => {
+            await ownedRenewal.stop()
+            await Promise.all([
+              bestEffort(() => releasePoolLease(ownedPool, ownedLeaseId)),
+              bestEffort(() => releaseApiKeyAdmission(ownedAdmission)),
+            ])
+            ownedCompleteLifecycle()
+          })
+          registerExecutionTask(context, liveTask)
+          lifecycleTransferred = true
+          billingReserved = false
+          renewal = null
+          admission = null
+          activeLeaseId = null
+          return new Response(live.body, {
+            status: 200,
+            headers: new Headers({
+              'content-type': 'text/event-stream; charset=utf-8',
+              'cache-control': 'no-cache, no-store',
+              'x-accel-buffering': 'no',
+              'x-request-id': requestId,
+            }),
+          })
+        }
+        const result = account.image_adapter === 'responses_image_tool'
           ? await executeCodexImages({
               manifest,
               account,
@@ -313,7 +427,7 @@ export async function handleSyncImages(
       await bestEffort(() => releasePoolLease(activePool as DurableObjectStub, activeLeaseId as string))
     }
     await bestEffort(() => releaseApiKeyAdmission(admission))
-    completeStartedLifecycle()
+    if (!lifecycleTransferred) completeStartedLifecycle()
   }
 }
 
@@ -443,6 +557,7 @@ async function executeCodexImages(input: ImageExecutionInput & {
       responses_model: input.responsesModel,
       account: input.account,
       credential: input.credential,
+      credential_kind: responsesCredentialKind(input.account.credential_kind),
       client_headers: input.clientHeaders,
       fetcher: input.fetcher,
       signal: input.leaseSignal,
@@ -572,6 +687,164 @@ async function executeCodexImages(input: ImageExecutionInput & {
         : imageResponseHeaders(response.headers, input.requestId),
     }
   }
+}
+
+async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
+  publicModel: string
+  remainingAccounts: number
+  responsesModel: string
+  waitUntil?: (task: Promise<unknown>) => void
+}): Promise<Extract<SyncImageLivePrelude, { kind: 'committed' }>> {
+  let sameAccountRetries = 0
+  let retryWindowElapsedMs = 0
+  while (true) {
+    const execution = await executeSyncImageResponses({
+      manifest: input.manifest,
+      public_model: input.publicModel,
+      upstream_model: input.upstreamModel,
+      responses_model: input.responsesModel,
+      account: input.account,
+      credential: input.credential,
+      credential_kind: responsesCredentialKind(input.account.credential_kind),
+      client_headers: input.clientHeaders,
+      fetcher: input.fetcher,
+      signal: input.leaseSignal,
+    })
+    const response = execution.response
+    if (!response.ok) {
+      const decision = await codexErrorDecision(response, input, {
+        sameAccountRetries,
+        retryWindowElapsedMs,
+      })
+      if (decision.action === 'retry_same_account') {
+        const delay = decision.retryDelayMs ?? 0
+        await waitForRetry(delay, input.leaseSignal)
+        retryWindowElapsedMs += delay
+        sameAccountRetries += 1
+        continue
+      }
+      throw gatewayErrorFromDecision(decision)
+    }
+
+    const prelude = await prepareSyncImageLiveStream({
+      response,
+      operation: input.manifest.operation === 'edits' ? 'edit' : 'generation',
+      responseFormat: input.manifest.options.response_format === 'url' ? 'url' : 'b64_json',
+      publicModel: input.publicModel,
+      leaseSignal: input.leaseSignal,
+      maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
+      maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
+      maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
+      maxResponseBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
+      maxAggregateBytes: SYNC_IMAGE_SSE_AGGREGATE_LIMIT,
+      waitUntil: input.waitUntil,
+    })
+    if (prelude.kind === 'committed') return prelude
+
+    const classified = classifySyncImageProviderOutcome(snapshotOutcome(response.status, prelude.snapshot))
+    if (classified.kind === 'success') {
+      throw new GatewayError(502, 'IMAGE_RESPONSES_PRELUDE_INVALID', 'Image Responses prelude ended unexpectedly', 'server_error')
+    }
+    const decision = decideSyncImageFailover(classified.failure, {
+      upstreamStarted: true,
+      outputCommitted: false,
+      clientDisconnected: false,
+      sameAccountRetries,
+      accountSwitches: 0,
+      remainingAccounts: input.remainingAccounts,
+      retryWindowElapsedMs,
+    })
+    if (decision.action === 'retry_same_account') {
+      const delay = decision.retryDelayMs ?? 0
+      await waitForRetry(delay, input.leaseSignal)
+      retryWindowElapsedMs += delay
+      sameAccountRetries += 1
+      continue
+    }
+    throw gatewayErrorFromDecision(decision)
+  }
+}
+
+async function codexErrorDecision(
+  response: Response,
+  input: ImageExecutionInput & { publicModel: string; remainingAccounts: number },
+  retry: { sameAccountRetries: number; retryWindowElapsedMs: number },
+): Promise<SyncImageFailoverDecision> {
+  let mapped: GatewayError
+  if (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    const transformed = await readSyncImageSseResponse(
+      response,
+      input.manifest,
+      input.publicModel,
+      false,
+      input.leaseSignal,
+    )
+    const classified = classifySyncImageProviderOutcome(snapshotOutcome(
+      response.status,
+      transformed.snapshot,
+      response.headers.get('retry-after') ?? undefined,
+    ))
+    if (classified.kind === 'success') {
+      return decideSyncImageFailover({
+        kind: 'upstream_error', status: 502, code: 'IMAGE_RESPONSES_ERROR_MISSING',
+      }, {
+        upstreamStarted: true, outputCommitted: false, clientDisconnected: false,
+        sameAccountRetries: retry.sameAccountRetries, accountSwitches: 0,
+        remainingAccounts: input.remainingAccounts, retryWindowElapsedMs: retry.retryWindowElapsedMs,
+      })
+    }
+    return decideSyncImageFailover(classified.failure, {
+      upstreamStarted: true,
+      outputCommitted: false,
+      clientDisconnected: false,
+      sameAccountRetries: retry.sameAccountRetries,
+      accountSwitches: 0,
+      remainingAccounts: input.remainingAccounts,
+      retryWindowElapsedMs: retry.retryWindowElapsedMs,
+    })
+  }
+  try {
+    await readSyncImageResponse(response)
+    mapped = new GatewayError(502, 'IMAGE_RESPONSES_ERROR_MISSING', 'Image Responses provider returned an invalid error', 'server_error')
+  } catch (error) {
+    mapped = asGatewayError(error)
+  }
+  const classified = classifySyncImageProviderOutcome({
+    kind: 'response',
+    httpStatus: mapped.status,
+    imageCount: 0,
+    retryAfter: mapped.retryAfter,
+    error: {
+      type: mapped.type,
+      code: mapped.code,
+      message: mapped.message,
+      ...(mapped.param === undefined ? {} : { param: mapped.param }),
+    },
+  })
+  if (classified.kind === 'success') {
+    return decideSyncImageFailover({
+      kind: 'upstream_error', status: 502, code: 'IMAGE_RESPONSES_ERROR_MISSING',
+    }, {
+      upstreamStarted: true, outputCommitted: false, clientDisconnected: false,
+      sameAccountRetries: retry.sameAccountRetries, accountSwitches: 0,
+      remainingAccounts: input.remainingAccounts, retryWindowElapsedMs: retry.retryWindowElapsedMs,
+    })
+  }
+  return decideSyncImageFailover(classified.failure, {
+    upstreamStarted: true,
+    outputCommitted: false,
+    clientDisconnected: false,
+    sameAccountRetries: retry.sameAccountRetries,
+    accountSwitches: 0,
+    remainingAccounts: input.remainingAccounts,
+    retryWindowElapsedMs: retry.retryWindowElapsedMs,
+  })
+}
+
+function responsesCredentialKind(
+  kind: AccountCredential['credential_kind'],
+): 'oauth' | 'setup-token' | 'api_key' {
+  return kind === 'setup_token' ? 'setup-token' : kind
 }
 
 async function readSyncImageSseResponse(
@@ -951,6 +1224,9 @@ async function retrySettlement(operation: () => Promise<void>): Promise<void> {
 }
 
 function startLeaseRenewal(
+  env: SyncImageEnv,
+  principal: NonNullable<Awaited<ReturnType<typeof authenticateGatewayRequest>>>,
+  requestId: string,
   admission: Awaited<ReturnType<typeof acquireApiKeyAdmission>>,
   pool: DurableObjectStub,
   leaseId: string,
@@ -962,8 +1238,12 @@ function startLeaseRenewal(
   const timer = setInterval(() => {
     chain = chain.then(async () => {
       sequence += 1
-      await renewApiKeyAdmission(admission, sequence)
-      await renewPoolLease(pool, leaseId, sequence)
+      await Promise.all([
+        renewApiKeyAdmission(admission, sequence),
+        renewPoolLease(pool, leaseId, sequence),
+        renewBillingReservation(env, principal, requestId, sequence),
+        renewApiKeyMonetaryReservation(env, principal, requestId, sequence),
+      ])
     }).catch((error: unknown) => {
       if (!controller.signal.aborted) controller.abort(error)
     })

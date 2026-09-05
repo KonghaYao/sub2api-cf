@@ -50,6 +50,25 @@ describe('synchronous image billing', () => {
     })
   })
 
+  it('records live Codex Images transport and cancellation attribution', () => {
+    const payload = buildSyncImageUsagePayload({
+      requestId: 'image-request-stream',
+      principal: {
+        user_id: 'user-1', api_key_id: 'key-1', group_id: 'group-1',
+        platform: 'codex', billing: { type: 'balance' },
+      },
+      accountId: 'account-1', priceId: 'price-1', requestedModel: 'gpt-image-public',
+      upstreamModel: 'gpt-image-upstream', amountMicros: 200_000, operation: 'generations',
+      stream: true, outcome: 'cancelled', upstreamEndpoint: '/backend-api/codex/responses',
+      startedAt: 1_000, occurredAt: 1_250,
+    })
+    expect(payload).toMatchObject({
+      stream: true, request_type: 2, outcome: 'cancelled',
+      inbound_endpoint: '/v1/images/generations',
+      upstream_endpoint: '/backend-api/codex/responses',
+    })
+  })
+
   it('enqueues the complete durable settlement command when D1 is unavailable', async () => {
     const send = vi.fn(async (_event: unknown) => undefined)
     const statement = {

@@ -128,6 +128,7 @@ export class SyncImageSseTransformer {
   private usage: SyncImageStreamUsage = emptyUsage()
   private state: SyncImageSseState = 'open'
   private outputSuppressed = false
+  private imageOutputStartedValue = false
   private responseStatus = ''
   private incompleteReason = ''
   private textOutput = ''
@@ -181,7 +182,19 @@ export class SyncImageSseTransformer {
 
   keepalive(): Uint8Array[] {
     if (this.state !== 'open' || this.outputSuppressed) return []
-    return [this.encoder.encode(': keepalive\n\n')]
+    return [this.encoder.encode(':\n\n')]
+  }
+
+  failTransport(code: string, message: string, type = 'upstream_error', param?: string): Uint8Array[] {
+    return this.emitFailure({
+      type,
+      code,
+      message,
+      param: param ?? '',
+      status: 502,
+      retryable: true,
+      classification: 'protocol',
+    })
   }
 
   disconnectOutput(): void {
@@ -218,6 +231,10 @@ export class SyncImageSseTransformer {
 
   retainedImageBytes(): number {
     return this.trackedImageBytes
+  }
+
+  imageOutputStarted(): boolean {
+    return this.imageOutputStartedValue
   }
 
   private drainLines(flush: boolean): Uint8Array[] {
@@ -375,6 +392,7 @@ export class SyncImageSseTransformer {
     }
     if (this.options.responseFormat === 'url') body.url = dataUrl(b64, meta.outputFormat)
     addMeta(body, meta)
+    this.imageOutputStartedValue = true
     return this.frame(`${this.prefix}.partial_image`, body)
   }
 
@@ -440,6 +458,7 @@ export class SyncImageSseTransformer {
     const b64 = stringValue(payload.b64_json).trim()
     if (b64 === '') return []
     const body = { ...payload, type: `${this.prefix}.partial_image` }
+    this.imageOutputStartedValue = true
     return this.frame(`${this.prefix}.partial_image`, body)
   }
 
@@ -484,6 +503,7 @@ export class SyncImageSseTransformer {
     this.usage.images = this.completedImages.length
     const usage = safeUsageObject(this.usage)
     const frames: Uint8Array[] = []
+    if (completedBatch.length > 0) this.imageOutputStartedValue = true
     for (const { source: image, completed } of completedBatch) {
       const body: Record<string, unknown> = {
         type: `${this.prefix}.completed`,

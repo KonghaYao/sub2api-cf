@@ -225,7 +225,7 @@ describe('synchronous Images SSE transformer', () => {
     const transformer = createSyncImageSseTransformer({
       operation: 'edit', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
     })
-    expect(text(transformer.keepalive())).toBe(': keepalive\n\n')
+    expect(text(transformer.keepalive())).toBe(':\n\n')
     expect(text(transformer.push(encoder.encode(
       'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0}\n\n',
     )))).toContain('event: image_edit.partial_image')

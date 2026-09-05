@@ -38,9 +38,11 @@ async function fixture(platform: 'openai' | 'codex' = 'openai') {
   ) VALUES ('price-1','group-1','model-1',1,1,0,0,0,0,1,1,1);
   INSERT INTO accounts (
     id,platform,name,credential_ref,enabled,max_concurrency,created_at_ms,updated_at_ms,
-    protocol,base_url,auth_scheme,health_status
+    protocol,base_url,auth_scheme,health_status,image_adapter,credential_kind
   ) VALUES ('account-1','${platform}','Image upstream','secret-1',1,2,1,1,'${platform}',
-    '${platform === 'codex' ? 'https://chatgpt.example.test' : 'https://api.openai.com'}','bearer','healthy');
+    '${platform === 'codex' ? 'https://chatgpt.example.test' : 'https://api.openai.com'}','bearer','healthy',
+    '${platform === 'codex' ? 'responses_image_tool' : 'direct_images'}',
+    '${platform === 'codex' ? 'oauth' : 'api_key'}');
   UPDATE accounts SET provider_config_json = '${platform === 'codex' ? '{"account_id":"workspace-123"}' : '{}'}'
     WHERE id = 'account-1';
   INSERT INTO account_secrets (
@@ -352,6 +354,146 @@ describe('synchronous image handler', () => {
     expect(body).toContain(png)
     expect(test.reserve).toHaveBeenCalledOnce()
     expect(test.settle).toHaveBeenCalledOnce()
+  })
+
+  it('returns the first Codex Images SSE frame before upstream completion', async () => {
+    const test = await fixture('codex')
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const encoder = new TextEncoder()
+    test.upstreamFetch.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        upstreamController = controller
+        controller.enqueue(encoder.encode([
+          'event: response.image_generation_call.partial_image',
+          'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0,"output_format":"png"}',
+          '',
+          '',
+        ].join('\n')))
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const responsePromise = app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+    await vi.waitFor(() => expect(upstreamController).not.toBeNull())
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const earlyResponse = await Promise.race([
+      responsePromise,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 25) }),
+    ])
+    if (timer !== undefined) clearTimeout(timer)
+    if (earlyResponse === null) {
+      upstreamController!.enqueue(encoder.encode([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_late","type":"image_generation_call","result":"aW1hZ2U="}]}}',
+        '',
+        '',
+      ].join('\n')))
+      upstreamController!.close()
+      await responsePromise
+    }
+    expect(earlyResponse).not.toBeNull()
+    if (earlyResponse === null) return
+
+    const reader = earlyResponse.body!.getReader()
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toContain('image_generation.partial_image')
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.stateCalls).not.toContain('/release')
+    upstreamController!.enqueue(encoder.encode([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_live","type":"image_generation_call","result":"aW1hZ2U="}]}}',
+      '',
+      '',
+    ].join('\n')))
+    upstreamController!.close()
+    while (!(await reader.read()).done) { /* drain */ }
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(test.stateCalls).toContain('/release'))
+  })
+
+  it('drains and settles a Codex Images stream after the client disconnects', async () => {
+    const test = await fixture('codex')
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const encoder = new TextEncoder()
+    test.upstreamFetch.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        upstreamController = controller
+        controller.enqueue(encoder.encode([
+          'event: response.image_generation_call.partial_image',
+          'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0}',
+          '',
+          '',
+        ].join('\n')))
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+    const reader = response.body!.getReader()
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('partial_image')
+    await reader.cancel('client disconnected')
+    upstreamController!.enqueue(encoder.encode([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_detached","type":"image_generation_call","result":"aW1hZ2U="}]}}',
+      '',
+      '',
+    ].join('\n')))
+    upstreamController!.close()
+
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledOnce())
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ stream: true, outcome: 'cancelled', amountMicros: 200_000 }),
+    }))
+    await vi.waitFor(() => expect(test.stateCalls.filter((path) => path === '/release')).toHaveLength(2))
+  })
+
+  it('keeps a retryable stream failure precommit and returns JSON after retries exhaust', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockImplementation(async () => new Response([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[]}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+
+    expect(response.status).toBe(502)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'IMAGE_UPSTREAM_RETRY_EXHAUSTED' },
+    })
+    expect(test.upstreamFetch).toHaveBeenCalledTimes(4)
+  })
+
+  it('never retries when a failure shares a chunk with the first partial image', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.image_generation_call.partial_image',
+      'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0}',
+      '',
+      'event: response.failed',
+      'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"server_error","code":"server_error","message":"failed after partial"}}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+    expect(response.status).toBe(200)
+    const body = await response.text()
+    expect(body).toContain('event: image_generation.partial_image')
+    expect(body).toContain('event: error')
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(test.cancel).toHaveBeenCalledOnce())
   })
 
   it('returns and bills every unique actual Responses output even when it exceeds requested n', async () => {
