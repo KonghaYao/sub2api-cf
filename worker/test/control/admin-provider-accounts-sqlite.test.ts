@@ -104,6 +104,59 @@ afterEach(() => {
 })
 
 describe('admin provider account control plane on D1', () => {
+  it('creates, reads and updates the persisted image adapter and credential kind', async () => {
+    const test = fixture()
+    const createResponse = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'image-adapter-account-create',
+      },
+      body: JSON.stringify({
+        name: 'responses-setup-token',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'oauth-access-token',
+        image_adapter: 'responses_image_tool',
+        credential_kind: 'setup_token',
+      }),
+    }, test.env)
+    const created = await createResponse.json() as any
+    expect(createResponse.status, JSON.stringify(created)).toBe(201)
+    expect(created.data).toMatchObject({
+      image_adapter: 'responses_image_tool',
+      credential_kind: 'setup_token',
+      control_version: 0,
+    })
+
+    const detailResponse = await test.app.request(`/accounts/${created.data.id}`, {}, test.env)
+    const detail = await detailResponse.json() as any
+    expect(detailResponse.status, JSON.stringify(detail)).toBe(200)
+    expect(detail.data).toMatchObject({
+      image_adapter: 'responses_image_tool',
+      credential_kind: 'setup_token',
+    })
+
+    const updateResponse = await test.app.request(`/accounts/${created.data.id}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({
+        image_adapter: 'direct_images',
+        credential_kind: 'oauth',
+      }),
+    }, test.env)
+    const updated = await updateResponse.json() as any
+    expect(updateResponse.status, JSON.stringify(updated)).toBe(200)
+    expect(updated.data).toMatchObject({
+      image_adapter: 'direct_images',
+      credential_kind: 'oauth',
+      config_version: 2,
+      control_version: 1,
+    })
+  })
+
   it('creates, reads and updates an image-only model capability', async () => {
     const test = fixture()
     test.raw.exec(`
@@ -230,9 +283,13 @@ describe('admin provider account control plane on D1', () => {
     expect(legacyResponse.status).toBe(201)
     expect(legacy).toMatchObject({
       platform: 'openai', protocol: 'openai', auth_scheme: 'bearer', provider_config: {},
+      image_adapter: 'direct_images', credential_kind: 'api_key',
     })
 
     const codex = await createProvider(test, 'codex')
+    expect(codex).toMatchObject({
+      image_adapter: 'responses_image_tool', credential_kind: 'oauth',
+    })
     const response = await test.app.request(`/accounts/${codex.id}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json', 'if-match': '0' },
@@ -293,6 +350,29 @@ describe('admin provider account control plane on D1', () => {
       expect(response.status).toBeGreaterThanOrEqual(400)
       expect(response.status).toBeLessThan(500)
     }
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 0 })
+  })
+
+  it.each([
+    [{ image_adapter: 'unknown' }, 'invalid_image_adapter'],
+    [{ credential_kind: 'password' }, 'invalid_credential_kind'],
+  ])('rejects an invalid persisted account execution discriminator', async (fields, code) => {
+    const test = fixture()
+    const response = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `invalid-account-discriminator-${code}`,
+      },
+      body: JSON.stringify({
+        name: 'invalid-discriminator',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'not-persisted-secret',
+        ...fields,
+      }),
+    }, test.env)
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ code })
     expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 0 })
   })
 

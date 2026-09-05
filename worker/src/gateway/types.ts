@@ -153,6 +153,8 @@ export interface ModelRoute {
 
 export interface AccountCandidate {
   account_id: string
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
@@ -165,8 +167,13 @@ export interface AccountCandidate {
   config_revision: number
 }
 
+export type AccountImageAdapter = 'direct_images' | 'responses_image_tool'
+export type AccountCredentialKind = 'api_key' | 'oauth' | 'setup_token'
+
 export interface AccountCredential {
   account_id: string
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   platform: ProviderPlatform
   protocol: ProviderProtocol
   base_url: string

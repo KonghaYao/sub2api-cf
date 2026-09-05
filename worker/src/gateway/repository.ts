@@ -5,7 +5,9 @@ import { GatewayError } from './errors'
 import { isProviderPlatform } from './platform'
 import type {
   AccountCandidate,
+  AccountCredentialKind,
   AccountCredential,
+  AccountImageAdapter,
   GatewayEndpoint,
   GatewayPrincipal,
   ModelRoute,
@@ -499,6 +501,7 @@ function accountCandidatesStatement(
       : ''
   return env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
+            a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency,
             ag.priority, ag.weight, a.config_version,
             revision.revision AS config_revision, am.model_id
@@ -528,6 +531,7 @@ export async function getAccountCredential(
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
+            a.image_adapter, a.credential_kind,
             a.provider_config_json,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
        FROM accounts a
@@ -649,6 +653,8 @@ interface ProviderAccountProjection {
   platform: string
   protocol: string
   auth_scheme: string
+  image_adapter: string
+  credential_kind: string
   provider_config_json: string
 }
 
@@ -673,6 +679,8 @@ function parseProviderAccountProjection(row: ProviderAccountProjection): {
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   provider_config: ProviderConfig
 } {
   if (!isProviderPlatform(row.platform)) return invalidProviderAccount()
@@ -684,6 +692,16 @@ function parseProviderAccountProjection(row: ProviderAccountProjection): {
     (expected === 'codex' && row.auth_scheme === 'bearer')
   )
   if (!valid) return invalidProviderAccount()
+  if (row.image_adapter !== 'direct_images' && row.image_adapter !== 'responses_image_tool') {
+    return invalidProviderAccount()
+  }
+  if (
+    row.credential_kind !== 'api_key' &&
+    row.credential_kind !== 'oauth' &&
+    row.credential_kind !== 'setup_token'
+  ) {
+    return invalidProviderAccount()
+  }
   let config: unknown
   try {
     config = JSON.parse(row.provider_config_json)
@@ -697,6 +715,8 @@ function parseProviderAccountProjection(row: ProviderAccountProjection): {
     platform: row.platform,
     protocol: row.protocol as ProviderProtocol,
     auth_scheme: row.auth_scheme as ProviderAuthScheme,
+    image_adapter: row.image_adapter,
+    credential_kind: row.credential_kind,
     provider_config: config as ProviderConfig,
   }
 }

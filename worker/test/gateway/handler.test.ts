@@ -57,7 +57,7 @@ class FakeStatement {
       const credential = requestedAccountId === accountId
         ? this.database.credential
         : this.database.additionalCredentials.get(String(requestedAccountId))
-      return (credential ?? null) as T | null
+      return (credential === undefined ? null : withAccountExecutionDefaults(credential)) as T | null
     }
     if (this.query.includes('FROM inbox')) return null
     if (this.query.includes('FROM settlement_recovery')) return this.database.recovery as T
@@ -119,6 +119,7 @@ class FakeStatement {
         success: true,
         results: credentials.map((credential) =>
           ({
+            ...withAccountExecutionDefaults(credential),
             account_id: credential.account_id,
             platform: credential.platform,
             protocol: credential.protocol,
@@ -136,6 +137,15 @@ class FakeStatement {
       }
     }
     throw new Error(`Unexpected all query: ${this.query}`)
+  }
+}
+
+function withAccountExecutionDefaults(credential: Record<string, unknown>): Record<string, unknown> {
+  const codex = credential.platform === 'codex'
+  return {
+    ...credential,
+    image_adapter: credential.image_adapter ?? (codex ? 'responses_image_tool' : 'direct_images'),
+    credential_kind: credential.credential_kind ?? (codex ? 'oauth' : 'api_key'),
   }
 }
 

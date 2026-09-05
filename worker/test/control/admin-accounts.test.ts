@@ -81,14 +81,15 @@ class Statement {
       const [
         id, platform, name, credential_ref, enabled, max_concurrency,
         created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
-        provider_config_json,
+        provider_config_json, image_adapter, credential_kind,
       ] = this.values
       if ([...this.db.accounts.values()].some((row) => row.name === name)) {
         throw new Error('UNIQUE constraint failed: accounts.platform, accounts.name')
       }
       this.db.accounts.set(String(id), {
         id, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms, base_url,
-        platform, protocol, auth_scheme, provider_config_json, config_version: 1,
+        platform, protocol, auth_scheme, provider_config_json, image_adapter, credential_kind,
+        config_version: 1,
         control_version: 0, health_status: 'unknown', last_checked_at_ms: null,
         last_latency_ms: null, last_health_error: null,
       })
@@ -103,11 +104,25 @@ class Statement {
       return result()
     }
     if (this.sql.includes('UPDATE accounts') && this.sql.includes('control_version = CASE')) {
-      const [name, enabled, max, base, providerConfig, config, expected, control, reset, , , , updated, id] = this.values
+      const [
+        name, enabled, max, base, providerConfig, imageAdapter, credentialKind,
+        config, expected, control, reset, , , , updated, id,
+      ] = this.values
       const row = this.db.accounts.get(String(id))
       if (!row) return result([], 0)
       if (row.control_version !== expected) throw new Error('CHECK constraint failed: control_version >= 0')
-      Object.assign(row, { name, enabled, max_concurrency: max, base_url: base, provider_config_json: providerConfig, config_version: config, control_version: control, updated_at_ms: updated })
+      Object.assign(row, {
+        name,
+        enabled,
+        max_concurrency: max,
+        base_url: base,
+        provider_config_json: providerConfig,
+        image_adapter: imageAdapter,
+        credential_kind: credentialKind,
+        config_version: config,
+        control_version: control,
+        updated_at_ms: updated,
+      })
       if (reset === 1) Object.assign(row, { health_status: 'unknown', last_checked_at_ms: null, last_latency_ms: null, last_health_error: null })
       return result()
     }

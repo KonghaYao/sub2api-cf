@@ -12,6 +12,7 @@ import {
   type ProviderProtocol,
 } from '../gateway/providers'
 import { credentialAad, validateBaseUrl } from '../gateway/repository'
+import type { AccountCredentialKind, AccountImageAdapter } from '../gateway/types'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -43,6 +44,8 @@ interface AccountRow {
   protocol: ProviderProtocol
   base_url: string
   auth_scheme: ProviderAuthScheme
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   provider_config_json: string
   config_version: number
   control_version: number
@@ -82,6 +85,8 @@ interface CreateAccountInput {
   protocol: ProviderProtocol
   base_url: string
   auth_scheme: ProviderAuthScheme
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   provider_config: ProviderConfig
   api_key: string
   enabled: boolean
@@ -113,12 +118,14 @@ interface AccountPatch {
   max_concurrency?: number
   group_links?: GroupLinkInput[]
   model_capabilities?: ModelCapabilityInput[]
+  image_adapter?: AccountImageAdapter
+  credential_kind?: AccountCredentialKind
 }
 
 const ACCOUNT_PROJECTION = `
   SELECT a.id, a.platform, a.name, a.credential_ref, a.enabled,
          a.max_concurrency, a.protocol, a.base_url, a.auth_scheme,
-         a.provider_config_json,
+         a.provider_config_json, a.image_adapter, a.credential_kind,
          a.config_version, a.control_version, a.health_status,
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
          a.created_at_ms, a.updated_at_ms,
@@ -264,6 +271,8 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       protocol: input.protocol,
       base_url: input.base_url,
       auth_scheme: input.auth_scheme,
+      image_adapter: input.image_adapter,
+      credential_kind: input.credential_kind,
       provider_config: input.provider_config,
       config_version: 1,
       control_version: 0,
@@ -287,8 +296,8 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         `INSERT INTO accounts (
            id, platform, name, credential_ref, enabled, max_concurrency,
            created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
-           provider_config_json, config_version
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           provider_config_json, image_adapter, credential_kind, config_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       ).bind(
         accountId,
         input.platform,
@@ -302,6 +311,8 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         input.base_url,
         input.auth_scheme,
         JSON.stringify(input.provider_config),
+        input.image_adapter,
+        input.credential_kind,
       ),
       context.env.DB.prepare(
         `INSERT INTO account_secrets (
@@ -348,7 +359,9 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
     const providerConfig = patch.provider_config ?? parseProviderConfigProjection(account.provider_config_json)
     const resetHealth = patch.base_url !== undefined ||
       patch.api_key !== undefined ||
-      patch.provider_config !== undefined
+      patch.provider_config !== undefined ||
+      patch.image_adapter !== undefined ||
+      patch.credential_kind !== undefined
     const statements: D1PreparedStatement[] = [
       accountCasStatement(context.env, account.id, account.control_version, {
         name: patch.name ?? account.name,
@@ -356,6 +369,8 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
         max_concurrency: patch.max_concurrency ?? account.max_concurrency,
         base_url: baseUrl,
         provider_config: providerConfig,
+        image_adapter: patch.image_adapter ?? account.image_adapter,
+        credential_kind: patch.credential_kind ?? account.credential_kind,
         config_version: nextConfigVersion,
         control_version: nextControlVersion,
         now,
@@ -428,6 +443,8 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
         max_concurrency: account.max_concurrency,
         base_url: account.base_url,
         provider_config: parseProviderConfigProjection(account.provider_config_json),
+        image_adapter: account.image_adapter,
+        credential_kind: account.credential_kind,
         config_version: incrementVersion(account.config_version, 'config_version'),
         control_version: incrementVersion(account.control_version, 'control_version'),
         now,
@@ -629,6 +646,8 @@ async function mutateAccountRelation(
       max_concurrency: account.max_concurrency,
       base_url: account.base_url,
       provider_config: parseProviderConfigProjection(account.provider_config_json),
+      image_adapter: account.image_adapter,
+      credential_kind: account.credential_kind,
       config_version: incrementVersion(account.config_version, 'config_version'),
       control_version: incrementVersion(account.control_version, 'control_version'),
       now,
@@ -648,6 +667,8 @@ function accountCasStatement(
     max_concurrency: number
     base_url: string
     provider_config: ProviderConfig
+    image_adapter: AccountImageAdapter
+    credential_kind: AccountCredentialKind
     config_version: number
     control_version: number
     now: number
@@ -657,6 +678,7 @@ function accountCasStatement(
   return env.DB.prepare(
     `UPDATE accounts
         SET name = ?, enabled = ?, max_concurrency = ?, base_url = ?, provider_config_json = ?,
+            image_adapter = ?, credential_kind = ?,
             config_version = ?,
             control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
             health_status = CASE WHEN ? = 1 THEN 'unknown' ELSE health_status END,
@@ -671,6 +693,8 @@ function accountCasStatement(
     value.max_concurrency,
     value.base_url,
     JSON.stringify(value.provider_config),
+    value.image_adapter,
+    value.credential_kind,
     value.config_version,
     expectedControlVersion,
     value.control_version,
@@ -727,6 +751,12 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     base_url: baseUrl,
     auth_scheme: authScheme,
     provider_config: parseProviderConfig(body.provider_config, platform),
+    image_adapter: body.image_adapter === undefined
+      ? defaultImageAdapter(platform)
+      : requireAccountImageAdapter(body.image_adapter),
+    credential_kind: body.credential_kind === undefined
+      ? defaultCredentialKind(platform)
+      : requireAccountCredentialKind(body.credential_kind),
     api_key: requireProviderCredential(body, 'api_key'),
     enabled,
     max_concurrency: body.max_concurrency === undefined
@@ -755,6 +785,12 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.provider_config !== undefined) {
     patch.provider_config = parseProviderConfig(body.provider_config, account.platform)
   }
+  if (body.image_adapter !== undefined) {
+    patch.image_adapter = requireAccountImageAdapter(body.image_adapter)
+  }
+  if (body.credential_kind !== undefined) {
+    patch.credential_kind = requireAccountCredentialKind(body.credential_kind)
+  }
   if (body.enabled !== undefined || body.status !== undefined) patch.enabled = parseEnabledBody(body, true)
   if (body.max_concurrency !== undefined) {
     patch.max_concurrency = requireSafeInteger(body, 'max_concurrency', 1, 1_000)
@@ -772,7 +808,7 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
 const CREATE_ACCOUNT_FIELDS = new Set([
   'name', 'platform', 'protocol', 'base_url', 'auth_scheme', 'provider_config',
   'api_key', 'enabled', 'status', 'max_concurrency', 'group_links',
-  'model_capabilities', 'type',
+  'model_capabilities', 'image_adapter', 'credential_kind', 'type',
 ])
 const UPDATE_ACCOUNT_FIELDS = new Set([
   ...CREATE_ACCOUNT_FIELDS,
@@ -817,6 +853,32 @@ function requireProviderProtocol(value: unknown): ProviderProtocol {
 function requireProviderAuthScheme(value: unknown): ProviderAuthScheme {
   if (value === 'bearer' || value === 'x-api-key' || value === 'x-goog-api-key') return value
   throw new GatewayError(409, 'auth_scheme_not_supported', 'Provider authentication scheme is not supported')
+}
+
+function requireAccountImageAdapter(value: unknown): AccountImageAdapter {
+  if (value === 'direct_images' || value === 'responses_image_tool') return value
+  throw new GatewayError(
+    400,
+    'invalid_image_adapter',
+    'image_adapter must be direct_images or responses_image_tool',
+  )
+}
+
+function requireAccountCredentialKind(value: unknown): AccountCredentialKind {
+  if (value === 'api_key' || value === 'oauth' || value === 'setup_token') return value
+  throw new GatewayError(
+    400,
+    'invalid_credential_kind',
+    'credential_kind must be api_key, oauth, or setup_token',
+  )
+}
+
+function defaultImageAdapter(platform: ProviderPlatform): AccountImageAdapter {
+  return platform === 'codex' ? 'responses_image_tool' : 'direct_images'
+}
+
+function defaultCredentialKind(platform: ProviderPlatform): AccountCredentialKind {
+  return platform === 'codex' ? 'oauth' : 'api_key'
 }
 
 function assertImmutableProviderField<T extends string>(
@@ -1054,6 +1116,8 @@ function requireSupportedAccount(account: AccountRow): void {
   }
   validateBaseUrl(account.base_url)
   parseProviderConfig(accountProviderConfig(account), platform)
+  requireAccountImageAdapter(account.image_adapter)
+  requireAccountCredentialKind(account.credential_kind)
 }
 
 function providerAccount(row: AccountRow): ProviderAccount {
@@ -1096,6 +1160,8 @@ function publicAccount(row: AccountRow) {
     protocol: row.protocol,
     base_url: row.base_url,
     auth_scheme: row.auth_scheme,
+    image_adapter: row.image_adapter,
+    credential_kind: row.credential_kind,
     provider_config: accountProviderConfig(row),
     config_version: row.config_version,
     control_version: row.control_version,
@@ -1120,6 +1186,8 @@ function accountResponse(value: {
   protocol: ProviderProtocol
   base_url: string
   auth_scheme: ProviderAuthScheme
+  image_adapter: AccountImageAdapter
+  credential_kind: AccountCredentialKind
   provider_config: ProviderConfig
   config_version: number
   control_version: number

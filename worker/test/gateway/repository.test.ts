@@ -154,14 +154,25 @@ describe('gateway repository image routing', () => {
     )
     expect(route.upstream_endpoint).toBe('images')
     expect(route.model).toMatchObject({ model_id: 'model-images', image_generation: 1 })
-    expect(route.candidates.map((candidate) => candidate.account_id)).toEqual(['account-images'])
+    expect(route.candidates).toEqual([
+      expect.objectContaining({
+        account_id: 'account-images',
+        image_adapter: 'direct_images',
+        credential_kind: 'api_key',
+      }),
+    ])
     await expect(getAccountCredential(
       testEnv,
       'group-images',
       'model-images',
       'images',
       'account-images',
-    )).resolves.toMatchObject({ account_id: 'account-images', secret_id: 'secret-images' })
+    )).resolves.toMatchObject({
+      account_id: 'account-images',
+      secret_id: 'secret-images',
+      image_adapter: 'direct_images',
+      credential_kind: 'api_key',
+    })
 
     raw.prepare(`UPDATE account_models SET image_generation = 0 WHERE account_id = 'account-images'`)
       .run()
