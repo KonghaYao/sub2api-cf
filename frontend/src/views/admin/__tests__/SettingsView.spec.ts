@@ -11,6 +11,8 @@ import SettingsView from "../SettingsView.vue";
 const {
   getSettings,
   updateSettings,
+  getCommercialConfig,
+  updateCommercialConfig,
   getWebSearchEmulationConfig,
   updateWebSearchEmulationConfig,
   getAdminApiKey,
@@ -41,6 +43,8 @@ const {
 } = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
+  getCommercialConfig: vi.fn(),
+  updateCommercialConfig: vi.fn(),
   getWebSearchEmulationConfig: vi.fn(),
   updateWebSearchEmulationConfig: vi.fn(),
   getAdminApiKey: vi.fn(),
@@ -90,6 +94,8 @@ vi.mock("@/api", () => ({
     settings: {
       getSettings,
       updateSettings,
+      getCommercialConfig,
+      updateCommercialConfig,
       getWebSearchEmulationConfig,
       updateWebSearchEmulationConfig,
       getAdminApiKey,
@@ -636,6 +642,8 @@ describe("admin SettingsView payment visible method controls", () => {
   beforeEach(() => {
     getSettings.mockReset();
     updateSettings.mockReset();
+    getCommercialConfig.mockReset();
+    updateCommercialConfig.mockReset();
     getWebSearchEmulationConfig.mockReset();
     updateWebSearchEmulationConfig.mockReset();
     getAdminApiKey.mockReset();
@@ -744,6 +752,25 @@ describe("admin SettingsView payment visible method controls", () => {
       },
     });
     updatePaymentConfig.mockImplementation(async (payload) => ({ data: payload }));
+    getCommercialConfig.mockResolvedValue({
+      control_version: 1,
+      affiliate_rebate_rate: 20,
+      affiliate_rebate_rate_ppm: 200_000,
+      affiliate_rebate_freeze_hours: 0,
+      affiliate_rebate_duration_days: 0,
+      affiliate_rebate_per_invitee_cap: 0,
+      affiliate_rebate_per_invitee_cap_micros: 0,
+      affiliate_admin_recharge_enabled: false,
+      updated_at_ms: 1,
+    });
+    updateCommercialConfig.mockImplementation(async (payload) => ({
+      control_version: 2,
+      affiliate_rebate_rate_ppm: Math.round(payload.affiliate_rebate_rate * 10_000),
+      affiliate_rebate_per_invitee_cap_micros:
+        Math.round(payload.affiliate_rebate_per_invitee_cap * 1_000_000),
+      updated_at_ms: 2,
+      ...payload,
+    }));
     fetchPublicSettings.mockResolvedValue(undefined);
     adminSettingsFetch.mockResolvedValue(undefined);
   });
@@ -841,6 +868,89 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({ passkey_enabled: false }),
     );
+  });
+
+  it("loads and persists Worker commercial feature switches", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+      model_plaza_enabled: true,
+      model_plaza_require_auth: true,
+      model_plaza_description: "Current public prices",
+      promo_code_enabled: true,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect((wrapper.get('[data-testid="worker-model-plaza-toggle"]').element as HTMLInputElement).checked)
+      .toBe(true);
+    expect((wrapper.get('[data-testid="worker-model-plaza-auth-toggle"]').element as HTMLInputElement).checked)
+      .toBe(true);
+    expect((wrapper.get('[data-testid="worker-promo-toggle"]').element as HTMLInputElement).checked)
+      .toBe(true);
+    expect((wrapper.get('[data-testid="worker-invitation-toggle"]').element as HTMLInputElement).checked)
+      .toBe(true);
+    expect((wrapper.get('[data-testid="worker-affiliate-toggle"]').element as HTMLInputElement).checked)
+      .toBe(true);
+    expect((wrapper.get('[data-testid="worker-model-plaza-description"]').element as HTMLTextAreaElement).value)
+      .toBe("Current public prices");
+
+    await wrapper.get('[data-testid="worker-promo-toggle"]').setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      model_plaza_enabled: true,
+      model_plaza_require_auth: true,
+      model_plaza_description: "Current public prices",
+      promo_code_enabled: false,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
+    }));
+  });
+
+  it("loads and persists the private Worker affiliate policy separately", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+      affiliate_enabled: true,
+    });
+    getCommercialConfig.mockResolvedValue({
+      control_version: 9,
+      affiliate_rebate_rate: 12.5,
+      affiliate_rebate_rate_ppm: 125_000,
+      affiliate_rebate_freeze_hours: 24,
+      affiliate_rebate_duration_days: 365,
+      affiliate_rebate_per_invitee_cap: 50,
+      affiliate_rebate_per_invitee_cap_micros: 50_000_000,
+      affiliate_admin_recharge_enabled: true,
+      updated_at_ms: 1,
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(getCommercialConfig).toHaveBeenCalledTimes(1);
+    expect((wrapper.get('[data-testid="worker-affiliate-rate"]').element as HTMLInputElement).value)
+      .toBe("12.5");
+    expect((wrapper.get('[data-testid="worker-affiliate-freeze-hours"]').element as HTMLInputElement).value)
+      .toBe("24");
+    expect((wrapper.get('[data-testid="worker-affiliate-cap"]').element as HTMLInputElement).value)
+      .toBe("50");
+
+    await wrapper.get('[data-testid="worker-affiliate-rate"]').setValue("15");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateCommercialConfig).toHaveBeenCalledWith({
+      affiliate_rebate_rate: 15,
+      affiliate_rebate_freeze_hours: 24,
+      affiliate_rebate_duration_days: 365,
+      affiliate_rebate_per_invitee_cap: 50,
+      affiliate_admin_recharge_enabled: true,
+    });
   });
 
   it("renders panel rate limit card and saves settings", async () => {

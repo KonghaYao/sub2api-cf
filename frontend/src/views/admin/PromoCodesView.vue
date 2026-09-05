@@ -651,7 +651,8 @@ const handleUpdate = async () => {
       max_uses: editForm.max_uses,
       status: editForm.status,
       expires_at: editForm.expires_at_str ? Math.floor(new Date(editForm.expires_at_str).getTime() / 1000) : 0,
-      notes: editForm.notes
+      notes: editForm.notes,
+      expected_control_version: editingCode.value.control_version,
     })
     appStore.showSuccess(t('admin.promo.codeUpdated'))
     closeEditDialog()
@@ -693,7 +694,10 @@ const confirmDelete = async () => {
   if (!deletingCode.value) return
 
   try {
-    await adminAPI.promo.delete(deletingCode.value.id)
+    await adminAPI.promo.delete(
+      deletingCode.value.id,
+      deletingCode.value.control_version,
+    )
     appStore.showSuccess(t('admin.promo.codeDeleted'))
     showDeleteDialog.value = false
     deletingCode.value = null

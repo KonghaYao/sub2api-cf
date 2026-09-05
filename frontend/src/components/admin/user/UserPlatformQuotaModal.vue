@@ -148,6 +148,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const resetting = reactive<Record<string, boolean>>({})
 const quotas = ref<QuotaRow[]>([])
+const controlVersion = ref<number | undefined>()
 
 function emptyRow(p: PlatformQuotaPlatform): QuotaRow {
   return {
@@ -189,10 +190,12 @@ async function load() {
   loading.value = true
   try {
     const data = await adminAPI.users.getPlatformQuotas(props.user.id)
+    controlVersion.value = data.control_version
     quotas.value = normalize(data.platform_quotas || [])
   } catch {
     appStore.showError(t('admin.users.platformQuota.loadFailed'))
     quotas.value = PLATFORMS.map(emptyRow)
+    controlVersion.value = undefined
   } finally {
     loading.value = false
   }
@@ -242,7 +245,12 @@ async function onSave() {
       weekly_limit_usd: normalizeLimit(r.weekly_limit_usd),
       monthly_limit_usd: normalizeLimit(r.monthly_limit_usd),
     }))
-    await adminAPI.users.updatePlatformQuotas(props.user.id, payload)
+    const data = await adminAPI.users.updatePlatformQuotas(
+      props.user.id,
+      payload,
+      controlVersion.value,
+    )
+    controlVersion.value = data.control_version
     appStore.showSuccess(t('admin.users.platformQuota.updateSuccess'))
     emit('success')
     emit('close')
@@ -271,7 +279,13 @@ async function onReset(platform: PlatformQuotaPlatform, quotaWindow: PlatformQuo
   const key = `${platform}.${quotaWindow}`
   resetting[key] = true
   try {
-    const data = await adminAPI.users.resetPlatformQuotaWindow(props.user.id, platform, quotaWindow)
+    const data = await adminAPI.users.resetPlatformQuotaWindow(
+      props.user.id,
+      platform,
+      quotaWindow,
+      controlVersion.value,
+    )
+    controlVersion.value = data.control_version
     quotas.value = normalize(data.platform_quotas || [])
     appStore.showSuccess(t('admin.users.platformQuota.reset.success', { platform, window: windowLabel }))
   } catch (e: any) {

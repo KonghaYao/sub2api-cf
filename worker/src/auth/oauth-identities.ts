@@ -6,6 +6,13 @@ import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { decryptCredential, encryptCredential, randomToken, sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
+  commercialRegistrationInsertSql,
+  mapCommercialRegistrationWriteError,
+  normalizeCommercialCode,
+  prepareCommercialRegistration,
+} from '../commercial/registration'
+import { initialPlatformQuotaStatements } from '../user/platform-quotas'
+import {
   authenticateUserRequest,
   issueOAuthUserSession,
   prepareOAuthUserSession,
@@ -114,6 +121,9 @@ interface ClaimedFlowRow {
   verifier_nonce_b64: string | null
   verifier_ciphertext_b64: string | null
   nonce_hash: string | null
+  commercial_key_version: number | null
+  commercial_nonce_b64: string | null
+  commercial_ciphertext_b64: string | null
   redirect_to: string
 }
 
@@ -446,6 +456,14 @@ async function createOAuthFlow(
       requireMasterKey(context.env),
       flowVerifierAad(context.env, id, 1),
     )
+  const commercialPayload = intent === 'login' ? oauthCommercialPayload(context) : null
+  const encryptedCommercial = commercialPayload === null
+    ? null
+    : await encryptCredential(
+      { api_key: JSON.stringify(commercialPayload) },
+      requireMasterKey(context.env),
+      flowCommercialAad(context.env, id, 1),
+    )
   const now = Date.now()
   const browserTokenHash = await sha256Hex(browserToken)
   const inserted = await context.env.DB.prepare(
@@ -453,9 +471,11 @@ async function createOAuthFlow(
        id, provider, intent, state_hash, browser_token_hash,
        target_user_id, target_session_id, target_auth_version,
        verifier_key_version, verifier_nonce_b64, verifier_ciphertext_b64,
-       nonce_hash, redirect_to, expires_at_ms, consumed_at_ms, created_at_ms
+       nonce_hash, commercial_key_version, commercial_nonce_b64,
+       commercial_ciphertext_b64, redirect_to, expires_at_ms,
+       consumed_at_ms, created_at_ms
      )
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
       WHERE (
         SELECT COUNT(*) FROM oauth_flows
          WHERE consumed_at_ms IS NULL AND expires_at_ms > ?
@@ -479,6 +499,9 @@ async function createOAuthFlow(
     encrypted?.nonce_b64 ?? null,
     encrypted?.ciphertext_b64 ?? null,
     nonce === null ? null : await sha256Hex(nonce),
+    encryptedCommercial === null ? null : 1,
+    encryptedCommercial?.nonce_b64 ?? null,
+    encryptedCommercial?.ciphertext_b64 ?? null,
     redirectTo,
     now + FLOW_TTL_MS,
     now,
@@ -571,7 +594,8 @@ async function claimOAuthFlow(
         AND consumed_at_ms IS NULL AND expires_at_ms > ?
       RETURNING id, provider, intent, target_user_id, target_session_id,
                 target_auth_version, verifier_key_version, verifier_nonce_b64,
-                verifier_ciphertext_b64, nonce_hash, redirect_to`,
+                verifier_ciphertext_b64, nonce_hash, commercial_key_version,
+                commercial_nonce_b64, commercial_ciphertext_b64, redirect_to`,
   ).bind(
     now,
     provider,
@@ -615,6 +639,34 @@ async function readFlowVerifier(env: Env, flow: ClaimedFlowRow): Promise<string 
     flowVerifierAad(env, flow.id, flow.verifier_key_version),
   )
   return value.api_key
+}
+
+async function readFlowCommercialRegistration(
+  env: Env,
+  flow: ClaimedFlowRow,
+): Promise<Record<string, unknown>> {
+  if (flow.commercial_key_version === null) return {}
+  if (flow.commercial_nonce_b64 === null || flow.commercial_ciphertext_b64 === null) {
+    throw new GatewayError(503, 'oauth_flow_unavailable', 'OAuth flow is unavailable', 'server_error')
+  }
+  const value = await decryptCredential(
+    flow.commercial_nonce_b64,
+    flow.commercial_ciphertext_b64,
+    requireMasterKey(env),
+    flowCommercialAad(env, flow.id, flow.commercial_key_version),
+  )
+  try {
+    const payload: unknown = JSON.parse(value.api_key)
+    if (!isObject(payload)) throw new Error('invalid commercial payload')
+    const allowed = new Set(['promo_code', 'invitation_code', 'aff_code'])
+    if (
+      Object.keys(payload).some((key) => !allowed.has(key)) ||
+      Object.values(payload).some((entry) => typeof entry !== 'string')
+    ) throw new Error('invalid commercial payload')
+    return payload
+  } catch {
+    throw new GatewayError(503, 'oauth_flow_unavailable', 'OAuth flow is unavailable', 'server_error')
+  }
 }
 
 async function exchangeCode(
@@ -969,6 +1021,7 @@ async function registerIdentityLogin(
   }
 
   const now = Date.now()
+  const commercialBody = await readFlowCommercialRegistration(context.env, flow)
   const user: UserRow = {
     id: crypto.randomUUID(),
     email: profile.email,
@@ -990,6 +1043,13 @@ async function registerIdentityLogin(
     created_at_ms: now,
     updated_at_ms: now,
   }
+  const commercial = await prepareCommercialRegistration(
+    context.env,
+    commercialBody,
+    user.id,
+    now,
+  )
+  user.balance_micros = commercial.bonusMicros
   const prepared = await prepareOAuthUserSession(
     context.env,
     user,
@@ -997,14 +1057,20 @@ async function registerIdentityLogin(
   )
   try {
     await context.env.DB.batch([
-      context.env.DB.prepare(
-        `INSERT INTO users (
-           id, email, display_name, role, status, balance_micros,
-           state_version, created_at_ms, updated_at_ms,
-           password_credential, auth_version, password_changed_at_ms,
-           last_login_at_ms, email_verified_at_ms, concurrency, rpm_limit
-         ) VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, NULL, 1, NULL, NULL, ?, 5, 0)`,
-      ).bind(user.id, user.email, user.display_name, now, now, now),
+      ...(commercial.claimStatement === undefined ? [] : [commercial.claimStatement]),
+      context.env.DB.prepare(commercialRegistrationInsertSql(commercial.active)).bind(
+        user.id,
+        user.email,
+        user.display_name,
+        ...(commercial.active ? [user.balance_micros] : []),
+        now,
+        now,
+        null,
+        null,
+        null,
+        now,
+        ...(commercial.active ? [user.id] : []),
+      ),
       context.env.DB.prepare(
         `INSERT INTO auth_identities (
            id, user_id, provider, provider_key, provider_subject, issuer,
@@ -1023,6 +1089,8 @@ async function registerIdentityLogin(
         now,
         now,
       ),
+      ...initialPlatformQuotaStatements(context.env, user.id, now),
+      ...commercial.afterUserStatements,
       ...prepared.statements,
       auditInsert(context.env, user.id, prepared.sessionId, 'auth.identity.register', config.provider, now),
     ])
@@ -1034,6 +1102,8 @@ async function registerIdentityLogin(
         'Sign in to the existing account before binding this identity',
       )
     }
+    const commercialError = mapCommercialRegistrationWriteError(error)
+    if (commercialError !== null) throw commercialError
     throw error
   }
   return oauthLoginRedirect(config.frontend_callback_path, flow.redirect_to, prepared.payload)
@@ -1497,6 +1567,21 @@ function safeRedirect(value: string | undefined, fallback: string): string {
   return value
 }
 
+function oauthCommercialPayload(context: OAuthContext): Record<string, string> | null {
+  const payload: Record<string, string> = {}
+  const inputs = [
+    ['promo_code', 'promotion'],
+    ['invitation_code', 'invitation'],
+    ['aff_code', 'affiliate'],
+  ] as const
+  for (const [key, kind] of inputs) {
+    const value = context.req.query(key)?.trim()
+    if (value === undefined || value === '') continue
+    payload[key] = normalizeCommercialCode(value, kind)
+  }
+  return Object.keys(payload).length === 0 ? null : payload
+}
+
 function requiredShortText(value: string | undefined, code: string, max: number): string {
   const normalized = value?.trim() ?? ''
   if (normalized === '' || normalized.length > max) {
@@ -1655,6 +1740,10 @@ function providerSecretAad(env: Env, provider: OAuthIdentityProvider, keyVersion
 
 function flowVerifierAad(env: Env, flowId: string, keyVersion: number): string {
   return `oauth-flow-verifier/${env.ENVIRONMENT}/${flowId}/${keyVersion}`
+}
+
+function flowCommercialAad(env: Env, flowId: string, keyVersion: number): string {
+  return `oauth-flow-commercial/${env.ENVIRONMENT}/${flowId}/${keyVersion}`
 }
 
 function invalidState(): GatewayError {

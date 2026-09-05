@@ -9,6 +9,7 @@ import {
 } from '../../src/auth/oauth-identities'
 import type { Env } from '../../src/env'
 import { encryptCredential } from '../../src/gateway/crypto'
+import { commercialCodeDigest } from '../../src/commercial/registration'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'oauth-identity-test-pepper-at-least-32-bytes'
@@ -422,6 +423,116 @@ describe('OAuth identities SQLite HTTP contract', () => {
       provider_subject: 'new-registration-subject',
       sessions: 1,
     })
+  })
+
+  it('keeps commercial codes encrypted across OAuth and consumes them with the new user transaction', async () => {
+    const test = await fixture()
+    await seedProvider(test, 'github')
+    const now = Date.now()
+    const publicSettings = {
+      registration_enabled: true,
+      promo_code_enabled: true,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
+    }
+    test.raw.prepare(
+      `UPDATE system_settings SET public_json = ? WHERE id = 'global'`,
+    ).run(JSON.stringify(publicSettings))
+    test.env.CONFIG_KV = {
+      get: vi.fn(async () => publicSettings),
+    } as unknown as KVNamespace
+
+    const promoSecret = await encryptCredential({ api_key: 'PROMO-2026' }, MASTER_KEY, 'test-promo')
+    const inviteSecret = await encryptCredential({ api_key: 'INVITE-2026' }, MASTER_KEY, 'test-invite')
+    const affiliateSecret = await encryptCredential({ api_key: 'ALICE-CODE' }, MASTER_KEY, 'test-affiliate')
+    test.raw.prepare(
+      `INSERT INTO promotion_codes (
+         id, code_hash, code_prefix, secret_key_version, secret_nonce_b64,
+         secret_ciphertext_b64, bonus_micros, max_uses, created_at_ms, updated_at_ms
+       ) VALUES ('promo-oauth', ?, 'PROMO', 1, ?, ?, 2500000, 1, ?, ?)`,
+    ).run(
+      await commercialCodeDigest('promotion', 'PROMO-2026', PEPPER),
+      promoSecret.nonce_b64,
+      promoSecret.ciphertext_b64,
+      now,
+      now,
+    )
+    test.raw.prepare(
+      `INSERT INTO invitation_codes (
+         id, code_hash, code_prefix, secret_key_version, secret_nonce_b64,
+         secret_ciphertext_b64, max_uses, created_at_ms, updated_at_ms
+       ) VALUES ('invite-oauth', ?, 'INVITE', 1, ?, ?, 1, ?, ?)`,
+    ).run(
+      await commercialCodeDigest('invitation', 'INVITE-2026', PEPPER),
+      inviteSecret.nonce_b64,
+      inviteSecret.ciphertext_b64,
+      now,
+      now,
+    )
+    test.raw.prepare(
+      `INSERT INTO affiliate_profiles (
+         user_id, code_hash, code_prefix, code_key_version, code_nonce_b64,
+         code_ciphertext_b64, created_at_ms, updated_at_ms
+       ) VALUES ('alice', ?, 'ALICE', 1, ?, ?, ?, ?)`,
+    ).run(
+      await commercialCodeDigest('affiliate', 'ALICE-CODE', PEPPER),
+      affiliateSecret.nonce_b64,
+      affiliateSecret.ciphertext_b64,
+      now,
+      now,
+    )
+    test.raw.prepare(
+      `INSERT INTO platform_quota_defaults (
+         platform, weekly_limit_micros, control_version, updated_at_ms
+       ) VALUES ('anthropic', 9000000, 1, ?)`,
+    ).run(now)
+    test.raw.prepare(
+      `UPDATE platform_quota_defaults_control
+          SET control_version = 1, updated_at_ms = ? WHERE singleton = 1`,
+    ).run(now)
+
+    const started = await test.app.request(
+      '/api/v1/auth/oauth/github/start?promo_code=PROMO-2026&invitation_code=INVITE-2026&aff_code=ALICE-CODE',
+      { method: 'POST' },
+      test.env,
+    )
+    expect(started.status).toBe(200)
+    const authorize = new URL((await started.json() as any).data.authorize_url)
+    const storedFlow = test.raw.prepare(
+      `SELECT commercial_key_version, commercial_ciphertext_b64 FROM oauth_flows
+        WHERE provider = 'github' ORDER BY created_at_ms DESC LIMIT 1`,
+    ).get() as { commercial_key_version: number; commercial_ciphertext_b64: string }
+    expect(storedFlow.commercial_key_version).toBe(1)
+    expect(storedFlow.commercial_ciphertext_b64).not.toContain('PROMO-2026')
+    expect(JSON.stringify(storedFlow)).not.toContain('INVITE-2026')
+    expect(JSON.stringify(storedFlow)).not.toContain('ALICE-CODE')
+
+    vi.stubGlobal('fetch', githubUpstream('commercial-oauth-subject', 'Commercial OAuth', 'commercial@example.test'))
+    const callback = await test.app.request(
+      `/api/v1/auth/oauth/github/callback?code=commercial&state=${encodeURIComponent(authorize.searchParams.get('state')!)}`,
+      { headers: { cookie: responseCookie(started, 'sub2api_oauth_browser') } },
+      test.env,
+    )
+
+    expect(callback.headers.get('location')).toMatch(/^\/auth\/oauth\/callback#access_token=sat_v1_/)
+    expect(test.raw.prepare(
+      `SELECT balance_micros FROM users WHERE email = 'commercial@example.test'`,
+    ).get()).toEqual({ balance_micros: 2_500_000 })
+    expect(test.raw.prepare(
+      `SELECT p.used_count AS promo_uses, i.used_count AS invitation_uses
+         FROM promotion_codes p CROSS JOIN invitation_codes i
+        WHERE p.id = 'promo-oauth' AND i.id = 'invite-oauth'`,
+    ).get()).toEqual({ promo_uses: 1, invitation_uses: 1 })
+    expect(test.raw.prepare(
+      `SELECT inviter_user_id FROM affiliate_referrals referral
+         JOIN users user ON user.id = referral.invitee_user_id
+        WHERE user.email = 'commercial@example.test'`,
+    ).get()).toEqual({ inviter_user_id: 'alice' })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS total FROM user_platform_quotas quota
+         JOIN users user ON user.id = quota.user_id
+        WHERE user.email = 'commercial@example.test'`,
+    ).get()).toEqual({ total: 1 })
   })
 
   it('never auto-binds a new provider identity to an existing email account', async () => {

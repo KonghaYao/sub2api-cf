@@ -772,6 +772,15 @@ export default {
         cellColumnTooltip: 'Only platforms with a limit are shown',
         subscriptionWarning: 'This user has an active subscription. Platform quotas only apply to balance (standard) mode requests; subscription mode requests are not subject to these limits.',
         invalidNumber: 'The following fields contain invalid numbers. Please fix them before saving: {fields}',
+      },
+      platformQuotaDefaults: {
+        action: 'Signup Quotas',
+        title: 'Default Platform Quotas',
+        hint: 'Applied atomically to newly registered users. Empty means unlimited; existing users are unchanged.',
+        loadFailed: 'Failed to load default platform quotas',
+        updateSuccess: 'Default platform quotas updated',
+        updateFailed: 'Failed to update default platform quotas',
+        invalidNumber: 'Limits must be non-negative USD values with at most six decimal places.',
       }
     },
 

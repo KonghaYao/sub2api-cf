@@ -26,6 +26,16 @@
               <Icon name="dollar" size="sm" />
               <span>{{ t('payment.orders.requestRefund') }}</span>
             </button>
+            <button
+              v-if="canDownloadReceipt(row)"
+              data-testid="download-receipt"
+              :disabled="receiptDownloadingIds.has(row.id)"
+              @click="handleDownloadReceipt(row)"
+              class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-60 dark:text-blue-400 dark:hover:bg-blue-900/20"
+            >
+              <Icon name="download" size="sm" />
+              <span>{{ t('payment.orders.receipt') }}</span>
+            </button>
           </div>
         </template>
       </OrderTable>
@@ -107,6 +117,7 @@ const currentFilter = ref('')
 const cancelTargetId = ref<PaymentResourceId | null>(null)
 const refundTarget = ref<PaymentOrder | null>(null)
 const refundReason = ref('')
+const receiptDownloadingIds = ref(new Set<PaymentResourceId>())
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 
 const statusFilters = computed(() => [
@@ -179,6 +190,40 @@ function canRequestRefund(order: PaymentOrder): boolean {
   if (order.order_type !== 'balance') return false
   if (!order.provider_instance_id) return false
   return refundEligibleProviders.value.has(order.provider_instance_id)
+}
+
+function canDownloadReceipt(order: PaymentOrder): boolean {
+  return ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(order.status)
+}
+
+async function handleDownloadReceipt(order: PaymentOrder) {
+  if (receiptDownloadingIds.value.has(order.id)) return
+  receiptDownloadingIds.value = new Set(receiptDownloadingIds.value).add(order.id)
+  try {
+    const metadataResponse = await paymentAPI.getReceipt(order.id)
+    const contentResponse = await paymentAPI.downloadReceipt(order.id)
+    const metadata = metadataResponse.data
+    const content = contentResponse.data instanceof Blob
+      ? contentResponse.data
+      : new Blob([contentResponse.data], { type: metadata.content_type })
+    const objectURL = URL.createObjectURL(content)
+    try {
+      const anchor = document.createElement('a')
+      const extension = metadata.content_type.includes('html') ? 'html' : 'json'
+      const orderName = order.out_trade_no.replace(/[^a-zA-Z0-9._-]/g, '_')
+      anchor.href = objectURL
+      anchor.download = `receipt-${orderName}.${extension}`
+      anchor.click()
+    } finally {
+      URL.revokeObjectURL(objectURL)
+    }
+  } catch (err: unknown) {
+    appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
+  } finally {
+    const next = new Set(receiptDownloadingIds.value)
+    next.delete(order.id)
+    receiptDownloadingIds.value = next
+  }
 }
 
 async function loadRefundEligibility() {

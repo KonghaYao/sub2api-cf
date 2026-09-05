@@ -91,6 +91,7 @@ class AuthDatabase {
   first(query: string, values: unknown[]): Record<string, unknown> | null {
     this.events?.push('db:read')
     this.reads.push({ query, values })
+    if (query.includes('FROM system_settings')) return null
     if (query.includes('FROM users') && query.includes('WHERE email = ?')) {
       const email = String(values[0])
       const user = Array.from(this.users.values()).find((value) => value.email === email)
@@ -182,6 +183,10 @@ class AuthDatabase {
       return 1
     }
     if (query.includes('INSERT INTO auth_audit_events')) return 1
+    if (
+      query.includes('INSERT INTO user_platform_quota_sets') ||
+      query.includes('INSERT INTO user_platform_quotas')
+    ) return 1
     if (query.includes('UPDATE users') && query.includes('last_login_at_ms')) {
       const now = Number(values[0])
       const updatedAt = Number(values[1])

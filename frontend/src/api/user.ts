@@ -204,7 +204,15 @@ export async function getAffiliateDetail(): Promise<UserAffiliateDetail> {
 }
 
 export async function transferAffiliateQuota(): Promise<AffiliateTransferResponse> {
-  const { data } = await apiClient.post<AffiliateTransferResponse>('/user/aff/transfer')
+  const { data } = await apiClient.post<AffiliateTransferResponse>(
+    '/user/aff/transfer',
+    undefined,
+    {
+      headers: {
+        'Idempotency-Key': `affiliate-transfer-${globalThis.crypto.randomUUID()}`,
+      },
+    },
+  )
   return data
 }
 

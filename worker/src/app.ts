@@ -103,6 +103,22 @@ import {
   putAdminGroupRpmOverrides,
 } from './control/group-rpm'
 import {
+  createAdminInvitationCode,
+  createAdminPromotionCode,
+  deleteAdminInvitationCode,
+  deleteAdminPromotionCode,
+  getAdminCommercialConfig,
+  getAdminInvitationCode,
+  getAdminPromotionCode,
+  listAdminInvitationCodes,
+  listAdminInvitationUsages,
+  listAdminPromotionCodes,
+  listAdminPromotionUsages,
+  updateAdminCommercialConfig,
+  updateAdminInvitationCode,
+  updateAdminPromotionCode,
+} from './control/promotions'
+import {
   batchDeleteAdminRedeemCodes,
   batchUpdateAdminRedeemCodes,
   deleteAdminRedeemCode,
@@ -150,6 +166,22 @@ import {
   handleResponsesInputTokens,
 } from './gateway/handler'
 import { handleGatewayUsage, handleKeyBillingInfo } from './gateway/info'
+import { getModelPlaza } from './gateway/model-plaza'
+import { validateInvitationCode, validatePromotionCode } from './commercial/registration'
+import {
+  accrueAdminAffiliateRebate,
+  batchUpdateAdminAffiliateRates,
+  clearAdminAffiliateUser,
+  getAdminAffiliateUserOverview,
+  getUserAffiliate,
+  listAdminAffiliateInvites,
+  listAdminAffiliateRebates,
+  listAdminAffiliateTransfers,
+  listAdminAffiliateUsers,
+  lookupAdminAffiliateUsers,
+  transferUserAffiliateQuota,
+  updateAdminAffiliateUser,
+} from './commercial/affiliate'
 import {
   createUserApiKey,
   getUserApiKey,
@@ -158,6 +190,14 @@ import {
   updateUserApiKey,
 } from './user/api-keys'
 import { getUserGroupRates, listAvailableUserGroups } from './user/groups'
+import {
+  getAdminPlatformQuotaDefaults,
+  getAdminUserPlatformQuotas,
+  getMyPlatformQuotas,
+  replaceAdminPlatformQuotaDefaults,
+  replaceAdminUserPlatformQuotas,
+  resetAdminUserPlatformQuotaWindow,
+} from './user/platform-quotas'
 import { listUserRedemptions, redeemCode } from './user/redeem'
 import {
   getUserSubscriptionProgress,
@@ -236,6 +276,13 @@ import {
   queryAdminRefund,
   requestPaymentRefund,
 } from './payment/refunds'
+import { downloadMyPaymentReceipt, getMyPaymentReceipt } from './payment/receipts'
+import {
+  actOnAdminPaymentReconciliationIssue,
+  downloadAdminPaymentReconciliationEvidence,
+  getAdminPaymentReconciliationIssue,
+  listAdminPaymentReconciliationIssues,
+} from './payment/reconciliation'
 
 type AppBindings = {
   Bindings: Env
@@ -266,6 +313,12 @@ function defaultPublicSettings() {
     turnstile_enabled: false,
     turnstile_site_key: '',
     passkey_enabled: false,
+    model_plaza_enabled: false,
+    model_plaza_require_auth: false,
+    model_plaza_description: '',
+    promo_code_enabled: false,
+    invitation_code_enabled: false,
+    affiliate_enabled: false,
     payment_enabled: false,
   }
 }
@@ -308,7 +361,7 @@ export function createApp() {
   app.get('/api/v1/settings/public', async (context) => {
     const key = `${context.env.ENVIRONMENT}:public-settings:v1`
     const settings = await context.env.CONFIG_KV.get<Record<string, unknown>>(key, 'json')
-    const resolved = settings ?? defaultPublicSettings()
+    const resolved = { ...defaultPublicSettings(), ...(settings ?? {}) }
     const paymentEnabled = typeof context.env.DB.prepare === 'function'
       ? await isPaymentEnabled(context.env)
       : Boolean(resolved.payment_enabled)
@@ -331,6 +384,8 @@ export function createApp() {
   app.post('/api/v1/auth/send-verify-code', requestRegistrationEmailVerification)
   app.post('/api/v1/auth/forgot-password', requestPasswordReset)
   app.post('/api/v1/auth/reset-password', resetPasswordWithChallenge)
+  app.post('/api/v1/auth/validate-promo-code', validatePromotionCode)
+  app.post('/api/v1/auth/validate-invitation-code', validateInvitationCode)
   app.post('/api/v1/auth/email-verification/request', requestEmailVerification)
   app.post('/api/v1/auth/email-verification/confirm', confirmEmailVerification)
   app.post('/api/v1/auth/login', loginWithPassword)
@@ -354,6 +409,7 @@ export function createApp() {
   registerOAuthIdentityRoutes(app)
 
   app.get('/api/v1/user/profile', getUserProfile)
+  app.get('/api/v1/user/platform-quotas', getMyPlatformQuotas)
   app.put('/api/v1/user', updateCurrentUser)
   app.put('/api/v1/user/password', changeUserPassword)
   app.get('/api/v1/user/avatar/:id', getUserAvatar)
@@ -361,6 +417,8 @@ export function createApp() {
   app.post('/api/v1/user/notify-email/verify', verifyNotificationEmail)
   app.delete('/api/v1/user/notify-email', removeNotificationEmail)
   app.put('/api/v1/user/notify-email/toggle', toggleNotificationEmail)
+  app.get('/api/v1/user/aff', getUserAffiliate)
+  app.post('/api/v1/user/aff/transfer', transferUserAffiliateQuota)
   app.get('/api/v1/user/totp/status', getTotpStatus)
   app.get('/api/v1/user/totp/verification-method', getTotpVerificationMethod)
   app.post('/api/v1/user/totp/send-code', sendTotpVerificationCode)
@@ -391,6 +449,8 @@ export function createApp() {
   )
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  app.get('/api/v1/admin/commercial/config', getAdminCommercialConfig)
+  app.put('/api/v1/admin/commercial/config', updateAdminCommercialConfig)
   app.get('/api/v1/admin/oauth-providers', listAdminOAuthProviders)
   app.get('/api/v1/admin/oauth-providers/:provider', getAdminOAuthProvider)
   app.put('/api/v1/admin/oauth-providers/:provider', upsertAdminOAuthProvider)
@@ -400,6 +460,11 @@ export function createApp() {
   app.get('/api/v1/admin/users/:id', getAdminUser)
   app.put('/api/v1/admin/users/:id', updateAdminUser)
   app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
+  app.get('/api/v1/admin/users/:id/platform-quotas', getAdminUserPlatformQuotas)
+  app.put('/api/v1/admin/users/:id/platform-quotas', replaceAdminUserPlatformQuotas)
+  app.post('/api/v1/admin/users/:id/platform-quotas/reset', resetAdminUserPlatformQuotaWindow)
+  app.get('/api/v1/admin/platform-quota-defaults', getAdminPlatformQuotaDefaults)
+  app.put('/api/v1/admin/platform-quota-defaults', replaceAdminPlatformQuotaDefaults)
   app.get('/api/v1/admin/users/:id/api-keys', listAdminApiKeys)
   app.post('/api/v1/admin/users/:id/api-keys', createAdminApiKey)
   app.put('/api/v1/admin/api-keys/:id', updateAdminApiKey)
@@ -452,6 +517,13 @@ export function createApp() {
   app.post('/api/v1/admin/payment/orders/:id/retry', retryAdminPaymentFulfillment)
   app.post('/api/v1/admin/payment/orders/:id/refund', processAdminRefund)
   app.post('/api/v1/admin/payment/orders/:id/refund/query', queryAdminRefund)
+  app.get('/api/v1/admin/payment/reconciliation', listAdminPaymentReconciliationIssues)
+  app.get('/api/v1/admin/payment/reconciliation/:id', getAdminPaymentReconciliationIssue)
+  app.get(
+    '/api/v1/admin/payment/reconciliation/:id/evidence',
+    downloadAdminPaymentReconciliationEvidence,
+  )
+  app.post('/api/v1/admin/payment/reconciliation/:id/:action', actOnAdminPaymentReconciliationIssue)
   app.get('/api/v1/admin/subscriptions', listAdminSubscriptions)
   app.post('/api/v1/admin/subscriptions/assign', assignAdminSubscription)
   app.post('/api/v1/admin/subscriptions/bulk-assign', bulkAssignAdminSubscriptions)
@@ -471,6 +543,28 @@ export function createApp() {
   app.post('/api/v1/admin/redeem-codes/:id/expire', expireAdminRedeemCode)
   app.get('/api/v1/admin/redeem-codes/:id', getAdminRedeemCode)
   app.delete('/api/v1/admin/redeem-codes/:id', deleteAdminRedeemCode)
+  app.get('/api/v1/admin/promo-codes', listAdminPromotionCodes)
+  app.post('/api/v1/admin/promo-codes', createAdminPromotionCode)
+  app.get('/api/v1/admin/promo-codes/:id/usages', listAdminPromotionUsages)
+  app.get('/api/v1/admin/promo-codes/:id', getAdminPromotionCode)
+  app.put('/api/v1/admin/promo-codes/:id', updateAdminPromotionCode)
+  app.delete('/api/v1/admin/promo-codes/:id', deleteAdminPromotionCode)
+  app.get('/api/v1/admin/invitation-codes', listAdminInvitationCodes)
+  app.post('/api/v1/admin/invitation-codes', createAdminInvitationCode)
+  app.get('/api/v1/admin/invitation-codes/:id/usages', listAdminInvitationUsages)
+  app.get('/api/v1/admin/invitation-codes/:id', getAdminInvitationCode)
+  app.put('/api/v1/admin/invitation-codes/:id', updateAdminInvitationCode)
+  app.delete('/api/v1/admin/invitation-codes/:id', deleteAdminInvitationCode)
+  app.get('/api/v1/admin/affiliates/users', listAdminAffiliateUsers)
+  app.get('/api/v1/admin/affiliates/users/lookup', lookupAdminAffiliateUsers)
+  app.post('/api/v1/admin/affiliates/users/batch-rate', batchUpdateAdminAffiliateRates)
+  app.get('/api/v1/admin/affiliates/users/:user_id/overview', getAdminAffiliateUserOverview)
+  app.put('/api/v1/admin/affiliates/users/:user_id', updateAdminAffiliateUser)
+  app.delete('/api/v1/admin/affiliates/users/:user_id', clearAdminAffiliateUser)
+  app.get('/api/v1/admin/affiliates/invites', listAdminAffiliateInvites)
+  app.get('/api/v1/admin/affiliates/rebates', listAdminAffiliateRebates)
+  app.get('/api/v1/admin/affiliates/transfers', listAdminAffiliateTransfers)
+  app.post('/api/v1/admin/affiliates/rebates/accrue', accrueAdminAffiliateRebate)
   app.get('/api/v1/admin/rbac/permissions', requireAdminPermission('admin.rbac.read'), listAdminPermissions)
   app.get('/api/v1/admin/rbac/roles', requireAdminPermission('admin.rbac.read'), listAdminRoles)
   app.post('/api/v1/admin/rbac/roles', requireAdminPermission('admin.rbac.write'), createAdminRole)
@@ -523,12 +617,15 @@ export function createApp() {
   app.post('/api/v1/payment/orders/verify', verifyMyPaymentOrder)
   app.get('/api/v1/payment/orders/my', listMyPaymentOrders)
   app.get('/api/v1/payment/orders/refund-eligible-providers', getRefundEligibleProviders)
+  app.get('/api/v1/payment/orders/:id/receipt', getMyPaymentReceipt)
+  app.get('/api/v1/payment/orders/:id/receipt/download', downloadMyPaymentReceipt)
   app.get('/api/v1/payment/orders/:id', getMyPaymentOrder)
   app.post('/api/v1/payment/orders/:id/cancel', cancelMyPaymentOrder)
   app.post('/api/v1/payment/orders/:id/refund-request', requestPaymentRefund)
   app.post('/api/v1/payment/public/orders/verify', verifyPaymentOrderPublic)
   app.post('/api/v1/payment/public/orders/resolve', resolvePaymentOrderPublic)
   app.post('/api/v1/payment/webhook/stripe', handleStripeWebhook)
+  app.get('/api/v1/model-plaza', getModelPlaza)
 
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)

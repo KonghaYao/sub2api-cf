@@ -38,6 +38,8 @@ import auditAPI from './audit'
 import pluginsAPI from './plugins'
 import modelsAPI from './models'
 import oauthProvidersAPI from './oauthProviders'
+import platformQuotasAPI from './platformQuotas'
+import invitationCodesAPI from './invitationCodes'
 
 /**
  * Unified admin API object for convenient access
@@ -77,7 +79,9 @@ export const adminAPI = {
   audit: auditAPI,
   plugins: pluginsAPI,
   models: modelsAPI,
-  oauthProviders: oauthProvidersAPI
+  oauthProviders: oauthProvidersAPI,
+  platformQuotas: platformQuotasAPI,
+  invitationCodes: invitationCodesAPI,
 }
 
 export {
@@ -115,10 +119,19 @@ export {
   auditAPI,
   pluginsAPI,
   modelsAPI,
-  oauthProvidersAPI
+  oauthProvidersAPI,
+  platformQuotasAPI,
+  invitationCodesAPI,
 }
 
 export type { WorkerAdminModel } from './models'
+export type {
+  InvitationCode,
+  InvitationCodeUsage,
+  InvitationCodeStatus,
+  CreateInvitationCodeInput,
+  UpdateInvitationCodeInput,
+} from './invitationCodes'
 export type {
   AdminOAuthProvider,
   AdminOAuthAdapter,

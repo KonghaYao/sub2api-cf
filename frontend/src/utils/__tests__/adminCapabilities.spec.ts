@@ -15,6 +15,9 @@ describe('Cloudflare admin capabilities', () => {
     '/admin/accounts',
     '/admin/subscriptions',
     '/admin/redeem',
+    '/admin/promo-codes',
+    '/admin/invitation-codes',
+    '/admin/affiliates/rebates',
     '/admin/orders/plans',
     '/admin/audit-logs/control/event-1',
   ])('allows migrated route %s', (path) => {
@@ -28,7 +31,6 @@ describe('Cloudflare admin capabilities', () => {
     '/admin/proxies',
     '/admin/plugins',
     '/admin/announcements',
-    '/admin/promo-codes',
     '/admin/usage',
     '/admin/new-host-feature',
   ])('denies unsupported or unknown route %s', (path) => {

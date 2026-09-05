@@ -390,6 +390,7 @@ export default {
       orderType: '订单类型',
       actions: '操作',
       requestRefund: '申请退款',
+      receipt: '收据',
     },
     result: {
       success: '支付成功',

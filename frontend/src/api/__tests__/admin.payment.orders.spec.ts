@@ -91,4 +91,47 @@ describe('admin payment opaque IDs', () => {
       { headers: expect.objectContaining({ 'If-Match': '"7"', 'Idempotency-Key': expect.any(String) }) },
     )
   })
+
+  it('uses the Worker reconciliation contract with opaque IDs and CAS actions', async () => {
+    const issueId = '01JRECONCILIATION-uuid'
+    get
+      .mockResolvedValueOnce({ data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 } })
+      .mockResolvedValueOnce({ data: { issue: { id: issueId }, actions: [], events: [] } })
+    post.mockResolvedValueOnce({ data: { id: issueId, version: 8, status: 'acknowledged' } })
+
+    await adminPaymentAPI.getReconciliationIssues({
+      page: 2,
+      page_size: 10,
+      status: 'open',
+      severity: 'critical',
+      order_id: '01JORDER-filter',
+    })
+    await adminPaymentAPI.getReconciliationIssue(issueId)
+    await adminPaymentAPI.actOnReconciliationIssue(issueId, 'acknowledge', 7, { note: 'reviewing' })
+    await adminPaymentAPI.downloadReconciliationEvidence(issueId)
+
+    expect(get).toHaveBeenNthCalledWith(1, '/admin/payment/reconciliation', {
+      params: {
+        page: 2,
+        page_size: 10,
+        status: 'open',
+        severity: 'critical',
+        order_id: '01JORDER-filter',
+      },
+    })
+    expect(get).toHaveBeenNthCalledWith(2, `/admin/payment/reconciliation/${issueId}`)
+    expect(get).toHaveBeenNthCalledWith(3, `/admin/payment/reconciliation/${issueId}/evidence`, {
+      responseType: 'blob',
+    })
+    expect(post).toHaveBeenCalledWith(
+      `/admin/payment/reconciliation/${issueId}/acknowledge`,
+      { note: 'reviewing', expected_control_version: 7 },
+      {
+        headers: expect.objectContaining({
+          'If-Match': '"7"',
+          'Idempotency-Key': expect.any(String),
+        }),
+      },
+    )
+  })
 })

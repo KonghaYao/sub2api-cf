@@ -1059,6 +1059,12 @@ interface WorkerAdminSettings {
     turnstile_enabled: boolean;
     turnstile_site_key: string;
     passkey_enabled?: boolean;
+    model_plaza_enabled: boolean;
+    model_plaza_require_auth: boolean;
+    model_plaza_description: string;
+    promo_code_enabled: boolean;
+    invitation_code_enabled: boolean;
+    affiliate_enabled: boolean;
   };
   security?: {
     step_up_enabled: boolean;
@@ -1076,8 +1082,31 @@ interface WorkerSettingsPatch {
   secrets?: { turnstile_secret_key: string | null };
 }
 
+export interface WorkerCommercialConfig {
+  control_version: number;
+  affiliate_rebate_rate: number;
+  affiliate_rebate_rate_ppm: number;
+  affiliate_rebate_freeze_hours: number;
+  affiliate_rebate_duration_days: number;
+  affiliate_rebate_per_invitee_cap: number;
+  affiliate_rebate_per_invitee_cap_micros: number;
+  affiliate_admin_recharge_enabled: boolean;
+  updated_at_ms: number;
+}
+
+export type WorkerCommercialConfigPatch = Pick<
+  WorkerCommercialConfig,
+  | "affiliate_rebate_rate"
+  | "affiliate_rebate_freeze_hours"
+  | "affiliate_rebate_duration_days"
+  | "affiliate_rebate_per_invitee_cap"
+  | "affiliate_admin_recharge_enabled"
+>;
+
 let workerSettingsETag: string | null = null;
 let pendingWorkerSettingsUpdate: { fingerprint: string; key: string } | null = null;
+let workerCommercialConfigETag: string | null = null;
+let pendingWorkerCommercialConfigUpdate: { fingerprint: string; key: string } | null = null;
 
 function isWorkerAdminSettings(value: unknown): value is WorkerAdminSettings {
   if (value === null || typeof value !== "object") return false;
@@ -1104,6 +1133,12 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     turnstile_enabled: settings.public.turnstile_enabled,
     turnstile_site_key: settings.public.turnstile_site_key,
     passkey_enabled: settings.public.passkey_enabled ?? false,
+    model_plaza_enabled: settings.public.model_plaza_enabled ?? false,
+    model_plaza_require_auth: settings.public.model_plaza_require_auth ?? false,
+    model_plaza_description: settings.public.model_plaza_description ?? "",
+    promo_code_enabled: settings.public.promo_code_enabled ?? false,
+    invitation_code_enabled: settings.public.invitation_code_enabled ?? false,
+    affiliate_enabled: settings.public.affiliate_enabled ?? false,
     passkey_configured: settings.security?.passkey_configured ?? false,
     passkey_rp_id: settings.security?.passkey_rp_id ?? "",
     passkey_rp_origins: settings.security?.passkey_rp_origins ?? [],
@@ -1168,6 +1203,24 @@ export async function updateSettings(
   if (settings.passkey_enabled !== undefined) {
     publicPatch.passkey_enabled = settings.passkey_enabled;
   }
+  if (settings.model_plaza_enabled !== undefined) {
+    publicPatch.model_plaza_enabled = settings.model_plaza_enabled;
+  }
+  if (settings.model_plaza_require_auth !== undefined) {
+    publicPatch.model_plaza_require_auth = settings.model_plaza_require_auth;
+  }
+  if (settings.model_plaza_description !== undefined) {
+    publicPatch.model_plaza_description = settings.model_plaza_description;
+  }
+  if (settings.promo_code_enabled !== undefined) {
+    publicPatch.promo_code_enabled = settings.promo_code_enabled;
+  }
+  if (settings.invitation_code_enabled !== undefined) {
+    publicPatch.invitation_code_enabled = settings.invitation_code_enabled;
+  }
+  if (settings.affiliate_enabled !== undefined) {
+    publicPatch.affiliate_enabled = settings.affiliate_enabled;
+  }
 
   const patch: WorkerSettingsPatch = {};
   if (Object.keys(publicPatch).length > 0) patch.public = publicPatch;
@@ -1206,6 +1259,47 @@ export async function updateSettings(
     ? response.headers.etag
     : `"${response.data.control_version}"`;
   return adaptWorkerSettings(response.data);
+}
+
+export async function getCommercialConfig(): Promise<WorkerCommercialConfig> {
+  const response = await apiClient.get<WorkerCommercialConfig>("/admin/commercial/config");
+  workerCommercialConfigETag = typeof response.headers?.etag === "string"
+    ? response.headers.etag
+    : `"${response.data.control_version}"`;
+  return response.data;
+}
+
+export async function updateCommercialConfig(
+  patch: WorkerCommercialConfigPatch,
+): Promise<WorkerCommercialConfig> {
+  if (workerCommercialConfigETag === null) {
+    throw settingsContractError(
+      "commercial_config_version_not_loaded",
+      "Reload Worker commercial settings before saving",
+    );
+  }
+  const fingerprint = JSON.stringify([workerCommercialConfigETag, patch]);
+  if (pendingWorkerCommercialConfigUpdate?.fingerprint !== fingerprint) {
+    pendingWorkerCommercialConfigUpdate = {
+      fingerprint,
+      key: newOperationKey("admin-commercial-config-update"),
+    };
+  }
+  const response = await apiClient.put<WorkerCommercialConfig>(
+    "/admin/commercial/config",
+    patch,
+    {
+      headers: {
+        "Idempotency-Key": pendingWorkerCommercialConfigUpdate.key,
+        "If-Match": workerCommercialConfigETag,
+      },
+    },
+  );
+  pendingWorkerCommercialConfigUpdate = null;
+  workerCommercialConfigETag = typeof response.headers?.etag === "string"
+    ? response.headers.etag
+    : `"${response.data.control_version}"`;
+  return response.data;
 }
 
 /**
@@ -1701,6 +1795,8 @@ export async function resetWebSearchUsage(payload: {
 export const settingsAPI = {
   getSettings,
   updateSettings,
+  getCommercialConfig,
+  updateCommercialConfig,
   testSmtpConnection,
   sendTestEmail,
   getEmailTemplates,

@@ -1,12 +1,23 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import type { Env } from '../../src/env'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const pepper = 'usage-contract-test-pepper-at-least-thirty-two-bytes'
+const TEST_NOW = Date.UTC(2026, 8, 4, 12)
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(TEST_NOW)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 async function fixture() {
-  const {raw,d1}=createSqliteD1(); applyMigrations(raw); const now=Date.UTC(2026,8,4,12)
+  const {raw,d1}=createSqliteD1(); applyMigrations(raw); const now=TEST_NOW
   for(const id of ['alice','bob']) raw.prepare(`INSERT INTO users(id,email,display_name,created_at_ms,updated_at_ms)VALUES(?,?,?, ?,?)`).run(id,`${id}@test.local`,id,now,now)
   raw.prepare(`INSERT INTO api_keys(id,user_id,key_hash,created_at_ms,updated_at_ms)VALUES('alice-key','alice',?, ?,?)`).run('a'.repeat(64),now,now)
   raw.prepare(`INSERT INTO api_keys(id,user_id,key_hash,created_at_ms,updated_at_ms)VALUES('bob-key','bob',?, ?,?)`).run('b'.repeat(64),now,now)

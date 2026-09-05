@@ -104,6 +104,120 @@
                 </p>
               </div>
             </div>
+            <div
+              class="space-y-4 rounded-lg border border-gray-200 p-4 dark:border-dark-600 md:col-span-2"
+              data-testid="worker-commercial-settings"
+            >
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <h3 class="font-medium text-gray-900 dark:text-white">Model plaza</h3>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    Publish the Worker-backed model catalog and active prices.
+                  </p>
+                </div>
+                <Toggle
+                  v-model="form.model_plaza_enabled"
+                  data-testid="worker-model-plaza-toggle"
+                />
+              </div>
+              <div
+                v-if="form.model_plaza_enabled"
+                class="flex items-center justify-between gap-4 rounded-lg bg-gray-50 p-3 dark:bg-dark-700"
+              >
+                <span class="text-sm text-gray-700 dark:text-gray-300">Require sign-in</span>
+                <Toggle
+                  v-model="form.model_plaza_require_auth"
+                  data-testid="worker-model-plaza-auth-toggle"
+                />
+              </div>
+              <div v-if="form.model_plaza_enabled">
+                <label class="input-label">Public pricing description</label>
+                <textarea
+                  v-model="form.model_plaza_description"
+                  rows="4"
+                  maxlength="20000"
+                  class="input"
+                  data-testid="worker-model-plaza-description"
+                ></textarea>
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Promo codes</span>
+                  <Toggle v-model="form.promo_code_enabled" data-testid="worker-promo-toggle" />
+                </div>
+                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Invitation codes</span>
+                  <Toggle
+                    v-model="form.invitation_code_enabled"
+                    data-testid="worker-invitation-toggle"
+                  />
+                </div>
+                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Affiliate rewards</span>
+                  <Toggle v-model="form.affiliate_enabled" data-testid="worker-affiliate-toggle" />
+                </div>
+              </div>
+              <div
+                v-if="form.affiliate_enabled"
+                class="grid grid-cols-1 gap-4 rounded-lg border border-gray-200 p-4 dark:border-dark-600 md:grid-cols-2"
+                data-testid="worker-affiliate-policy"
+              >
+                <div>
+                  <label class="input-label">Default rebate rate (%)</label>
+                  <input
+                    v-model.number="form.affiliate_rebate_rate"
+                    data-testid="worker-affiliate-rate"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    class="input"
+                  />
+                </div>
+                <div>
+                  <label class="input-label">Freeze period (hours)</label>
+                  <input
+                    v-model.number="form.affiliate_rebate_freeze_hours"
+                    data-testid="worker-affiliate-freeze-hours"
+                    type="number"
+                    min="0"
+                    max="720"
+                    step="1"
+                    class="input"
+                  />
+                </div>
+                <div>
+                  <label class="input-label">Attribution duration (days, 0 = unlimited)</label>
+                  <input
+                    v-model.number="form.affiliate_rebate_duration_days"
+                    data-testid="worker-affiliate-duration-days"
+                    type="number"
+                    min="0"
+                    max="3650"
+                    step="1"
+                    class="input"
+                  />
+                </div>
+                <div>
+                  <label class="input-label">Per-invitee rebate cap (USD, 0 = unlimited)</label>
+                  <input
+                    v-model.number="form.affiliate_rebate_per_invitee_cap"
+                    data-testid="worker-affiliate-cap"
+                    type="number"
+                    min="0"
+                    step="0.000001"
+                    class="input"
+                  />
+                </div>
+                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700 md:col-span-2">
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Reward administrator-created payments</span>
+                  <Toggle
+                    v-model="form.affiliate_admin_recharge_enabled"
+                    data-testid="worker-affiliate-admin-recharge-toggle"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
           <div class="space-y-5 border-t border-gray-100 p-6 dark:border-dark-700">
             <div>
@@ -10937,6 +11051,12 @@ async function loadSettings() {
         "passkey_configured",
         "passkey_rp_id",
         "passkey_rp_origins",
+        "model_plaza_enabled",
+        "model_plaza_require_auth",
+        "model_plaza_description",
+        "promo_code_enabled",
+        "invitation_code_enabled",
+        "affiliate_enabled",
       ] as const) {
         const value = settings[key];
         if (value !== null && value !== undefined) form[key] = value as never;
@@ -11141,6 +11261,21 @@ async function loadWorkerPaymentSettings() {
   }
 }
 
+async function loadWorkerCommercialConfig() {
+  try {
+    const commercial = await adminAPI.settings.getCommercialConfig();
+    form.affiliate_rebate_rate = commercial.affiliate_rebate_rate;
+    form.affiliate_rebate_freeze_hours = commercial.affiliate_rebate_freeze_hours;
+    form.affiliate_rebate_duration_days = commercial.affiliate_rebate_duration_days;
+    form.affiliate_rebate_per_invitee_cap = commercial.affiliate_rebate_per_invitee_cap;
+    form.affiliate_admin_recharge_enabled = commercial.affiliate_admin_recharge_enabled;
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(error, t("admin.settings.failedToLoad")),
+    );
+  }
+}
+
 async function loadSubscriptionGroups() {
   try {
     const groups = await adminAPI.groups.getAll();
@@ -11221,6 +11356,12 @@ async function saveSettings() {
         turnstile_site_key: form.turnstile_site_key,
         turnstile_secret_key: form.turnstile_secret_key || undefined,
         passkey_enabled: form.passkey_enabled,
+        model_plaza_enabled: form.model_plaza_enabled,
+        model_plaza_require_auth: form.model_plaza_require_auth,
+        model_plaza_description: form.model_plaza_description,
+        promo_code_enabled: form.promo_code_enabled,
+        invitation_code_enabled: form.invitation_code_enabled,
+        affiliate_enabled: form.affiliate_enabled,
       });
       form.turnstile_secret_key_configured = updated.turnstile_secret_key_configured;
       form.turnstile_secret_key = "";
@@ -11228,6 +11369,12 @@ async function saveSettings() {
       form.passkey_configured = updated.passkey_configured;
       form.passkey_rp_id = updated.passkey_rp_id;
       form.passkey_rp_origins = updated.passkey_rp_origins;
+      form.model_plaza_enabled = updated.model_plaza_enabled;
+      form.model_plaza_require_auth = updated.model_plaza_require_auth;
+      form.model_plaza_description = updated.model_plaza_description;
+      form.promo_code_enabled = updated.promo_code_enabled;
+      form.invitation_code_enabled = updated.invitation_code_enabled;
+      form.affiliate_enabled = updated.affiliate_enabled;
       await adminAPI.payment.updateConfig({
         enabled: form.payment_enabled,
         min_amount: Number(form.payment_min_amount) || 0,
@@ -11245,6 +11392,25 @@ async function saveSettings() {
         product_name_suffix: form.payment_product_name_suffix,
         help_image_url: form.payment_help_image_url,
         help_text: form.payment_help_text,
+      });
+      await adminAPI.settings.updateCommercialConfig({
+        affiliate_rebate_rate: Math.min(
+          100,
+          Math.max(0, Number(form.affiliate_rebate_rate) || 0),
+        ),
+        affiliate_rebate_freeze_hours: Math.max(
+          0,
+          Math.min(720, Math.floor(Number(form.affiliate_rebate_freeze_hours) || 0)),
+        ),
+        affiliate_rebate_duration_days: Math.max(
+          0,
+          Math.min(3650, Math.floor(Number(form.affiliate_rebate_duration_days) || 0)),
+        ),
+        affiliate_rebate_per_invitee_cap: Math.max(
+          0,
+          Number(form.affiliate_rebate_per_invitee_cap) || 0,
+        ),
+        affiliate_admin_recharge_enabled: form.affiliate_admin_recharge_enabled,
       });
       await appStore.fetchPublicSettings(true);
       appStore.showSuccess(t("admin.settings.settingsSaved"));
@@ -12790,7 +12956,11 @@ async function handleDeleteProvider() {
 onMounted(async () => {
   await loadSettings();
   if (cloudflareWorkerSettings.value) {
-    await Promise.all([loadWorkerPaymentSettings(), loadProviders()]);
+    await Promise.all([
+      loadWorkerPaymentSettings(),
+      loadWorkerCommercialConfig(),
+      loadProviders(),
+    ]);
     return;
   }
   loadSubscriptionGroups();
@@ -12817,7 +12987,7 @@ interface AffiliateState {
   page: number;
   pageSize: number;
   search: string;
-  selected: number[];
+  selected: Array<string | number>;
   searchTimer: number | null;
 }
 
@@ -12985,7 +13155,7 @@ function toggleAffiliateSelectAll(e: Event) {
   affiliateState.selected = checked ? affiliateState.entries.map((entry) => entry.user_id) : [];
 }
 
-function toggleAffiliateSelect(userId: number) {
+function toggleAffiliateSelect(userId: string | number) {
   const idx = affiliateState.selected.indexOf(userId);
   if (idx >= 0) affiliateState.selected.splice(idx, 1);
   else affiliateState.selected.push(userId);
@@ -13068,7 +13238,7 @@ async function submitAffiliateModal() {
     return;
   }
 
-  let userId: number;
+  let userId: string | number;
   if (affiliateModal.mode === "add") {
     userId = affiliateModal.selectedUser!.id;
   } else {
@@ -13091,7 +13261,10 @@ async function submitAffiliateModal() {
 
   affiliateModal.saving = true;
   try {
-    await affiliatesAPI.updateUserSettings(userId, payload);
+    const expectedControlVersion = affiliateModal.mode === "add"
+      ? affiliateModal.selectedUser!.control_version
+      : affiliateModal.editingEntry!.control_version;
+    await affiliatesAPI.updateUserSettings(userId, payload, expectedControlVersion);
     appStore.showSuccess(t("common.saved"));
     closeAffiliateModal();
     affiliateState.page = 1;
@@ -13113,7 +13286,7 @@ function askResetAffiliateUser(entry: AffiliateAdminEntry) {
       email: entry.email || `#${entry.user_id}`,
     }),
     t("common.delete"),
-    () => affiliatesAPI.clearUserSettings(entry.user_id),
+    () => affiliatesAPI.clearUserSettings(entry.user_id, entry.control_version),
   );
 }
 
@@ -13127,10 +13300,24 @@ async function submitAffiliateBatchModal() {
   const rateInput = parseRebateRate(affiliateBatchModal.rate);
   if (rateInput === undefined) return;
   const userIDs = [...affiliateState.selected];
+  const selectedIDs = new Set(userIDs.map(String));
+  const expectedControlVersions = Object.fromEntries(
+    affiliateState.entries
+      .filter((entry) => selectedIDs.has(String(entry.user_id)))
+      .map((entry) => [String(entry.user_id), entry.control_version]),
+  );
   const payload: Parameters<typeof affiliatesAPI.batchSetRate>[0] =
     rateInput === null
-      ? { user_ids: userIDs, clear: true }
-      : { user_ids: userIDs, aff_rebate_rate_percent: rateInput };
+      ? {
+          user_ids: userIDs,
+          clear: true,
+          expected_control_versions: expectedControlVersions,
+        }
+      : {
+          user_ids: userIDs,
+          aff_rebate_rate_percent: rateInput,
+          expected_control_versions: expectedControlVersions,
+        };
 
   affiliateBatchModal.saving = true;
   try {

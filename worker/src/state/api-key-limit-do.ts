@@ -7,6 +7,7 @@ import {
   requireString,
   StateApiError,
 } from './http'
+import { PlatformQuotaLimitError, PlatformQuotaState } from './platform-quota-state'
 
 type LeaseStatus = 'active' | 'released' | 'expired'
 type MonetaryReservationStatus = 'reserved' | 'settled' | 'cancelled' | 'expired'
@@ -129,14 +130,18 @@ const MAX_MONETARY_RESERVATION_TTL_MS = DAY_MS
  * its API key identity for per-key observability and replay safety.
  */
 export class ApiKeyLimitDO {
+  private platformQuotas!: PlatformQuotaState
+
   constructor(private readonly state: DurableObjectState) {
     this.state.blockConcurrencyWhile(async () => {
       this.initializeSchema()
+      this.platformQuotas = new PlatformQuotaState(this.state.storage)
       const now = Date.now()
       this.state.storage.transactionSync(() => {
         this.cleanup(now)
         this.reclaimExpiredLeases(now)
         this.expireMonetaryReservations(now)
+        this.platformQuotas.expireReservations(now)
       })
       await this.scheduleAlarm()
     })
@@ -161,6 +166,12 @@ export class ApiKeyLimitDO {
       if (url.pathname === '/monetary/renew') return await this.renewMonetary(body)
       if (url.pathname === '/monetary/settle') return await this.settleMonetary(body)
       if (url.pathname === '/monetary/cancel') return await this.cancelMonetary(body)
+      if (url.pathname.startsWith('/platform-quota/')) {
+        const response = this.state.storage.transactionSync(() =>
+          this.platformQuotas.handle(url.pathname, body))
+        await this.scheduleAlarm()
+        return response
+      }
       throw new StateApiError(404, 'route_not_found', 'Durable object route was not found')
     } catch (error) {
       if (error instanceof AdmissionLimitError) {
@@ -193,6 +204,20 @@ export class ApiKeyLimitDO {
           error: { code: error.code, message: error.message },
         }), { status: error.status, headers })
       }
+      if (error instanceof PlatformQuotaLimitError) {
+        return new Response(JSON.stringify({
+          schema_version: 1,
+          reserved: false,
+          retry_after_seconds: error.retryAfterSeconds,
+          error: { code: error.code, message: error.message },
+        }), {
+          status: error.status,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'retry-after': String(error.retryAfterSeconds),
+          },
+        })
+      }
       return errorResponse(error)
     }
   }
@@ -203,6 +228,7 @@ export class ApiKeyLimitDO {
       this.cleanup(now)
       this.reclaimExpiredLeases(now)
       this.expireMonetaryReservations(now)
+      this.platformQuotas.expireReservations(now)
     })
     await this.scheduleAlarm()
   }
@@ -253,6 +279,7 @@ export class ApiKeyLimitDO {
            FROM api_key_monetary_reservations
           ORDER BY created_at_ms ASC, request_id ASC`,
       ))
+      const platformQuotas = this.platformQuotas.snapshot(now)
       return json({
         schema_version: 1,
         active_concurrency: leases.filter((lease) => lease.status === 'active').length,
@@ -263,6 +290,7 @@ export class ApiKeyLimitDO {
           windows: monetaryWindows,
           reservations: monetaryReservations,
         },
+        platform_quotas: platformQuotas,
       })
     })
     await this.scheduleAlarm()
@@ -442,10 +470,12 @@ export class ApiKeyLimitDO {
       this.cleanup(now)
       const reclaimed = this.reclaimExpiredLeases(now)
       const monetaryReclaimed = this.expireMonetaryReservations(now)
+      const platformQuotaReclaimed = this.platformQuotas.expireReservations(now)
       return json({
         schema_version: 1,
         reclaimed,
         monetary_reclaimed: monetaryReclaimed,
+        platform_quota_reclaimed: platformQuotaReclaimed,
       })
     })
     await this.scheduleAlarm()
@@ -1235,6 +1265,7 @@ export class ApiKeyLimitDO {
       now - MONETARY_WINDOW_MS['1d'],
       now - MONETARY_WINDOW_MS['7d'],
     )
+    this.platformQuotas.cleanup(now)
   }
 
   private async scheduleAlarm(): Promise<void> {
@@ -1245,7 +1276,11 @@ export class ApiKeyLimitDO {
       `SELECT MIN(reservation_expires_at_ms) AS expires_at_ms
          FROM api_key_monetary_reservations WHERE status = 'reserved'`,
     ))[0] as { expires_at_ms?: unknown } | undefined
-    const expirations = [admission?.expires_at_ms, monetary?.expires_at_ms]
+    const expirations = [
+      admission?.expires_at_ms,
+      monetary?.expires_at_ms,
+      this.platformQuotas.nextReservationExpiry(),
+    ]
       .filter((value): value is number => Number.isSafeInteger(value))
     if (expirations.length > 0) {
       await this.state.storage.setAlarm(Math.max(Date.now(), Math.min(...expirations)))

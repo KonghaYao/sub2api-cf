@@ -44,6 +44,21 @@ interface PrincipalRow {
   window_7d_start_ms?: number | null
   api_key_quota_reset_epoch?: number
   api_key_rate_limit_reset_epoch?: number
+  platform_quota_platform?: string | null
+  platform_quota_enabled?: number | null
+  platform_quota_control_version?: number | null
+  platform_daily_limit_micros?: number | null
+  platform_weekly_limit_micros?: number | null
+  platform_monthly_limit_micros?: number | null
+  platform_daily_used_micros?: number | null
+  platform_weekly_used_micros?: number | null
+  platform_monthly_used_micros?: number | null
+  platform_daily_window_start_ms?: number | null
+  platform_weekly_window_start_ms?: number | null
+  platform_monthly_window_start_ms?: number | null
+  platform_daily_reset_epoch?: number | null
+  platform_weekly_reset_epoch?: number | null
+  platform_monthly_reset_epoch?: number | null
   group_id: string
   group_enabled: number
   group_accessible: number
@@ -104,6 +119,21 @@ export async function authenticateGatewayRequest(
             k.window_7d_start_ms,
             k.quota_reset_epoch AS api_key_quota_reset_epoch,
             k.rate_limit_reset_epoch AS api_key_rate_limit_reset_epoch,
+            platform_quota.platform AS platform_quota_platform,
+            platform_quota.enabled AS platform_quota_enabled,
+            platform_quota.control_version AS platform_quota_control_version,
+            platform_quota.daily_limit_micros AS platform_daily_limit_micros,
+            platform_quota.weekly_limit_micros AS platform_weekly_limit_micros,
+            platform_quota.monthly_limit_micros AS platform_monthly_limit_micros,
+            platform_quota.daily_used_micros AS platform_daily_used_micros,
+            platform_quota.weekly_used_micros AS platform_weekly_used_micros,
+            platform_quota.monthly_used_micros AS platform_monthly_used_micros,
+            platform_quota.daily_window_start_ms AS platform_daily_window_start_ms,
+            platform_quota.weekly_window_start_ms AS platform_weekly_window_start_ms,
+            platform_quota.monthly_window_start_ms AS platform_monthly_window_start_ms,
+            platform_quota.daily_reset_epoch AS platform_daily_reset_epoch,
+            platform_quota.weekly_reset_epoch AS platform_weekly_reset_epoch,
+            platform_quota.monthly_reset_epoch AS platform_monthly_reset_epoch,
             g.id AS group_id, g.enabled AS group_enabled, g.platform, g.group_type,
             subscription.id AS subscription_id,
             subscription.starts_at_ms AS subscription_starts_at_ms,
@@ -123,6 +153,9 @@ export async function authenticateGatewayRequest(
        JOIN "groups" g ON g.id = k.group_id
        LEFT JOIN user_group_rpm_overrides rpm_override
          ON rpm_override.user_id = u.id AND rpm_override.group_id = g.id
+       LEFT JOIN user_platform_quotas platform_quota
+         ON platform_quota.user_id = u.id
+        AND platform_quota.platform = CASE WHEN g.platform = 'codex' THEN 'openai' ELSE g.platform END
        LEFT JOIN user_subscriptions subscription
          ON subscription.user_id = u.id AND subscription.group_id = g.id
         AND subscription.status = 'active'
@@ -190,7 +223,57 @@ export async function authenticateGatewayRequest(
     user_rpm_limit: userRpmLimit!,
     group_rpm_limit: groupRpmLimit!,
     api_key_monetary: apiKeyMonetaryPolicy(row, now),
+    platform_quota: platformQuotaPolicy(row),
     billing,
+  }
+}
+
+function platformQuotaPolicy(row: PrincipalRow): GatewayPrincipal['platform_quota'] {
+  // Hand-written fixtures and users without a configured policy both project
+  // no platform quota. Disabled D1 tombstones are synchronized by the admin
+  // mutation before success and intentionally stop participating in admission.
+  if (row.platform_quota_platform == null || row.platform_quota_enabled !== 1) return null
+  if (!['anthropic', 'openai', 'gemini', 'antigravity', 'grok'].includes(row.platform_quota_platform)) {
+    throw new GatewayError(500, 'invalid_platform_quota', 'Platform quota has an invalid platform', 'server_error')
+  }
+  const required = [
+    row.platform_quota_control_version,
+    row.platform_daily_used_micros,
+    row.platform_weekly_used_micros,
+    row.platform_monthly_used_micros,
+    row.platform_daily_reset_epoch,
+    row.platform_weekly_reset_epoch,
+    row.platform_monthly_reset_epoch,
+  ]
+  const nullable = [
+    row.platform_daily_limit_micros,
+    row.platform_weekly_limit_micros,
+    row.platform_monthly_limit_micros,
+    row.platform_daily_window_start_ms,
+    row.platform_weekly_window_start_ms,
+    row.platform_monthly_window_start_ms,
+  ]
+  if (
+    required.some((value) => !Number.isSafeInteger(value) || (value as number) < 0) ||
+    nullable.some((value) => value !== null && (!Number.isSafeInteger(value) || (value as number) < 0))
+  ) {
+    throw new GatewayError(500, 'invalid_platform_quota', 'Platform quota state is invalid', 'server_error')
+  }
+  return {
+    platform: row.platform_quota_platform as NonNullable<GatewayPrincipal['platform_quota']>['platform'],
+    control_version: row.platform_quota_control_version!,
+    daily_limit_micros: row.platform_daily_limit_micros!,
+    weekly_limit_micros: row.platform_weekly_limit_micros!,
+    monthly_limit_micros: row.platform_monthly_limit_micros!,
+    daily_used_micros: row.platform_daily_used_micros!,
+    weekly_used_micros: row.platform_weekly_used_micros!,
+    monthly_used_micros: row.platform_monthly_used_micros!,
+    daily_window_start_ms: row.platform_daily_window_start_ms!,
+    weekly_window_start_ms: row.platform_weekly_window_start_ms!,
+    monthly_window_start_ms: row.platform_monthly_window_start_ms!,
+    daily_reset_epoch: row.platform_daily_reset_epoch!,
+    weekly_reset_epoch: row.platform_weekly_reset_epoch!,
+    monthly_reset_epoch: row.platform_monthly_reset_epoch!,
   }
 }
 

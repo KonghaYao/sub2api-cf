@@ -30,7 +30,13 @@ describe('admin settings Cloudflare Worker contract', () => {
           email_verification_enabled: false,
           turnstile_enabled: true,
           turnstile_site_key: 'site-key',
-          passkey_enabled: true
+          passkey_enabled: true,
+          model_plaza_enabled: true,
+          model_plaza_require_auth: true,
+          model_plaza_description: 'Public prices',
+          promo_code_enabled: true,
+          invitation_code_enabled: true,
+          affiliate_enabled: true
         },
         security: {
           step_up_enabled: true,
@@ -55,6 +61,12 @@ describe('admin settings Cloudflare Worker contract', () => {
       passkey_configured: true,
       passkey_rp_id: 'example.com',
       passkey_rp_origins: ['https://example.com'],
+      model_plaza_enabled: true,
+      model_plaza_require_auth: true,
+      model_plaza_description: 'Public prices',
+      promo_code_enabled: true,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
       step_up_enabled: true,
       turnstile_secret_key_configured: true,
       cloudflare_worker_contract: true,
@@ -73,7 +85,13 @@ describe('admin settings Cloudflare Worker contract', () => {
           email_verification_enabled: false,
           turnstile_enabled: false,
           turnstile_site_key: '',
-          passkey_enabled: false
+          passkey_enabled: false,
+          model_plaza_enabled: false,
+          model_plaza_require_auth: false,
+          model_plaza_description: '',
+          promo_code_enabled: false,
+          invitation_code_enabled: false,
+          affiliate_enabled: false
         },
         security: { step_up_enabled: false },
         secrets: { turnstile_secret_key_configured: false },
@@ -91,7 +109,13 @@ describe('admin settings Cloudflare Worker contract', () => {
           email_verification_enabled: true,
           turnstile_enabled: true,
           turnstile_site_key: 'new-site-key',
-          passkey_enabled: true
+          passkey_enabled: true,
+          model_plaza_enabled: true,
+          model_plaza_require_auth: true,
+          model_plaza_description: 'Public prices',
+          promo_code_enabled: true,
+          invitation_code_enabled: true,
+          affiliate_enabled: true
         },
         security: { step_up_enabled: true },
         secrets: { turnstile_secret_key_configured: true },
@@ -109,6 +133,12 @@ describe('admin settings Cloudflare Worker contract', () => {
       turnstile_enabled: true,
       turnstile_site_key: 'new-site-key',
       passkey_enabled: true,
+      model_plaza_enabled: true,
+      model_plaza_require_auth: true,
+      model_plaza_description: 'Public prices',
+      promo_code_enabled: true,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
       turnstile_secret_key: 'new-secret',
       step_up_enabled: true,
       payment_enabled: true
@@ -121,7 +151,13 @@ describe('admin settings Cloudflare Worker contract', () => {
         email_verification_enabled: true,
         turnstile_enabled: true,
         turnstile_site_key: 'new-site-key',
-        passkey_enabled: true
+        passkey_enabled: true,
+        model_plaza_enabled: true,
+        model_plaza_require_auth: true,
+        model_plaza_description: 'Public prices',
+        promo_code_enabled: true,
+        invitation_code_enabled: true,
+        affiliate_enabled: true
       },
       security: { step_up_enabled: true },
       secrets: { turnstile_secret_key: 'new-secret' }
@@ -187,5 +223,64 @@ describe('admin settings Cloudflare Worker contract', () => {
     expect(put).toHaveBeenCalledWith('/admin/settings', {
       security: { step_up_enabled: true }
     }, expect.any(Object))
+  })
+
+  it('loads and updates the private Worker commercial config with CAS and idempotency', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        control_version: 3,
+        affiliate_rebate_rate: 12.5,
+        affiliate_rebate_rate_ppm: 125_000,
+        affiliate_rebate_freeze_hours: 24,
+        affiliate_rebate_duration_days: 365,
+        affiliate_rebate_per_invitee_cap: 50,
+        affiliate_rebate_per_invitee_cap_micros: 50_000_000,
+        affiliate_admin_recharge_enabled: false,
+        updated_at_ms: 1
+      },
+      headers: { etag: '"3"' }
+    })
+    put.mockResolvedValueOnce({
+      data: {
+        control_version: 4,
+        affiliate_rebate_rate: 15,
+        affiliate_rebate_rate_ppm: 150_000,
+        affiliate_rebate_freeze_hours: 48,
+        affiliate_rebate_duration_days: 180,
+        affiliate_rebate_per_invitee_cap: 25,
+        affiliate_rebate_per_invitee_cap_micros: 25_000_000,
+        affiliate_admin_recharge_enabled: true,
+        updated_at_ms: 2
+      },
+      headers: { etag: '"4"' }
+    })
+    const { getCommercialConfig, updateCommercialConfig } = await import('@/api/admin/settings')
+
+    await expect(getCommercialConfig()).resolves.toEqual(expect.objectContaining({
+      control_version: 3,
+      affiliate_rebate_rate: 12.5,
+      affiliate_rebate_per_invitee_cap: 50
+    }))
+    await expect(updateCommercialConfig({
+      affiliate_rebate_rate: 15,
+      affiliate_rebate_freeze_hours: 48,
+      affiliate_rebate_duration_days: 180,
+      affiliate_rebate_per_invitee_cap: 25,
+      affiliate_admin_recharge_enabled: true
+    })).resolves.toEqual(expect.objectContaining({ control_version: 4 }))
+
+    expect(get).toHaveBeenCalledWith('/admin/commercial/config')
+    expect(put).toHaveBeenCalledWith('/admin/commercial/config', {
+      affiliate_rebate_rate: 15,
+      affiliate_rebate_freeze_hours: 48,
+      affiliate_rebate_duration_days: 180,
+      affiliate_rebate_per_invitee_cap: 25,
+      affiliate_admin_recharge_enabled: true
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-commercial-config-update-22222222-2222-4222-8222-222222222222',
+        'If-Match': '"3"'
+      }
+    })
   })
 })

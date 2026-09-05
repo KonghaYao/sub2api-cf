@@ -8,13 +8,14 @@ import { apiClient } from '../client'
 import type { PaginatedResponse } from '@/types'
 
 export interface AffiliateAdminEntry {
-  user_id: number
+  user_id: string | number
   email: string
   username: string
   aff_code: string
   aff_code_custom: boolean
   aff_rebate_rate_percent?: number | null
   aff_count: number
+  control_version: number
 }
 
 export interface ListAffiliateUsersParams {
@@ -35,10 +36,10 @@ export interface ListAffiliateRecordsParams {
 }
 
 export interface AffiliateInviteRecord {
-  inviter_id: number
+  inviter_id: string | number
   inviter_email: string
   inviter_username: string
-  invitee_id: number
+  invitee_id: string | number
   invitee_email: string
   invitee_username: string
   aff_code: string
@@ -47,12 +48,12 @@ export interface AffiliateInviteRecord {
 }
 
 export interface AffiliateRebateRecord {
-  order_id: number
+  order_id: string | number
   out_trade_no: string
-  inviter_id: number
+  inviter_id: string | number
   inviter_email: string
   inviter_username: string
-  invitee_id: number
+  invitee_id: string | number
   invitee_email: string
   invitee_username: string
   order_amount: number
@@ -64,8 +65,8 @@ export interface AffiliateRebateRecord {
 }
 
 export interface AffiliateTransferRecord {
-  ledger_id: number
-  user_id: number
+  ledger_id: string | number
+  user_id: string | number
   user_email: string
   username: string
   amount: number
@@ -78,7 +79,7 @@ export interface AffiliateTransferRecord {
 }
 
 export interface AffiliateUserOverview {
-  user_id: number
+  user_id: string | number
   email: string
   username: string
   aff_code: string
@@ -87,6 +88,7 @@ export interface AffiliateUserOverview {
   rebated_invitee_count: number
   available_quota: number
   history_quota: number
+  control_version: number
 }
 
 export interface UpdateAffiliateUserRequest {
@@ -97,16 +99,35 @@ export interface UpdateAffiliateUserRequest {
 }
 
 export interface BatchSetRateRequest {
-  user_ids: number[]
+  user_ids: Array<string | number>
+  expected_control_versions: Record<string, number>
   aff_rebate_rate_percent?: number | null
   /** Set true to clear rates instead of setting. */
   clear?: boolean
 }
 
 export interface SimpleUser {
-  id: number
+  id: string | number
   email: string
   username: string
+  control_version: number
+}
+
+export interface AffiliateMutationResponse {
+  user_id: string | number
+  control_version: number
+}
+
+export interface AffiliateBatchMutationResponse {
+  affected: number
+  control_versions: Record<string, number>
+}
+
+function mutationHeaders(scope: string, controlVersion?: number) {
+  return {
+    'Idempotency-Key': `${scope}-${globalThis.crypto.randomUUID()}`,
+    ...(controlVersion === undefined ? {} : { 'If-Match': `"${controlVersion}"` }),
+  }
 }
 
 export async function listUsers(
@@ -134,31 +155,41 @@ export async function lookupUsers(q: string): Promise<SimpleUser[]> {
 }
 
 export async function updateUserSettings(
-  userId: number,
+  userId: string | number,
   payload: UpdateAffiliateUserRequest,
-): Promise<{ user_id: number }> {
-  const { data } = await apiClient.put<{ user_id: number }>(
+  expectedControlVersion: number,
+): Promise<AffiliateMutationResponse> {
+  const { data } = await apiClient.put<AffiliateMutationResponse>(
     `/admin/affiliates/users/${userId}`,
-    payload,
+    { ...payload, expected_control_version: expectedControlVersion },
+    {
+      headers: mutationHeaders(`admin-affiliate-update-${userId}`, expectedControlVersion),
+    },
   )
   return data
 }
 
 export async function clearUserSettings(
-  userId: number,
-): Promise<{ user_id: number }> {
-  const { data } = await apiClient.delete<{ user_id: number }>(
+  userId: string | number,
+  expectedControlVersion: number,
+): Promise<AffiliateMutationResponse> {
+  const { data } = await apiClient.delete<AffiliateMutationResponse>(
     `/admin/affiliates/users/${userId}`,
+    {
+      data: { expected_control_version: expectedControlVersion },
+      headers: mutationHeaders(`admin-affiliate-clear-${userId}`, expectedControlVersion),
+    },
   )
   return data
 }
 
 export async function batchSetRate(
   payload: BatchSetRateRequest,
-): Promise<{ affected: number }> {
-  const { data } = await apiClient.post<{ affected: number }>(
+): Promise<AffiliateBatchMutationResponse> {
+  const { data } = await apiClient.post<AffiliateBatchMutationResponse>(
     '/admin/affiliates/users/batch-rate',
     payload,
+    { headers: mutationHeaders('admin-affiliate-batch-rate') },
   )
   return data
 }
@@ -207,7 +238,7 @@ export async function listTransferRecords(
 }
 
 export async function getUserOverview(
-  userId: number,
+  userId: string | number,
 ): Promise<AffiliateUserOverview> {
   const { data } = await apiClient.get<AffiliateUserOverview>(
     `/admin/affiliates/users/${userId}/overview`,

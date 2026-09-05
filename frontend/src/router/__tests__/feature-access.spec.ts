@@ -141,6 +141,17 @@ describe('feature route guard', () => {
     })
   })
 
+  it('registers the dedicated invitation-code administration route', () => {
+    expect(routerHarness.routes.find((route) => route.path === '/admin/invitation-codes')).toMatchObject({
+      name: 'AdminInvitationCodes',
+      meta: {
+        requiresAuth: true,
+        requiresAdmin: true,
+        title: 'Invitation Code Management',
+      },
+    })
+  })
+
   it('waits for the first public-settings request before deciding payment access', async () => {
     const deferred = createDeferred<{ payment_enabled: boolean }>()
     appStore.fetchPublicSettings.mockImplementation(async () => {
@@ -216,6 +227,9 @@ describe('feature route guard', () => {
     '/admin/accounts',
     '/admin/subscriptions',
     '/admin/redeem',
+    '/admin/promo-codes',
+    '/admin/invitation-codes',
+    '/admin/affiliates/rebates',
     '/admin/orders/plans',
     '/admin/audit-logs',
   ])('keeps migrated Worker admin route %s reachable', async (path) => {

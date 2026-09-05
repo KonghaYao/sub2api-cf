@@ -86,7 +86,7 @@ const authStore = useAuthStore()
 const isAuthenticated = computed(() => authStore.isAuthenticated)
 
 const selectedPlatform = ref<string>('all')
-const selectedGroupId = ref<number | 'all'>('all')
+const selectedGroupId = ref<string | number | 'all'>('all')
 const selectedRate = ref<number | 'all'>('all')
 const searchQuery = ref('')
 

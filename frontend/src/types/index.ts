@@ -147,7 +147,7 @@ export interface RegisterRequest {
 }
 
 export interface AffiliateInvitee {
-  user_id: number
+  user_id: string | number
   email: string
   username: string
   created_at?: string
@@ -155,9 +155,9 @@ export interface AffiliateInvitee {
 }
 
 export interface UserAffiliateDetail {
-  user_id: number
+  user_id: string | number
   aff_code: string
-  inviter_id?: number | null
+  inviter_id?: string | number | null
   aff_count: number
   aff_quota: number
   aff_frozen_quota: number
@@ -169,7 +169,11 @@ export interface UserAffiliateDetail {
 
 export interface AffiliateTransferResponse {
   transferred_quota: number
+  transferred_micros?: number
   balance: number
+  balance_micros?: number
+  transfer_id?: string
+  idempotent?: boolean
 }
 
 export interface SendVerifyCodeRequest {
@@ -2300,7 +2304,7 @@ export interface UserAttributeValuesMap {
 // ==================== Promo Code Types ====================
 
 export interface PromoCode {
-  id: number
+  id: string | number
   code: string
   bonus_amount: number
   max_uses: number
@@ -2308,14 +2312,15 @@ export interface PromoCode {
   status: 'active' | 'disabled'
   expires_at: string | null
   notes: string | null
+  control_version: number
   created_at: string
   updated_at: string
 }
 
 export interface PromoCodeUsage {
-  id: number
-  promo_code_id: number
-  user_id: number
+  id: string | number
+  promo_code_id: string | number
+  user_id: string | number
   bonus_amount: number
   used_at: string
   user?: User
@@ -2336,6 +2341,7 @@ export interface UpdatePromoCodeRequest {
   status?: 'active' | 'disabled'
   expires_at?: number | null
   notes?: string
+  expected_control_version?: number
 }
 
 // ==================== TOTP (2FA) Types ====================

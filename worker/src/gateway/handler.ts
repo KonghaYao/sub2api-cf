@@ -66,9 +66,11 @@ import {
   acquireApiKeyAdmission,
   cancelApiKeyMonetaryReservation,
   cancelBillingReservation,
+  cancelPlatformQuotaReservation,
   disablePoolAccount,
   prepareBillingReservation,
   prepareApiKeyMonetaryReservation,
+  preparePlatformQuotaReservation,
   recordPoolFailure,
   releaseApiKeyAdmission,
   releasePoolLease,
@@ -2710,6 +2712,7 @@ async function cancelGatewayReservations(
   const results = await Promise.allSettled([
     cancelBillingReservation(env, principal, requestId),
     cancelApiKeyMonetaryReservation(env, principal, requestId),
+    cancelPlatformQuotaReservation(env, principal, requestId),
   ])
   const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
   if (failed !== undefined) throw failed.reason
@@ -2724,6 +2727,7 @@ async function prepareGatewayReservations(
   try {
     await prepareBillingReservation(env, principal, requestId, amountMicros)
     await prepareApiKeyMonetaryReservation(env, principal, requestId, amountMicros)
+    await preparePlatformQuotaReservation(env, principal, requestId, amountMicros)
   } catch (error) {
     await bestEffort(() => cancelGatewayReservations(env, principal, requestId))
     throw error

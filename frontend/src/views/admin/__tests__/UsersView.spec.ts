@@ -119,6 +119,11 @@ const BulkEditUserModalStub = {
   `
 }
 
+const PlatformQuotaDefaultsModalStub = {
+  props: ['show'],
+  template: '<div v-if="show" data-test="platform-quota-defaults-modal" />'
+}
+
 describe('admin UsersView', () => {
   beforeEach(() => {
     vi.useRealTimers()
@@ -167,6 +172,7 @@ describe('admin UsersView', () => {
           UserEditModal: true,
           BulkEditUserModal: BulkEditUserModalStub,
           UserPlatformQuotaModal: true,
+          PlatformQuotaDefaultsModal: PlatformQuotaDefaultsModalStub,
           UserApiKeysModal: true,
           UserAllowedGroupsModal: true,
           UserBalanceModal: true,
@@ -179,6 +185,10 @@ describe('admin UsersView', () => {
     })
 
     await flushPromises()
+
+    expect(wrapper.get('[data-test="edit-platform-quota-defaults"]').exists()).toBe(true)
+    await wrapper.get('[data-test="edit-platform-quota-defaults"]').trigger('click')
+    expect(wrapper.get('[data-test="platform-quota-defaults-modal"]').exists()).toBe(true)
 
     const columns = wrapper.get('[data-test="columns"]').text()
     const visibleColumns = columns.split(',')
@@ -253,6 +263,7 @@ describe('admin UsersView', () => {
           UserEditModal: true,
           BulkEditUserModal: BulkEditUserModalStub,
           UserPlatformQuotaModal: true,
+          PlatformQuotaDefaultsModal: PlatformQuotaDefaultsModalStub,
           UserApiKeysModal: true,
           UserAllowedGroupsModal: true,
           UserBalanceModal: true,
@@ -331,6 +342,7 @@ describe('admin UsersView', () => {
           UserEditModal: true,
           BulkEditUserModal: BulkEditUserModalStub,
           UserPlatformQuotaModal: true,
+          PlatformQuotaDefaultsModal: PlatformQuotaDefaultsModalStub,
           UserApiKeysModal: true,
           UserAllowedGroupsModal: true,
           UserBalanceModal: true,

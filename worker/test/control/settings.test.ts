@@ -29,6 +29,12 @@ interface SettingsResponse {
       turnstile_enabled: boolean
       turnstile_site_key: string
       passkey_enabled?: boolean
+      model_plaza_enabled: boolean
+      model_plaza_require_auth: boolean
+      model_plaza_description: string
+      promo_code_enabled: boolean
+      invitation_code_enabled: boolean
+      affiliate_enabled: boolean
     }
     security: {
       step_up_enabled: boolean
@@ -146,6 +152,13 @@ describe('admin system settings', () => {
           email_verification_enabled: false,
           turnstile_enabled: false,
           turnstile_site_key: '',
+          passkey_enabled: false,
+          model_plaza_enabled: false,
+          model_plaza_require_auth: false,
+          model_plaza_description: '',
+          promo_code_enabled: false,
+          invitation_code_enabled: false,
+          affiliate_enabled: false,
         },
         security: {
           step_up_enabled: false,
@@ -197,6 +210,12 @@ describe('admin system settings', () => {
           turnstile_enabled: true,
           turnstile_site_key: 'site-key-public',
           passkey_enabled: true,
+          model_plaza_enabled: true,
+          model_plaza_require_auth: true,
+          model_plaza_description: 'Prices are shown in USD.',
+          promo_code_enabled: true,
+          invitation_code_enabled: true,
+          affiliate_enabled: true,
         },
         secrets: { turnstile_secret_key: 'turnstile-secret-private' },
       }),
@@ -215,6 +234,12 @@ describe('admin system settings', () => {
         turnstile_enabled: true,
         turnstile_site_key: 'site-key-public',
         passkey_enabled: true,
+        model_plaza_enabled: true,
+        model_plaza_require_auth: true,
+        model_plaza_description: 'Prices are shown in USD.',
+        promo_code_enabled: true,
+        invitation_code_enabled: true,
+        affiliate_enabled: true,
       },
       secrets: { turnstile_secret_key_configured: true },
     })
@@ -229,6 +254,12 @@ describe('admin system settings', () => {
       turnstile_enabled: true,
       turnstile_site_key: 'site-key-public',
       passkey_enabled: true,
+      model_plaza_enabled: true,
+      model_plaza_require_auth: true,
+      model_plaza_description: 'Prices are shown in USD.',
+      promo_code_enabled: true,
+      invitation_code_enabled: true,
+      affiliate_enabled: true,
     }
     expect(subject.kv.puts).toEqual([{
       key: publicSettingsKey('test'),
@@ -254,8 +285,14 @@ describe('admin system settings', () => {
       resource_version: 1,
     })
     expect(JSON.parse(String(audit.changed_fields_json))).toEqual([
+      'public.affiliate_enabled',
       'public.email_verification_enabled',
+      'public.invitation_code_enabled',
+      'public.model_plaza_description',
+      'public.model_plaza_enabled',
+      'public.model_plaza_require_auth',
       'public.passkey_enabled',
+      'public.promo_code_enabled',
       'public.registration_enabled',
       'public.site_name',
       'public.turnstile_enabled',

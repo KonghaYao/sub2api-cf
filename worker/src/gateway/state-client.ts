@@ -8,6 +8,8 @@ import type {
   ApiKeyMonetaryWindowSnapshot,
   GatewayEndpoint,
   GatewayPrincipal,
+  PlatformQuotaPolicy,
+  PlatformQuotaUsageSnapshot,
 } from './types'
 
 export const STATE_SCHEMA_VERSION = 1
@@ -109,6 +111,135 @@ export interface BillingReference {
 export interface ApiKeyMonetaryReference {
   user_id: string
   api_key_id: string
+}
+
+export interface PlatformQuotaReference {
+  user_id: string
+  platform_quota?: Pick<PlatformQuotaPolicy, 'platform'> | null
+  billing: BillingReference['billing']
+}
+
+export async function preparePlatformQuotaReservation(
+  env: Env,
+  principal: GatewayPrincipal,
+  requestId: string,
+  amountMicros: number,
+): Promise<void> {
+  const policy = principal.platform_quota
+  // Platform limits are a user balance policy. Subscription products own
+  // their independent windows and must not consume the standard allowance.
+  if (principal.billing.type !== 'balance' || policy == null) return
+  const stub = apiKeyLimitStub(env, principal.user_id)
+  await requireStateOk(post(stub, '/platform-quota/configure', {
+    schema_version: STATE_SCHEMA_VERSION,
+    user_id: principal.user_id,
+    platform: policy.platform,
+    enabled: true,
+    control_version: policy.control_version,
+    daily_limit_micros: policy.daily_limit_micros,
+    weekly_limit_micros: policy.weekly_limit_micros,
+    monthly_limit_micros: policy.monthly_limit_micros,
+    daily_used_micros: policy.daily_used_micros,
+    weekly_used_micros: policy.weekly_used_micros,
+    monthly_used_micros: policy.monthly_used_micros,
+    daily_window_start_ms: policy.daily_window_start_ms,
+    weekly_window_start_ms: policy.weekly_window_start_ms,
+    monthly_window_start_ms: policy.monthly_window_start_ms,
+    daily_reset_epoch: policy.daily_reset_epoch,
+    weekly_reset_epoch: policy.weekly_reset_epoch,
+    monthly_reset_epoch: policy.monthly_reset_epoch,
+  }))
+  await requireStateOk(post(stub, '/platform-quota/reserve', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    user_id: principal.user_id,
+    platform: policy.platform,
+    control_version: policy.control_version,
+    amount_micros: amountMicros,
+    reservation_ttl_ms: RESERVATION_TTL_MS,
+  }))
+}
+
+export async function settlePlatformQuotaReservation(
+  env: Env,
+  reference: PlatformQuotaReference,
+  requestId: string,
+  amountMicros: number,
+): Promise<PlatformQuotaUsageSnapshot | null> {
+  const policy = reference.platform_quota
+  if (reference.billing.type !== 'balance' || policy == null) return null
+  const response = await requireStateOk(post(
+    apiKeyLimitStub(env, reference.user_id),
+    '/platform-quota/settle',
+    {
+      schema_version: STATE_SCHEMA_VERSION,
+      request_id: requestId,
+      user_id: reference.user_id,
+      platform: policy.platform,
+      amount_micros: amountMicros,
+    },
+  ))
+  let body: { usage?: unknown }
+  try {
+    body = await response.json() as { usage?: unknown }
+  } catch {
+    throw invalidPlatformQuotaUsage()
+  }
+  return parsePlatformQuotaUsage(body.usage, reference.user_id, policy.platform)
+}
+
+export async function cancelPlatformQuotaReservation(
+  env: Env,
+  reference: PlatformQuotaReference,
+  requestId: string,
+): Promise<void> {
+  const policy = reference.platform_quota
+  if (reference.billing.type !== 'balance' || policy == null) return
+  const response = await post(apiKeyLimitStub(env, reference.user_id), '/platform-quota/cancel', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    user_id: reference.user_id,
+    platform: policy.platform,
+  })
+  if (!response.ok && (await stateErrorCode(response)) !== 'platform_quota_invalid_transition') {
+    throw await stateResponseError(response)
+  }
+}
+
+export async function projectPlatformQuotaUsage(
+  env: Env,
+  snapshot: PlatformQuotaUsageSnapshot,
+): Promise<void> {
+  const now = Date.now()
+  const projection = (kind: 'daily' | 'weekly' | 'monthly') => {
+    const window = snapshot[kind]
+    return env.DB.prepare(
+      `UPDATE user_platform_quotas
+          SET ${kind}_used_micros = CASE
+                WHEN ${kind}_reset_epoch < ? THEN ?
+                WHEN ${kind}_reset_epoch = ?
+                 AND (${kind}_window_start_ms IS NULL OR ${kind}_window_start_ms < ?) THEN ?
+                WHEN ${kind}_reset_epoch = ? AND ${kind}_window_start_ms = ?
+                  THEN MAX(${kind}_used_micros, ?)
+                ELSE ${kind}_used_micros END,
+              ${kind}_window_start_ms = CASE
+                WHEN ${kind}_reset_epoch < ? THEN ?
+                WHEN ${kind}_reset_epoch = ?
+                 AND (${kind}_window_start_ms IS NULL OR ${kind}_window_start_ms < ?) THEN ?
+                ELSE ${kind}_window_start_ms END,
+              ${kind}_reset_epoch = MAX(${kind}_reset_epoch, ?),
+              updated_at_ms = MAX(updated_at_ms, ?)
+        WHERE user_id = ? AND platform = ? AND ${kind}_reset_epoch <= ?`,
+    ).bind(
+      window.reset_epoch, window.settled_micros,
+      window.reset_epoch, window.window_start_ms, window.settled_micros,
+      window.reset_epoch, window.window_start_ms, window.settled_micros,
+      window.reset_epoch, window.window_start_ms,
+      window.reset_epoch, window.window_start_ms, window.window_start_ms,
+      window.reset_epoch, now, snapshot.user_id, snapshot.platform, window.reset_epoch,
+    )
+  }
+  await env.DB.batch([projection('daily'), projection('weekly'), projection('monthly')])
 }
 
 export async function prepareApiKeyMonetaryReservation(
@@ -619,6 +750,42 @@ export function parseApiKeyMonetaryUsage(
     active_reserved_micros: candidate.active_reserved_micros,
     windows: [window5h, window1d, window7d],
   }
+}
+
+export function parsePlatformQuotaUsage(
+  value: unknown,
+  userId: string,
+  platform: PlatformQuotaPolicy['platform'],
+): PlatformQuotaUsageSnapshot {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return invalidPlatformQuotaUsage()
+  }
+  const candidate = value as Partial<PlatformQuotaUsageSnapshot>
+  if (
+    candidate.user_id !== userId || candidate.platform !== platform ||
+    !nonNegativeSafeInteger(candidate.control_version)
+  ) return invalidPlatformQuotaUsage()
+  for (const kind of ['daily', 'weekly', 'monthly'] as const) {
+    const window = candidate[kind]
+    if (
+      window === null || typeof window !== 'object' ||
+      !nonNegativeSafeInteger(window.reset_epoch) ||
+      !nonNegativeSafeInteger(window.window_start_ms) ||
+      !nonNegativeSafeInteger(window.settled_micros) ||
+      !nonNegativeSafeInteger(window.active_reserved_micros) ||
+      !nonNegativeSafeInteger(window.updated_at_ms)
+    ) return invalidPlatformQuotaUsage()
+  }
+  return candidate as PlatformQuotaUsageSnapshot
+}
+
+function invalidPlatformQuotaUsage(): never {
+  throw new GatewayError(
+    503,
+    'invalid_platform_quota_state',
+    'Platform quota state returned invalid usage',
+    'server_error',
+  )
 }
 
 function invalidApiKeyMonetaryUsage(): never {

@@ -580,13 +580,16 @@ export interface PlatformQuotaUpdateItem {
 }
 
 export interface PlatformQuotasResponse {
+  schema_version?: 1
+  control_version?: number
   platform_quotas: PlatformQuotaItem[]
+  updated_at_ms?: number
 }
 
 /**
  * Get user's platform quotas
  */
-export async function getPlatformQuotas(id: number): Promise<PlatformQuotasResponse> {
+export async function getPlatformQuotas(id: AdminUserId): Promise<PlatformQuotasResponse> {
   const { data } = await apiClient.get<PlatformQuotasResponse>(
     `/admin/users/${id}/platform-quotas`
   )
@@ -597,12 +600,15 @@ export async function getPlatformQuotas(id: number): Promise<PlatformQuotasRespo
  * Replace user's platform quotas (全量替换)
  */
 export async function updatePlatformQuotas(
-  id: number,
-  quotas: PlatformQuotaUpdateItem[]
+  id: AdminUserId,
+  quotas: PlatformQuotaUpdateItem[],
+  expectedControlVersion?: number,
 ): Promise<PlatformQuotasResponse> {
+  const config = quotaMutationConfig(
+    'admin-user-platform-quotas', id, expectedControlVersion,
+  )
   const { data } = await apiClient.put<PlatformQuotasResponse>(
-    `/admin/users/${id}/platform-quotas`,
-    { quotas }
+    `/admin/users/${id}/platform-quotas`, { quotas }, config,
   )
   return data
 }
@@ -611,15 +617,37 @@ export async function updatePlatformQuotas(
  * Reset a single (platform, window) usage immediately
  */
 export async function resetPlatformQuotaWindow(
-  id: number,
+  id: AdminUserId,
   platform: PlatformQuotaPlatform,
-  window: PlatformQuotaWindow
+  window: PlatformQuotaWindow,
+  expectedControlVersion?: number,
 ): Promise<PlatformQuotasResponse> {
+  const config = quotaMutationConfig(
+    'admin-user-platform-quota-reset', id, expectedControlVersion,
+  )
   const { data } = await apiClient.post<PlatformQuotasResponse>(
     `/admin/users/${id}/platform-quotas/reset`,
-    { platform, window }
+    { platform, window },
+    config,
   )
   return data
+}
+
+function quotaMutationConfig(
+  prefix: string,
+  id: AdminUserId,
+  expectedControlVersion?: number,
+): { headers: Record<string, string> } | undefined {
+  if (!isCloudflareWorkerContractActive()) return undefined
+  if (!Number.isSafeInteger(expectedControlVersion) || (expectedControlVersion as number) < 0) {
+    throw Object.assign(new Error('Reload platform quotas before changing them.'), {
+      code: 'platform_quota_control_version_required',
+    })
+  }
+  return { headers: {
+    'Idempotency-Key': operationKey(prefix, id),
+    'If-Match': `"${expectedControlVersion}"`,
+  } }
 }
 
 export const usersAPI = {

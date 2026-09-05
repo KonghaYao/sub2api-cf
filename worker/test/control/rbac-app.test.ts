@@ -104,6 +104,57 @@ describe('production admin route permission matrix', () => {
     })
   })
 
+  it('requires operations permission in addition to commerce permission for reconciliation actions', async () => {
+    grantRole('commerce-reconciler', ['admin.commerce.write'])
+
+    const response = await request(
+      '/api/v1/admin/payment/reconciliation/issue-1/resolve',
+      'POST',
+    )
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
+    })
+  })
+
+  it('classifies promotions and affiliates as commerce while guarding manual accrual as operations', async () => {
+    grantRole('commerce-operator', ['admin.commerce.read', 'admin.commerce.write'])
+
+    const promotions = await request('/api/v1/admin/promo-codes')
+    const accrue = await request('/api/v1/admin/affiliates/rebates/accrue', 'POST')
+
+    expect(promotions.status).not.toBe(403)
+    expect(accrue.status).toBe(403)
+    await expect(accrue.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
+    })
+  })
+
+  it('classifies platform quota policy as commerce and guards manual resets as operations', async () => {
+    grantRole('quota-operator', ['admin.commerce.read', 'admin.commerce.write'])
+
+    const defaults = await request('/api/v1/admin/platform-quota-defaults')
+    const userQuotas = await request('/api/v1/admin/users/user-1/platform-quotas')
+    const reset = await request('/api/v1/admin/users/user-1/platform-quotas/reset', 'POST')
+
+    expect(defaults.status).not.toBe(403)
+    expect(userQuotas.status).not.toBe(403)
+    expect(reset.status).toBe(403)
+    await expect(reset.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
+    })
+  })
+
   it('isolates the immutable audit stream behind the audit read permission', async () => {
     grantRole('audit-reader', ['admin.audit.read'])
 

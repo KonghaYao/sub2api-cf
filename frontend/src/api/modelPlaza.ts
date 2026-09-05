@@ -56,7 +56,8 @@ export interface PlazaModel {
 }
 
 export interface ModelPlazaGroup {
-  id: number
+  /** Worker group IDs are opaque strings; legacy deployments may still return numbers. */
+  id: string | number
   name: string
   description: string
   platform: string

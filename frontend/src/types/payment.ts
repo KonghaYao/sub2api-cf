@@ -110,6 +110,19 @@ export interface PaymentOrder {
   provider_instance_id?: string
 }
 
+export interface PaymentReceiptMetadata {
+  id: string
+  order_id: PaymentResourceId
+  order_version: number
+  status: 'available'
+  content_type: string
+  content_sha256: string
+  content_length: number
+  issued_at: string
+  available_at: string
+  download_url: string
+}
+
 // ==================== Plans & Channels ====================
 
 export interface SubscriptionPlan {

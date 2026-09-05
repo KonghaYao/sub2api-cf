@@ -12,6 +12,7 @@ import type {
   CreateOrderRequest,
   CreateOrderResult,
   PaymentOrder,
+  PaymentReceiptMetadata,
   PaymentResourceId,
 } from '@/types/payment'
 import type { BasePaginationResponse } from '@/types'
@@ -101,5 +102,17 @@ export const paymentAPI = {
   /** Get provider instance IDs that allow user refund */
   getRefundEligibleProviders() {
     return apiClient.get<{ provider_instance_ids: string[] }>('/payment/orders/refund-eligible-providers')
+  },
+
+  /** Materialize and return immutable receipt metadata for an owned completed order. */
+  getReceipt(id: PaymentResourceId) {
+    return apiClient.get<PaymentReceiptMetadata>(`/payment/orders/${id}/receipt`)
+  },
+
+  /** Download receipt content through the authenticated API client. */
+  downloadReceipt(id: PaymentResourceId) {
+    return apiClient.get<Blob>(`/payment/orders/${id}/receipt/download`, {
+      responseType: 'blob',
+    })
   }
 }

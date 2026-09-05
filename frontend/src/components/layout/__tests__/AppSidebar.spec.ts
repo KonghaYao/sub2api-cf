@@ -60,4 +60,9 @@ describe('AppSidebar Worker capabilities', () => {
     expect(componentSource).toContain('filterCloudflareAdminNavigation(baseItems)')
     expect(componentSource).toContain('adminSettingsStore.cloudflareWorkerContract')
   })
+
+  it('exposes the dedicated invitation-code administration entry', () => {
+    expect(componentSource).toContain("path: '/admin/invitation-codes'")
+    expect(componentSource).toContain("t('nav.invitationCodes')")
+  })
 })

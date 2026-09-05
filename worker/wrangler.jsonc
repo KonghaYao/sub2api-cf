@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "ENVIRONMENT": "development",
-    "APP_VERSION": "0.16.0",
+    "APP_VERSION": "0.17.0",
     "PUBLIC_ORIGIN": "http://localhost:8787",
     "WEBAUTHN_RP_ID": "localhost",
     "WEBAUTHN_RP_NAME": "Sub2API Development",
@@ -120,7 +120,7 @@
       "name": "sub2api-worker-staging",
       "vars": {
         "ENVIRONMENT": "staging",
-        "APP_VERSION": "0.16.0",
+        "APP_VERSION": "0.17.0",
         "PUBLIC_ORIGIN": "https://sub2api-worker-staging.claude-code-best.workers.dev",
         "WEBAUTHN_RP_ID": "sub2api-worker-staging.claude-code-best.workers.dev",
         "WEBAUTHN_RP_NAME": "Sub2API Staging",
@@ -195,7 +195,7 @@
       "name": "sub2api-worker-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_VERSION": "0.16.0",
+        "APP_VERSION": "0.17.0",
         "PUBLIC_ORIGIN": "https://sub2api-worker-production.claude-code-best.workers.dev",
         "WEBAUTHN_RP_ID": "sub2api-worker-production.claude-code-best.workers.dev",
         "WEBAUTHN_RP_NAME": "Sub2API",

@@ -4,6 +4,8 @@ import { flushPromises, shallowMount } from '@vue/test-utils'
 const getMyOrders = vi.hoisted(() => vi.fn())
 const cancelOrder = vi.hoisted(() => vi.fn())
 const getRefundEligibleProviders = vi.hoisted(() => vi.fn())
+const getReceipt = vi.hoisted(() => vi.fn())
+const downloadReceipt = vi.hoisted(() => vi.fn())
 const showSuccess = vi.hoisted(() => vi.fn())
 const showError = vi.hoisted(() => vi.fn())
 
@@ -27,6 +29,8 @@ vi.mock('@/api/payment', () => ({
     cancelOrder,
     requestRefund: vi.fn(),
     getRefundEligibleProviders,
+    getReceipt,
+    downloadReceipt,
   },
 }))
 
@@ -57,6 +61,10 @@ describe('UserOrdersView opaque order IDs', () => {
     })
     cancelOrder.mockReset().mockResolvedValue({ data: {} })
     getRefundEligibleProviders.mockReset().mockResolvedValue({ data: { provider_instance_ids: [] } })
+    getReceipt.mockReset().mockResolvedValue({
+      data: { id: 'receipt-1', content_type: 'text/html' },
+    })
+    downloadReceipt.mockReset().mockResolvedValue({ data: new Blob(['receipt']) })
     showSuccess.mockReset()
     showError.mockReset()
   })
@@ -134,5 +142,61 @@ describe('UserOrdersView opaque order IDs', () => {
     await flushPromises()
 
     expect(wrapper.find('button.text-red-600').exists()).toBe(false)
+  })
+
+  it('downloads a receipt for a completed order through the authenticated API client', async () => {
+    getMyOrders.mockResolvedValueOnce({
+      data: {
+        items: [{
+          id: '01JORDER-receipt',
+          user_id: '01JUSER-user-list',
+          amount: 20,
+          pay_amount: 20,
+          fee_rate: 0,
+          payment_type: 'stripe',
+          out_trade_no: 'sub2_receipt',
+          status: 'COMPLETED',
+          order_type: 'subscription',
+          created_at: '2026-09-04T00:00:00Z',
+          expires_at: '2026-09-04T00:30:00Z',
+          refund_amount: 0,
+        }],
+        page: 1,
+        page_size: 20,
+        total: 1,
+      },
+    })
+    const createObjectURL = vi.fn(() => 'blob:receipt')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperties(URL, {
+      createObjectURL: { value: createObjectURL, configurable: true },
+      revokeObjectURL: { value: revokeObjectURL, configurable: true },
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    const wrapper = shallowMount(UserOrdersView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          OrderTable: {
+            props: ['orders'],
+            template: '<div><slot v-if="orders[0]" name="actions" :row="orders[0]" /></div>',
+          },
+          BaseDialog: true,
+          Pagination: true,
+          Select: true,
+          Icon: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="download-receipt"]').trigger('click')
+    await flushPromises()
+
+    expect(getReceipt).toHaveBeenCalledWith('01JORDER-receipt')
+    expect(downloadReceipt).toHaveBeenCalledWith('01JORDER-receipt')
+    expect(createObjectURL).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:receipt')
   })
 })

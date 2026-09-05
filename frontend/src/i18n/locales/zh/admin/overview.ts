@@ -769,6 +769,15 @@ export default {
         cellColumnTooltip: '仅展示已设限额的平台',
         subscriptionWarning: '此用户有活跃订阅，平台限额仅在余额（标准）模式下生效，订阅模式请求不受此限额约束。',
         invalidNumber: '以下字段填写不是合法数字，请修正后再保存：{fields}',
+      },
+      platformQuotaDefaults: {
+        action: '注册默认额度',
+        title: '默认平台额度',
+        hint: '新用户注册时原子应用；留空表示不限额，现有用户不受影响。',
+        loadFailed: '加载默认平台额度失败',
+        updateSuccess: '默认平台额度已更新',
+        updateFailed: '更新默认平台额度失败',
+        invalidNumber: '额度必须是非负 USD 数值，且最多保留六位小数。',
       }
     },
 

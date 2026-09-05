@@ -39,6 +39,12 @@ import {
   totpTokenDigest,
   verifyStoredTotpCode,
 } from './totp'
+import {
+  commercialRegistrationInsertSql,
+  mapCommercialRegistrationWriteError,
+  prepareCommercialRegistration,
+} from '../commercial/registration'
+import { initialPlatformQuotaStatements } from '../user/platform-quotas'
 
 type AuthBindings = { Bindings: Env }
 
@@ -126,6 +132,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     await clearAuthAccountRateLimit(context.env, rateLimitSubject)
     const now = Date.now()
     const userId = crypto.randomUUID()
+    const commercial = await prepareCommercialRegistration(context.env, body, userId, now)
     let registrationChallenge: RegistrationEmailChallengeConsumption | null = null
     let registrationChallengeModule: typeof import('./email-challenges') | null = null
     if (settings.email_verification_enabled === true) {
@@ -144,7 +151,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       display_name: email.slice(0, email.indexOf('@')).slice(0, 128),
       role: 'user',
       status: 'active',
-      balance_micros: 0,
+      balance_micros: commercial.bonusMicros,
       concurrency: 5,
       rpm_limit: 0,
       state_version: 0,
@@ -163,28 +170,28 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     const emailHash = await sha256Hex(email)
     try {
       const statements: D1PreparedStatement[] = []
+      if (commercial.claimStatement !== undefined) statements.push(commercial.claimStatement)
       if (registrationChallenge !== null) statements.push(registrationChallenge.consumeStatement)
       statements.push(
         context.env.DB.prepare(
-          `INSERT INTO users (
-             id, email, display_name, role, status, balance_micros,
-             state_version, created_at_ms, updated_at_ms,
-             password_credential, auth_version, password_changed_at_ms,
-             last_login_at_ms, email_verified_at_ms
-           ) VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?)`,
+          commercialRegistrationInsertSql(commercial.active),
         ).bind(
           user.id,
           email,
           user.display_name,
+          ...(commercial.active ? [user.balance_micros] : []),
           now,
           now,
           credential,
           now,
           now,
           registrationChallenge?.verifiedAtMs ?? null,
+          ...(commercial.active ? [user.id] : []),
         ),
       )
+      statements.push(...initialPlatformQuotaStatements(context.env, user.id, now))
       if (registrationChallenge !== null) statements.push(registrationChallenge.claimStatement)
+      statements.push(...commercial.afterUserStatements)
       statements.push(
         sessionInsert(context.env, user, issued, requestUserAgent(context.req.raw)),
         authAuditInsert(
@@ -206,6 +213,8 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       if (registrationChallengeModule?.isRegistrationEmailChallengeClaimFailure(error) === true) {
         throw new GatewayError(400, 'INVALID_VERIFY_CODE', 'Invalid or expired verification code')
       }
+      const commercialError = mapCommercialRegistrationWriteError(error)
+      if (commercialError !== null) throw commercialError
       throw error
     }
     return controlSuccess(authPayload(user, issued), 201)

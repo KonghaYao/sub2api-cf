@@ -239,6 +239,45 @@ describe('admin users Cloudflare Worker contract', () => {
     expect(post).not.toHaveBeenCalled()
   })
 
+  it('uses Worker quota control versions and idempotency for replace and reset', async () => {
+    const quotaResponse = {
+      schema_version: 1,
+      control_version: 7,
+      platform_quotas: [],
+      updated_at_ms: 1_788_480_000_000,
+    }
+    get.mockResolvedValueOnce({ data: quotaResponse })
+    put.mockResolvedValueOnce({ data: { ...quotaResponse, control_version: 8 } })
+    post.mockResolvedValueOnce({ data: { ...quotaResponse, control_version: 9 } })
+    const { getPlatformQuotas, updatePlatformQuotas, resetPlatformQuotaWindow } =
+      await import('@/api/admin/users')
+
+    const current = await getPlatformQuotas(WORKER_USER_ID)
+    await updatePlatformQuotas(WORKER_USER_ID, [{
+      platform: 'openai', daily_limit_usd: 1, weekly_limit_usd: null,
+      monthly_limit_usd: 10,
+    }], current.control_version)
+    await resetPlatformQuotaWindow(WORKER_USER_ID, 'openai', 'daily', 8)
+
+    expect(get).toHaveBeenCalledWith(`/admin/users/${WORKER_USER_ID}/platform-quotas`)
+    expect(put).toHaveBeenCalledWith(
+      `/admin/users/${WORKER_USER_ID}/platform-quotas`,
+      { quotas: [expect.objectContaining({ platform: 'openai' })] },
+      { headers: {
+        'Idempotency-Key': `admin-user-platform-quotas-${WORKER_USER_ID}-11111111-1111-4111-8111-111111111111`,
+        'If-Match': '"7"',
+      } },
+    )
+    expect(post).toHaveBeenCalledWith(
+      `/admin/users/${WORKER_USER_ID}/platform-quotas/reset`,
+      { platform: 'openai', window: 'daily' },
+      { headers: {
+        'Idempotency-Key': `admin-user-platform-quota-reset-${WORKER_USER_ID}-11111111-1111-4111-8111-111111111111`,
+        'If-Match': '"8"',
+      } },
+    )
+  })
+
   it('degrades batch limits to one idempotent Worker update per UUID', async () => {
     const secondId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
     put

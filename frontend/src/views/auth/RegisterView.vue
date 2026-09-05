@@ -557,6 +557,15 @@ onMounted(async () => {
         await validatePromoCodeDebounced(promoParam)
       }
     }
+    if (invitationCodeEnabled.value) {
+      const invitationParam = Array.isArray(route.query.invitation_code)
+        ? route.query.invitation_code[0]
+        : route.query.invitation_code
+      if (typeof invitationParam === 'string' && invitationParam.trim()) {
+        formData.invitation_code = invitationParam.trim()
+        await validateInvitationCodeDebounced(formData.invitation_code)
+      }
+    }
     syncAffiliateReferralCode()
   } catch (error) {
     console.error('Failed to load public settings:', error)
@@ -823,8 +832,43 @@ async function acquireActionProof(): Promise<boolean> {
 async function handleOAuthStart(request: OAuthLoginStart): Promise<void> {
   if (registrationActionDisabled.value) return
 
+  if (invitationCodeEnabled.value) {
+    const invitationCode = formData.invitation_code.trim()
+    if (!invitationCode) {
+      errors.invitation_code = t('auth.invitationCodeRequired')
+      errorMessage.value = errors.invitation_code
+      return
+    }
+    if (invitationValidating.value || !invitationValidation.valid) {
+      await validateInvitationCodeDebounced(invitationCode)
+      if (!invitationValidation.valid) {
+        errorMessage.value = t('auth.invitationCodeInvalidCannotRegister')
+        return
+      }
+    }
+  }
+  const promoCode = formData.promo_code.trim()
+  if (promoCode && (promoValidating.value || promoValidation.invalid)) {
+    errorMessage.value = promoValidating.value
+      ? t('auth.promoCodeValidating')
+      : t('auth.promoCodeInvalidCannotRegister')
+    return
+  }
+  const affiliateCode = formData.aff_code.trim() || loadAffiliateReferralCode()
+  const commercialRequest: OAuthLoginStart = {
+    ...request,
+    params: {
+      ...request.params,
+      ...(promoCode ? { promo_code: promoCode } : {}),
+      ...(formData.invitation_code.trim()
+        ? { invitation_code: formData.invitation_code.trim() }
+        : {}),
+      ...(affiliateCode ? { aff_code: affiliateCode } : {})
+    }
+  }
+
   if (!actionCaptchaEnabled.value) {
-    window.location.href = buildOAuthLoginStartURL(request)
+    window.location.href = buildOAuthLoginStartURL(commercialRequest)
     return
   }
 
@@ -834,7 +878,7 @@ async function handleOAuthStart(request: OAuthLoginStart): Promise<void> {
     if (!proof) return
 
     const result = await startOAuthLogin(
-      request,
+      commercialRequest,
       tencentCaptchaEnabled.value
         ? {
             tencent_captcha_ticket: proof.token,

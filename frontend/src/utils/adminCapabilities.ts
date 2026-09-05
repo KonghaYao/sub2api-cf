@@ -18,6 +18,9 @@ const CLOUDFLARE_ADMIN_PATHS = [
   '/admin/accounts',
   '/admin/subscriptions',
   '/admin/redeem',
+  '/admin/promo-codes',
+  '/admin/invitation-codes',
+  '/admin/affiliates',
   '/admin/audit-logs',
   '/admin/orders'
 ] as const

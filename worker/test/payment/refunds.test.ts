@@ -680,6 +680,7 @@ describe('Stripe refund HTTP contract', () => {
       paidAmountMicros: 12_500_000,
       paymentIntentId: 'pi-admin-partial',
     })
+    seedAvailableAffiliateRebate(test.raw, 'order-admin-partial', 'bob', 'alice', 2_500_000)
 
     test.stripeFetch.mockResolvedValue(stripeRefund({
       id: 're-admin-partial',
@@ -750,9 +751,20 @@ describe('Stripe refund HTTP contract', () => {
       `SELECT event_type FROM payment_events
         WHERE order_id = 'order-admin-partial' ORDER BY event_type`,
     ).all()).toEqual([
+      { event_type: 'AFFILIATE_REBATE_CLAWBACK_SUCCEEDED' },
       { event_type: 'REFUND_PROCESSING' },
       { event_type: 'REFUND_SUCCEEDED' },
     ])
+    expect(test.raw.prepare(
+      `SELECT available_micros, frozen_micros, history_micros
+         FROM affiliate_profiles WHERE user_id = 'bob'`,
+    ).get()).toEqual({ available_micros: 1_500_000, frozen_micros: 0, history_micros: 1_500_000 })
+    expect(test.raw.prepare(
+      `SELECT adjustment_kind, adjustment_micros, status
+         FROM affiliate_rebate_adjustments`,
+    ).all()).toEqual([{
+      adjustment_kind: 'partial_clawback', adjustment_micros: 1_000_000, status: 'completed',
+    }])
     const processingEvent = test.raw.prepare(
       `SELECT payload_json FROM payment_events
         WHERE order_id = 'order-admin-partial' AND event_type = 'REFUND_PROCESSING'`,
@@ -1131,6 +1143,32 @@ async function fixture(): Promise<Fixture> {
   app.post('/api/v1/admin/payment/orders/:id/refund/query', queryAdminRefund)
 
   return { raw, env, app, authorization, stripeFetch, subscriptionFetch }
+}
+
+function seedAvailableAffiliateRebate(
+  raw: any,
+  orderId: string,
+  inviterUserId: string,
+  inviteeUserId: string,
+  rebateMicros: number,
+): void {
+  raw.prepare(
+    `INSERT INTO affiliate_profiles (
+       user_id, code_hash, code_prefix, code_key_version,
+       code_nonce_b64, code_ciphertext_b64, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, 'AFFTEST', 1, 'AAAAAAAAAAAAAAAA', 'BBBBBBBBBBBBBBBB', ?, ?)`,
+  ).run(inviterUserId, 'd'.repeat(64), NOW, NOW)
+  const order = raw.prepare(
+    `SELECT amount_micros, paid_amount_micros FROM payment_orders WHERE id = ?`,
+  ).get(orderId) as { amount_micros: number; paid_amount_micros: number }
+  raw.prepare(
+    `INSERT INTO affiliate_rebates (
+       id, source_order_id, inviter_user_id, invitee_user_id,
+       order_amount_micros, pay_amount_micros, rebate_micros,
+       status, eligible_at_ms, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'available', ?, ?, ?)`,
+  ).run(`rebate-${orderId}`, orderId, inviterUserId, inviteeUserId,
+    order.amount_micros, order.paid_amount_micros, rebateMicros, NOW, NOW, NOW)
 }
 
 async function insertProvider(raw: any, input: InsertProviderInput): Promise<void> {

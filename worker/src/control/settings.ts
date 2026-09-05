@@ -32,6 +32,12 @@ export interface PublicSystemSettings {
   turnstile_enabled: boolean
   turnstile_site_key: string
   passkey_enabled?: boolean
+  model_plaza_enabled: boolean
+  model_plaza_require_auth: boolean
+  model_plaza_description: string
+  promo_code_enabled: boolean
+  invitation_code_enabled: boolean
+  affiliate_enabled: boolean
 }
 
 export interface AdminSystemSettings {
@@ -55,6 +61,12 @@ interface PublicSettingsPatch {
   turnstile_enabled?: boolean
   turnstile_site_key?: string
   passkey_enabled?: boolean
+  model_plaza_enabled?: boolean
+  model_plaza_require_auth?: boolean
+  model_plaza_description?: string
+  promo_code_enabled?: boolean
+  invitation_code_enabled?: boolean
+  affiliate_enabled?: boolean
 }
 
 interface SecretSettingsPatch {
@@ -319,14 +331,15 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSystemSettings {
   } catch {
     throw new GatewayError(503, 'invalid_settings_record', 'System settings record is invalid', 'server_error')
   }
-  if (!isPublicSystemSettings(publicSettings)) {
+  const normalizedPublicSettings = normalizePublicSystemSettings(publicSettings)
+  if (normalizedPublicSettings === null) {
     throw new GatewayError(503, 'invalid_settings_record', 'System settings record is invalid', 'server_error')
   }
   const passkey = passkeyDeploymentConfiguration(env)
   return {
     schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
     control_version: row.control_version,
-    public: publicSettings,
+    public: normalizedPublicSettings,
     security: {
       step_up_enabled: row.step_up_enabled === 1,
       passkey_configured: passkey.configured,
@@ -338,16 +351,42 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSystemSettings {
   }
 }
 
-function isPublicSystemSettings(value: unknown): value is PublicSystemSettings {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const settings = value as Record<string, unknown>
-  return (
-    typeof settings.site_name === 'string' &&
-    typeof settings.registration_enabled === 'boolean' &&
-    typeof settings.email_verification_enabled === 'boolean' &&
-    typeof settings.turnstile_enabled === 'boolean' &&
-    typeof settings.turnstile_site_key === 'string'
-  )
+  if (
+    typeof settings.site_name !== 'string' ||
+    typeof settings.registration_enabled !== 'boolean' ||
+    typeof settings.email_verification_enabled !== 'boolean' ||
+    typeof settings.turnstile_enabled !== 'boolean' ||
+    typeof settings.turnstile_site_key !== 'string' ||
+    (settings.passkey_enabled !== undefined && typeof settings.passkey_enabled !== 'boolean') ||
+    (settings.model_plaza_enabled !== undefined && typeof settings.model_plaza_enabled !== 'boolean') ||
+    (settings.model_plaza_require_auth !== undefined && typeof settings.model_plaza_require_auth !== 'boolean') ||
+    (settings.model_plaza_description !== undefined && typeof settings.model_plaza_description !== 'string') ||
+    (settings.promo_code_enabled !== undefined && typeof settings.promo_code_enabled !== 'boolean') ||
+    (settings.invitation_code_enabled !== undefined && typeof settings.invitation_code_enabled !== 'boolean') ||
+    (settings.affiliate_enabled !== undefined && typeof settings.affiliate_enabled !== 'boolean')
+  ) return null
+  return {
+    site_name: settings.site_name,
+    registration_enabled: settings.registration_enabled,
+    email_verification_enabled: settings.email_verification_enabled,
+    turnstile_enabled: settings.turnstile_enabled,
+    turnstile_site_key: settings.turnstile_site_key,
+    passkey_enabled: settings.passkey_enabled === true,
+    model_plaza_enabled: settings.model_plaza_enabled === true,
+    model_plaza_require_auth: settings.model_plaza_require_auth === true,
+    model_plaza_description:
+      typeof settings.model_plaza_description === 'string' ? settings.model_plaza_description : '',
+    promo_code_enabled: settings.promo_code_enabled === true,
+    invitation_code_enabled: settings.invitation_code_enabled === true,
+    affiliate_enabled: settings.affiliate_enabled === true,
+  }
+}
+
+function isPublicSystemSettings(value: unknown): value is PublicSystemSettings {
+  return normalizePublicSystemSettings(value) !== null
 }
 
 function settingsResponse(settings: AdminSystemSettings): Response {
@@ -384,6 +423,12 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'turnstile_enabled',
       'turnstile_site_key',
       'passkey_enabled',
+      'model_plaza_enabled',
+      'model_plaza_require_auth',
+      'model_plaza_description',
+      'promo_code_enabled',
+      'invitation_code_enabled',
+      'affiliate_enabled',
     ])
     const publicPatch: PublicSettingsPatch = {}
     if (value.site_name !== undefined) {
@@ -406,6 +451,35 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (value.passkey_enabled !== undefined) {
       publicPatch.passkey_enabled = settingBoolean(value.passkey_enabled, 'passkey_enabled')
+    }
+    if (value.model_plaza_enabled !== undefined) {
+      publicPatch.model_plaza_enabled = settingBoolean(value.model_plaza_enabled, 'model_plaza_enabled')
+    }
+    if (value.model_plaza_require_auth !== undefined) {
+      publicPatch.model_plaza_require_auth = settingBoolean(
+        value.model_plaza_require_auth,
+        'model_plaza_require_auth',
+      )
+    }
+    if (value.model_plaza_description !== undefined) {
+      publicPatch.model_plaza_description = settingString(
+        value.model_plaza_description,
+        'model_plaza_description',
+        20_000,
+        true,
+      )
+    }
+    if (value.promo_code_enabled !== undefined) {
+      publicPatch.promo_code_enabled = settingBoolean(value.promo_code_enabled, 'promo_code_enabled')
+    }
+    if (value.invitation_code_enabled !== undefined) {
+      publicPatch.invitation_code_enabled = settingBoolean(
+        value.invitation_code_enabled,
+        'invitation_code_enabled',
+      )
+    }
+    if (value.affiliate_enabled !== undefined) {
+      publicPatch.affiliate_enabled = settingBoolean(value.affiliate_enabled, 'affiliate_enabled')
     }
     if (Object.keys(publicPatch).length > 0) patch.public = publicPatch
   }
@@ -558,6 +632,7 @@ function publicProjection(settings: AdminSystemSettings): PublicSystemSettings &
 
 function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>[0]): AdminSystemSettings {
   const value = parseIdempotentResponse<AdminSystemSettings>(row, 'system_settings')
+  const normalizedPublic = normalizePublicSystemSettings(value.public)
   if (
     row.resource_id !== 'global' ||
     value.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
@@ -565,7 +640,7 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
     value.control_version < 0 ||
     !Number.isSafeInteger(value.updated_at_ms) ||
     value.updated_at_ms < 0 ||
-    !isPublicSystemSettings(value.public) ||
+    normalizedPublic === null ||
     typeof value.secrets?.turnstile_secret_key_configured !== 'boolean' ||
     (value.security !== undefined && typeof value.security.step_up_enabled !== 'boolean')
   ) {
@@ -573,6 +648,7 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
   }
   return {
     ...value,
+    public: normalizedPublic,
     security: value.security ?? { step_up_enabled: false },
   }
 }

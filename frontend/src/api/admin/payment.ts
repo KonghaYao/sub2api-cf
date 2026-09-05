@@ -65,6 +65,74 @@ export interface RefundResult {
   subscription_days_deducted?: number
 }
 
+export type PaymentReconciliationAction = 'acknowledge' | 'resolve' | 'reopen'
+export type PaymentReconciliationStatus = 'open' | 'acknowledged' | 'resolved'
+export type PaymentReconciliationSeverity = 'warning' | 'error' | 'critical'
+export type PaymentReconciliationSourceKind = 'order' | 'webhook' | 'fulfillment' | 'refund'
+export type PaymentReconciliationIssueType =
+  | 'late_paid_refund_required'
+  | 'webhook_pending'
+  | 'webhook_failed'
+  | 'fulfillment_pending'
+  | 'fulfillment_failed'
+  | 'refund_pending'
+  | 'refund_failed'
+  | 'provider_amount_mismatch'
+  | 'provider_status_mismatch'
+
+export interface PaymentReconciliationIssue {
+  id: string
+  type: PaymentReconciliationIssueType
+  severity: PaymentReconciliationSeverity
+  status: PaymentReconciliationStatus
+  source: { kind: PaymentReconciliationSourceKind; id: string }
+  order_id: PaymentResourceId | null
+  provider_instance_id: PaymentResourceId | null
+  summary: string
+  evidence: {
+    available: boolean
+    content_sha256: string | null
+    content_length: number | null
+    download_url: string | null
+  }
+  version: number
+  acknowledged: { by_user_id: string; at: string } | null
+  resolution: { code: string; note: string; by_user_id: string; at: string } | null
+  first_observed_at: string
+  last_seen_at: string
+  updated_at: string
+}
+
+export interface PaymentReconciliationIssueDetail {
+  issue: PaymentReconciliationIssue
+  actions: Array<{
+    id: string
+    action: PaymentReconciliationAction
+    actor_user_id: string
+    expected_version: number
+    result_version: number
+    occurred_at: string
+  }>
+  events: Array<{
+    id: string
+    action: string
+    from_status: PaymentReconciliationStatus
+    to_status: PaymentReconciliationStatus
+    issue_version: number
+    actor_user_id: string
+    detail: unknown
+    occurred_at: string
+  }>
+}
+
+export interface PaymentReconciliationListResponse {
+  items: PaymentReconciliationIssue[]
+  total: number
+  page: number
+  page_size: number
+  pages: number
+}
+
 type WorkerSubscriptionPlan = SubscriptionPlan & {
   control_version?: number
   price_micros?: number
@@ -216,6 +284,48 @@ export const adminPaymentAPI = {
   /** Query and finalize a pending refund */
   queryRefund(id: PaymentResourceId) {
     return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund/query`)
+  },
+
+  // ==================== Reconciliation ====================
+
+  getReconciliationIssues(params?: {
+    page?: number
+    page_size?: number
+    status?: PaymentReconciliationStatus
+    type?: PaymentReconciliationIssueType
+    severity?: PaymentReconciliationSeverity
+    source_kind?: PaymentReconciliationSourceKind
+    order_id?: PaymentResourceId
+  }) {
+    return apiClient.get<PaymentReconciliationListResponse>('/admin/payment/reconciliation', { params })
+  },
+
+  getReconciliationIssue(id: string) {
+    return apiClient.get<PaymentReconciliationIssueDetail>(`/admin/payment/reconciliation/${id}`)
+  },
+
+  actOnReconciliationIssue(
+    id: string,
+    action: PaymentReconciliationAction,
+    expectedVersion: number,
+    data: { note?: string; resolution_code?: string } = {},
+  ) {
+    return apiClient.post<PaymentReconciliationIssue>(
+      `/admin/payment/reconciliation/${id}/${action}`,
+      { ...data, expected_control_version: expectedVersion },
+      {
+        headers: {
+          'If-Match': `"${expectedVersion}"`,
+          'Idempotency-Key': planOperationKey(`admin-payment-reconciliation-${action}`),
+        },
+      },
+    )
+  },
+
+  downloadReconciliationEvidence(id: string) {
+    return apiClient.get<Blob>(`/admin/payment/reconciliation/${id}/evidence`, {
+      responseType: 'blob',
+    })
   },
 
   // ==================== Channels ====================

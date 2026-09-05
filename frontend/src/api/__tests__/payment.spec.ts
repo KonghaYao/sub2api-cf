@@ -73,4 +73,16 @@ describe('payment api', () => {
       reason: 'duplicate',
     })
   })
+
+  it('retrieves owner-scoped receipt metadata and content without exposing an R2 key', async () => {
+    const orderId = '01JORDER-receipt'
+
+    await paymentAPI.getReceipt(orderId)
+    await paymentAPI.downloadReceipt(orderId)
+
+    expect(get).toHaveBeenNthCalledWith(1, `/payment/orders/${orderId}/receipt`)
+    expect(get).toHaveBeenNthCalledWith(2, `/payment/orders/${orderId}/receipt/download`, {
+      responseType: 'blob',
+    })
+  })
 })

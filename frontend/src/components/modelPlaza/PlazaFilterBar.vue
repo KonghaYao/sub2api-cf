@@ -121,11 +121,11 @@ const props = defineProps<{
   /** 数据中出现的平台(去重排序后)。 */
   platforms: string[]
   /** 全量分组(含平台与生效倍率),三个维度的置灰联动由此推导。 */
-  groups: Array<{ id: number; name: string; platform: string; rate: number }>
+  groups: Array<{ id: string | number; name: string; platform: string; rate: number }>
   /** 全量生效倍率去重升序。 */
   rates: number[]
   platform: string
-  groupId: number | 'all'
+  groupId: string | number | 'all'
   rate: number | 'all'
   /** 模型名搜索词(纯前端过滤)。 */
   search: string
@@ -133,7 +133,7 @@ const props = defineProps<{
 
 defineEmits<{
   'update:platform': [value: string]
-  'update:groupId': [value: number | 'all']
+  'update:groupId': [value: string | number | 'all']
   'update:rate': [value: number | 'all']
   'update:search': [value: string]
 }>()

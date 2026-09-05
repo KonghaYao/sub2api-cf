@@ -89,4 +89,31 @@ describe('AdminOrdersView opaque order IDs', () => {
 
     expect(queryRefund).toHaveBeenCalledWith('01JORDER-admin-list')
   })
+
+  it('switches from order operations to the payment reconciliation workspace', async () => {
+    const wrapper = shallowMount(AdminOrdersView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          OrderTable: { template: '<div data-testid="orders-table" />' },
+          PaymentReconciliationPanel: { template: '<div data-testid="reconciliation-panel" />' },
+          Pagination: true,
+          BaseDialog: true,
+          Select: true,
+          Icon: true,
+          AdminRefundDialog: true,
+          OrderStatusBadge: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="orders-table"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="reconciliation-panel"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="toggle-payment-reconciliation"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="orders-table"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="reconciliation-panel"]').exists()).toBe(true)
+  })
 })

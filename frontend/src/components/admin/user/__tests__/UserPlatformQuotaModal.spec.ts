@@ -68,9 +68,9 @@ async function mountAndOpen(extraProps: Record<string, unknown> = {}) {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
-  apiMocks.getPlatformQuotas.mockResolvedValue({ platform_quotas: [] })
-  apiMocks.updatePlatformQuotas.mockResolvedValue({ platform_quotas: [] })
-  apiMocks.resetPlatformQuotaWindow.mockResolvedValue({ platform_quotas: [] })
+  apiMocks.getPlatformQuotas.mockResolvedValue({ control_version: 0, platform_quotas: [] })
+  apiMocks.updatePlatformQuotas.mockResolvedValue({ control_version: 1, platform_quotas: [] })
+  apiMocks.resetPlatformQuotaWindow.mockResolvedValue({ control_version: 1, platform_quotas: [] })
 })
 
 describe('UserPlatformQuotaModal', () => {
@@ -185,8 +185,25 @@ describe('UserPlatformQuotaModal', () => {
     const resetBtns = w.findAll('button').filter((b) => b.text() === '↻')
     await resetBtns[0].trigger('click') // 第一个是 anthropic.daily
     await flushPromises()
-    expect(apiMocks.resetPlatformQuotaWindow).toHaveBeenCalledWith(99, 'anthropic', 'daily')
+    expect(apiMocks.resetPlatformQuotaWindow).toHaveBeenCalledWith(99, 'anthropic', 'daily', 0)
     confirmSpy.mockRestore()
+  })
+
+  it('uses the latest Worker control version after a reset when saving', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    apiMocks.getPlatformQuotas.mockResolvedValueOnce({ control_version: 7, platform_quotas: [] })
+    apiMocks.resetPlatformQuotaWindow.mockResolvedValueOnce({ control_version: 8, platform_quotas: [] })
+    const w = await mountAndOpen()
+
+    await w.findAll('button').find((button) => button.text() === '↻')!.trigger('click')
+    await flushPromises()
+    await w.findAll('button').find((button) =>
+      button.text() === 'admin.users.platformQuota.save'
+    )!.trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.resetPlatformQuotaWindow).toHaveBeenCalledWith(99, 'anthropic', 'daily', 7)
+    expect(apiMocks.updatePlatformQuotas).toHaveBeenCalledWith(99, expect.any(Array), 8)
   })
 
   describe('subscription warning banner', () => {

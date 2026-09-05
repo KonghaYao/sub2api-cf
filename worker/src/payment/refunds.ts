@@ -1,6 +1,7 @@
 import type { Context } from 'hono'
 
 import { authenticateUserRequest } from '../auth/handler'
+import { clawbackAffiliateRebateForRefund } from '../commercial/affiliate'
 import {
   controlError,
   controlSuccess,
@@ -110,7 +111,10 @@ export async function processAdminRefund(
       assertRefundReplay(refund, order, amountMicros, input.reason, input, true)
       refund = await reconcilePendingRefundRollback(context.env, order, refund)
       const replay = completedRefundResult(refund)
-      if (replay !== null) return controlSuccess(replay)
+      if (replay !== null) {
+        await clawbackAffiliateRebateForRefund(context.env, refund.id)
+        return controlSuccess(replay)
+      }
       if (refund.status === 'pending') return controlSuccess(pendingRefundResult())
     } else {
       const existing = await findOrderRefund(context.env, order.id)
@@ -118,7 +122,10 @@ export async function processAdminRefund(
         assertRefundReplay(existing, order, amountMicros, input.reason, input, false)
         const reconciled = await reconcilePendingRefundRollback(context.env, order, existing)
         const replay = completedRefundResult(reconciled)
-        if (replay !== null) return controlSuccess(replay)
+        if (replay !== null) {
+          await clawbackAffiliateRebateForRefund(context.env, reconciled.id)
+          return controlSuccess(replay)
+        }
         if (reconciled.status === 'pending') return controlSuccess(pendingRefundResult())
         refund = reconciled
       }
@@ -208,7 +215,10 @@ export async function queryAdminRefund(
     }
     const refund = await reconcilePendingRefundRollback(context.env, order, foundRefund)
     const replay = completedRefundResult(refund)
-    if (replay !== null) return controlSuccess(replay)
+    if (replay !== null) {
+      await clawbackAffiliateRebateForRefund(context.env, refund.id)
+      return controlSuccess(replay)
+    }
     if (!['REFUNDING', 'REFUND_PENDING', 'REFUND_FAILED'].includes(order.status)) {
       throw new GatewayError(409, 'invalid_refund_status', `Order status ${order.status} cannot be queried`)
     }
@@ -1147,6 +1157,30 @@ export async function recoverPendingRefundClawbacks(
     ])
     if (await rollbackRefundClawback(env, order, refund)) recovered += 1
   }
+  const affiliateLimit = Math.max(0, limit - recovered)
+  if (affiliateLimit === 0) return recovered
+  const affiliateDue = await env.DB.prepare(
+    `SELECT refund.id
+       FROM payment_refunds refund
+       JOIN affiliate_rebates rebate ON rebate.source_order_id = refund.order_id
+       LEFT JOIN affiliate_rebate_adjustments adjustment ON adjustment.refund_id = refund.id
+      WHERE refund.status IN ('partially_refunded', 'refunded')
+        AND refund.settled_amount_micros > 0
+        AND (adjustment.id IS NULL OR adjustment.status = 'processing')
+      ORDER BY refund.completed_at_ms ASC, refund.id ASC
+      LIMIT ?`,
+  ).bind(affiliateLimit).all<{ id: string }>()
+  for (const row of affiliateDue.results) {
+    try {
+      const result = await clawbackAffiliateRebateForRefund(env, row.id)
+      if (result.applied && result.status === 'completed') recovered += 1
+    } catch (error) {
+      console.error('affiliate refund clawback recovery deferred', {
+        refund_id: row.id,
+        name: error instanceof Error ? error.name : 'unknown',
+      })
+    }
+  }
   return recovered
 }
 
@@ -1340,6 +1374,7 @@ async function finalizeRefundSuccess(
   const current = await findRefund(env, refund.id)
   const result = current === null ? null : completedRefundResult(current)
   if (result === null) throw new GatewayError(409, 'payment_order_conflict', 'Payment order status changed')
+  await clawbackAffiliateRebateForRefund(env, refund.id)
   return result
 }
 

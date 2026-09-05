@@ -18,6 +18,7 @@ class StateStub {
 
   admissionResponse: Response | null = null
   monetaryReserveResponse: Response | null = null
+  platformQuotaReserveResponse: Response | null = null
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname
@@ -43,8 +44,17 @@ class StateStub {
         })),
       } })
     }
+    if (this.kind === 'admission' && path === '/platform-quota/settle') {
+      return Response.json({ usage: {
+        user_id: 'user-1', platform: 'openai', control_version: 1,
+        daily: platformWindow(10), weekly: platformWindow(10), monthly: platformWindow(10),
+      } })
+    }
     if (this.kind === 'admission' && path === '/monetary/reserve' && this.monetaryReserveResponse !== null) {
       return this.monetaryReserveResponse.clone()
+    }
+    if (this.kind === 'admission' && path === '/platform-quota/reserve' && this.platformQuotaReserveResponse !== null) {
+      return this.platformQuotaReserveResponse.clone()
     }
     if (this.kind === 'pool' && path === '/reserve') {
       return Response.json({ lease: { account_id: 'account-1', status: 'active' } })
@@ -53,6 +63,16 @@ class StateStub {
       return Response.json({ profile: { balance_micros: 999_990, settled_micros: 10 } })
     }
     return Response.json({})
+  }
+}
+
+function platformWindow(settledMicros: number): Record<string, number> {
+  return {
+    reset_epoch: 0,
+    window_start_ms: 1,
+    settled_micros: settledMicros,
+    active_reserved_micros: 0,
+    updated_at_ms: 2,
   }
 }
 
@@ -219,6 +239,67 @@ describe('gateway API key admission lifecycle', () => {
     ])
     expect(state.pool.calls).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
+    state.close()
+  })
+
+  it('enforces a balance user platform quota before pool selection and compensates every hold', async () => {
+    const state = await harness()
+    await state.env.DB.prepare(
+      `INSERT INTO user_platform_quotas (
+         user_id, platform, enabled, daily_limit_micros, weekly_limit_micros,
+         monthly_limit_micros, control_version, created_at_ms, updated_at_ms
+       ) VALUES ('user-1', 'openai', 1, 100, 200, 300, 1, 1, 1)`,
+    ).run()
+    state.admission.platformQuotaReserveResponse = Response.json({
+      error: { code: 'user_platform_daily_quota_exceeded', message: 'Daily exhausted' },
+      retry_after_seconds: 31,
+    }, { status: 429, headers: { 'retry-after': '31' } })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    const response = await createApp().request('/v1/responses', gatewayRequest(), state.env)
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('31')
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'user_platform_daily_quota_exceeded' },
+    })
+    expect(state.pool.calls).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(state.admission.calls.map((call) => call.path)).toEqual([
+      '/admit', '/monetary/configure', '/monetary/reserve',
+      '/platform-quota/configure', '/platform-quota/reserve',
+      '/monetary/cancel', '/platform-quota/cancel', '/release',
+    ])
+    state.close()
+  })
+
+  it('settles and durably projects an enabled platform quota on the normal response path', async () => {
+    const state = await harness()
+    await state.env.DB.prepare(
+      `INSERT INTO user_platform_quotas (
+         user_id, platform, enabled, daily_limit_micros, weekly_limit_micros,
+         monthly_limit_micros, control_version, created_at_ms, updated_at_ms
+       ) VALUES ('user-1', 'openai', 1, 100, 200, 300, 1, 1, 1)`,
+    ).run()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      id: 'response-1', object: 'response', model: 'gpt-upstream',
+      usage: { input_tokens: 2, output_tokens: 3 },
+    }))
+
+    const response = await createApp().request('/v1/responses', gatewayRequest(), state.env)
+
+    expect(response.status).toBe(200)
+    expect(state.admission.calls.map((call) => call.path)).toEqual(expect.arrayContaining([
+      '/platform-quota/configure', '/platform-quota/reserve', '/platform-quota/settle',
+    ]))
+    await expect(state.env.DB.prepare(
+      `SELECT daily_used_micros, weekly_used_micros, monthly_used_micros
+         FROM user_platform_quotas WHERE user_id = 'user-1' AND platform = 'openai'`,
+    ).first()).resolves.toEqual({
+      daily_used_micros: 10,
+      weekly_used_micros: 10,
+      monthly_used_micros: 10,
+    })
     state.close()
   })
 

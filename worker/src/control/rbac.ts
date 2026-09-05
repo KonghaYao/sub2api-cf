@@ -213,13 +213,29 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   ) {
     return ['admin.commerce.write', 'admin.operations.write']
   }
+  if (
+    /^\/api\/v1\/admin\/payment\/reconciliation\/[^/]+\/(?:acknowledge|resolve|reopen)$/.test(pathname)
+  ) {
+    return ['admin.commerce.write', 'admin.operations.write']
+  }
+  if (/^\/api\/v1\/admin\/affiliates\/rebates\/accrue$/.test(pathname)) {
+    return ['admin.commerce.write', 'admin.operations.write']
+  }
+  if (/^\/api\/v1\/admin\/users\/[^/]+\/platform-quotas\/reset$/.test(pathname)) {
+    return ['admin.commerce.write', 'admin.operations.write']
+  }
+  if (/^\/api\/v1\/admin\/users\/[^/]+\/platform-quotas(?:\/|$)/.test(pathname)) {
+    return [category('admin.commerce.read', 'admin.commerce.write')]
+  }
   if (/^\/api\/v1\/admin\/(?:users|api-keys)(?:\/|$)/.test(pathname)) {
     return [category('admin.users.read', 'admin.users.write')]
   }
   if (/^\/api\/v1\/admin\/(?:groups|models|accounts)(?:\/|$)/.test(pathname)) {
     return [category('admin.catalog.read', 'admin.catalog.write')]
   }
-  if (/^\/api\/v1\/admin\/(?:payment|subscriptions|redeem-codes)(?:\/|$)/.test(pathname)) {
+  if (
+    /^\/api\/v1\/admin\/(?:payment|subscriptions|redeem-codes|promo-codes|invitation-codes|affiliates|commercial|platform-quota-defaults)(?:\/|$)/.test(pathname)
+  ) {
     return [category('admin.commerce.read', 'admin.commerce.write')]
   }
   return [category('admin.operations.read', 'admin.operations.write')]

@@ -1,5 +1,6 @@
 import { deterministicUuid } from '../control/http'
 import { synchronizeSubscriptionState } from '../control/subscriptions'
+import { accrueAffiliateRebateForPaymentOrder } from '../commercial/affiliate'
 import type { Env, PlatformEvent } from '../env'
 
 const DAY_MS = 86_400_000
@@ -108,6 +109,7 @@ export async function fulfillPaymentOrder(
     if (completedEvent === null) {
       throw new Error('Completed payment order has no subscription fulfillment event')
     }
+    await tryAccrueAffiliateRebate(env, normalizedOrderId)
     return appliedResult(normalizedOrderId, completedEvent.subscription_id, true)
   }
   assertFulfillableOrder(initialOrder)
@@ -132,6 +134,7 @@ export async function fulfillPaymentOrder(
     if (order.status === 'COMPLETED') {
       const event = await findPaymentSubscriptionEvent(env, normalizedOrderId)
       if (event === null) throw new Error('Completed payment order has no subscription fulfillment event')
+      await tryAccrueAffiliateRebate(env, normalizedOrderId)
       return appliedResult(normalizedOrderId, event.subscription_id, true)
     }
     assertFulfillableOrder(order)
@@ -144,10 +147,24 @@ export async function fulfillPaymentOrder(
 
     await synchronizeSubscriptionState(env, event.subscription_id)
     await finishFulfillment(env, normalizedOrderId, event.subscription_id, leaseOwner, Date.now())
+    await tryAccrueAffiliateRebate(env, normalizedOrderId)
     return appliedResult(normalizedOrderId, event.subscription_id, alreadyGranted)
   } catch (error) {
     await recordFulfillmentFailure(env, normalizedOrderId, leaseOwner, error, Date.now())
     throw error
+  }
+}
+
+async function tryAccrueAffiliateRebate(env: Env, orderId: string): Promise<void> {
+  try {
+    await accrueAffiliateRebateForPaymentOrder(env, orderId)
+  } catch (error) {
+    // The entitlement is already committed. Cron retries the idempotent rebate
+    // projection without turning a successful purchase into a failed order.
+    console.error('affiliate rebate accrual deferred', {
+      order_id: orderId,
+      name: error instanceof Error ? error.name : 'unknown',
+    })
   }
 }
 

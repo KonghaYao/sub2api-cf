@@ -26,7 +26,43 @@ export interface GatewayPrincipal {
   group_rpm_limit: number
   /** Complete D1 projection used to configure the user-sharded monetary authority. */
   api_key_monetary: ApiKeyMonetaryPolicy
+  /** User-wide standard-billing quota for this request's canonical platform. */
+  platform_quota?: PlatformQuotaPolicy | null
   billing: GatewayBilling
+}
+
+export interface PlatformQuotaPolicy {
+  platform: 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok'
+  control_version: number
+  daily_limit_micros: number | null
+  weekly_limit_micros: number | null
+  monthly_limit_micros: number | null
+  daily_used_micros: number
+  weekly_used_micros: number
+  monthly_used_micros: number
+  daily_window_start_ms: number | null
+  weekly_window_start_ms: number | null
+  monthly_window_start_ms: number | null
+  daily_reset_epoch: number
+  weekly_reset_epoch: number
+  monthly_reset_epoch: number
+}
+
+export interface PlatformQuotaWindowSnapshot {
+  reset_epoch: number
+  window_start_ms: number
+  settled_micros: number
+  active_reserved_micros: number
+  updated_at_ms: number
+}
+
+export interface PlatformQuotaUsageSnapshot {
+  user_id: string
+  platform: PlatformQuotaPolicy['platform']
+  control_version: number
+  daily: PlatformQuotaWindowSnapshot
+  weekly: PlatformQuotaWindowSnapshot
+  monthly: PlatformQuotaWindowSnapshot
 }
 
 export interface ApiKeyMonetaryPolicy {
