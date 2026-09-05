@@ -192,6 +192,11 @@ import {
   submitUserMediaTask,
 } from './media/handlers'
 import { handleSyncImages } from './media/sync-handler'
+import {
+  getAsyncImageTask,
+  getAsyncImageTaskContent,
+  submitAsyncImageTask,
+} from './media/image-task'
 import { validateInvitationCode, validatePromotionCode } from './commercial/registration'
 import {
   accrueAdminAffiliateRebate,
@@ -737,6 +742,14 @@ export function createApp() {
   app.post('/images/generations', (context) => handleSyncImages(context, 'generations'))
   app.post('/v1/images/edits', (context) => handleSyncImages(context, 'edits'))
   app.post('/images/edits', (context) => handleSyncImages(context, 'edits'))
+  app.post('/v1/images/generations/async', (context) => submitAsyncImageTask(context, 'generations'))
+  app.post('/images/generations/async', (context) => submitAsyncImageTask(context, 'generations'))
+  app.post('/v1/images/edits/async', (context) => submitAsyncImageTask(context, 'edits'))
+  app.post('/images/edits/async', (context) => submitAsyncImageTask(context, 'edits'))
+  app.get('/v1/images/tasks/:id/content/:index', getAsyncImageTaskContent)
+  app.get('/images/tasks/:id/content/:index', getAsyncImageTaskContent)
+  app.get('/v1/images/tasks/:id', getAsyncImageTask)
+  app.get('/images/tasks/:id', getAsyncImageTask)
   app.post('/v1/images/batches', submitGatewayMediaTask)
   app.get('/v1/images/batches', listGatewayMediaTasks)
   app.get('/v1/images/batches/models', listGatewayMediaModels)

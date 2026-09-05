@@ -180,6 +180,23 @@ describe('worker app', () => {
     expect(response.status).toBe(401)
   })
 
+  it.each([
+    ['/v1/images/generations/async', 'POST'],
+    ['/images/generations/async', 'POST'],
+    ['/v1/images/edits/async', 'POST'],
+    ['/images/edits/async', 'POST'],
+    ['/v1/images/tasks/imgtask_00000000000000000000000000000000', 'GET'],
+    ['/images/tasks/imgtask_00000000000000000000000000000000', 'GET'],
+  ])('routes the ordinary asynchronous Images contract at %s', async (path, method) => {
+    const response = await createApp().request(path, {
+      method,
+      headers: method === 'POST' ? { 'content-type': 'application/json' } : undefined,
+      body: method === 'POST' ? JSON.stringify({ prompt: 'cat' }) : undefined,
+    }, testEnv())
+
+    expect(response.status).toBe(401)
+  })
+
   it('does not add loose OpenAI-prefixed Images aliases', async () => {
     const response = await createApp().request('/openai/v1/images/generations', {
       method: 'POST',

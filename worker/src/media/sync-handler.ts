@@ -3,7 +3,7 @@ import type { Env } from '../env'
 import { decryptCredential } from '../gateway/crypto'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/errors'
 import { buildProviderRequest } from '../gateway/providers'
-import type { AccountCredential, UpstreamCredential } from '../gateway/types'
+import type { AccountCredential, GatewayPrincipal, UpstreamCredential } from '../gateway/types'
 import {
   authenticateGatewayRequest,
   credentialAad,
@@ -59,7 +59,7 @@ import {
 } from './sync-sse'
 import { prepareSyncImageLiveStream, type SyncImageLivePrelude } from './sync-stream-session'
 
-interface SyncImageEnv extends Env {
+export interface SyncImageEnv extends Env {
   SYNC_IMAGE_BILLING?: SyncImageBilling
   SYNC_IMAGE_UPSTREAM_FETCH?: typeof fetch
   SYNC_IMAGE_MODERATOR?: SyncImageModerator
@@ -96,6 +96,34 @@ export async function handleSyncImages(
   context: Context<SyncImageBindings>,
   operation: SyncImageOperation,
 ): Promise<Response> {
+  return executeSyncImages(context, operation)
+}
+
+/** Executes Images for a principal already authenticated by a durable task submit. */
+export async function executeSyncImagesForPrincipal(input: {
+  env: SyncImageEnv
+  request: Request
+  operation: SyncImageOperation
+  principal: GatewayPrincipal
+  waitUntil?: (task: Promise<unknown>) => void
+  moderationChecked?: boolean
+}): Promise<Response> {
+  const context = {
+    env: input.env,
+    req: { raw: input.request },
+    executionCtx: {
+      waitUntil: (task: Promise<unknown>) => input.waitUntil?.(task),
+    },
+  } as unknown as Context<SyncImageBindings>
+  return executeSyncImages(context, input.operation, input.principal, input.moderationChecked === true)
+}
+
+async function executeSyncImages(
+  context: Context<SyncImageBindings>,
+  operation: SyncImageOperation,
+  principalOverride?: GatewayPrincipal,
+  moderationChecked = false,
+): Promise<Response> {
   const requestId = crypto.randomUUID()
   const startedAt = Date.now()
   let admission: Awaited<ReturnType<typeof acquireApiKeyAdmission>> = null
@@ -106,24 +134,9 @@ export async function handleSyncImages(
   let completeStartedLifecycle: () => void = () => undefined
   let lifecycleTransferred = false
   try {
-    principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const manifest = await parseRequest(context.req.raw, operation)
-    if (context.env.SYNC_IMAGE_MODERATOR !== undefined) {
-      const decision = await context.env.SYNC_IMAGE_MODERATOR.check({
-        userId: principal.user_id,
-        apiKeyId: principal.api_key_id,
-        model: manifest.model,
-        manifest,
-      })
-      if (!decision.allowed) {
-        throw new GatewayError(
-          400,
-          'content_policy_violation',
-          decision.message?.slice(0, 240) || 'Image request was blocked by content moderation',
-          'invalid_request_error',
-        )
-      }
-    }
+    principal = principalOverride ?? await authenticateGatewayRequest(context.req.raw, context.env)
+    const manifest = await parseSyncImageRequest(context.req.raw, operation)
+    if (!moderationChecked) await moderateSyncImageRequest(context.env, principal, manifest)
 
     const [pricing, route] = await Promise.all([
       resolveSyncImagePricePolicy(context.env, principal),
@@ -472,7 +485,32 @@ export async function handleSyncImages(
   }
 }
 
-async function parseRequest(request: Request, operation: SyncImageOperation): Promise<SyncImageManifest> {
+export async function moderateSyncImageRequest(
+  env: SyncImageEnv,
+  principal: GatewayPrincipal,
+  manifest: SyncImageManifest,
+): Promise<void> {
+  if (env.SYNC_IMAGE_MODERATOR === undefined) return
+  const decision = await env.SYNC_IMAGE_MODERATOR.check({
+    userId: principal.user_id,
+    apiKeyId: principal.api_key_id,
+    model: manifest.model,
+    manifest,
+  })
+  if (!decision.allowed) {
+    throw new GatewayError(
+      400,
+      'content_policy_violation',
+      decision.message?.slice(0, 240) || 'Image request was blocked by content moderation',
+      'invalid_request_error',
+    )
+  }
+}
+
+export async function parseSyncImageRequest(
+  request: Request,
+  operation: SyncImageOperation,
+): Promise<SyncImageManifest> {
   const rawContentType = request.headers.get('content-type') ?? ''
   const contentType = rawContentType.split(';', 1)[0].trim().toLowerCase()
   if (contentType === 'multipart/form-data') {
