@@ -72,6 +72,13 @@ describe('gateway API key limit projection', () => {
         rate_limit_reset_epoch: 0,
       },
     })
+
+    raw.prepare("UPDATE \"groups\" SET platform = 'composite' WHERE id = 'group-1'").run()
+    await expect(authenticateGatewayRequest(new Request('https://gateway.test/v1/models', {
+      headers: { authorization: `Bearer ${rawKey}` },
+    }), { DB: d1, API_KEY_PEPPER: pepper } as Env)).resolves.toMatchObject({
+      group_id: 'group-1', platform: 'composite', platform_quota: null,
+    })
     raw.close()
   })
 })

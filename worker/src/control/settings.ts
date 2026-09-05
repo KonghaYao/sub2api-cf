@@ -54,6 +54,7 @@ export interface PublicSystemSettings {
   turnstile_enabled: boolean
   turnstile_site_key: string
   passkey_enabled?: boolean
+  available_channels_enabled: boolean
   model_plaza_enabled: boolean
   model_plaza_require_auth: boolean
   model_plaza_description: string
@@ -85,6 +86,7 @@ interface PublicSettingsPatch {
   turnstile_enabled?: boolean
   turnstile_site_key?: string
   passkey_enabled?: boolean
+  available_channels_enabled?: boolean
   model_plaza_enabled?: boolean
   model_plaza_require_auth?: boolean
   model_plaza_description?: string
@@ -497,6 +499,7 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     turnstile_enabled: settings.turnstile_enabled,
     turnstile_site_key: settings.turnstile_site_key,
     passkey_enabled: settings.passkey_enabled === true,
+    available_channels_enabled: settings.available_channels_enabled === true,
     model_plaza_enabled: settings.model_plaza_enabled === true,
     model_plaza_require_auth: settings.model_plaza_require_auth === true,
     model_plaza_description:
@@ -546,6 +549,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'turnstile_enabled',
       'turnstile_site_key',
       'passkey_enabled',
+      'available_channels_enabled',
       'model_plaza_enabled',
       'model_plaza_require_auth',
       'model_plaza_description',
@@ -579,6 +583,12 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (value.passkey_enabled !== undefined) {
       publicPatch.passkey_enabled = settingBoolean(value.passkey_enabled, 'passkey_enabled')
+    }
+    if (value.available_channels_enabled !== undefined) {
+      publicPatch.available_channels_enabled = settingBoolean(
+        value.available_channels_enabled,
+        'available_channels_enabled',
+      )
     }
     if (value.model_plaza_enabled !== undefined) {
       publicPatch.model_plaza_enabled = settingBoolean(value.model_plaza_enabled, 'model_plaza_enabled')

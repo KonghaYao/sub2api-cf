@@ -346,7 +346,7 @@ const props = defineProps<{
   noModelsLabel: string
   emptyLabel: string
   /** 用户专属倍率（group_id → multiplier）；无专属时由 GroupBadge 仅显示默认倍率。 */
-  userGroupRates: Record<number, number>
+  userGroupRates: Record<string, number>
 }>()
 
 // Suppress unused warning — props is accessed via template automatically but

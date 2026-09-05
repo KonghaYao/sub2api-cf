@@ -64,7 +64,7 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const channels = ref<UserAvailableChannel[]>([])
-const userGroupRates = ref<Record<number, number>>({})
+const userGroupRates = ref<Record<string, number>>({})
 const loading = ref(false)
 const searchQuery = ref('')
 
@@ -111,7 +111,7 @@ async function loadChannels() {
       userChannelsAPI.getAvailable(),
       userGroupsAPI.getUserGroupRates().catch((err: unknown) => {
         console.error('Failed to load user group rates:', err)
-        return {} as Record<number, number>
+        return {} as Record<string, number>
       }),
     ])
     channels.value = list

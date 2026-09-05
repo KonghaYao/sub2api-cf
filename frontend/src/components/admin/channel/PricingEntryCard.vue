@@ -282,10 +282,12 @@ const props = withDefaults(defineProps<{
   hideTokenIntervals?: boolean
   enableTimePricing?: boolean
   enableTierMultipliers?: boolean
+  enableDefaultPricing?: boolean
 }>(), {
   hideTokenIntervals: false,
   enableTimePricing: false,
   enableTierMultipliers: false,
+  enableDefaultPricing: true,
 })
 
 const emit = defineEmits<{
@@ -362,6 +364,7 @@ async function onModelsUpdate(newModels: string[]) {
   // 只在新增模型且当前无价格时自动填充
   const addedModels = newModels.filter(m => !oldModels.includes(m))
   if (addedModels.length === 0) return
+  if (!props.enableDefaultPricing) return
 
   // 检查是否所有价格字段都为空
   const e = props.entry

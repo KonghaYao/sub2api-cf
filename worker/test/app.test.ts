@@ -59,6 +59,7 @@ describe('worker app', () => {
         turnstile_enabled: false,
         turnstile_site_key: '',
         passkey_enabled: false,
+        available_channels_enabled: false,
         model_plaza_enabled: false,
         model_plaza_require_auth: false,
         model_plaza_description: '',
@@ -105,6 +106,7 @@ describe('worker app', () => {
         turnstile_enabled: false,
         turnstile_site_key: '',
         passkey_enabled: false,
+        available_channels_enabled: false,
         model_plaza_enabled: false,
         model_plaza_require_auth: false,
         model_plaza_description: '',
@@ -123,6 +125,20 @@ describe('worker app', () => {
         oidc_oauth_provider_name: 'OIDC',
         payment_enabled: false,
       },
+    })
+  })
+
+  it('fails closed when cached available-channels settings are malformed', async () => {
+    const env = testEnv({
+      CONFIG_KV: {
+        get: async () => ({ available_channels_enabled: 'yes' }),
+      } as unknown as KVNamespace,
+    })
+
+    const response = await createApp().request('/api/v1/settings/public', {}, env)
+
+    await expect(response.json()).resolves.toMatchObject({
+      data: { available_channels_enabled: false },
     })
   })
 
@@ -161,6 +177,12 @@ describe('worker app', () => {
     ['/api/v1/user/image-batches', 'GET'],
   ])('routes the migrated media contract at %s', async (path, method) => {
     const response = await createApp().request(path, { method }, testEnv())
+
+    expect(response.status).toBe(401)
+  })
+
+  it('routes the authenticated available-channels contract', async () => {
+    const response = await createApp().request('/api/v1/channels/available', {}, testEnv())
 
     expect(response.status).toBe(401)
   })

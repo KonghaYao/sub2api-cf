@@ -1085,6 +1085,7 @@ interface WorkerAdminSettings {
     turnstile_enabled: boolean;
     turnstile_site_key: string;
     passkey_enabled?: boolean;
+    available_channels_enabled: boolean;
     model_plaza_enabled: boolean;
     model_plaza_require_auth: boolean;
     model_plaza_description: string;
@@ -1161,6 +1162,7 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     turnstile_enabled: settings.public.turnstile_enabled,
     turnstile_site_key: settings.public.turnstile_site_key,
     passkey_enabled: settings.public.passkey_enabled ?? false,
+    available_channels_enabled: settings.public.available_channels_enabled === true,
     model_plaza_enabled: settings.public.model_plaza_enabled ?? false,
     model_plaza_require_auth: settings.public.model_plaza_require_auth ?? false,
     model_plaza_description: settings.public.model_plaza_description ?? "",
@@ -1231,6 +1233,9 @@ export async function updateSettings(
   }
   if (settings.passkey_enabled !== undefined) {
     publicPatch.passkey_enabled = settings.passkey_enabled;
+  }
+  if (settings.available_channels_enabled !== undefined) {
+    publicPatch.available_channels_enabled = settings.available_channels_enabled;
   }
   if (settings.model_plaza_enabled !== undefined) {
     publicPatch.model_plaza_enabled = settings.model_plaza_enabled;

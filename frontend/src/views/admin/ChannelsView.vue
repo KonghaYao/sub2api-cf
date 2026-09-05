@@ -253,7 +253,7 @@
             </div>
 
             <!-- Apply Pricing to Account Stats (toggle only in basic settings) -->
-            <div class="border-t border-gray-200 pt-4 dark:border-dark-700">
+            <div v-if="!workerContractActive" class="border-t border-gray-200 pt-4 dark:border-dark-700">
               <div class="flex items-center justify-between">
                 <div>
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -423,6 +423,7 @@
                 <label class="input-label text-xs mb-0">{{ t('admin.channels.form.modelPricing', 'Model Pricing') }}</label>
                 <div class="flex items-center gap-2">
                   <button
+                    v-if="!workerContractActive"
                     type="button"
                     @click="syncLatestModels(sIdx)"
                     :disabled="syncingPlatform === section.platform"
@@ -447,6 +448,7 @@
                   :key="idx"
                   :entry="entry"
                   :platform="section.platform"
+                  :enable-default-pricing="!workerContractActive"
                   enable-time-pricing
                   enable-tier-multipliers
                   @update="updatePricingEntry(sIdx, idx, $event)"
@@ -456,7 +458,7 @@
             </div>
 
             <!-- Account Stats Pricing Rules (per-platform, always visible) -->
-            <div class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-700 space-y-3">
+            <div v-if="!workerContractActive" class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-700 space-y-3">
               <div class="flex items-center justify-between">
                 <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300">
                   {{ t('admin.channels.form.accountStatsPricingRules') }}
@@ -652,9 +654,11 @@ import Toggle from '@/components/common/Toggle.vue'
 import PricingEntryCard from '@/components/admin/channel/PricingEntryCard.vue'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { useKeyedDebouncedSearch } from '@/composables/useKeyedDebouncedSearch'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const workerContractActive = isCloudflareWorkerContractActive()
 
 // Web Search global enabled state (loaded once on mount)
 const webSearchGlobalEnabled = ref(false)
@@ -669,10 +673,12 @@ async function loadWebSearchGlobalState() {
 }
 
 // ── Form-level pricing rule type (per-platform) ──
+type FormEntityId = string | number
+
 interface FormPricingRule {
   name: string
-  group_ids: number[]
-  account_ids: number[]
+  group_ids: FormEntityId[]
+  account_ids: FormEntityId[]
   pricing: PricingFormEntry[]
 }
 
@@ -681,7 +687,7 @@ interface PlatformSection {
   platform: GroupPlatform
   enabled: boolean
   collapsed: boolean
-  group_ids: number[]
+  group_ids: FormEntityId[]
   model_mapping: Record<string, string>
   model_pricing: PricingFormEntry[]
   web_search_emulation: boolean
@@ -811,7 +817,7 @@ function getGroupsForPlatform(platform: GroupPlatform): AdminGroup[] {
 
 // ── Group helpers ──
 const groupToChannelMap = computed(() => {
-  const map = new Map<number, Channel>()
+  const map = new Map<FormEntityId, Channel>()
   for (const ch of allChannelsForConflict.value) {
     if (editingChannel.value && ch.id === editingChannel.value.id) continue
     for (const gid of ch.group_ids || []) {
@@ -821,15 +827,15 @@ const groupToChannelMap = computed(() => {
   return map
 })
 
-function isGroupInOtherChannel(groupId: number, _platform: string): boolean {
+function isGroupInOtherChannel(groupId: FormEntityId, _platform: string): boolean {
   return groupToChannelMap.value.has(groupId)
 }
 
-function getGroupChannelName(groupId: number): string {
+function getGroupChannelName(groupId: FormEntityId): string {
   return groupToChannelMap.value.get(groupId)?.name || ''
 }
 
-function getGroupInOtherChannelLabel(groupId: number): string {
+function getGroupInOtherChannelLabel(groupId: FormEntityId): string {
   const name = getGroupChannelName(groupId)
   return t('admin.channels.form.inOtherChannel', { name }, `In "${name}"`)
 }
@@ -843,7 +849,7 @@ const deleteConfirmMessage = computed(() => {
   )
 })
 
-function toggleGroupInSection(sectionIdx: number, groupId: number) {
+function toggleGroupInSection(sectionIdx: number, groupId: FormEntityId) {
   const section = form.platforms[sectionIdx]
   const idx = section.group_ids.indexOf(groupId)
   if (idx >= 0) {
@@ -988,19 +994,19 @@ function removeRulePricingEntry(sectionIdx: number, ruleIndex: number, pricingIn
   form.platforms[sectionIdx].account_stats_pricing_rules[ruleIndex].pricing.splice(pricingIndex, 1)
 }
 
-function getGroupNameById(groupId: number): string {
+function getGroupNameById(groupId: FormEntityId): string {
   const group = allGroups.value.find(g => g.id === groupId)
   return group ? group.name : `#${groupId}`
 }
 
 // ── Account search for pricing rules ──
-interface SimpleAccount { id: number; name: string; platform: string }
+interface SimpleAccount { id: FormEntityId; name: string; platform: string }
 
 const ruleAccountSearchKeyword = ref<Record<string, string>>({})
 const ruleAccountSearchResults = ref<Record<string, SimpleAccount[]>>({})
 const showRuleAccountDropdown = ref<Record<string, boolean>>({})
 // Cache: account ID → name, populated when search results are selected
-const ruleAccountNameCache = ref<Record<number, string>>({})
+const ruleAccountNameCache = ref<Record<string, string>>({})
 
 const ruleAccountSearchRunner = useKeyedDebouncedSearch<SimpleAccount[]>({
   delay: 300,
@@ -1028,27 +1034,27 @@ function onRuleAccountSearchFocus(platform: string, ruleIndex: number) {
 }
 
 function selectRuleAccount(
-  rule: { account_ids: number[] },
+  rule: { account_ids: FormEntityId[] },
   account: SimpleAccount,
   platform: string,
   ruleIndex: number,
 ) {
   if (!rule.account_ids.includes(account.id)) {
     rule.account_ids.push(account.id)
-    ruleAccountNameCache.value[account.id] = account.name
+    ruleAccountNameCache.value[String(account.id)] = account.name
   }
   const key = `${platform}-${ruleIndex}`
   ruleAccountSearchKeyword.value[key] = ''
   showRuleAccountDropdown.value[key] = false
 }
 
-function removeRuleAccount(rule: { account_ids: number[] }, accountId: number) {
+function removeRuleAccount(rule: { account_ids: FormEntityId[] }, accountId: FormEntityId) {
   const idx = rule.account_ids.indexOf(accountId)
   if (idx !== -1) rule.account_ids.splice(idx, 1)
 }
 
-function getRuleAccountLabel(accountId: number): string {
-  const name = ruleAccountNameCache.value[accountId]
+function getRuleAccountLabel(accountId: FormEntityId): string {
+  const name = ruleAccountNameCache.value[String(accountId)]
   return name ? `${name} #${accountId}` : `#${accountId}`
 }
 
@@ -1100,8 +1106,8 @@ function accountStatsRulesToAPI(): AccountStatsPricingRule[] {
 }
 
 // ── Form ↔ API conversion ──
-function formToAPI(): { group_ids: number[], model_pricing: ChannelModelPricing[], model_mapping: Record<string, Record<string, string>>, features_config: Record<string, unknown> } {
-  const group_ids: number[] = []
+function formToAPI(): { group_ids: FormEntityId[], model_pricing: ChannelModelPricing[], model_mapping: Record<string, Record<string, string>>, features_config: Record<string, unknown> } {
+  const group_ids: FormEntityId[] = []
   const model_pricing: ChannelModelPricing[] = []
   const model_mapping: Record<string, Record<string, string>> = {}
   // Preserve existing features_config fields not managed by the form
@@ -1189,7 +1195,7 @@ function formToAPI(): { group_ids: number[], model_pricing: ChannelModelPricing[
 
 function apiToForm(channel: Channel): PlatformSection[] {
   // Build a map: groupID → platform
-  const groupPlatformMap = new Map<number, GroupPlatform>()
+  const groupPlatformMap = new Map<FormEntityId, GroupPlatform>()
   for (const g of allGroups.value) {
     groupPlatformMap.set(g.id, g.platform)
   }
@@ -1390,7 +1396,7 @@ async function openEditDialog(channel: Channel) {
 /** Distribute flat channel-level rules into the matching platform section based on group_ids */
 function distributeRulesToPlatforms(apiRules: AccountStatsPricingRule[]) {
   // Build groupID → platform lookup
-  const groupPlatformMap = new Map<number, GroupPlatform>()
+  const groupPlatformMap = new Map<FormEntityId, GroupPlatform>()
   for (const g of allGroups.value) {
     groupPlatformMap.set(g.id, g.platform)
   }
@@ -1438,7 +1444,7 @@ function distributeRulesToPlatforms(apiRules: AccountStatsPricingRule[]) {
 
 /** Populate ruleAccountNameCache by fetching account details for all account_ids in rules */
 async function populateRuleAccountNameCache() {
-  const allAccountIds = new Set<number>()
+  const allAccountIds = new Set<FormEntityId>()
   for (const section of form.platforms) {
     for (const rule of section.account_stats_pricing_rules) {
       for (const id of rule.account_ids) {
@@ -1456,7 +1462,7 @@ async function populateRuleAccountNameCache() {
   for (let i = 0; i < ids.length; i++) {
     const result = results[i]
     if (result.status === 'fulfilled') {
-      ruleAccountNameCache.value[ids[i]] = result.value.name
+      ruleAccountNameCache.value[String(ids[i])] = result.value.name
     }
     // If rejected, the cache won't have the name, so it'll show "#ID" which is acceptable
   }
@@ -1662,7 +1668,7 @@ async function confirmDelete() {
 onMounted(() => {
   loadChannels()
   loadGroups()
-  loadWebSearchGlobalState()
+  if (!workerContractActive) loadWebSearchGlobalState()
   document.addEventListener('click', handleRuleAccountClickOutside)
 })
 

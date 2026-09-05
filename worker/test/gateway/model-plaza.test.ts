@@ -159,4 +159,23 @@ describe('model plaza HTTP contract', () => {
     })
     test.raw.close()
   })
+
+  it('publishes concrete provider models from a composite group', async () => {
+    const test = await fixture()
+    setSettings(test.raw, true, false)
+    test.raw.prepare("UPDATE \"groups\" SET platform = 'composite' WHERE id = 'public-group'").run()
+
+    const response = await app().request('/model-plaza', undefined, test.env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        groups: [expect.objectContaining({
+          id: 'public-group', platform: 'composite',
+          models: [expect.objectContaining({ name: 'friendly-alias', platform: 'openai' })],
+        })],
+      },
+    })
+    test.raw.close()
+  })
 })

@@ -717,10 +717,11 @@ async function loadPoolTargets(env: Env, job: ProbeJobRow): Promise<PoolTargetRo
        ) am
        JOIN account_groups ag ON ag.account_id = am.account_id
        JOIN accounts a ON a.id = am.account_id
-       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
+       JOIN "groups" g ON g.id = ag.group_id
        JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = am.model_id
       WHERE a.id = ? AND a.enabled = 1 AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1
+        AND (g.platform = a.platform OR g.platform = 'composite')
         AND (am.endpoint <> 'images' OR m.image_generation = 1)
       ORDER BY ag.group_id ASC, am.model_id ASC, am.endpoint ASC`,
   ).bind(job.account_id).all<PoolTargetRow>()
@@ -742,10 +743,11 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
        JOIN account_models am ON am.account_id = a.id AND am.model_id = ?
-       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
+       JOIN "groups" g ON g.id = ag.group_id
        JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = am.model_id
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.health_status <> 'unhealthy'
+        AND (g.platform = a.platform OR g.platform = 'composite')
         AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1 AND ${capability} = 1
       ORDER BY ag.priority ASC, a.id ASC`,
   ).bind(target.model_id, target.group_id)

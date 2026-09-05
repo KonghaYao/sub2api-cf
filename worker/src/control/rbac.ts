@@ -230,7 +230,7 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   if (/^\/api\/v1\/admin\/(?:users|api-keys)(?:\/|$)/.test(pathname)) {
     return [category('admin.users.read', 'admin.users.write')]
   }
-  if (/^\/api\/v1\/admin\/(?:groups|models|accounts)(?:\/|$)/.test(pathname)) {
+  if (/^\/api\/v1\/admin\/(?:groups|models|accounts|channels)(?:\/|$)/.test(pathname)) {
     return [category('admin.catalog.read', 'admin.catalog.write')]
   }
   if (

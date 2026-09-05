@@ -56,6 +56,12 @@ declare module 'vue-router' {
     requiresRiskControl?: boolean
 
     /**
+     * Whether this route requires the opt-in available-channels catalog.
+     * @default false
+     */
+    requiresAvailableChannels?: boolean
+
+    /**
      * i18n key for the page title
      */
     titleKey?: string

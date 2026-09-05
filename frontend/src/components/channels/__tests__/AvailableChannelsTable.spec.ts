@@ -40,7 +40,7 @@ const rows: UserAvailableChannel[] = [
         platform: 'anthropic',
         groups: [
           {
-            id: 1,
+            id: 'group-exclusive',
             name: 'Exclusive Pro',
             platform: 'anthropic',
             subscription_type: 'standard',
@@ -52,7 +52,7 @@ const rows: UserAvailableChannel[] = [
             is_exclusive: true,
           },
           {
-            id: 2,
+            id: 'group-public',
             name: 'Public',
             platform: 'anthropic',
             subscription_type: 'standard',
@@ -84,7 +84,7 @@ const baseProps = {
   noPricingLabel: 'No pricing',
   noModelsLabel: 'No models',
   emptyLabel: 'No channels',
-  userGroupRates: { 1: 0.8 },
+  userGroupRates: { 'group-exclusive': 0.8 },
 }
 
 function mountTable(props = {}) {

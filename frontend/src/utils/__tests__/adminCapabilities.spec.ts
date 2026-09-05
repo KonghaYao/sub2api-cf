@@ -12,6 +12,7 @@ describe('Cloudflare admin capabilities', () => {
     '/admin/settings',
     '/admin/users/42',
     '/admin/groups',
+    '/admin/channels/pricing',
     '/admin/accounts',
     '/admin/subscriptions',
     '/admin/redeem',

@@ -47,6 +47,10 @@ class FakeStatement {
 
   async first<T>(): Promise<T | null> {
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
+    if (this.query.includes('FROM channel_groups cg')) return this.database.channelPolicy as T
+    if (this.query.includes('JOIN user_platform_quotas quota')) {
+      return this.database.routePlatformQuota as T | null
+    }
     if (this.query.includes('FROM group_models gm')) {
       return { ...model, platform: this.database.principal.platform } as T
     }
@@ -80,6 +84,12 @@ class FakeStatement {
         api_key_settled: 0,
         api_key_usage_json: null,
         api_key_projected: 0,
+        platform_quota_platform: this.values[7] ?? null,
+        platform_quota_settled: this.values[8] ?? 1,
+        platform_quota_usage_json: null,
+        platform_quota_projected: this.values[9] ?? 1,
+        initial_reserved_micros: null,
+        reservations_ensured: 1,
       }
     } else if (this.query.includes('SET billing_settled = 1')) {
       if (this.database.recovery !== null) this.database.recovery.billing_settled = 1
@@ -90,6 +100,13 @@ class FakeStatement {
       }
     } else if (this.query.includes('SET api_key_projected = 1')) {
       if (this.database.recovery !== null) this.database.recovery.api_key_projected = 1
+    } else if (this.query.includes('SET platform_quota_settled = 1')) {
+      if (this.database.recovery !== null) {
+        this.database.recovery.platform_quota_settled = 1
+        this.database.recovery.platform_quota_usage_json = this.values[0]
+      }
+    } else if (this.query.includes('SET platform_quota_projected = 1')) {
+      if (this.database.recovery !== null) this.database.recovery.platform_quota_projected = 1
     } else if (this.query.includes('DELETE FROM settlement_recovery')) {
       this.database.recovery = null
     }
@@ -151,12 +168,15 @@ function withAccountExecutionDefaults(credential: Record<string, unknown>): Reco
 
 class FakeDatabase {
   readonly bindings: Array<{ query: string; values: unknown[] }> = []
+  readonly batchQueries: string[][] = []
   credential: Record<string, unknown> = {}
   readonly additionalCredentials = new Map<string, Record<string, unknown>>()
   recovery: Record<string, unknown> | null = null
   failRecoveryWrites = false
   chatOnly = false
   responsesOnly = false
+  channelPolicy: Record<string, unknown> | null = null
+  routePlatformQuota: Record<string, unknown> | null = null
   readonly principal = {
     api_key_id: 'key-1',
     api_key_auth_version: 1,
@@ -198,11 +218,15 @@ class FakeDatabase {
   }
 
   async batch(statements: FakeStatement[]): Promise<D1Result<unknown>[]> {
+    this.batchQueries.push(statements.map((statement) => statement.query))
     const values: D1Result<unknown>[] = []
     for (const statement of statements) {
       if (statement.query.includes('FROM account_groups ag')) {
         values.push(await statement.all())
-      } else if (statement.query.includes('UPDATE api_keys')) {
+      } else if (
+        statement.query.includes('UPDATE api_keys') ||
+        statement.query.includes('UPDATE user_platform_quotas')
+      ) {
         values.push(await statement.run())
       } else {
         const row = await statement.first()
@@ -268,6 +292,16 @@ class FakeStateStub {
           api_key_id: 'key-1', kind: window, window_started_at_ms: 1,
           settled_micros: 40, updated_at_ms: 1,
         })),
+      } })
+    }
+    if (this.kind === 'limit' && path === '/platform-quota/settle') {
+      return Response.json({ usage: {
+        user_id: body.user_id,
+        platform: body.platform,
+        control_version: 7,
+        daily: { reset_epoch: 1, window_start_ms: 1, settled_micros: 108, active_reserved_micros: 0, updated_at_ms: 2 },
+        weekly: { reset_epoch: 2, window_start_ms: 1, settled_micros: 208, active_reserved_micros: 0, updated_at_ms: 2 },
+        monthly: { reset_epoch: 3, window_start_ms: 1, settled_micros: 308, active_reserved_micros: 0, updated_at_ms: 2 },
       } })
     }
     return Response.json({})
@@ -820,6 +854,98 @@ describe('OpenAI-compatible gateway', () => {
       payload: { input_tokens: 10, output_tokens: 5, account_id: accountId },
     })
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
+  it('forwards a channel-mapped model while restoring the public model and original billing snapshot', async () => {
+    const { env, database, user } = await harness()
+    database.channelPolicy = {
+      channel_id: 'channel-1',
+      restrict_models: 1,
+      source_pattern: 'gpt-public',
+      target_pattern: 'channel-upstream',
+      source_is_wildcard: 0,
+      target_is_wildcard: 0,
+      pricing_match: 0,
+    }
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'chatcmpl-channel',
+        model: 'channel-upstream',
+        choices: [{ message: { role: 'assistant', content: 'hello' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ model: 'gpt-public' })
+    expect(JSON.parse(String(upstream.mock.calls[0]?.[1]?.body))).toMatchObject({
+      model: 'channel-upstream',
+    })
+    const routeBatch = database.batchQueries.find((queries) =>
+      queries.some((query) => query.includes('FROM group_models gm')))
+    expect(routeBatch?.map((query) => {
+      if (query.includes('JOIN user_platform_quotas quota')) return 'quota'
+      if (query.includes('FROM group_models gm')) return 'model'
+      if (query.includes('FROM channel_groups cg')) return 'channel'
+      if (query.includes('FROM account_groups ag')) return 'candidate'
+      return 'other'
+    })).toEqual(['model', 'channel', 'candidate', 'quota', 'candidate'])
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      amount_micros: 40,
+      usage_event: {
+        event_type: 'usage.settled.v1',
+        payload: {
+          price_id: 'price-1',
+          requested_model: 'gpt-public',
+          upstream_model: 'channel-upstream',
+        },
+      },
+    })
+  })
+
+  it('enforces the resolved provider quota for a composite group', async () => {
+    const { env, database, limit } = await harness()
+    database.principal.platform = 'composite'
+    database.routePlatformQuota = {
+      platform_quota_platform: 'openai', platform_quota_enabled: 1,
+      platform_quota_control_version: 7,
+      platform_daily_limit_micros: 10_000,
+      platform_weekly_limit_micros: 20_000,
+      platform_monthly_limit_micros: 30_000,
+      platform_daily_used_micros: 100,
+      platform_weekly_used_micros: 200,
+      platform_monthly_used_micros: 300,
+      platform_daily_window_start_ms: 1,
+      platform_weekly_window_start_ms: 1,
+      platform_monthly_window_start_ms: 1,
+      platform_daily_reset_epoch: 1,
+      platform_weekly_reset_epoch: 2,
+      platform_monthly_reset_epoch: 3,
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      id: 'chatcmpl-composite', model: 'gpt-upstream',
+      choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })))
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    expect(limit.calls.find((call) => call.path === '/platform-quota/configure')?.body)
+      .toMatchObject({ platform: 'openai', control_version: 7, daily_limit_micros: 10_000 })
+    expect(limit.calls.find((call) => call.path === '/platform-quota/reserve')?.body)
+      .toMatchObject({ platform: 'openai', control_version: 7 })
   })
 
   it('passes scale to native Responses and rejects invalid tiers before reservations', async () => {

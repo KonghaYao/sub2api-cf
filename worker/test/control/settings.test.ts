@@ -30,6 +30,7 @@ interface SettingsResponse {
       turnstile_enabled: boolean
       turnstile_site_key: string
       passkey_enabled?: boolean
+      available_channels_enabled: boolean
       model_plaza_enabled: boolean
       model_plaza_require_auth: boolean
       model_plaza_description: string
@@ -155,6 +156,7 @@ describe('admin system settings', () => {
           turnstile_enabled: false,
           turnstile_site_key: '',
           passkey_enabled: false,
+          available_channels_enabled: false,
           model_plaza_enabled: false,
           model_plaza_require_auth: false,
           model_plaza_description: '',
@@ -186,6 +188,23 @@ describe('admin system settings', () => {
       },
     })
     expect(JSON.stringify(body)).not.toContain('turnstile_secret_key"')
+  })
+
+  it('normalizes an unknown persisted available-channels flag to false', async () => {
+    subject.raw.prepare(
+      `UPDATE system_settings
+          SET public_json = json_set(public_json, '$.available_channels_enabled', 'yes')
+        WHERE id = 'global'`,
+    ).run()
+
+    const response = await subject.app.request('/settings', {
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+    }, subject.env)
+
+    expect(response.status).toBe(200)
+    await expect(responseJson(response)).resolves.toMatchObject({
+      data: { public: { available_channels_enabled: false } },
+    })
   })
 
   it('projects deployment-owned passkey RP readiness without trusting request headers', async () => {
@@ -376,6 +395,7 @@ describe('admin system settings', () => {
           turnstile_enabled: true,
           turnstile_site_key: 'site-key-public',
           passkey_enabled: true,
+          available_channels_enabled: true,
           model_plaza_enabled: true,
           model_plaza_require_auth: true,
           model_plaza_description: 'Prices are shown in USD.',
@@ -422,6 +442,7 @@ describe('admin system settings', () => {
       turnstile_enabled: true,
       turnstile_site_key: 'site-key-public',
       passkey_enabled: true,
+      available_channels_enabled: true,
       model_plaza_enabled: true,
       model_plaza_require_auth: true,
       model_plaza_description: 'Prices are shown in USD.',
@@ -454,6 +475,7 @@ describe('admin system settings', () => {
     })
     expect(JSON.parse(String(audit.changed_fields_json))).toEqual([
       'public.affiliate_enabled',
+      'public.available_channels_enabled',
       'public.email_verification_enabled',
       'public.invitation_code_enabled',
       'public.model_plaza_description',

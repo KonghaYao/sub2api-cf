@@ -15,7 +15,7 @@ interface Harness {
 
 function harness(): Harness {
   const { raw, d1 } = createSqliteD1()
-  applyMigrations(raw, 19)
+  applyMigrations(raw)
   const env = {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',

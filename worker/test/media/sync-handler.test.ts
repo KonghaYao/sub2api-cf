@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { describe, expect, it, vi } from 'vitest'
 import { apiKeyDigest, encryptCredential } from '../../src/gateway/crypto'
-import { handleSyncImages } from '../../src/media/sync-handler'
+import { authenticateGatewayRequest } from '../../src/gateway/repository'
+import { executeSyncImagesForPrincipal, handleSyncImages } from '../../src/media/sync-handler'
 import type { SyncImageBilling } from '../../src/media/sync-billing'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
@@ -112,6 +113,16 @@ function app() {
   return api
 }
 
+function configureCompositeOpenAiQuota(test: Awaited<ReturnType<typeof fixture>>): void {
+  const now = Date.now()
+  test.raw.prepare("UPDATE \"groups\" SET platform = 'composite' WHERE id = 'group-1'").run()
+  test.raw.prepare(`INSERT INTO user_platform_quotas (
+    user_id, platform, enabled, daily_limit_micros, weekly_limit_micros, monthly_limit_micros,
+    control_version, created_at_ms, updated_at_ms
+  ) VALUES ('user-1', 'openai', 1, 10000000, 20000000, 30000000, 7, ?, ?)`)
+    .run(now, now)
+}
+
 describe('synchronous image handler', () => {
   it.each(['/v1/images/generations', '/images/generations'])('serves %s through the image account pool', async (path) => {
     const test = await fixture()
@@ -135,6 +146,59 @@ describe('synchronous image handler', () => {
     })])
     expect(test.stateCalls).toContain('/accounts/sync')
     expect(test.stateCalls).toContain('/release')
+  })
+
+  it('passes the resolved provider quota into a composite synchronous Images reservation', async () => {
+    const test = await fixture()
+    configureCompositeOpenAiQuota(test)
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'composite sync image' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({
+        platform: 'composite',
+        platform_quota: expect.objectContaining({
+          platform: 'openai', control_version: 7, daily_limit_micros: 10_000_000,
+        }),
+      }),
+    }))
+  })
+
+  it('passes the resolved provider quota into a composite durable-task Images reservation', async () => {
+    const test = await fixture()
+    configureCompositeOpenAiQuota(test)
+    const authRequest = new Request('https://worker.test/v1/images/generations', {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    })
+    const principal = await authenticateGatewayRequest(authRequest, test.env as never)
+    expect(principal).toMatchObject({ platform: 'composite', platform_quota: null })
+
+    const response = await executeSyncImagesForPrincipal({
+      env: test.env as never,
+      request: new Request('https://worker.test/v1/images/generations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'composite async image' }),
+      }),
+      operation: 'generations',
+      principal,
+      moderationChecked: true,
+    })
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({
+        platform: 'composite',
+        platform_quota: expect.objectContaining({
+          platform: 'openai', control_version: 7, daily_limit_micros: 10_000_000,
+        }),
+      }),
+    }))
   })
 
   it('returns and bills every distinct provider output when the provider exceeds requested n', async () => {

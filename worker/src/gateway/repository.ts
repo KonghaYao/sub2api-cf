@@ -180,7 +180,7 @@ export async function authenticateGatewayRequest(
   if (row.user_status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
-  if (row.group_enabled !== 1 || !isProviderPlatform(row.platform)) {
+  if (row.group_enabled !== 1 || (!isProviderPlatform(row.platform) && row.platform !== 'composite')) {
     throw new GatewayError(403, 'group_unavailable', 'API key group is unavailable', 'permission_error')
   }
   if (row.group_accessible !== 1) {
@@ -396,7 +396,8 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
             JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
            WHERE ag.group_id = gm.group_id AND a.enabled = 1
              AND a.health_status <> 'unhealthy'
-             AND m.platform = g.platform AND a.platform = g.platform
+             AND a.platform = m.platform
+             AND (m.platform = g.platform OR g.platform = 'composite')
              AND (
                (m.endpoint = 'chat_completions' AND (
                  am.chat_completions = 1 OR
@@ -429,6 +430,7 @@ export async function resolveGatewayRoute(
   model: ModelRoute
   candidates: AccountCandidate[]
   upstream_endpoint: GatewayEndpoint
+  platform_quota: GatewayPrincipal['platform_quota']
 }> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const modelCapability = endpoint === 'embeddings'
@@ -445,11 +447,15 @@ export async function resolveGatewayRoute(
       `${modelSelect(true)}
         WHERE gm.group_id = ? AND m.public_name = ?
           AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
-          AND g.enabled = 1 AND m.platform = g.platform
+          AND g.enabled = 1
+          AND (m.platform = g.platform OR g.platform = 'composite')
           AND ${modelCapability}
+        ORDER BY gm.sort_order ASC, m.platform ASC, m.id ASC
         LIMIT 1`,
     ).bind(...modelBindings),
-    accountCandidatesStatement(env, groupId, publicName, capabilityColumn),
+    channelModelPolicyStatement(env, groupId, publicName, endpoint),
+    accountCandidatesStatement(env, groupId, publicName, endpoint, capabilityColumn),
+    platformQuotaStatement(env, userId, groupId, publicName, endpoint),
   ]
   if (
     (endpoint === 'responses' && fallbackEndpoint === 'chat_completions') ||
@@ -459,15 +465,23 @@ export async function resolveGatewayRoute(
       env,
       groupId,
       publicName,
+      endpoint,
       accountCapabilityColumn(fallbackEndpoint),
       endpoint === 'chat_completions' ? 'openai_or_codex' : 'openai',
     ))
   }
-  const [modelResult, candidateResult, fallbackCandidateResult] = await env.DB.batch(statements)
+  const [modelResult, channelResult, candidateResult, quotaResult, fallbackCandidateResult] =
+    await env.DB.batch(statements)
   const model = modelResult.results[0] as unknown as ModelRoute | undefined
   if (model === undefined) {
     throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
   }
+  const channelPolicy = channelResult.results[0] as unknown as ChannelModelPolicyRow | undefined
+  const routedModel = applyChannelModelPolicy(publicName, model, channelPolicy)
+
+  // Account eligibility remains attached to the requested catalog model. The
+  // channel only rewrites the provider-facing name, so the original price and
+  // account capability snapshot stay authoritative.
   let candidates = candidateResult.results.map(parseAccountCandidate)
   let upstreamEndpoint = endpoint
   if (
@@ -480,17 +494,205 @@ export async function resolveGatewayRoute(
   }
   if (
     candidates.length === 0 ||
-    candidates.some((candidate) => candidate.config_revision !== model.config_revision)
+    candidates.some((candidate) => candidate.config_revision !== routedModel.config_revision)
   ) {
     throw new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
   }
-  return { model, candidates, upstream_endpoint: upstreamEndpoint }
+  const quotaRow = quotaResult.results[0] as unknown as PrincipalRow | undefined
+  return {
+    model: routedModel,
+    candidates,
+    upstream_endpoint: upstreamEndpoint,
+    platform_quota: quotaRow === undefined ? null : platformQuotaPolicy(quotaRow),
+  }
+}
+
+function platformQuotaStatement(
+  env: Env,
+  userId: string,
+  groupId: string,
+  publicName: string,
+  endpoint: GatewayEndpoint,
+): D1PreparedStatement {
+  const modelCapability = endpoint === 'embeddings'
+    ? 'm.embeddings = 1'
+    : endpoint === 'images'
+      ? 'm.image_generation = 1'
+      : `(m.endpoint = ? OR m.endpoint = 'both')`
+  const bindings = endpoint === 'embeddings' || endpoint === 'images'
+    ? [groupId, publicName, userId]
+    : [groupId, publicName, endpoint, userId]
+  return env.DB.prepare(
+    `WITH resolved_model AS (
+       SELECT m.platform
+         FROM group_models gm
+         JOIN "groups" g ON g.id = gm.group_id
+         JOIN models m ON m.id = gm.model_id
+         JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id
+        WHERE gm.group_id = ? AND m.public_name = ?
+          AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
+          AND g.enabled = 1
+          AND (m.platform = g.platform OR g.platform = 'composite')
+          AND ${modelCapability}
+        ORDER BY gm.sort_order ASC, m.platform ASC, m.id ASC
+        LIMIT 1
+     )
+     SELECT quota.platform AS platform_quota_platform,
+            quota.enabled AS platform_quota_enabled,
+            quota.control_version AS platform_quota_control_version,
+            quota.daily_limit_micros AS platform_daily_limit_micros,
+            quota.weekly_limit_micros AS platform_weekly_limit_micros,
+            quota.monthly_limit_micros AS platform_monthly_limit_micros,
+            quota.daily_used_micros AS platform_daily_used_micros,
+            quota.weekly_used_micros AS platform_weekly_used_micros,
+            quota.monthly_used_micros AS platform_monthly_used_micros,
+            quota.daily_window_start_ms AS platform_daily_window_start_ms,
+            quota.weekly_window_start_ms AS platform_weekly_window_start_ms,
+            quota.monthly_window_start_ms AS platform_monthly_window_start_ms,
+            quota.daily_reset_epoch AS platform_daily_reset_epoch,
+            quota.weekly_reset_epoch AS platform_weekly_reset_epoch,
+            quota.monthly_reset_epoch AS platform_monthly_reset_epoch
+       FROM resolved_model resolved
+       JOIN user_platform_quotas quota
+         ON quota.user_id = ?
+        AND quota.platform = CASE
+          WHEN resolved.platform = 'codex' THEN 'openai'
+          ELSE resolved.platform
+        END
+      LIMIT 1`,
+  ).bind(...bindings)
+}
+
+interface ChannelModelPolicyRow {
+  channel_id: string
+  restrict_models: number
+  source_pattern: string | null
+  target_pattern: string | null
+  source_is_wildcard: number | null
+  target_is_wildcard: number | null
+  pricing_match: number
+}
+
+function channelModelPolicyStatement(
+  env: Env,
+  groupId: string,
+  requestedModel: string,
+  endpoint: GatewayEndpoint,
+): D1PreparedStatement {
+  const modelCapability = endpoint === 'embeddings'
+    ? 'resolved.embeddings = 1'
+    : endpoint === 'images'
+      ? 'resolved.image_generation = 1'
+      : `(resolved.endpoint = ? OR resolved.endpoint = 'both')`
+  const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
+    ? [groupId, requestedModel]
+    : [groupId, requestedModel, endpoint]
+  return env.DB.prepare(
+    `WITH active_channel AS (
+       SELECT c.id, c.restrict_models, resolved.platform AS target_platform
+         FROM channel_groups cg
+         JOIN channels c ON c.id = cg.channel_id
+         JOIN "groups" g ON g.id = cg.group_id
+         JOIN group_models gm ON gm.group_id = g.id
+         JOIN models resolved ON resolved.id = gm.model_id
+         JOIN model_prices price ON price.group_id = gm.group_id AND price.model_id = gm.model_id
+        WHERE cg.group_id = ? AND resolved.public_name = ?
+          AND c.status = 'active' AND g.enabled = 1
+          AND gm.enabled = 1 AND resolved.enabled = 1 AND price.active = 1
+          AND (resolved.platform = g.platform OR g.platform = 'composite')
+          AND ${modelCapability}
+        ORDER BY gm.sort_order ASC, resolved.platform ASC, resolved.id ASC
+        LIMIT 1
+     ), matched_mapping AS (
+       SELECT mapping.channel_id, mapping.source_pattern, mapping.target_pattern,
+              mapping.source_is_wildcard, mapping.target_is_wildcard
+         FROM channel_model_mappings mapping
+         JOIN active_channel channel ON channel.id = mapping.channel_id
+        WHERE mapping.platform = channel.target_platform AND (
+          (mapping.source_is_wildcard = 0 AND mapping.source_pattern = ? COLLATE NOCASE)
+          OR
+          (mapping.source_is_wildcard = 1 AND
+            substr(lower(?), 1, length(mapping.source_pattern) - 1) =
+              lower(substr(mapping.source_pattern, 1, length(mapping.source_pattern) - 1)))
+        )
+        ORDER BY mapping.source_is_wildcard ASC, mapping.sort_order ASC,
+                 length(mapping.source_pattern) DESC, mapping.source_pattern ASC
+        LIMIT 1
+     )
+     SELECT channel.id AS channel_id, channel.restrict_models,
+            mapping.source_pattern, mapping.target_pattern,
+            mapping.source_is_wildcard, mapping.target_is_wildcard,
+            EXISTS (
+              SELECT 1
+                FROM channel_model_pricing pricing
+                JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
+               WHERE pricing.channel_id = channel.id AND pricing.platform = channel.target_platform AND (
+                 (allowed.is_wildcard = 0 AND allowed.model_pattern = ? COLLATE NOCASE)
+                 OR
+                 (allowed.is_wildcard = 1 AND
+                   substr(lower(?), 1, length(allowed.model_pattern) - 1) =
+                     lower(substr(allowed.model_pattern, 1, length(allowed.model_pattern) - 1)))
+               )
+               LIMIT 1
+            ) AS pricing_match
+       FROM active_channel channel
+      LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
+      LIMIT 1`,
+  )
+    .bind(
+      ...routeBindings,
+      requestedModel,
+      requestedModel,
+      requestedModel,
+      requestedModel,
+    )
+}
+
+function applyChannelModelPolicy(
+  requestedModel: string,
+  model: ModelRoute,
+  row: ChannelModelPolicyRow | undefined,
+): ModelRoute {
+  // An unlinked or inactive channel deliberately preserves pre-channel routing.
+  if (row === undefined) return model
+
+  const mapped = row.target_pattern !== null && row.target_pattern !== ''
+  if (!mapped) {
+    if (row.restrict_models === 1 && row.pricing_match !== 1) {
+      throw new GatewayError(
+        404,
+        'model_not_found',
+        `Model '${requestedModel}' is not available`,
+        'invalid_request_error',
+      )
+    }
+    return model
+  }
+
+  return {
+    ...model,
+    upstream_name: expandChannelMappingTarget(requestedModel, row),
+  }
+}
+
+function expandChannelMappingTarget(
+  requestedModel: string,
+  row: Pick<ChannelModelPolicyRow,
+    'source_pattern' | 'target_pattern' | 'source_is_wildcard' | 'target_is_wildcard'>,
+): string {
+  const target = row.target_pattern!
+  if (row.target_is_wildcard !== 1) return target
+  const sourcePrefixLength = row.source_is_wildcard === 1
+    ? row.source_pattern!.length - 1
+    : requestedModel.length
+  return `${target.slice(0, -1)}${requestedModel.slice(sourcePrefixLength)}`
 }
 
 function accountCandidatesStatement(
   env: Env,
   groupId: string,
   publicName: string,
+  modelEndpoint: GatewayEndpoint,
   capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation',
   platformConstraint?: 'openai' | 'openai_or_codex',
 ): D1PreparedStatement {
@@ -499,8 +701,30 @@ function accountCandidatesStatement(
     : platformConstraint === 'openai_or_codex'
       ? "AND a.platform IN ('openai', 'codex')"
       : ''
+  const modelCapability = modelEndpoint === 'embeddings'
+    ? 'm.embeddings = 1'
+    : modelEndpoint === 'images'
+      ? 'm.image_generation = 1'
+      : `(m.endpoint = ? OR m.endpoint = 'both')`
+  const modelBindings = modelEndpoint === 'embeddings' || modelEndpoint === 'images'
+    ? [groupId, publicName]
+    : [groupId, publicName, modelEndpoint]
   return env.DB.prepare(
-    `SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
+    `WITH resolved_model AS (
+       SELECT m.id AS model_id, m.platform
+         FROM group_models AS gm
+         JOIN "groups" g ON g.id = gm.group_id
+         JOIN models m ON m.id = gm.model_id
+         JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id
+        WHERE gm.group_id = ? AND m.public_name = ?
+          AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
+          AND g.enabled = 1
+          AND (m.platform = g.platform OR g.platform = 'composite')
+          AND ${modelCapability}
+        ORDER BY gm.sort_order ASC, m.platform ASC, m.id ASC
+        LIMIT 1
+     )
+     SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency,
             ag.priority, ag.weight, a.config_version,
@@ -508,17 +732,18 @@ function accountCandidatesStatement(
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
        JOIN account_models am ON am.account_id = a.id
-       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
-       JOIN models m ON m.id = am.model_id AND m.platform = g.platform
+       JOIN resolved_model resolved
+         ON resolved.model_id = am.model_id AND resolved.platform = a.platform
+       JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
-        AND m.public_name = ?
+        AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1
         ${platformPredicate}
       ORDER BY ag.priority ASC, a.id ASC`,
   )
-    .bind(groupId, publicName)
+    .bind(...modelBindings, groupId)
 }
 
 export async function getAccountCredential(
@@ -537,10 +762,11 @@ export async function getAccountCredential(
        FROM accounts a
        JOIN account_groups ag ON ag.account_id = a.id
        JOIN account_models am ON am.account_id = a.id
-       JOIN "groups" g ON g.id = ag.group_id AND g.platform = a.platform
-       JOIN models m ON m.id = am.model_id AND m.platform = g.platform
+       JOIN "groups" g ON g.id = ag.group_id
+       JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
+        AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1 AND a.enabled = 1
         AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL

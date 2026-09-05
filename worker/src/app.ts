@@ -92,6 +92,13 @@ import {
   updateAdminGroup,
   updateAdminModel,
 } from './control/catalog'
+import {
+  createAdminChannel,
+  deleteAdminChannel,
+  getAdminChannel,
+  listAdminChannels,
+  updateAdminChannel,
+} from './control/channels'
 import { getAdminSettings, updateAdminSettings } from './control/settings'
 import {
   disableAdminOAuthProvider,
@@ -220,6 +227,7 @@ import {
   updateUserApiKey,
 } from './user/api-keys'
 import { getUserGroupRates, listAvailableUserGroups } from './user/groups'
+import { listAvailableUserChannels } from './user/channels'
 import {
   getAdminPlatformQuotaDefaults,
   getAdminUserPlatformQuotas,
@@ -366,6 +374,7 @@ function defaultPublicSettings() {
     turnstile_enabled: false,
     turnstile_site_key: '',
     passkey_enabled: false,
+    available_channels_enabled: false,
     model_plaza_enabled: false,
     model_plaza_require_auth: false,
     model_plaza_description: '',
@@ -427,6 +436,7 @@ export function createApp() {
           resolved.email_verify_enabled ?? resolved.email_verification_enabled ?? false,
         passkey_enabled:
           resolved.passkey_enabled === true && isPasskeyDeploymentConfigured(context.env),
+        available_channels_enabled: resolved.available_channels_enabled === true,
         ...oauth,
         payment_enabled: paymentEnabled,
       },
@@ -565,6 +575,11 @@ export function createApp() {
   app.get('/api/v1/admin/models/:id', getAdminModel)
   app.put('/api/v1/admin/models/:id', updateAdminModel)
   app.delete('/api/v1/admin/models/:id', deleteAdminModel)
+  app.get('/api/v1/admin/channels', listAdminChannels)
+  app.post('/api/v1/admin/channels', createAdminChannel)
+  app.get('/api/v1/admin/channels/:id', getAdminChannel)
+  app.put('/api/v1/admin/channels/:id', updateAdminChannel)
+  app.delete('/api/v1/admin/channels/:id', deleteAdminChannel)
   app.get('/api/v1/admin/accounts', listAdminAccounts)
   app.post('/api/v1/admin/accounts', createAdminAccount)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
@@ -677,6 +692,7 @@ export function createApp() {
   app.delete('/api/v1/keys/:id', revokeUserApiKey)
   app.get('/api/v1/groups/available', listAvailableUserGroups)
   app.get('/api/v1/groups/rates', getUserGroupRates)
+  app.get('/api/v1/channels/available', listAvailableUserChannels)
   app.get('/api/v1/subscriptions', listUserSubscriptions)
   app.get('/api/v1/subscriptions/active', listActiveUserSubscriptions)
   app.get('/api/v1/subscriptions/progress', listUserSubscriptionProgress)

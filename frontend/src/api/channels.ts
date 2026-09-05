@@ -7,7 +7,7 @@ import { apiClient } from './client'
 import type { BillingMode } from '@/constants/channel'
 
 export interface UserAvailableGroup {
-  id: number
+  id: string
   name: string
   platform: string
   /** 'standard' | 'subscription' — 订阅分组视觉加深，和 API 密钥页保持一致。 */
@@ -75,7 +75,13 @@ export async function getAvailable(options?: { signal?: AbortSignal }): Promise<
   const { data } = await apiClient.get<UserAvailableChannel[]>('/channels/available', {
     signal: options?.signal
   })
-  return data
+  return data.map((channel) => ({
+    ...channel,
+    platforms: channel.platforms.map((section) => ({
+      ...section,
+      groups: section.groups.map((group) => ({ ...group, id: String(group.id) })),
+    })),
+  }))
 }
 
 export const userChannelsAPI = { getAvailable }

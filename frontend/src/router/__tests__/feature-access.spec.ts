@@ -26,6 +26,7 @@ const appStore = vi.hoisted(() => ({
   cachedPublicSettings: null as null | {
     payment_enabled?: boolean
     risk_control_enabled?: boolean
+    available_channels_enabled?: boolean
     custom_menu_items?: []
   },
   fetchPublicSettings: vi.fn(),
@@ -152,6 +153,12 @@ describe('feature route guard', () => {
     })
   })
 
+  it('marks available channels as an opt-in route', () => {
+    expect(routerHarness.routes.find((route) => route.path === '/available-channels')).toMatchObject({
+      meta: { requiresAvailableChannels: true },
+    })
+  })
+
   it('waits for the first public-settings request before deciding payment access', async () => {
     const deferred = createDeferred<{ payment_enabled: boolean }>()
     appStore.fetchPublicSettings.mockImplementation(async () => {
@@ -175,6 +182,7 @@ describe('feature route guard', () => {
   it.each([
     ['payment', { requiresPayment: true }, '/purchase'],
     ['risk control', { requiresRiskControl: true }, '/admin/risk-control'],
+    ['available channels', { requiresAvailableChannels: true }, '/available-channels'],
   ])('does not treat a failed %s settings load as explicitly disabled', async (_name, meta, path) => {
     authStore.isAdmin = meta.requiresRiskControl === true
     appStore.fetchPublicSettings.mockResolvedValue(null)
@@ -194,6 +202,12 @@ describe('feature route guard', () => {
       { requiresRiskControl: true },
       { risk_control_enabled: false },
       '/admin/settings',
+    ],
+    [
+      'available channels',
+      { requiresAvailableChannels: true },
+      { available_channels_enabled: false },
+      '/dashboard',
     ],
   ])('redirects when loaded settings explicitly disable %s', async (_name, meta, settings, target) => {
     authStore.isAdmin = meta.requiresRiskControl === true

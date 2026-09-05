@@ -63,6 +63,25 @@ describe('production admin route permission matrix', () => {
     expect(groups.status).toBe(403)
   })
 
+  it('classifies channel administration as catalog access', async () => {
+    grantRole('channel-reader', ['admin.catalog.read'])
+
+    const list = await request('/api/v1/admin/channels')
+    const create = await request('/api/v1/admin/channels', 'POST')
+
+    expect(list.status).toBe(200)
+    await expect(list.json()).resolves.toMatchObject({
+      data: { items: [], total: 0 },
+    })
+    expect(create.status).toBe(403)
+    await expect(create.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.catalog.write'),
+      },
+    })
+  })
+
   it('routes nested subscription reads to commerce instead of user or catalog permissions', async () => {
     grantRole('commerce-reader', ['admin.commerce.read'])
 

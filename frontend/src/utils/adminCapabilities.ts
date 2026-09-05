@@ -15,6 +15,7 @@ const CLOUDFLARE_ADMIN_PATHS = [
   '/admin/settings',
   '/admin/users',
   '/admin/groups',
+  '/admin/channels/pricing',
   '/admin/accounts',
   '/admin/subscriptions',
   '/admin/redeem',

@@ -336,6 +336,226 @@ describe('gateway repository provider routing', () => {
   )
 })
 
+describe('gateway repository channel model policy', () => {
+  it('prefers an exact channel mapping over a matching suffix wildcard without changing billing', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('channel-openai', 'openai', 'openai-*', 'wildcard-*', 1, 1, 0, 1),
+        ('channel-openai', 'openai', 'openai-public', 'exact-upstream', 0, 0, 99, 1);
+    `)
+
+    const route = await resolveGatewayRoute(
+      { DB: d1 } as Env,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )
+
+    expect(route.model).toMatchObject({
+      public_name: 'openai-public',
+      upstream_name: 'exact-upstream',
+      price_id: 'price-openai',
+      input_micros_per_million: 1000,
+      output_micros_per_million: 2000,
+    })
+    expect(route.candidates.map((candidate) => candidate.account_id)).toEqual(['account-openai'])
+    raw.close()
+  })
+
+  it('expands the requested suffix into a wildcard mapping target', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-openai', 'openai', 'openai-*', 'vendor-*', 1, 1, 0, 1);
+    `)
+
+    const route = await resolveGatewayRoute(
+      { DB: d1 } as Env,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )
+
+    expect(route.model.upstream_name).toBe('vendor-public')
+    raw.close()
+  })
+
+  it('rejects an unmapped restricted model unless channel pricing explicitly covers it', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: true })
+    const testEnv = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )).rejects.toMatchObject({ status: 404, code: 'model_not_found' })
+
+    raw.exec(`
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, control_version, created_at_ms, updated_at_ms
+      ) VALUES ('channel-price-openai', 'channel-openai', 'openai', 'token', 0, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-price-openai', 'openai-*', 1, 0, 1);
+    `)
+
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )).resolves.toMatchObject({
+      model: { upstream_name: 'openai-upstream', price_id: 'price-openai' },
+    })
+    raw.close()
+  })
+
+  it('allows a mapped restricted model and leaves inactive channels as pass-through', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: true })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-openai', 'openai', 'openai-public', 'mapped-upstream', 0, 0, 0, 1);
+    `)
+    const testEnv = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )).resolves.toMatchObject({ model: { upstream_name: 'mapped-upstream' } })
+
+    raw.prepare("UPDATE channels SET status = 'inactive', updated_at_ms = 2 WHERE id = 'channel-openai'").run()
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )).resolves.toMatchObject({ model: { upstream_name: 'openai-upstream' } })
+    raw.close()
+  })
+
+  it('uses the resolved concrete model platform for composite channel mapping and pricing', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    raw.exec(`
+      INSERT INTO users (id, email, display_name, created_at_ms, updated_at_ms)
+      VALUES ('user-1', 'composite@example.test', 'Composite user', 1, 1);
+      INSERT INTO user_platform_quotas (
+        user_id, platform, enabled, daily_limit_micros, weekly_limit_micros,
+        monthly_limit_micros, control_version, created_at_ms, updated_at_ms
+      ) VALUES ('user-1', 'openai', 1, 1000, 2000, 3000, 4, 1, 1);
+    `)
+    raw.prepare("UPDATE \"groups\" SET platform = 'composite' WHERE id = 'group-openai'").run()
+    seedProviderRoute(raw, 'anthropic', 'anthropic', 'x-api-key', '{}')
+    raw.exec(`
+      UPDATE models SET public_name = 'openai-public'
+       WHERE id = 'model-anthropic';
+      INSERT INTO group_models (
+        group_id, model_id, enabled, catalog_visible, sort_order, created_at_ms, updated_at_ms
+      ) VALUES ('group-openai', 'model-anthropic', 1, 1, 1, 1, 1);
+      INSERT INTO model_prices (
+        id, group_id, model_id, version, active,
+        input_micros_per_million, output_micros_per_million,
+        cache_read_micros_per_million, per_request_micros,
+        minimum_reservation_micros, effective_at_ms, created_at_ms
+      ) VALUES (
+        'price-composite-anthropic', 'group-openai', 'model-anthropic', 1, 1,
+        3000, 4000, 0, 0, 1, 1, 1
+      );
+      INSERT INTO account_groups (
+        account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+      ) VALUES ('account-anthropic', 'group-openai', 0, 1, 1, 1);
+    `)
+    seedChannel(raw, { restrictModels: true })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('channel-openai', 'composite', 'openai-public', 'wrong-upstream', 0, 0, 0, 1),
+        ('channel-openai', 'openai', 'openai-public', 'resolved-upstream', 0, 0, 0, 1);
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, control_version, created_at_ms, updated_at_ms
+      ) VALUES ('channel-price-openai', 'channel-openai', 'openai', 'token', 0, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-price-openai', 'openai-public', 0, 0, 1);
+    `)
+    const testEnv = { DB: d1 } as Env
+
+    const route = await resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )
+    expect(route).toMatchObject({
+      model: { platform: 'openai', upstream_name: 'resolved-upstream' },
+      platform_quota: {
+        platform: 'openai', control_version: 4,
+        daily_limit_micros: 1000, weekly_limit_micros: 2000, monthly_limit_micros: 3000,
+      },
+    })
+    expect(route.candidates.map((candidate) => [candidate.account_id, candidate.platform]))
+      .toEqual([['account-openai', 'openai']])
+    await expect(getAccountCredential(
+      testEnv,
+      'group-openai',
+      'model-openai',
+      'responses',
+      'account-openai',
+    )).resolves.toMatchObject({
+      account_id: 'account-openai', platform: 'openai', secret_id: 'secret-openai',
+    })
+    await expect(listModels(testEnv, 'group-openai')).resolves.toEqual([
+      expect.objectContaining({ model_id: 'model-openai', platform: 'openai' }),
+      expect.objectContaining({ model_id: 'model-anthropic', platform: 'anthropic' }),
+    ])
+
+    raw.prepare('DELETE FROM channel_model_mappings WHERE channel_id = ?').run('channel-openai')
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-openai',
+      'openai-public',
+      'responses',
+      'user-1',
+    )).resolves.toMatchObject({
+      model: { platform: 'openai', upstream_name: 'openai-upstream' },
+    })
+    raw.close()
+  })
+})
+
 function seedEmbeddingRoute(database: any): void {
   database.exec(`
     INSERT INTO "groups" (
@@ -479,4 +699,19 @@ function seedProviderRoute(
       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
     ) VALUES (?, ?, 0, 1, 0, 1, 1)
   `).run(`account-${platform}`, `model-${platform}`)
+}
+
+function seedChannel(
+  database: any,
+  options: { restrictModels: boolean },
+): void {
+  database.prepare(`
+    INSERT INTO channels (
+      id, name, status, restrict_models, created_at_ms, updated_at_ms
+    ) VALUES ('channel-openai', 'OpenAI channel', 'active', ?, 1, 1)
+  `).run(options.restrictModels ? 1 : 0)
+  database.exec(`
+    INSERT INTO channel_groups (channel_id, group_id, created_at_ms)
+    VALUES ('channel-openai', 'group-openai', 1);
+  `)
 }

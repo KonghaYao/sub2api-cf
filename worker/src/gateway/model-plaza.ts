@@ -81,7 +81,8 @@ export async function getModelPlaza(context: Context<Bindings>): Promise<Respons
               JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
              WHERE ag.group_id = g.id AND a.enabled = 1
                AND a.health_status <> 'unhealthy' AND a.base_url IS NOT NULL
-               AND a.platform = g.platform AND m.platform = g.platform
+               AND a.platform = m.platform
+               AND (m.platform = g.platform OR g.platform = 'composite')
                AND (
                  (m.endpoint = 'chat_completions' AND (am.chat_completions = 1 OR
                    (a.platform IN ('openai', 'codex') AND am.responses = 1)))

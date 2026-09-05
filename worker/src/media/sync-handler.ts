@@ -145,6 +145,7 @@ async function executeSyncImages(
       resolveSyncImagePricePolicy(context.env, principal),
       resolveGatewayRoute(context.env, principal.group_id, manifest.model, 'images', principal.user_id),
     ])
+    principal = { ...principal, platform_quota: route.platform_quota }
     const compatibleCandidates = route.candidates.filter((candidate) =>
       (candidate.platform === 'openai' && candidate.image_adapter === 'direct_images' &&
         candidate.credential_kind === 'api_key') ||

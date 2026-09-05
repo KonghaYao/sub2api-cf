@@ -408,6 +408,62 @@ describe('scheduled account health lifecycle', () => {
     test.raw.close()
   })
 
+  it('synchronizes only same-provider model members for a composite group Pool', async () => {
+    const test = fixture()
+    const primaryId = await seedAccount(test, 'openai', 'composite-primary')
+    const backupId = await seedAccount(test, 'openai', 'composite-backup')
+    const anthropicId = await seedAccount(test, 'anthropic', 'composite-anthropic')
+    test.raw.exec(`
+      INSERT INTO "groups" (
+        id, name, platform, enabled, created_at_ms, updated_at_ms
+      ) VALUES ('group-composite', 'Lifecycle composite', 'composite', 1, ${NOW}, ${NOW});
+      INSERT INTO models (
+        id, platform, public_name, upstream_name, endpoint, embeddings,
+        enabled, created_at_ms, updated_at_ms
+      ) VALUES
+        ('model-composite-openai', 'openai', 'shared-public', 'openai-upstream', 'responses', 0, 1, ${NOW}, ${NOW}),
+        ('model-composite-anthropic', 'anthropic', 'shared-public', 'claude-upstream', 'responses', 0, 1, ${NOW}, ${NOW});
+      INSERT INTO group_models (
+        group_id, model_id, enabled, catalog_visible, created_at_ms, updated_at_ms
+      ) VALUES
+        ('group-composite', 'model-composite-openai', 1, 1, ${NOW}, ${NOW}),
+        ('group-composite', 'model-composite-anthropic', 1, 1, ${NOW}, ${NOW});
+      INSERT INTO account_groups (
+        account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+      ) VALUES
+        ('${primaryId}', 'group-composite', 1, 3, ${NOW}, ${NOW}),
+        ('${backupId}', 'group-composite', 2, 2, ${NOW}, ${NOW}),
+        ('${anthropicId}', 'group-composite', 0, 9, ${NOW}, ${NOW});
+      INSERT INTO account_models (
+        account_id, model_id, chat_completions, responses, embeddings,
+        created_at_ms, updated_at_ms
+      ) VALUES
+        ('${primaryId}', 'model-composite-openai', 0, 1, 0, ${NOW}, ${NOW}),
+        ('${backupId}', 'model-composite-openai', 0, 1, 0, ${NOW}, ${NOW}),
+        ('${anthropicId}', 'model-composite-anthropic', 0, 1, 0, ${NOW}, ${NOW});
+      UPDATE accounts SET next_health_probe_at_ms = ${NOW + 24 * 60 * 60_000}
+       WHERE id IN ('${backupId}', '${anthropicId}');
+    `)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')))
+
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+    await consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
+
+    expect(test.pool.calls).toEqual([
+      expect.objectContaining({
+        name: 'group:group-composite:platform:openai:model:model-composite-openai:endpoint:responses:shard:0',
+        body: expect.objectContaining({
+          accounts: [
+            { account_id: primaryId, max_concurrency: 4, priority: 1, weight: 3 },
+            { account_id: backupId, max_concurrency: 4, priority: 2, weight: 2 },
+          ],
+        }),
+      }),
+    ])
+    expect(job(test, primaryId)).toMatchObject({ status: 'completed' })
+    test.raw.close()
+  })
+
   it('removes an unhealthy account from Pool and restores it after a later successful probe', async () => {
     const test = fixture()
     const accountId = await seedAccount(test, 'gemini')

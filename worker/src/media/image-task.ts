@@ -350,7 +350,11 @@ async function claimExpiredTask(env: Env, taskId: string, now: number): Promise<
 }
 
 async function requireAsyncImageGroup(env: Env, principal: GatewayPrincipal): Promise<void> {
-  if (principal.platform !== 'openai' && principal.platform !== 'codex') {
+  if (
+    principal.platform !== 'openai' &&
+    principal.platform !== 'codex' &&
+    principal.platform !== 'composite'
+  ) {
     throw new GatewayError(404, 'IMAGE_ASYNC_NOT_SUPPORTED', 'Asynchronous Images is not available for this group')
   }
   const group = await env.DB.prepare(

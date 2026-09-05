@@ -357,6 +357,7 @@ async function handleGeminiCountTokens(
       'responses',
       principal.user_id,
     )
+    principal.platform_quota = route.platform_quota
     const provider = providerForCandidates(route.candidates)
     let operation: ProviderOperation
     let upstreamBody: Record<string, unknown>
@@ -526,6 +527,7 @@ export async function handleAnthropicCountTokens(
       'responses',
       principal.user_id,
     )
+    principal.platform_quota = route.platform_quota
     const provider = providerForCandidates(route.candidates)
     let operation: ProviderOperation
     let upstreamBody: unknown
@@ -643,6 +645,7 @@ export async function handleResponsesInputTokens(
       'responses',
       principal.user_id,
     )
+    principal.platform_quota = route.platform_quota
     const provider = providerForCandidates(route.candidates)
     if (provider !== 'openai') unsupportedProviderOperation(provider, 'responses_input_tokens')
     const upstreamBody: Record<string, unknown> = {
@@ -1109,6 +1112,7 @@ async function dispatchGateway(
           ? 'responses'
           : undefined,
     )
+    principal.platform_quota = route.platform_quota
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint as TextGatewayEndpoint
     const provider = providerForCandidates(route.candidates)

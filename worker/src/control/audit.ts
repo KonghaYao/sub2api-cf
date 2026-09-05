@@ -5,7 +5,7 @@ import { controlError, controlSuccess, queryInteger } from './http'
 
 type ControlBindings = { Bindings: Env }
 
-const AUDIT_CATEGORIES = ['settings', 'rbac', 'auth', 'payment'] as const
+const AUDIT_CATEGORIES = ['settings', 'rbac', 'channel', 'auth', 'payment'] as const
 const AUDIT_OUTCOMES = ['succeeded', 'failed', 'blocked', 'recorded'] as const
 const MAX_CURSOR_BYTES = 2_048
 
@@ -252,6 +252,13 @@ function auditSelect(category?: AuditCategory): string {
              'admin' AS origin, resource_type, resource_id, resource_version,
              details_json AS metadata_json, occurred_at_ms
         FROM admin_rbac_audit_events`,
+    channel: `
+      SELECT 'channel' AS category, id AS event_id, action,
+             'succeeded' AS outcome, actor_user_id, actor_session_id,
+             'admin' AS origin, 'channel' AS resource_type,
+             resource_id, resource_version, changed_fields_json AS metadata_json,
+             occurred_at_ms
+        FROM admin_channel_audit_events`,
     auth: `
       SELECT 'auth' AS category, id AS event_id, event_type AS action,
              outcome, user_id AS actor_user_id, session_id AS actor_session_id,
@@ -376,11 +383,23 @@ function sanitizeMetadata(category: AuditCategory, raw: string): Record<string, 
       return { changed_fields: sanitizeChangedFields(value) }
     case 'rbac':
       return sanitizeRbacMetadata(value)
+    case 'channel':
+      return { changed_fields: sanitizeChannelChangedFields(value) }
     case 'auth':
       return sanitizeAuthMetadata(value)
     case 'payment':
       return sanitizePaymentMetadata(value)
   }
+}
+
+function sanitizeChannelChangedFields(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const allowed = new Set([
+    'create', 'delete', 'name', 'description', 'status', 'billing_model_source',
+    'restrict_models', 'features_config', 'group_ids', 'model_mapping',
+    'model_pricing', 'apply_pricing_to_account_stats',
+  ])
+  return value.filter((field): field is string => typeof field === 'string' && allowed.has(field)).slice(0, 100)
 }
 
 function sanitizeChangedFields(value: unknown): string[] {
