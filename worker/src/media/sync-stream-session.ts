@@ -31,6 +31,10 @@ export interface SyncImageLiveStreamOptions {
   disconnectTotalMs?: number
   now?: () => number
   waitUntil?: (task: Promise<unknown>) => void
+  /** Preserve direct Images provider bytes; the transformer becomes accounting-only. */
+  outputMode?: 'transformed' | 'passthrough'
+  /** Detect JSON returned to a streaming request, including an SSE-mislabeled body. */
+  detectJsonFallback?: boolean
 }
 
 export interface SyncImageLiveCompletion {
@@ -50,6 +54,13 @@ export type SyncImageLivePrelude =
     completion: Promise<SyncImageLiveCompletion>
   }
 
+export type SyncImageDirectLivePrelude = SyncImageLivePrelude | {
+  kind: 'json_fallback'
+  bytes: Uint8Array
+  status: number
+  headers: Headers
+}
+
 interface SessionState {
   reader: ReadableStreamDefaultReader<Uint8Array>
   transformer: SyncImageSseTransformer
@@ -64,6 +75,7 @@ interface SessionState {
   responseBytes: number
   frameBytes: number
   pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null
+  passthroughBytesStarted: boolean
 }
 
 type ReadResult =
@@ -75,9 +87,13 @@ type ReadResult =
  * A semantic failure before a public image frame/keepalive remains available
  * to the handler's existing account retry/failover policy.
  */
+export function prepareSyncImageLiveStream(
+  input: SyncImageLiveStreamOptions & { outputMode: 'passthrough'; detectJsonFallback: true },
+): Promise<SyncImageDirectLivePrelude>
+export function prepareSyncImageLiveStream(input: SyncImageLiveStreamOptions): Promise<SyncImageLivePrelude>
 export async function prepareSyncImageLiveStream(
   input: SyncImageLiveStreamOptions,
-): Promise<SyncImageLivePrelude> {
+): Promise<SyncImageDirectLivePrelude> {
   if (input.response.body === null) {
     throw new GatewayError(502, 'IMAGE_RESPONSES_BODY_MISSING', 'Image Responses provider returned no stream', 'server_error')
   }
@@ -92,6 +108,7 @@ export async function prepareSyncImageLiveStream(
       maxEventBytes: input.maxEventBytes,
       maxTrackedImageBytes: input.maxTrackedImageBytes,
       maxCompletedImages: input.maxCompletedImages,
+      tolerateMalformedEvents: input.outputMode === 'passthrough',
       now: () => Math.floor(now() / 1_000),
     }),
     options: {
@@ -109,51 +126,164 @@ export async function prepareSyncImageLiveStream(
     responseBytes: 0,
     frameBytes: 0,
     pendingRead: null,
+    passthroughBytesStarted: false,
+  }
+
+  const passthrough = input.outputMode === 'passthrough'
+  const rawPrelude: Uint8Array[] = []
+  const sniffed: Uint8Array[] = []
+  let sniffing = passthrough && input.detectJsonFallback === true
+
+  if (sniffing && !isEventStream(input.response.headers)) {
+    return readJsonFallback(state, input.response, sniffed)
   }
 
   try {
     while (true) {
       const next = await readNext(state, false)
       if (next.kind === 'keepalive') {
+        if (sniffing) continue
         const frames = state.transformer.keepalive()
         accountFrames(state, frames)
-        return committedSession(state, frames)
+        return committedSession(state, passthrough ? [...rawPrelude, ...frames] : frames)
       }
       if (next.result.done) {
-        const frames = state.transformer.finish()
-        frames.push(...retainPaidOutput(state))
-        accountFrames(state, frames)
+        if (sniffing) {
+          return readJsonFallback(state, input.response, sniffed)
+        }
+        const frames = terminalOutput(state, passthrough)
         if (state.transformer.currentState() === 'error' && !state.transformer.imageOutputStarted()) {
           if (state.transformer.providerOutputCompleted()) {
             return committedSession(state, frames)
           }
           return precommitFailure(state)
         }
-        return committedSession(state, frames)
+        return committedSession(state, passthrough ? [...rawPrelude, ...frames] : frames)
       }
       state.lastChunkAt = state.options.now?.() ?? Date.now()
-      accountResponseChunk(state, next.result.value)
-      const frames = state.transformer.push(next.result.value)
-      frames.push(...retainPaidOutput(state))
-      accountFrames(state, frames)
+      if (sniffing) {
+        accountResponseChunk(state, next.result.value)
+        sniffed.push(next.result.value)
+        const kind = sniffBodyKind(sniffed)
+        if (kind === 'undecided') continue
+        if (kind === 'json') return readJsonFallback(state, input.response, sniffed)
+        sniffing = false
+        for (const chunk of sniffed) rawPrelude.push(...processOutputChunk(state, chunk, true, true))
+        sniffed.length = 0
+      } else {
+        rawPrelude.push(...processOutputChunk(state, next.result.value, passthrough))
+      }
+      // Once a 2xx Direct response is known to be SSE, the first provider
+      // bytes are the public commitment point. Accounting state must never
+      // delay the response or make the handler switch accounts.
+      if (passthrough) return committedSession(state, rawPrelude)
       if (state.transformer.currentState() === 'error' && !state.transformer.imageOutputStarted()) {
         if (state.transformer.providerOutputCompleted()) {
-          return committedSession(state, frames)
+          return committedSession(state, rawPrelude)
         }
         return precommitFailure(state)
       }
-      if (frames.length > 0) return committedSession(state, frames)
+      if (rawPrelude.length > 0) return committedSession(state, rawPrelude)
     }
   } catch (error) {
     const mapped = streamFailure(error)
     if (state.transformer.providerOutputCompleted()) {
       const frames = retainPaidOutput(state)
       frames.push(...state.transformer.failTransport(mapped.code, mapped.message, mapped.type, mapped.param))
-      return committedSession(state, frames)
+      return committedSession(state, passthrough ? rawPrelude : frames)
     }
     void state.reader.cancel(error)
     throw mapped
   }
+}
+
+function processOutputChunk(
+  state: SessionState,
+  chunk: Uint8Array,
+  passthrough: boolean,
+  alreadyAccounted = false,
+): Uint8Array[] {
+  if (!alreadyAccounted) accountResponseChunk(state, chunk)
+  if (passthrough) {
+    if (chunk.byteLength > 0) state.passthroughBytesStarted = true
+    try {
+      state.transformer.push(chunk)
+      retainPaidOutput(state)
+    } catch {
+      // The native stream remains authoritative after commitment. An observer
+      // protocol failure may reduce accounting detail, but may not truncate or
+      // rewrite provider bytes that the client is already receiving.
+    }
+    return [chunk]
+  }
+  const transformed = state.transformer.push(chunk)
+  transformed.push(...retainPaidOutput(state))
+  accountFrames(state, transformed)
+  return transformed
+}
+
+function terminalOutput(state: SessionState, passthrough: boolean): Uint8Array[] {
+  const transformed = state.transformer.finish()
+  transformed.push(...retainPaidOutput(state))
+  if (!passthrough) {
+    accountFrames(state, transformed)
+    return transformed
+  }
+  // Native upstream bytes are the public protocol. The transformer is an
+  // accounting-only observer and must never append or rewrite terminal bytes.
+  return []
+}
+
+function isEventStream(headers: Headers): boolean {
+  return headers.get('content-type')?.toLowerCase().includes('text/event-stream') === true
+}
+
+function sniffBodyKind(chunks: readonly Uint8Array[]): 'undecided' | 'json' | 'sse' {
+  let offset = 0
+  for (const chunk of chunks) {
+    for (const byte of chunk) {
+      offset += 1
+      if (offset <= 3 && ((offset === 1 && byte === 0xef) || (offset === 2 && byte === 0xbb) || (offset === 3 && byte === 0xbf))) {
+        continue
+      }
+      if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue
+      return byte === 0x7b || byte === 0x5b ? 'json' : 'sse'
+    }
+  }
+  return 'undecided'
+}
+
+async function readJsonFallback(
+  state: SessionState,
+  response: Response,
+  initial: readonly Uint8Array[],
+): Promise<Extract<SyncImageDirectLivePrelude, { kind: 'json_fallback' }>> {
+  const chunks = [...initial]
+  while (true) {
+    const next = await readNext(state, false)
+    if (next.kind === 'keepalive') continue
+    if (next.result.done) break
+    state.lastChunkAt = state.options.now?.() ?? Date.now()
+    accountResponseChunk(state, next.result.value)
+    chunks.push(next.result.value)
+  }
+  const bytes = concatenate(chunks, state.responseBytes)
+  return {
+    kind: 'json_fallback',
+    bytes,
+    status: response.status,
+    headers: new Headers(response.headers),
+  }
+}
+
+function concatenate(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const output = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    output.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return output
 }
 
 function precommitFailure(state: SessionState): SyncImageLivePrelude {
@@ -209,21 +339,17 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
     result: ReadableStreamReadResult<Uint8Array>,
     controller: ReadableStreamDefaultController<Uint8Array> | null,
   ): void => {
+    const passthrough = state.options.outputMode === 'passthrough'
     if (result.done) {
-      const frames = state.transformer.finish()
-      frames.push(...retainPaidOutput(state))
-      accountFrames(state, frames)
+      const frames = terminalOutput(state, passthrough)
       if (controller !== null && !downstreamCancelled) pendingFrames.push(...frames)
       if (pendingFrames.length === 0 || controller === null || downstreamCancelled) finish(controller, null)
       return
     }
     state.lastChunkAt = state.options.now?.() ?? Date.now()
-    accountResponseChunk(state, result.value)
-    const frames = state.transformer.push(result.value)
-    frames.push(...retainPaidOutput(state))
-    accountFrames(state, frames)
+    const frames = processOutputChunk(state, result.value, passthrough)
     if (controller !== null && !downstreamCancelled) pendingFrames.push(...frames)
-    if (state.transformer.currentState() !== 'open' && pendingFrames.length === 0) finish(controller, null)
+    if (!passthrough && state.transformer.currentState() !== 'open' && pendingFrames.length === 0) finish(controller, null)
   }
 
   const failCommitted = (
@@ -237,7 +363,9 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
       // A terminal diagnostic must never be subjected to the already-exceeded
       // aggregate budget; completion owns settlement and resource release.
       if (controller !== null && !downstreamCancelled) {
-        for (const frame of frames) controller.enqueue(frame)
+        if (state.options.outputMode !== 'passthrough') {
+          for (const frame of frames) controller.enqueue(frame)
+        }
       }
     } finally {
       finish(controller, mapped)
@@ -265,13 +393,19 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
       return serialize(async () => {
         if (finished || downstreamCancelled) return
         if (enqueueOne(controller)) {
-          if (pendingFrames.length === 0 && state.transformer.currentState() !== 'open') finish(controller, null)
+          if (state.options.outputMode !== 'passthrough' && pendingFrames.length === 0 && state.transformer.currentState() !== 'open') {
+            finish(controller, null)
+          }
           return
         }
         try {
           while (!finished && !downstreamCancelled) {
             const next = await readNext(state, false, disconnectSignal.signal)
             if (next.kind === 'keepalive') {
+              // Appending an SSE comment after an arbitrary provider chunk can
+              // split a multiline event. Once native bytes have started, favor
+              // byte-exact passthrough over synthetic keepalives.
+              if (state.options.outputMode === 'passthrough' && state.passthroughBytesStarted) continue
               const frames = state.transformer.keepalive()
               accountFrames(state, frames)
               pendingFrames.push(...frames)
@@ -279,7 +413,9 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
               processRead(next.result, controller)
             }
             if (enqueueOne(controller)) {
-              if (pendingFrames.length === 0 && state.transformer.currentState() !== 'open') finish(controller, null)
+              if (state.options.outputMode !== 'passthrough' && pendingFrames.length === 0 && state.transformer.currentState() !== 'open') {
+                finish(controller, null)
+              }
               return
             }
           }
@@ -380,6 +516,11 @@ async function readNext(
 }
 
 function accountResponseChunk(state: SessionState, chunk: Uint8Array): void {
+  // Native passthrough chunks are not retained after commitment, so treating
+  // cumulative egress as an in-memory response buffer would truncate valid
+  // multi-image streams. The sniffed prelude remains bounded because this flag
+  // is set only after the body has been classified as SSE.
+  if (state.options.outputMode === 'passthrough' && state.passthroughBytesStarted) return
   state.responseBytes += chunk.byteLength
   if (state.responseBytes > state.options.maxResponseBytes) throw responseTooLarge()
   enforceAggregateBudget(state)

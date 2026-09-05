@@ -15,6 +15,8 @@ export interface SyncImageSseOptions {
   maxEventBytes?: number
   maxTrackedImageBytes?: number
   maxCompletedImages?: number
+  /** Keep a native passthrough observer alive after malformed provider events. */
+  tolerateMalformedEvents?: boolean
 }
 
 export interface SyncImageStreamUsage {
@@ -175,7 +177,7 @@ export class SyncImageSseTransformer {
       frames.push(...this.completeImages(this.pendingImages, true))
       return frames
     }
-    if (this.completedImages.length > 0) {
+    if (this.completedImages.length > 0 || this.paidOutputs.size > 0) {
       this.state = 'completed'
       this.responseStatus = 'completed'
       return frames
@@ -333,7 +335,7 @@ export class SyncImageSseTransformer {
     const data = event.data.trim()
     if (data === '' || this.state !== 'open') return []
     if (data === '[DONE]') {
-      if (this.completedImages.length > 0) {
+      if (this.completedImages.length > 0 || this.paidOutputs.size > 0) {
         this.state = 'completed'
         this.responseStatus = 'completed'
         return []
@@ -344,6 +346,7 @@ export class SyncImageSseTransformer {
     try {
       payload = asRecord(JSON.parse(data)) ?? invalidPayload()
     } catch (error) {
+      if (this.options.tolerateMalformedEvents === true) return []
       if (error instanceof SyncImageSseError) throw this.protocolFailure(error.code, error.message)
       throw this.protocolFailure('IMAGE_SSE_INVALID_JSON', 'Image provider returned invalid SSE JSON')
     }
@@ -512,9 +515,21 @@ export class SyncImageSseTransformer {
     const image = imageFrom({
       ...payload,
       result: payload.b64_json,
-      id: payload.id,
+      id: payload.id ?? payload.call_id,
     }, this.currentMeta)
-    if (image === null) return this.emitError('IMAGE_INVALID_PROVIDER_OUTPUT', 'Image provider returned an invalid completion')
+    if (image === null) {
+      const url = safeImageUrl(payload.url)
+      if (url !== '') {
+        const identity = boundedString(stringValue(payload.id ?? payload.call_id).trim(), 200) || `url:${url}`
+        if (this.paidOutputs.size < this.maxCompletedImages) this.paidOutputs.add(identity)
+        this.currentMeta = mergeMeta(this.currentMeta, metaFrom(payload))
+        this.responseStatus = this.responseStatus || 'in_progress'
+        this.usage.images = Math.max(this.usage.images, this.paidOutputs.size)
+        return []
+      }
+      if (this.options.tolerateMalformedEvents === true) return []
+      return this.emitError('IMAGE_INVALID_PROVIDER_OUTPUT', 'Image provider returned an invalid completion')
+    }
     this.responseStatus = this.responseStatus || 'in_progress'
     return this.completeImages([image], false)
   }
@@ -539,6 +554,7 @@ export class SyncImageSseTransformer {
       }
     } catch (error) {
       if (error instanceof SyncImageSseError) {
+        if (this.options.tolerateMalformedEvents === true) return []
         return this.emitFailure({
           type: 'upstream_error', code: error.code, message: error.message, param: '',
           status: 502, retryable: true, classification: 'protocol',
@@ -699,6 +715,9 @@ export class SyncImageSseTransformer {
   private failLimit(): never {
     this.pendingText = ''
     this.resetEvent()
+    if (this.options.tolerateMalformedEvents === true) {
+      throw new SyncImageSseError('IMAGE_SSE_EVENT_TOO_LARGE', 'Image provider SSE event exceeded the size limit')
+    }
     throw this.protocolFailure('IMAGE_SSE_EVENT_TOO_LARGE', 'Image provider SSE event exceeded the size limit')
   }
 
@@ -799,8 +818,19 @@ function imageFrom(value: Record<string, unknown>, fallback: ImageMeta): Pending
   }
 }
 
-function imageIdentity(image: Pick<PendingImage, 'outputFormat' | 'b64'>): string {
-  return `${image.outputFormat}|${image.b64}`
+function imageIdentity(image: Pick<PendingImage, 'id' | 'outputFormat' | 'b64'>): string {
+  return image.id === '' ? `${image.outputFormat}|${image.b64}` : `id:${image.id}`
+}
+
+function safeImageUrl(value: unknown): string {
+  const raw = boundedString(stringValue(value).trim(), 8_192)
+  if (raw === '') return ''
+  try {
+    const url = new URL(raw)
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : ''
+  } catch {
+    return ''
+  }
 }
 
 function metaFrom(value: Record<string, unknown>): ImageMeta {

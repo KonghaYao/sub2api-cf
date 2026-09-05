@@ -848,14 +848,275 @@ describe('synchronous image handler', () => {
     expect(test.failureRequests).toEqual([])
   })
 
-  it('still rejects direct-provider streaming before admission and billing', async () => {
+  it('streams native Direct Images SSE from the direct endpoint and settles actual output', async () => {
     const test = await fixture()
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    const upstreamSse = [
+      ': provider-comment\r',
+      '',
+      'event: image_generation.partial_image',
+      'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbA=="}',
+      '',
+      'event: image_generation.completed',
+      `data: {"type":"image_generation.completed","id":"img_direct","b64_json":"${png}","output_format":"png","size":"1024x1024"}`,
+      '',
+      'data: [DONE]',
+      '',
+      '',
+    ].join('\n')
+    test.upstreamFetch.mockResolvedValueOnce(new Response(upstreamSse, {
+      headers: { 'content-type': 'text/event-stream' },
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true, size: '1024x1024' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const body = await response.text()
+    expect(body).toBe(upstreamSse)
+    const upstreamCall = test.upstreamFetch.mock.calls[0]
+    expect(upstreamCall?.[0]).toBe('https://api.openai.com/v1/images/generations')
+    expect(JSON.parse(String(upstreamCall?.[1]?.body))).toMatchObject({
+      model: 'gpt-image-upstream', prompt: 'cat', stream: true,
+    })
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        stream: true, outcome: 'completed', amountMicros: 100_000,
+        upstreamEndpoint: '/v1/images/generations',
+      }),
+    })))
+    expect(test.cancel).not.toHaveBeenCalled()
+  })
+
+  it('streams multipart Direct image edits through the native edits endpoint', async () => {
+    const test = await fixture()
+    const upstreamSse = [
+      'event: image_edit.completed',
+      'data: {"type":"image_edit.completed","id":"edit_direct","b64_json":"aW1hZ2U=","size":"1024x1024"}',
+      '',
+      'data: [DONE]',
+      '',
+      '',
+    ].join('\n')
+    test.upstreamFetch.mockResolvedValueOnce(new Response(upstreamSse, {
+      headers: { 'content-type': 'text/event-stream' },
+    }))
+    const form = new FormData()
+    form.set('prompt', 'add a hat')
+    form.set('stream', 'true')
+    form.set('image', new Blob([new Uint8Array([
+      137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,
+    ])], { type: 'image/png' }), 'cat.png')
+
+    const response = await app().request('/v1/images/edits', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}` }, body: form,
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(await response.text()).toBe(upstreamSse)
+    const upstreamCall = test.upstreamFetch.mock.calls[0]
+    expect(upstreamCall?.[0]).toBe('https://api.openai.com/v1/images/edits')
+    expect(upstreamCall?.[1]?.body).toBeInstanceOf(FormData)
+    const upstreamForm = Object.fromEntries(Array.from((upstreamCall?.[1]?.body as FormData).entries(), ([key, value]) => [
+      key,
+      typeof value === 'string' ? value : { name: value.name, type: value.type, size: value.size },
+    ]))
+    expect(upstreamForm).toMatchObject({
+      model: 'gpt-image-upstream', prompt: 'add a hat', stream: 'true',
+      'image[]': { name: 'cat.png', type: 'image/png', size: 24 },
+    })
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ operation: 'edits', stream: true, imageCount: 1 }),
+    })))
+  })
+
+  it('returns a raw JSON body mislabeled as event-stream and still settles its image', async () => {
+    const test = await fixture()
+    const upstreamJson = ' { "created":1710000009, "vendor_extension":{"future":true},' +
+      ' "data":[{"b64_json":"ZmluYWw=","size":"1024x1024"}] }\n'
+    test.upstreamFetch.mockResolvedValueOnce(new Response(upstreamJson, {
+      headers: { 'content-type': 'text/event-stream', 'x-request-id': 'upstream-json-stream' },
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true, size: '1024x1024' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    expect(await response.text()).toBe(upstreamJson)
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        stream: true, outcome: 'completed', imageCount: 1, amountMicros: 100_000,
+        upstreamEndpoint: '/v1/images/generations',
+      }),
+    })))
+    expect(test.cancel).not.toHaveBeenCalled()
+  })
+
+  it('does not repeat an accepted Direct request when its 2xx JSON body is malformed', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(new Response('{not-json}', {
+      headers: { 'content-type': 'application/json' },
+    }))
+
     const response = await app().request('/v1/images/generations', {
       method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'cat', stream: true }),
     }, test.env as never)
-    expect(response.status).toBe(501)
-    expect(test.reserve).not.toHaveBeenCalled()
-    expect(test.upstreamFetch).not.toHaveBeenCalled()
+
+    expect(response.status).toBe(502)
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('bills a Direct URL completion without rewriting its native event', async () => {
+    const test = await fixture()
+    const upstreamSse = [
+      'event: image_generation.completed',
+      'data: {"type":"image_generation.completed","call_id":"url-call","url":"https://cdn.example.test/image.png","size":"1024x1024"}',
+      '',
+      'data: [DONE]',
+      '',
+      '',
+    ].join('\n')
+    test.upstreamFetch.mockResolvedValueOnce(new Response(upstreamSse, {
+      headers: { 'content-type': 'text/event-stream' },
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true, response_format: 'url' }),
+    }, test.env as never)
+
+    expect(await response.text()).toBe(upstreamSse)
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ imageCount: 1, amountMicros: 100_000, outcome: 'completed' }),
+    })))
+    expect(test.failureRequests).toEqual([])
+  })
+
+  it('keeps native Direct Images leases until a disconnected stream is drained and settled', async () => {
+    const test = await fixture()
+    let upstreamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const encoder = new TextEncoder()
+    test.upstreamFetch.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        upstreamController = controller
+        controller.enqueue(encoder.encode([
+          'event: image_generation.partial_image',
+          'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbA=="}',
+          '',
+          '',
+        ].join('\n')))
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+    expect(response.status).toBe(200)
+    const reader = response.body!.getReader()
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('partial_image')
+    expect(test.stateCalls).not.toContain('/release')
+    await reader.cancel('client disconnected')
+    upstreamController!.enqueue(encoder.encode([
+      'event: image_generation.completed',
+      'data: {"type":"image_generation.completed","id":"img_direct_detached","b64_json":"aW1hZ2U=","size":"1024x1024"}',
+      '',
+      'data: [DONE]',
+      '',
+      '',
+    ].join('\n')))
+    upstreamController!.close()
+
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        stream: true, outcome: 'cancelled', amountMicros: 100_000,
+        upstreamEndpoint: '/v1/images/generations',
+      }),
+    })))
+    await vi.waitFor(() => expect(test.stateCalls.filter((path) => path === '/release')).toHaveLength(2))
+  })
+
+  it('keeps a native Direct Images error precommit and returns JSON without charging output', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: error',
+      'data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"bad size","param":"size"}}',
+      '',
+      '',
+    ].join('\n'), { status: 400, headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+
+    expect(response.status).toBe(400)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    await expect(response.json()).resolves.toEqual({
+      error: { type: 'invalid_request_error', code: 'invalid_value', message: 'bad size', param: 'size' },
+    })
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('retries a Direct streaming HTTP 429 before committing provider bytes', async () => {
+    const test = await fixture()
+    test.upstreamFetch
+      .mockResolvedValueOnce(Response.json({
+        error: { type: 'rate_limit_error', code: 'rate_limit_exceeded', message: 'slow down' },
+      }, { status: 429, headers: { 'retry-after': '0.001' } }))
+      .mockResolvedValueOnce(new Response([
+        'event: image_generation.completed',
+        'data: {"type":"image_generation.completed","id":"after_retry","b64_json":"aW1hZ2U=","size":"1024x1024"}',
+        '',
+        'data: [DONE]',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(await response.text()).toContain('after_retry')
+    expect(test.upstreamFetch).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledOnce())
+  })
+
+  it('never retries a Direct 2xx stream after its first public bytes', async () => {
+    const test = await fixture()
+    const upstreamSse = [
+      ': committed',
+      '',
+      'event: error',
+      'data: {"type":"error","error":{"type":"server_error","code":"late_failure","message":"late"}}',
+      '',
+      '',
+    ].join('\n')
+    test.upstreamFetch.mockResolvedValueOnce(new Response(upstreamSse, {
+      headers: { 'content-type': 'text/event-stream' },
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+
+    expect(await response.text()).toBe(upstreamSse)
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(test.cancel).toHaveBeenCalledOnce())
+    expect(test.settle).not.toHaveBeenCalled()
   })
 })

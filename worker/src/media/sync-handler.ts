@@ -138,16 +138,7 @@ export async function handleSyncImages(
     if (compatibleCandidates.length === 0) {
       throw new GatewayError(503, 'IMAGE_PROVIDER_NOT_SUPPORTED', 'No compatible Images account is configured', 'server_error')
     }
-    const candidates = manifest.options.stream === true
-      ? compatibleCandidates.filter((candidate) => candidate.image_adapter === 'responses_image_tool')
-      : compatibleCandidates
-    if (manifest.options.stream === true && candidates.length === 0) {
-      throw new GatewayError(
-        501,
-        'IMAGE_DIRECT_STREAMING_NOT_IMPLEMENTED',
-        'Direct Images provider streaming is not migrated yet',
-      )
-    }
+    const candidates = compatibleCandidates
 
     admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     // Reserve the maximum billable tier. Actual-output settlement can then be
@@ -175,6 +166,8 @@ export async function handleSyncImages(
       streamBody?: ReadableStream<Uint8Array>
       status: number
       headers: Headers
+      stream?: boolean
+      upstreamEndpoint?: string
     } | null = null
     let lastError: GatewayError | null = null
     const attempts = Math.min(4, candidates.length)
@@ -224,8 +217,8 @@ export async function handleSyncImages(
           throw new GatewayError(499, 'client_cancelled', 'Client cancelled before image generation started')
         }
         upstreamStarted = true
-        if (manifest.options.stream === true && account.image_adapter === 'responses_image_tool') {
-          const live = await prepareCodexImageLiveAttempt({
+        if (manifest.options.stream === true) {
+          const liveInput = {
             manifest,
             account,
             credential,
@@ -235,9 +228,30 @@ export async function handleSyncImages(
             fetcher: context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch,
             leaseSignal: renewal.signal,
             remainingAccounts: Math.max(0, attempts - attempt - 1),
-            responsesModel: context.env.SYNC_IMAGE_RESPONSES_MODEL ?? SYNC_IMAGE_RESPONSES_MODEL,
-            waitUntil: (task) => registerExecutionTask(context, task),
-          })
+            waitUntil: (task: Promise<unknown>) => registerExecutionTask(context, task),
+          }
+          const liveAttempt = account.image_adapter === 'responses_image_tool'
+            ? await prepareCodexImageLiveAttempt({
+                ...liveInput,
+                responsesModel: context.env.SYNC_IMAGE_RESPONSES_MODEL ?? SYNC_IMAGE_RESPONSES_MODEL,
+              })
+            : await prepareDirectImageLiveAttempt({
+                ...liveInput,
+                operation,
+                enforceProviderModeration: context.env.SYNC_IMAGE_MODERATOR === undefined,
+                requestId,
+              })
+          if (liveAttempt.kind === 'buffered') {
+            const renewalError = await renewal.stop()
+            renewal = null
+            if (renewalError !== null) throw renewalError
+            completed = { accountId, ...liveAttempt.result }
+            break
+          }
+          const live = liveAttempt
+          const liveUpstreamEndpoint = account.image_adapter === 'responses_image_tool'
+            ? '/backend-api/codex/responses'
+            : directImageEndpoint(operation)
           const ownedRenewal = renewal
           const ownedAdmission = admission
           const ownedPool = activePool
@@ -303,7 +317,7 @@ export async function handleSyncImages(
               startedAt,
               stream: true,
               outcome: clientDisconnected ? 'cancelled' : snapshot.state === 'completed' ? 'completed' : 'failed',
-              upstreamEndpoint: '/backend-api/codex/responses',
+              upstreamEndpoint: liveUpstreamEndpoint,
             }
             await retrySettlement(() => billing.settle({
               env: context.env,
@@ -325,8 +339,8 @@ export async function handleSyncImages(
           admission = null
           activeLeaseId = null
           return new Response(live.body, {
-            status: 200,
-            headers: new Headers({
+            status: 'status' in live && typeof live.status === 'number' ? live.status : 200,
+            headers: 'headers' in live && live.headers instanceof Headers ? live.headers : new Headers({
               'content-type': 'text/event-stream; charset=utf-8',
               'cache-control': 'no-cache, no-store',
               'x-accel-buffering': 'no',
@@ -373,6 +387,7 @@ export async function handleSyncImages(
         renewal = null
         const mapped = asGatewayError(renewalError ?? error)
         lastError = mapped
+        if (error instanceof SyncImageCommittedError) throw mapped
         // Renewal failure may race a provider that has already accepted paid
         // work. Never switch accounts on this path and risk duplicate images.
         if (renewalError !== null && upstreamStarted) throw mapped
@@ -412,6 +427,11 @@ export async function handleSyncImages(
       operation,
       ...outputBilling.dimensions,
       startedAt,
+      ...(completed.stream === true ? {
+        stream: true,
+        outcome: 'completed' as const,
+        upstreamEndpoint: completed.upstreamEndpoint,
+      } : {}),
     }
     // The provider has already completed billable work. From this point the
     // reservation must never be cancelled and the image response must never
@@ -515,6 +535,8 @@ interface ImageExecutionResult {
   streamBody?: ReadableStream<Uint8Array>
   status: number
   headers: Headers
+  stream?: boolean
+  upstreamEndpoint?: string
 }
 
 async function executeDirectImages(input: ImageExecutionInput & {
@@ -522,6 +544,46 @@ async function executeDirectImages(input: ImageExecutionInput & {
   enforceProviderModeration: boolean
   requestId: string
 }): Promise<ImageExecutionResult> {
+  const response = await executeDirectImageRequest(input)
+  const parsed = await readSyncImageResponse(response)
+  return directImageResult(parsed, response, input.manifest.n, input.requestId)
+}
+
+function directImageResult(
+  parsed: unknown,
+  response: Pick<Response, 'status' | 'headers'>,
+  maxOutputs: number,
+  requestId: string,
+  rawBody?: Uint8Array,
+): ImageExecutionResult {
+  const normalized = normalizeNativeImageResponse(parsed, maxOutputs)
+  const normalizedUsage = normalized.publicBody.usage
+  const publicUsage = normalizedUsage !== null && typeof normalizedUsage === 'object' && !Array.isArray(normalizedUsage)
+    ? { ...(normalizedUsage as Record<string, unknown>), images: normalized.outputs.length }
+    : normalizedUsage
+  const publicBody = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? {
+        ...(parsed as Record<string, unknown>),
+        ...normalized.publicBody,
+        ...(publicUsage === undefined ? {} : { usage: publicUsage }),
+      }
+    : normalized.publicBody
+  return {
+    normalized,
+    publicBody,
+    ...(rawBody === undefined ? {} : {
+      streamBody: chunksToStream([rawBody]),
+      stream: true,
+    }),
+    status: response.status,
+    headers: imageResponseHeaders(response.headers, requestId),
+  }
+}
+
+async function executeDirectImageRequest(input: ImageExecutionInput & {
+  operation: SyncImageOperation
+  enforceProviderModeration: boolean
+}): Promise<Response> {
   const upstreamBody = providerBody(input.manifest, input.upstreamModel, input.enforceProviderModeration)
   const plan = buildProviderRequest({
     account: input.account,
@@ -553,25 +615,7 @@ async function executeDirectImages(input: ImageExecutionInput & {
     await response.body?.cancel()
     throw new GatewayError(502, 'upstream_redirect_rejected', 'Upstream redirect was rejected', 'server_error')
   }
-  const parsed = await readSyncImageResponse(response)
-  const normalized = normalizeNativeImageResponse(parsed, input.manifest.n)
-  const normalizedUsage = normalized.publicBody.usage
-  const publicUsage = normalizedUsage !== null && typeof normalizedUsage === 'object' && !Array.isArray(normalizedUsage)
-    ? { ...(normalizedUsage as Record<string, unknown>), images: normalized.outputs.length }
-    : normalizedUsage
-  const publicBody = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-    ? {
-        ...(parsed as Record<string, unknown>),
-        ...normalized.publicBody,
-        ...(publicUsage === undefined ? {} : { usage: publicUsage }),
-      }
-    : normalized.publicBody
-  return {
-    normalized,
-    publicBody,
-    status: response.status,
-    headers: imageResponseHeaders(response.headers, input.requestId),
-  }
+  return response
 }
 
 async function executeCodexImages(input: ImageExecutionInput & {
@@ -722,6 +766,113 @@ async function executeCodexImages(input: ImageExecutionInput & {
   }
 }
 
+async function prepareDirectImageLiveAttempt(input: ImageExecutionInput & {
+  operation: SyncImageOperation
+  enforceProviderModeration: boolean
+  publicModel: string
+  remainingAccounts: number
+  requestId: string
+  waitUntil?: (task: Promise<unknown>) => void
+}): Promise<{
+  kind: 'buffered'
+  result: ImageExecutionResult
+} | (Extract<SyncImageLivePrelude, { kind: 'committed' }> & {
+  status: number
+  headers: Headers
+})> {
+  let sameAccountRetries = 0
+  let retryWindowElapsedMs = 0
+  while (true) {
+    const response = await executeDirectImageRequest(input)
+    // HTTP errors are still pre-commit and may participate in the normal
+    // provider retry/switch policy. A successful Direct SSE response, however,
+    // becomes irrevocable as soon as its first public byte is observed.
+    if (!response.ok) {
+      const decision = await imageErrorDecision(response, input, {
+        sameAccountRetries,
+        retryWindowElapsedMs,
+      })
+      if (decision.action === 'retry_same_account') {
+        const delay = decision.retryDelayMs ?? 0
+        await waitForRetry(delay, input.leaseSignal)
+        retryWindowElapsedMs += delay
+        sameAccountRetries += 1
+        continue
+      }
+      throw gatewayErrorFromDecision(decision)
+    }
+    const prelude = await prepareSyncImageLiveStream({
+      response,
+      operation: input.operation === 'edits' ? 'edit' : 'generation',
+      responseFormat: input.manifest.options.response_format === 'url' ? 'url' : 'b64_json',
+      publicModel: input.publicModel,
+      leaseSignal: input.leaseSignal,
+      maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
+      maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
+      maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, input.manifest.n),
+      maxResponseBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
+      maxAggregateBytes: SYNC_IMAGE_SSE_AGGREGATE_LIMIT,
+      waitUntil: input.waitUntil,
+      outputMode: 'passthrough',
+      detectJsonFallback: true,
+    })
+    if (prelude.kind === 'committed') {
+      return {
+        ...prelude,
+        status: response.status,
+        headers: imageStreamResponseHeaders(response.headers, input.requestId),
+      }
+    }
+    if (prelude.kind === 'json_fallback') {
+      let parsed: unknown
+      try {
+        parsed = await readSyncImageResponse(new Response(byteBuffer(prelude.bytes), {
+          status: prelude.status,
+          headers: prelude.headers,
+        }))
+      } catch (error) {
+        const mapped = asGatewayError(error)
+        // A successful Direct response means the provider accepted the paid
+        // request. Malformed JSON is not permission to generate it again.
+        throw new SyncImageCommittedError(mapped)
+      }
+      return {
+        kind: 'buffered',
+        result: {
+          ...directImageResult(parsed, prelude, input.manifest.n, input.requestId, prelude.bytes),
+          upstreamEndpoint: directImageEndpoint(input.operation),
+        },
+      }
+    }
+
+    const classified = classifySyncImageProviderOutcome(snapshotOutcome(
+      response.status,
+      prelude.snapshot,
+      response.headers.get('retry-after') ?? undefined,
+    ))
+    if (classified.kind === 'success') {
+      throw new GatewayError(502, 'IMAGE_DIRECT_PRELUDE_INVALID', 'Direct Images prelude ended unexpectedly', 'server_error')
+    }
+    const decision = decideSyncImageFailover(classified.failure, {
+      upstreamStarted: true,
+      outputCommitted: false,
+      clientDisconnected: false,
+      sameAccountRetries,
+      accountSwitches: 0,
+      remainingAccounts: input.remainingAccounts,
+      retryWindowElapsedMs,
+    })
+    if (decision.action === 'retry_same_account') {
+      const delay = decision.retryDelayMs ?? 0
+      await waitForRetry(delay, input.leaseSignal)
+      retryWindowElapsedMs += delay
+      sameAccountRetries += 1
+      continue
+    }
+    throw gatewayErrorFromDecision(decision)
+  }
+}
+
 async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
   publicModel: string
   remainingAccounts: number
@@ -745,7 +896,7 @@ async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
     })
     const response = execution.response
     if (!response.ok) {
-      const decision = await codexErrorDecision(response, input, {
+      const decision = await imageErrorDecision(response, input, {
         sameAccountRetries,
         retryWindowElapsedMs,
       })
@@ -798,7 +949,7 @@ async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
   }
 }
 
-async function codexErrorDecision(
+async function imageErrorDecision(
   response: Response,
   input: ImageExecutionInput & { publicModel: string; remainingAccounts: number },
   retry: { sameAccountRetries: number; retryWindowElapsedMs: number },
@@ -1030,6 +1181,13 @@ class SyncImageDecisionError extends GatewayError {
   }
 }
 
+class SyncImageCommittedError extends GatewayError {
+  constructor(error: GatewayError) {
+    super(error.status, error.code, error.message, error.type, error.retryAfter, error.param)
+    this.name = 'SyncImageCommittedError'
+  }
+}
+
 function gatewayErrorFromDecision(decision: SyncImageFailoverDecision): GatewayError {
   return new SyncImageDecisionError(decision, decision.cooldown)
 }
@@ -1137,6 +1295,10 @@ function providerBody(
     }
   }
   return body
+}
+
+function directImageEndpoint(operation: SyncImageOperation): string {
+  return operation === 'edits' ? '/v1/images/edits' : '/v1/images/generations'
 }
 
 function resolveOutputBilling(
@@ -1252,6 +1414,26 @@ function imageResponseHeaders(upstream: Headers, requestId: string): Headers {
   const headers = new Headers({ 'content-type': contentType, 'x-request-id': requestId })
   for (const name of ['cache-control', 'retry-after', 'openai-processing-ms', 'x-ratelimit-limit-requests',
     'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests']) {
+    const value = upstream.get(name)
+    if (value !== null) headers.set(name, value)
+  }
+  return headers
+}
+
+function imageStreamResponseHeaders(upstream: Headers, requestId: string): Headers {
+  const upstreamContentType = upstream.get('content-type')
+  const headers = new Headers({
+    'content-type': upstreamContentType?.toLowerCase().includes('text/event-stream') === true
+      ? upstreamContentType.slice(0, 200)
+      : 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-store',
+    'x-accel-buffering': 'no',
+    'x-request-id': requestId,
+  })
+  for (const name of [
+    'retry-after', 'openai-processing-ms', 'x-ratelimit-limit-requests',
+    'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
+  ]) {
     const value = upstream.get(name)
     if (value !== null) headers.set(name, value)
   }
