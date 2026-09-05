@@ -15,6 +15,8 @@ interface AvailableGroupRow {
   rate_multiplier_ppm: number
   group_type: 'standard' | 'subscription'
   is_exclusive: number
+  allow_image_generation: number
+  allow_batch_image_generation: number
 }
 
 interface UserGroupRateRow {
@@ -43,7 +45,8 @@ export async function listAvailableUserGroups(
     const now = Date.now()
     const rows = await context.env.DB.prepare(
       `SELECT g.id, g.name, g.description, g.platform,
-              g.rate_multiplier_ppm, g.group_type, g.is_exclusive
+              g.rate_multiplier_ppm, g.group_type, g.is_exclusive,
+              g.allow_image_generation, g.allow_batch_image_generation
          FROM "groups" g
         WHERE g.enabled = 1
           AND ${groupAccessPredicate('g')}
@@ -134,6 +137,8 @@ function publicAvailableGroup(row: AvailableGroupRow): Record<string, unknown> {
     is_exclusive: row.is_exclusive === 1,
     status: 'active',
     subscription_type: row.group_type,
+    allow_image_generation: row.allow_image_generation === 1,
+    allow_batch_image_generation: row.allow_batch_image_generation === 1,
   }
 }
 

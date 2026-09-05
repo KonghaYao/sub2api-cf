@@ -762,9 +762,11 @@ import Select, { type SelectOption } from '@/components/common/Select.vue'
 import SearchInput from '@/components/common/SearchInput.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
+import { keyAllowsBatchImage } from '@/composables/useBatchImageAccess'
 import { getPersistedPageSize, setPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { useAppStore } from '@/stores/app'
 import { keysAPI } from '@/api'
+import { userGroupsAPI, type AvailableUserGroup } from '@/api/groups'
 import {
   cancelBatchImageJob,
   deleteBatchImageJobRecord,
@@ -784,7 +786,6 @@ import {
   type BatchImageSubmitItem,
 } from '@/api/batchImage'
 import type { ApiKey } from '@/types'
-import { hasPlaintextApiKey, type ApiKeyWithPlaintext } from '@/utils/apiKeySecret'
 import type { Column } from '@/components/common/types'
 
 type BatchImageJobRow = Pick<BatchImageJob, 'id' | 'task_name' | 'parent_batch_id' | 'status' | 'model' | 'provider' | 'item_count' | 'success_count' | 'fail_count' | 'estimated_cost' | 'hold_amount' | 'actual_cost' | 'created_at' | 'downloaded_at'> & {
@@ -895,6 +896,7 @@ const pagination = reactive({
 })
 
 const apiKeys = ref<ApiKey[]>([])
+const availableGroups = ref<AvailableUserGroup[]>([])
 const loadingKeys = ref(false)
 const loadingJobs = ref(false)
 const submitting = ref(false)
@@ -944,12 +946,7 @@ let promptPopoverOpenTimer: ReturnType<typeof setTimeout> | null = null
 let activePromptPopoverTarget: HTMLElement | null = null
 
 const geminiApiKeys = computed(() =>
-  apiKeys.value.filter((key): key is ApiKeyWithPlaintext =>
-    hasPlaintextApiKey(key) &&
-    key.status === 'active' &&
-    key.group?.platform === 'gemini' &&
-    key.group?.allow_batch_image_generation === true,
-  ),
+  apiKeys.value.filter(key => keyAllowsBatchImage(key, availableGroups.value)),
 )
 
 const selectedApiKey = computed(() =>
@@ -1248,7 +1245,11 @@ function readFileAsBase64(file: File): Promise<string> {
 async function loadApiKeys() {
   loadingKeys.value = true
   try {
-    const response = await keysAPI.list(1, 100, { status: 'active', sort_by: 'created_at', sort_order: 'desc' })
+    const [response, groups] = await Promise.all([
+      keysAPI.list(1, 100, { status: 'active', sort_by: 'created_at', sort_order: 'desc' }),
+      userGroupsAPI.getAvailable(),
+    ])
+    availableGroups.value = groups
     apiKeys.value = response.items || []
     if (!selectedApiKey.value && geminiApiKeys.value.length > 0) {
       form.apiKeyId = geminiApiKeys.value[0].id
@@ -1277,7 +1278,7 @@ async function loadAvailableModels() {
 
   loadingModels.value = true
   try {
-    const result = await listBatchImageModels(key.key)
+    const result = await listBatchImageModels(key)
     if (requestID !== modelRequestSeq) return
     const seen = new Set<string>()
     availableBatchImageModels.value = (result.data || [])
@@ -1513,7 +1514,7 @@ async function loadBatchJobs() {
   try {
     const options = listOptions()
     const results = await Promise.all(keys.map(async (key) => {
-      const result = await listBatchImageJobs(key.key, options)
+      const result = await listBatchImageJobs(key, options)
       return {
         hasMore: Boolean(result.has_more),
         rows: (result.data || []).map(job => toJobRow(job, key)),
@@ -1593,7 +1594,7 @@ function closeDetail() {
   clearItemPreviews()
 }
 
-function keyForSelectedBatch(): ApiKeyWithPlaintext | null {
+function keyForSelectedBatch(): ApiKey | null {
   if (selectedBatchApiKeyId.value) {
     const key = geminiApiKeys.value.find(item => item.id === selectedBatchApiKeyId.value)
     if (key) return key
@@ -1601,7 +1602,7 @@ function keyForSelectedBatch(): ApiKeyWithPlaintext | null {
   return selectedApiKey.value
 }
 
-function requireApiKey(): ApiKeyWithPlaintext | null {
+function requireApiKey(): ApiKey | null {
   if (!selectedApiKey.value) {
     appStore.showError(batchImageText('selectApiKey'))
     return null
@@ -1640,7 +1641,7 @@ async function submitJob() {
 	  submitting.value = true
 	  try {
 	    const job = await submitBatchImageJob(
-	      key.key,
+	      key,
 	      {
 	        model: form.model,
         task_name: form.taskName.trim() || defaultTaskName(),
@@ -1673,7 +1674,7 @@ async function refreshSelected() {
   if (!key) return
   refreshing.value = true
   try {
-    const job = await getBatchImageJob(key.key, selectedBatchId.value)
+    const job = await getBatchImageJob(key, selectedBatchId.value)
     currentJob.value = job
     upsertJob(job)
     if (TERMINAL_STATUSES.has(job.status)) stopPolling()
@@ -1747,7 +1748,7 @@ function applyJobApiKey(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>) {
   }
 }
 
-function apiKeyForJob(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>): ApiKeyWithPlaintext | null {
+function apiKeyForJob(job: BatchImageJobRow | Pick<BatchImageJob, 'id'>): ApiKey | null {
   if ('api_key_id' in job && job.api_key_id) {
     return geminiApiKeys.value.find(key => key.id === job.api_key_id) || null
   }
@@ -1781,7 +1782,7 @@ async function cancelSelected() {
   if (!window.confirm(batchImageText('cancelConfirm'))) return
   cancelling.value = true
   try {
-    const job = await cancelBatchImageJob(key.key, currentJob.value.id)
+    const job = await cancelBatchImageJob(key, currentJob.value.id)
     currentJob.value = job
     upsertJob(job)
     appStore.showSuccess(batchImageText('cancelled'))
@@ -1809,7 +1810,7 @@ async function retryFailedJob(job: BatchImageJobRow | BatchImageJob) {
   if (!key) return
   retryingBatchId.value = job.id
   try {
-    const sourceItems = await ensureItemsForRetry(key.key, job.id)
+    const sourceItems = await ensureItemsForRetry(key, job.id)
     const failedItems = sourceItems
       .filter(item => item.status === 'failed')
       .map(item => ({ custom_id: retryCustomID(item.custom_id), prompt: String(item.prompt_preview || '').trim() }))
@@ -1819,7 +1820,7 @@ async function retryFailedJob(job: BatchImageJobRow | BatchImageJob) {
       return
     }
     const retryJob = await submitBatchImageJob(
-      key.key,
+      key,
       {
         model: job.model,
         task_name: `${job.task_name || defaultTaskName()} ${t('batchImage.messages.retryTaskNameSuffix')}`,
@@ -1849,7 +1850,7 @@ async function retryFailedJob(job: BatchImageJobRow | BatchImageJob) {
   }
 }
 
-async function ensureItemsForRetry(apiKey: string, batchId: string) {
+async function ensureItemsForRetry(apiKey: ApiKey, batchId: string) {
   if (selectedBatchId.value === batchId && items.value.length > 0) {
     return items.value
   }
@@ -1875,7 +1876,7 @@ async function downloadJob(job: (BatchImageJobRow | Pick<BatchImageJob, 'id'>)) 
   downloading.value = true
   downloadingBatchId.value = job.id
   try {
-    const blob = await downloadBatchImageZip(key.key, job.id)
+    const blob = await downloadBatchImageZip(key, job.id)
     saveBlob(blob, `${job.id}.zip`)
     markJobDownloaded(job.id)
   } catch (error: any) {
@@ -1895,7 +1896,7 @@ async function downloadSelectedJobs() {
       if (!key) continue
       downloading.value = true
       downloadingBatchId.value = row.id
-      const blob = await downloadBatchImageZip(key.key, row.id)
+      const blob = await downloadBatchImageZip(key, row.id)
       saveBlob(blob, `${row.id}.zip`)
       markJobDownloaded(row.id)
     }
@@ -1917,7 +1918,7 @@ async function deleteJob(job: BatchImageJobRow) {
   if (!window.confirm(batchImageText('deleteConfirm'))) return
   deletingBatchId.value = job.id
   try {
-    await deleteBatchImageJobRecord(key.key, job.id)
+    await deleteBatchImageJobRecord(key, job.id)
     removeJobFromList(job.id)
     appStore.showSuccess(batchImageText('deleted'))
   } catch (error: any) {
@@ -1937,7 +1938,7 @@ async function deleteSelectedJobs() {
       const key = apiKeyForJob(row)
       if (!key) continue
       deletingBatchId.value = row.id
-      await deleteBatchImageJobRecord(key.key, row.id)
+      await deleteBatchImageJobRecord(key, row.id)
       removeJobFromList(row.id)
     }
     appStore.showSuccess(batchImageText('deleted'))
@@ -2204,7 +2205,7 @@ async function loadItems() {
     clearItemPreviews()
     const jobs = detailJobsForBatch(batchId)
     const results = await Promise.all(jobs.map(async (job) => {
-      const result = await listBatchImageItems(key.key, job.id)
+      const result = await listBatchImageItems(key, job.id)
       return (result.data || []).map(item => ({
         ...item,
         batch_id: job.id,
@@ -2254,7 +2255,7 @@ async function loadItemPreview(item: BatchImageItem) {
       itemPreviewUrls[previewKey] = URL.createObjectURL(cached)
       return
     }
-    const blob = await getBatchImageItemContent(key.key, batchId, item.custom_id, 0)
+    const blob = await getBatchImageItemContent(key, batchId, item.custom_id, 0)
     const thumbnail = await createThumbnailBlob(blob).catch(() => blob)
     itemPreviewUrls[previewKey] = URL.createObjectURL(thumbnail)
     if (thumbnail !== blob || thumbnail.size <= 1024 * 1024) {

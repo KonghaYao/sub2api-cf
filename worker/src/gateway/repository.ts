@@ -2,6 +2,7 @@ import type { Env } from '../env'
 import { groupAccessPredicate } from '../user/group-access'
 import { apiKeyDigest } from './crypto'
 import { GatewayError } from './errors'
+import { isProviderPlatform } from './platform'
 import type {
   AccountCandidate,
   AccountCredential,
@@ -703,10 +704,6 @@ function invalidProviderAccount(): never {
     'Upstream provider account configuration is invalid',
     'server_error',
   )
-}
-
-function isProviderPlatform(value: string): value is ProviderPlatform {
-  return value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex'
 }
 
 function accountCapabilityColumn(

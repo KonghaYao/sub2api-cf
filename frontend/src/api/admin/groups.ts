@@ -32,6 +32,12 @@ type WorkerGroupProjection = AdminGroup & {
   daily_quota_micros?: number | null
   weekly_quota_micros?: number | null
   monthly_quota_micros?: number | null
+  image_rate_multiplier_ppm?: number
+  batch_image_discount_multiplier_ppm?: number
+  batch_image_hold_multiplier_ppm?: number
+  image_price_1k_micros?: number | null
+  image_price_2k_micros?: number | null
+  image_price_4k_micros?: number | null
 }
 
 const groupControlVersions = new Map<string, number>()
@@ -76,6 +82,16 @@ function quotaUsdToMicros(value: number | null, field: string): number | null {
   return micros
 }
 
+function multiplierToPpm(value: number, field: string): number {
+  const ppm = Math.round(value * 1_000_000)
+  if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(ppm)) {
+    throw Object.assign(new Error(`${field} must be a non-negative multiplier`), {
+      code: `invalid_${field}`
+    })
+  }
+  return ppm
+}
+
 function adaptWorkerGroup(group: AdminGroup): AdminGroup {
   const projection = group as WorkerGroupProjection
   const adapted = { ...group } as AdminGroup
@@ -94,7 +110,57 @@ function adaptWorkerGroup(group: AdminGroup): AdminGroup {
       adapted[legacyField] = value / 1_000_000
     }
   }
+  for (const [workerField, legacyField] of [
+    ['image_rate_multiplier_ppm', 'image_rate_multiplier'],
+    ['batch_image_discount_multiplier_ppm', 'batch_image_discount_multiplier'],
+    ['batch_image_hold_multiplier_ppm', 'batch_image_hold_multiplier']
+  ] as const) {
+    const value = projection[workerField]
+    if (Number.isSafeInteger(value) && value! >= 0) adapted[legacyField] = value! / 1_000_000
+  }
+  for (const [workerField, legacyField] of [
+    ['image_price_1k_micros', 'image_price_1k'],
+    ['image_price_2k_micros', 'image_price_2k'],
+    ['image_price_4k_micros', 'image_price_4k']
+  ] as const) {
+    const value = projection[workerField]
+    if (value === null) adapted[legacyField] = null
+    else if (Number.isSafeInteger(value) && value! >= 0) adapted[legacyField] = value! / 1_000_000
+  }
   return adapted
+}
+
+function appendWorkerImagePolicy(
+  payload: Record<string, unknown>,
+  group: CreateGroupRequest | UpdateGroupRequest
+): void {
+  for (const field of [
+    'allow_image_generation',
+    'allow_batch_image_generation',
+    'image_rate_independent'
+  ] as const) {
+    if (group[field] !== undefined) payload[field] = group[field]
+  }
+  for (const [legacyField, workerField] of [
+    ['image_rate_multiplier', 'image_rate_multiplier_ppm'],
+    ['batch_image_discount_multiplier', 'batch_image_discount_multiplier_ppm'],
+    ['batch_image_hold_multiplier', 'batch_image_hold_multiplier_ppm']
+  ] as const) {
+    const value = group[legacyField]
+    if (value !== undefined) payload[workerField] = multiplierToPpm(value, legacyField)
+  }
+  for (const [legacyField, workerField] of [
+    ['image_price_1k', 'image_price_1k_micros'],
+    ['image_price_2k', 'image_price_2k_micros'],
+    ['image_price_4k', 'image_price_4k_micros']
+  ] as const) {
+    const value = group[legacyField]
+    if (value !== undefined) {
+      // The retained edit form uses -1 as its explicit "clear configured
+      // price" sentinel. D1 uses NULL for the same state.
+      payload[workerField] = value === -1 ? null : quotaUsdToMicros(value, legacyField)
+    }
+  }
 }
 
 function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unknown> {
@@ -116,6 +182,7 @@ function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unk
   if (group.monthly_limit_usd !== undefined) {
     payload.monthly_quota_micros = quotaUsdToMicros(group.monthly_limit_usd, 'monthly_limit_usd')
   }
+  appendWorkerImagePolicy(payload, group)
   return payload
 }
 
@@ -140,6 +207,7 @@ function workerUpdateGroupPayload(group: UpdateGroupRequest): Record<string, unk
   if (group.monthly_limit_usd !== undefined) {
     payload.monthly_quota_micros = quotaUsdToMicros(group.monthly_limit_usd, 'monthly_limit_usd')
   }
+  appendWorkerImagePolicy(payload, group)
   const workerFields = group as UpdateGroupRequest & {
     enabled?: boolean
     sort_order?: number

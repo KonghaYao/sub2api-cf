@@ -1,7 +1,9 @@
 import { computed, ref } from 'vue'
 import { keysAPI } from '@/api/keys'
+import { userGroupsAPI, type AvailableUserGroup } from '@/api/groups'
 import { useAuthStore } from '@/stores/auth'
 import type { ApiKey } from '@/types'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
 
 const loaded = ref(false)
@@ -10,12 +12,17 @@ const hasAllowedBatchImageKey = ref(false)
 let pendingLoad: Promise<boolean> | null = null
 const pageSize = 100
 
-function keyAllowsBatchImage(key: ApiKey): boolean {
+export function keyAllowsBatchImage(
+  key: ApiKey,
+  availableGroups: readonly AvailableUserGroup[] = [],
+): boolean {
+  const group = availableGroups.find(item => String(item.id) === String(key.group_id))
   return (
     key.status === 'active' &&
-    hasPlaintextApiKey(key) &&
-    key.group?.platform === 'gemini' &&
-    key.group?.allow_batch_image_generation === true
+    (isCloudflareWorkerContractActive() || hasPlaintextApiKey(key)) &&
+    group?.status === 'active' &&
+    group.platform === 'gemini' &&
+    group.allow_batch_image_generation === true
   )
 }
 
@@ -37,6 +44,7 @@ async function loadBatchImageAccess(force = false): Promise<boolean> {
 
   loading.value = true
   pendingLoad = (async () => {
+    const availableGroups = await userGroupsAPI.getAvailable()
     let page = 1
     while (true) {
       const response = await keysAPI.list(page, pageSize, {
@@ -45,7 +53,7 @@ async function loadBatchImageAccess(force = false): Promise<boolean> {
         sort_order: 'desc'
       })
 
-      if ((response.items || []).some(keyAllowsBatchImage)) {
+      if ((response.items || []).some(key => keyAllowsBatchImage(key, availableGroups))) {
         hasAllowedBatchImageKey.value = true
         loaded.value = true
         return true

@@ -222,6 +222,17 @@ describe("UserStateDO balance contract", () => {
     ).run(now);
     expect((await authorize("request-allowed")).status).toBe(200);
 
+    raw.prepare(`UPDATE "groups" SET platform = 'gemini' WHERE id = 'group-1'`).run();
+    expect((await authorize("request-gemini")).status).toBe(200);
+
+    raw.prepare(`UPDATE "groups" SET platform = 'unsupported' WHERE id = 'group-1'`).run();
+    const unsupported = await authorize("request-unsupported");
+    expect(unsupported.status).toBe(403);
+    await expect(unsupported.json()).resolves.toMatchObject({
+      error: { code: "group_unavailable" },
+    });
+
+    raw.prepare(`UPDATE "groups" SET platform = 'gemini' WHERE id = 'group-1'`).run();
     raw.prepare(
       `DELETE FROM user_group_permissions WHERE user_id = 'user-1' AND group_id = 'group-1'`,
     ).run();

@@ -45,6 +45,63 @@ function fixture(): { app: Hono<{ Bindings: Env }>; env: Env; raw: any } {
 }
 
 describe('group RPM administration on D1', () => {
+  it('round-trips exact image generation policy and rejects an underfunded hold', async () => {
+    const test = fixture()
+    const created = await test.app.request('/groups', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'group-image-policy-create-0001',
+      },
+      body: JSON.stringify({
+        name: 'Gemini images',
+        platform: 'gemini',
+        is_exclusive: false,
+        allow_image_generation: true,
+        allow_batch_image_generation: true,
+        image_rate_independent: true,
+        image_rate_multiplier_ppm: 1_250_000,
+        batch_image_discount_multiplier_ppm: 500_000,
+        batch_image_hold_multiplier_ppm: 600_000,
+        image_price_1k_micros: 20_000,
+        image_price_2k_micros: 30_000,
+        image_price_4k_micros: null,
+      }),
+    }, test.env)
+    expect(created.status).toBe(201)
+    const group = (await created.json() as any).data
+    expect(group).toMatchObject({
+      allow_image_generation: true,
+      allow_batch_image_generation: true,
+      image_rate_independent: true,
+      image_rate_multiplier_ppm: 1_250_000,
+      batch_image_discount_multiplier_ppm: 500_000,
+      batch_image_hold_multiplier_ppm: 600_000,
+      image_price_1k_micros: 20_000,
+      image_price_2k_micros: 30_000,
+      image_price_4k_micros: null,
+    })
+    expect(test.raw.prepare(
+      `SELECT allow_batch_image_generation, image_price_2k_micros
+         FROM "groups" WHERE id = ?`,
+    ).get(group.id)).toEqual({ allow_batch_image_generation: 1, image_price_2k_micros: 30_000 })
+
+    const invalid = await test.app.request(`/groups/${group.id}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'group-image-policy-invalid-hold',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({
+        batch_image_discount_multiplier_ppm: 700_000,
+        batch_image_hold_multiplier_ppm: 600_000,
+      }),
+    }, test.env)
+    expect(invalid.status).toBe(400)
+    await expect(invalid.json()).resolves.toMatchObject({ code: 'invalid_batch_image_hold_multiplier' })
+  })
+
   it.each(['openai', 'anthropic', 'gemini', 'codex'])(
     'allows an enabled %s group for a Worker-native provider',
     async (platform) => {

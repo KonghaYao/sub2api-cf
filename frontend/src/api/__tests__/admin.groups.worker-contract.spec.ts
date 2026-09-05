@@ -83,6 +83,67 @@ describe('admin groups Cloudflare Worker contract', () => {
     })
   })
 
+  it('round-trips image task policy and exact image prices through Worker integer fields', async () => {
+    const created = {
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      name: 'Gemini Images',
+      platform: 'gemini',
+      enabled: true,
+      status: 'active',
+      rate_multiplier_ppm: 1_000_000,
+      group_type: 'standard',
+      is_exclusive: false,
+      allow_image_generation: true,
+      allow_batch_image_generation: true,
+      image_rate_independent: true,
+      image_rate_multiplier_ppm: 1_250_000,
+      batch_image_discount_multiplier_ppm: 500_000,
+      batch_image_hold_multiplier_ppm: 600_000,
+      image_price_1k_micros: 20_000,
+      image_price_2k_micros: 30_000,
+      image_price_4k_micros: null,
+      control_version: 0
+    }
+    post.mockResolvedValueOnce({ data: created })
+    const { create } = await import('@/api/admin/groups')
+
+    await expect(create({
+      name: 'Gemini Images',
+      platform: 'gemini',
+      is_exclusive: false,
+      allow_image_generation: true,
+      allow_batch_image_generation: true,
+      image_rate_independent: true,
+      image_rate_multiplier: 1.25,
+      batch_image_discount_multiplier: 0.5,
+      batch_image_hold_multiplier: 0.6,
+      image_price_1k: 0.02,
+      image_price_2k: 0.03,
+      image_price_4k: null
+    })).resolves.toMatchObject({
+      allow_image_generation: true,
+      allow_batch_image_generation: true,
+      image_rate_multiplier: 1.25,
+      batch_image_discount_multiplier: 0.5,
+      batch_image_hold_multiplier: 0.6,
+      image_price_1k: 0.02,
+      image_price_2k: 0.03,
+      image_price_4k: null
+    })
+
+    expect(post).toHaveBeenCalledWith('/admin/groups', expect.objectContaining({
+      allow_image_generation: true,
+      allow_batch_image_generation: true,
+      image_rate_independent: true,
+      image_rate_multiplier_ppm: 1_250_000,
+      batch_image_discount_multiplier_ppm: 500_000,
+      batch_image_hold_multiplier_ppm: 600_000,
+      image_price_1k_micros: 20_000,
+      image_price_2k_micros: 30_000,
+      image_price_4k_micros: null
+    }), expect.any(Object))
+  })
+
   it('uses the listed control version for updates and only sends supported fields', async () => {
     const id = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
     get.mockResolvedValueOnce({

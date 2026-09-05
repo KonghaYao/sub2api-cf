@@ -36,7 +36,7 @@ class TestSqlStorage {
   }
 }
 
-function harness(storage = new TestSqlStorage()): {
+function harness(storage = new TestSqlStorage(), platform = 'openai'): {
   object: SubscriptionStateDO
   storage: TestSqlStorage
   queued: unknown[]
@@ -53,7 +53,7 @@ function harness(storage = new TestSqlStorage()): {
           first: async () => ({
             subscription_id: 'subscription-1',
             group_enabled: 1,
-            platform: 'openai',
+            platform,
           }),
         }),
       }),
@@ -186,6 +186,20 @@ describe('SubscriptionStateDO quota contract', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-01T12:00:00.000Z'))
+  })
+
+  it('authorizes supported Gemini subscription groups and rejects unknown platforms', async () => {
+    const gemini = harness(new TestSqlStorage(), 'gemini')
+    await post(gemini.object, '/configure', config())
+    expect((await authorize(gemini.object, 'gemini-request')).status).toBe(200)
+
+    const unsupported = harness(new TestSqlStorage(), 'unsupported')
+    await post(unsupported.object, '/configure', config())
+    const response = await authorize(unsupported.object, 'unsupported-request')
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'group_unavailable' },
+    })
   })
 
   afterEach(() => {

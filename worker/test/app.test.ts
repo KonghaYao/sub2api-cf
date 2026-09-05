@@ -156,6 +156,15 @@ describe('worker app', () => {
     },
   )
 
+  it.each([
+    ['/v1/images/batches', 'GET'],
+    ['/api/v1/user/image-batches', 'GET'],
+  ])('routes the migrated media contract at %s', async (path, method) => {
+    const response = await createApp().request(path, { method }, testEnv())
+
+    expect(response.status).toBe(401)
+  })
+
   it('still delegates non-API routes to Static Assets', async () => {
     const response = await createApp().request('/dashboard', {}, testEnv())
 

@@ -53,7 +53,8 @@ Status vocabulary:
 | `server/routes/gateway_test.go`: Responses compact registration | Retain | `/v1`, root and `/backend-api/codex` aliases in `test/gateway/legacy-gateway-routes.test.ts`; both public aliases, compact whitelist normalization, unary forwarding and exact terminal billing in `test/gateway/handler.test.ts` |
 | Same: Responses input-token counting registration | Retain | aliases in `test/gateway/legacy-gateway-routes.test.ts`; both public aliases, official upstream/no-billing behavior, custom-relay local estimation and malformed-upstream error cleanup in `test/gateway/handler.test.ts` |
 | Same: unsupported Responses subpaths are rejected | Pending | Route allow-list exists, but a dedicated negative contract for every reserved subpath has not migrated |
-| Same: alpha search, synchronous/async images, video and custom voice routes | Pending | Media/search products require Queue/R2 task contracts and are not represented by the text gateway tests |
+| Same: alpha search, video and custom voice routes | Pending | Media/search products require provider-specific contracts and are not represented by the text gateway tests |
+| Same: synchronous Images, ordinary async Images and batch Images routes | Replace + Pending | The v0.21 batch surface is replaced by the Worker-native contract below; synchronous and ordinary async Images remain Pending |
 | Chat request with only a Responses-capable account | Replace | `test/gateway/protocols/chat-from-responses.test.ts`, `test/gateway/repository.test.ts`, `test/gateway/handler.test.ts` and `test/e2e/chat-to-responses.e2e.ts` prove explicit OpenAI/Codex cohort fallback, forced Responses SSE, terminal-without-EOF return, buffered/streamed Chat output, failure fidelity, zero-billable cyber policy, Codex body normalization, public model restoration, interleaved tools, exact billing and one released Pool lease on real local bindings |
 | `integration/e2e_gateway_test.go`: Claude/Gemini model lists and normal generation | Replace | Local Worker request contracts in `test/gateway/handler.test.ts`; production-binding E2E remains Pending |
 | Same: complex Claude tools/thinking and cross-platform Claude↔Gemini routing | Pending | Pure codecs cover core tools, but there is no full deployed-binding cross-provider test yet |
@@ -61,6 +62,73 @@ Status vocabulary:
 | Same: invalid/streaming embedding input is rejected before billing/capacity | Retain | `test/gateway/legacy-gateway-routes.test.ts` |
 | Same: embeddings-specific access-state/non-access failover distinction | Replace | `test/gateway/handler.test.ts` proves structured access-state, account-capacity and provider-transient failures switch accounts, while request/permission/model failures do not; every attempt has one Pool lease while billing and API-key monetary reservation/settlement remain request-scoped and exactly once |
 | Gemini `embedContent` conversion and native result shape | Retain | `test/gateway/handler.test.ts` — Gemini embedding contract |
+
+## Media migration contract (v0.21 delivery)
+
+The three image surfaces share D1, Queue and R2 infrastructure, but they do not
+share one public contract. The v0.21 delivery slice is batch Images only and is
+accepted by the Worker evidence named below. Synchronous Images and ordinary
+async Images remain later work.
+
+Compatibility decisions for the first Worker slice:
+
+- Gemini batch execution uses one synchronous `generateContent` call per expanded
+  item. It therefore has no provider job/polling/indexing phase and does not expose
+  `processing_results`; unknown, missing and duplicate provider result IDs are not
+  claimed as compatible until a provider with an asynchronous job API is added.
+- The persisted task row is the durable enqueue intent. Submission commits the
+  queued row before sending, and Cron recovers unsent or stale rows; a separate
+  outbox table would duplicate the same authority for this single-event workflow.
+- ZIPs are generated as bounded streams from R2 instead of persisted as a second
+  R2 artifact. `manifest.json` and `errors.json` are deferred; successful image
+  members and safe names are retained. A future prepared-ZIP cache may persist
+  CRC/size metadata to reduce repeated Worker CPU.
+- v0.21 selects a deterministic healthy Gemini account from D1. Pool Durable
+  Object weighted selection, concurrency leasing, cooldown and multi-account
+  failover are explicitly deferred before this media surface can be called full
+  scheduling parity.
+
+### Synchronous Images
+
+| Legacy source and retained case | Required Worker contract | Required Worker evidence |
+|---|---|---|
+| `server/routes/gateway_test.go`; `service/openai_images_test.go`: JSON generations, JSON/multipart edits, `/v1` and root aliases, defaults and native option parsing | Retain `POST /[v1/]images/generations` and `/[v1/]images/edits`; JSON generations, JSON `images[].image_url` edits and multipart `image`/`mask`; `model=gpt-image-2` and `n=1` defaults; reject malformed/oversized requests before reservation | Pending: route and request fixtures in `test/gateway/media-images.test.ts` |
+| `openai_images_test.go`: `OAuthPassesNAndReturnsAllImages`, API-key generation/edit forwarding and OAuth buffered conversion | Retain every completed image, public model restoration, `b64_json`/`url`, revised prompt and usage fields; API-key accounts use the configured Images endpoint while OAuth accounts use the Responses image tool | Pending: buffered provider fixtures in `test/gateway/media-images.test.ts` |
+| `openai_images_test.go`: `OAuthStreamingTransformsEvents`, edit streaming, multiline SSE and disconnect draining | Retain `image_generation.*` versus `image_edit.*` partial/completed events, exactly one terminal sequence, usage extraction and continued upstream drain for billing after client disconnect | Pending: SSE fixtures in `test/gateway/media-images.test.ts` |
+| `handler/openai_images_controls_test.go`; `handler/openai_images_failover_test.go`; `service/openai_images_incomplete_test.go` | Denied groups fail 403 before scheduling/billing/upstream; non-retryable provider errors retain their public status/type/code/message; retryable empty/5xx results fail over only before output and exhaust as sanitized gateway errors | Pending: policy, error and failover fixtures in `test/gateway/media-images.test.ts` |
+| `openai_images_actual_size_test.go`; image cases in `openai_gateway_record_usage_test.go` | Bill only actual image output, including a partial request that produced images; actual decoded output dimensions override requested size, unknown size defaults to 2K, per-image billing ignores incidental image-tool token usage, and image-specific versus shared group multipliers remain exact | Pending: exact-micros media accounting tests in `test/gateway/media-images-billing.test.ts` |
+
+### Ordinary async Images
+
+| Legacy source and retained case | Required Worker contract | Required Worker evidence |
+|---|---|---|
+| `handler/image_task_handler_test.go`: `SubmitAndPoll`, `DisabledReturns404` | Retain `POST /[v1/]images/{generations,edits}/async` and `GET /[v1/]images/tasks/:task_id`; accepted submission is 202 with `Location`, `Retry-After: 3`, `Cache-Control: no-store`, `id=task_id`, `object=image.generation.task`, timestamps and `poll_url`; `stream:true` is rejected and disabled storage/platform is 404 | Pending: HTTP contract tests in `test/media/image-task.test.ts` |
+| `service/image_task_test.go`: lifecycle, invalid result and store failures | Polling is always HTTP 200 for an owned stored task: `processing` includes retry guidance, `completed` includes `http_status`, `result` and first `image_url`, and `failed` includes the original `http_status` plus public `error`; missing or cross-key tasks are indistinguishable 404; default TTL is 24 hours and refreshes on completion | Pending: D1 task lifecycle/ownership tests in `test/media/image-task.test.ts` |
+| `service/image_storage_test.go`: offload success/failure and base64/data-URL handling | Write every successful image to R2 before completing the task, remove `b64_json` from persistent task JSON, and record a 502 failed task if offload fails; D1 must never contain image bytes or credentials | Pending: R2 integration tests in `test/media/image-task-storage.test.ts` |
+| `middleware/api_key_auth_image_task_test.go` and synchronous Images billing tests | A task may be accepted before downstream billing/account failure, which is then observed through the failed task; polling remains available after balance exhaustion or feature disablement; Queue replay must execute the synchronous billing contract exactly once | Pending: API-key admission plus Queue replay/recovery tests in `test/media/image-task.test.ts` |
+
+### Batch Images — v0.21 slice
+
+| Legacy source and retained case | Required Worker contract | Required Worker evidence |
+|---|---|---|
+| `service/batch_image_public_test.go`: valid/invalid submit, output expansion, model listing, group denial, ownership and idempotency | Retain the `/v1/images/batches` submit/list/models/get/items/cancel/delete-record surface used by the frontend; require a Gemini group with `allow_batch_image_generation`; expand `output_count` into uniquely suffixed items; cap each item at 4 and the job at 200 outputs; scope every operation and idempotency key to user plus API key; same key/different request hash is 409 | Replace: `test/media/domain.test.ts`, `test/media/handlers.test.ts`, `test/media/schema.test.ts` and `test/app.test.ts` |
+| `batch_image_test.go`; `batch_image_processor_test.go`: transitions, provider polling and result reconciliation | Replace the legacy provider job with synchronous per-item Gemini execution; retain `queued`, `running`, `settling`, `completed`, `failed`, `cancelled`, `output_deleted`; Queue delivery is at least once and every retained transition is CAS/idempotent | Replace + Pending: retained Worker lifecycle/replay behavior is covered by `test/media/handlers.test.ts`; provider-job polling/result-ID reconciliation remains Pending by the compatibility decision above |
+| `batch_image_settlement_test.go`; `batch_image_billing_recovery_test.go`: successful-only settlement, zero success, crash replay and exhausted retry | Reserve before provider submission using the submitted price/discount/hold snapshot; charge only successful expanded items; zero-success provider completion is `completed` with zero actual cost; capture/release IDs are stable across replay; cancellation and job-level failure release unused hold; missed Queue sends and stale pre-submit holds are recoverable | Replace: exact-micros settlement, cancellation races, replay and recovery in `test/media/handlers.test.ts` |
+| `batch_image_download_test.go`; `batch_image_cleanup_test.go`: item/ZIP download, safe names, owner gates and deleted output | Store image artifacts in R2, serve the selected `image_index` with a safe attachment name/MIME, stream a bounded ZIP of successful outputs, and preserve 404 owner masking, 409 not-ready/item-failed, 410 output-deleted and bounded download errors | Replace + Pending: R2 item/ZIP and cleanup contracts in `test/media/handlers.test.ts`; ZIP manifest/error members remain deferred by the compatibility decision above |
+| `batch_image_mvp_smoke_test.go`: submit through cleanup | One binding-level test must prove submit -> reserve -> Queue execution -> successful-only settlement -> list/items -> item/ZIP download -> output deletion without storing base64 or provider-private references in D1/public JSON | Replace: isolated binding E2E in `test/e2e/batch-image.e2e.ts` |
+| `frontend/src/api/batchImage.ts`; `frontend/src/views/user/BatchImageGuideView.vue`; `frontend/src/composables/useBatchImageAccess.ts` | Worker mode uses the authenticated session alias and sends only `api_key_id`; legacy mode preserves Bearer/idempotency headers. Retain model discovery, filters, parent retry jobs, prompt previews, cost/download timestamps, item preview, ZIP download and terminal-only record deletion. A 200-item job must not be truncated by the legacy 100-item default | Replace: `src/api/__tests__/batch-image.worker-contract.spec.ts`, `src/composables/__tests__/useBatchImageAccess.spec.ts` and `src/views/user/__tests__/BatchImageGuideView.worker.spec.ts`; API preserves 200 items and the view renders 175 rows |
+
+Worker implementation constraints for all three surfaces:
+
+- D1 stores task/job metadata, item projections, pricing snapshots, immutable
+  billing operations and an outbox; R2 stores inputs, images and prepared ZIPs.
+- Queue messages are versioned and replay-safe. D1 status/version CAS and stable
+  hold/capture/release IDs, not Queue delivery count, are the mutation authority.
+- A bounded Cron dispatcher recovers committed outbox rows and stale work. A
+  Worker request or `waitUntil` is never treated as a long-running task runner.
+- R2 object names and provider job/account identifiers are private. Public and
+  error JSON must not expose credentials, storage keys, raw prompts beyond the
+  bounded prompt preview, or base64 image data.
 
 ## Multiplatform scheduling suites
 

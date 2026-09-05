@@ -1,4 +1,5 @@
 import type { Env, PlatformEvent, SubscriptionStateChangedPayload } from '../env'
+import { isProviderPlatform } from '../gateway/platform'
 import {
   errorResponse,
   json,
@@ -702,7 +703,7 @@ export class SubscriptionStateDO {
     if (row === null || row.subscription_id !== input.subscriptionId) {
       throw new StateApiError(403, 'subscription_unavailable', 'Subscription entitlement is no longer active')
     }
-    if (row.group_enabled !== 1 || row.platform !== 'openai') {
+    if (row.group_enabled !== 1 || !isProviderPlatform(row.platform)) {
       throw new StateApiError(403, 'group_unavailable', 'API key group is unavailable')
     }
   }

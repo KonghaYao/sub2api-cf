@@ -169,6 +169,28 @@ import {
 } from './gateway/handler'
 import { handleGatewayUsage, handleKeyBillingInfo } from './gateway/info'
 import { getModelPlaza } from './gateway/model-plaza'
+import {
+  cancelGatewayMediaTask,
+  cancelUserMediaTask,
+  deleteGatewayMediaTask,
+  deleteGatewayMediaTaskOutputs,
+  deleteUserMediaTask,
+  deleteUserMediaTaskOutputs,
+  downloadGatewayMediaTask,
+  downloadUserMediaTask,
+  getGatewayMediaTask,
+  getGatewayMediaTaskItemContent,
+  getUserMediaTask,
+  getUserMediaTaskItemContent,
+  listGatewayMediaModels,
+  listGatewayMediaTaskItems,
+  listGatewayMediaTasks,
+  listUserMediaModels,
+  listUserMediaTaskItems,
+  listUserMediaTasks,
+  submitGatewayMediaTask,
+  submitUserMediaTask,
+} from './media/handlers'
 import { validateInvitationCode, validatePromotionCode } from './commercial/registration'
 import {
   accrueAdminAffiliateRebate,
@@ -675,6 +697,17 @@ export function createApp() {
   app.post('/api/v1/payment/webhook/stripe', handleStripeWebhook)
   app.get('/api/v1/model-plaza', getModelPlaza)
 
+  app.post('/api/v1/user/image-batches', submitUserMediaTask)
+  app.get('/api/v1/user/image-batches', listUserMediaTasks)
+  app.get('/api/v1/user/image-batches/models', listUserMediaModels)
+  app.get('/api/v1/user/image-batches/:id', getUserMediaTask)
+  app.get('/api/v1/user/image-batches/:id/items', listUserMediaTaskItems)
+  app.get('/api/v1/user/image-batches/:id/items/:customId/content', getUserMediaTaskItemContent)
+  app.get('/api/v1/user/image-batches/:id/download', downloadUserMediaTask)
+  app.post('/api/v1/user/image-batches/:id/cancel', cancelUserMediaTask)
+  app.delete('/api/v1/user/image-batches/:id/outputs', deleteUserMediaTaskOutputs)
+  app.delete('/api/v1/user/image-batches/:id', deleteUserMediaTask)
+
   app.get('/v1/models', handleModels)
   app.get('/models', handleModels)
   app.get('/backend-api/codex/models', handleCodexModels)
@@ -699,6 +732,16 @@ export function createApp() {
   app.post('/messages/count_tokens', handleAnthropicCountTokens)
   app.post('/v1/embeddings', handleEmbeddings)
   app.post('/embeddings', handleEmbeddings)
+  app.post('/v1/images/batches', submitGatewayMediaTask)
+  app.get('/v1/images/batches', listGatewayMediaTasks)
+  app.get('/v1/images/batches/models', listGatewayMediaModels)
+  app.get('/v1/images/batches/:id', getGatewayMediaTask)
+  app.get('/v1/images/batches/:id/items', listGatewayMediaTaskItems)
+  app.get('/v1/images/batches/:id/items/:customId/content', getGatewayMediaTaskItemContent)
+  app.get('/v1/images/batches/:id/download', downloadGatewayMediaTask)
+  app.post('/v1/images/batches/:id/cancel', cancelGatewayMediaTask)
+  app.delete('/v1/images/batches/:id/outputs', deleteGatewayMediaTaskOutputs)
+  app.delete('/v1/images/batches/:id', deleteGatewayMediaTask)
 
   app.notFound(async (context) => {
     const pathname = new URL(context.req.url).pathname

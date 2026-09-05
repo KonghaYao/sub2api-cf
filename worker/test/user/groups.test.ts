@@ -68,22 +68,29 @@ function seedGroup(
     description?: string | null
     groupType?: 'standard' | 'subscription'
     isExclusive?: boolean
+    platform?: 'openai' | 'gemini'
+    allowImageGeneration?: boolean
+    allowBatchImageGeneration?: boolean
   },
 ): void {
   raw.prepare(
     `INSERT INTO "groups" (
        id, name, description, platform, enabled, sort_order,
-       rate_multiplier_ppm, group_type, is_exclusive, created_at_ms, updated_at_ms
-     ) VALUES (?, ?, ?, 'openai', ?, ?, ?, ?, ?, 100, 100)`,
+       rate_multiplier_ppm, group_type, is_exclusive, allow_image_generation,
+       allow_batch_image_generation, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 100)`,
   ).run(
     input.id,
     input.name,
     input.description ?? null,
+    input.platform ?? 'openai',
     input.enabled === false ? 0 : 1,
     input.sortOrder ?? 0,
     input.rateMultiplierPpm ?? 1_000_000,
     input.groupType ?? 'standard',
     input.isExclusive === true ? 1 : 0,
+    input.allowImageGeneration === true ? 1 : 0,
+    input.allowBatchImageGeneration === true ? 1 : 0,
   )
 }
 
@@ -132,6 +139,14 @@ describe('user groups', () => {
       sortOrder: 0,
     })
     seedGroup(test.raw, { id: 'disabled', name: 'Disabled', enabled: false, sortOrder: 0 })
+    seedGroup(test.raw, {
+      id: 'gemini-images',
+      name: 'Gemini Images',
+      platform: 'gemini',
+      allowImageGeneration: true,
+      allowBatchImageGeneration: true,
+      sortOrder: 40,
+    })
     const now = Date.now()
     test.raw.prepare(
       `INSERT INTO user_group_permissions (user_id, group_id, created_at_ms)
@@ -187,6 +202,8 @@ describe('user groups', () => {
         is_exclusive: true,
         status: 'active',
         subscription_type: 'standard',
+        allow_image_generation: false,
+        allow_batch_image_generation: false,
       },
       {
         id: 'subscription',
@@ -197,6 +214,8 @@ describe('user groups', () => {
         is_exclusive: false,
         status: 'active',
         subscription_type: 'subscription',
+        allow_image_generation: false,
+        allow_batch_image_generation: false,
       },
       {
         id: 'standard',
@@ -207,6 +226,20 @@ describe('user groups', () => {
         is_exclusive: false,
         status: 'active',
         subscription_type: 'standard',
+        allow_image_generation: false,
+        allow_batch_image_generation: false,
+      },
+      {
+        id: 'gemini-images',
+        name: 'Gemini Images',
+        description: null,
+        platform: 'gemini',
+        rate_multiplier: 1,
+        is_exclusive: false,
+        status: 'active',
+        subscription_type: 'standard',
+        allow_image_generation: true,
+        allow_batch_image_generation: true,
       },
     ])
     expect(JSON.stringify(body)).not.toContain('Disabled')

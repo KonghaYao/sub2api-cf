@@ -41,6 +41,15 @@ interface GroupRow {
   daily_quota_micros: number | null
   weekly_quota_micros: number | null
   monthly_quota_micros: number | null
+  allow_image_generation: number
+  allow_batch_image_generation: number
+  image_rate_independent: number
+  image_rate_multiplier_ppm: number
+  batch_image_discount_multiplier_ppm: number
+  batch_image_hold_multiplier_ppm: number
+  image_price_1k_micros: number | null
+  image_price_2k_micros: number | null
+  image_price_4k_micros: number | null
   control_version: number
   created_at_ms: number
   updated_at_ms: number
@@ -103,6 +112,10 @@ interface PriceRow {
 const GROUP_COLUMNS = `id, name, description, platform, enabled, sort_order,
   rate_multiplier_ppm, rpm_limit, catalog_mode, group_type, is_exclusive,
   daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
+  allow_image_generation, allow_batch_image_generation, image_rate_independent,
+  image_rate_multiplier_ppm, batch_image_discount_multiplier_ppm,
+  batch_image_hold_multiplier_ppm, image_price_1k_micros,
+  image_price_2k_micros, image_price_4k_micros,
   control_version, created_at_ms, updated_at_ms`
 const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings, enabled,
   control_version, created_at_ms, updated_at_ms`
@@ -201,8 +214,12 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
              id, name, description, platform, enabled, sort_order,
              rate_multiplier_ppm, rpm_limit, catalog_mode, group_type, is_exclusive,
              daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
+             allow_image_generation, allow_batch_image_generation, image_rate_independent,
+             image_rate_multiplier_ppm, batch_image_discount_multiplier_ppm,
+             batch_image_hold_multiplier_ppm, image_price_1k_micros,
+             image_price_2k_micros, image_price_4k_micros,
              created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id,
           row.name,
@@ -218,6 +235,15 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
           row.daily_quota_micros,
           row.weekly_quota_micros,
           row.monthly_quota_micros,
+          row.allow_image_generation,
+          row.allow_batch_image_generation,
+          row.image_rate_independent,
+          row.image_rate_multiplier_ppm,
+          row.batch_image_discount_multiplier_ppm,
+          row.batch_image_hold_multiplier_ppm,
+          row.image_price_1k_micros,
+          row.image_price_2k_micros,
+          row.image_price_4k_micros,
           now,
           now,
         ),
@@ -272,6 +298,10 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
               SET name = ?, description = ?, platform = ?, enabled = ?, sort_order = ?,
                   rate_multiplier_ppm = ?, rpm_limit = ?, catalog_mode = ?, group_type = ?, is_exclusive = ?,
                   daily_quota_micros = ?, weekly_quota_micros = ?, monthly_quota_micros = ?,
+                  allow_image_generation = ?, allow_batch_image_generation = ?, image_rate_independent = ?,
+                  image_rate_multiplier_ppm = ?, batch_image_discount_multiplier_ppm = ?,
+                  batch_image_hold_multiplier_ppm = ?, image_price_1k_micros = ?,
+                  image_price_2k_micros = ?, image_price_4k_micros = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ?`,
@@ -289,6 +319,15 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
           next.daily_quota_micros,
           next.weekly_quota_micros,
           next.monthly_quota_micros,
+          next.allow_image_generation,
+          next.allow_batch_image_generation,
+          next.image_rate_independent,
+          next.image_rate_multiplier_ppm,
+          next.batch_image_discount_multiplier_ppm,
+          next.batch_image_hold_multiplier_ppm,
+          next.image_price_1k_micros,
+          next.image_price_2k_micros,
+          next.image_price_4k_micros,
           expected,
           expected + 1,
           response.updated_at_ms,
@@ -713,6 +752,15 @@ function parseCreateGroup(body: Record<string, unknown>) {
     daily_quota_micros: optionalNullableMicros(body, 'daily_quota_micros') ?? null,
     weekly_quota_micros: optionalNullableMicros(body, 'weekly_quota_micros') ?? null,
     monthly_quota_micros: optionalNullableMicros(body, 'monthly_quota_micros') ?? null,
+    allow_image_generation: optionalBoolean(body, 'allow_image_generation') ? 1 : 0,
+    allow_batch_image_generation: optionalBoolean(body, 'allow_batch_image_generation') ? 1 : 0,
+    image_rate_independent: optionalBoolean(body, 'image_rate_independent') ? 1 : 0,
+    image_rate_multiplier_ppm: optionalSafeInteger(body, 'image_rate_multiplier_ppm', 0, 10_000_000) ?? 1_000_000,
+    batch_image_discount_multiplier_ppm: optionalSafeInteger(body, 'batch_image_discount_multiplier_ppm', 0, 10_000_000) ?? 500_000,
+    batch_image_hold_multiplier_ppm: optionalSafeInteger(body, 'batch_image_hold_multiplier_ppm', 0, 10_000_000) ?? 600_000,
+    image_price_1k_micros: optionalNullableImagePrice(body, 'image_price_1k_micros') ?? null,
+    image_price_2k_micros: optionalNullableImagePrice(body, 'image_price_2k_micros') ?? null,
+    image_price_4k_micros: optionalNullableImagePrice(body, 'image_price_4k_micros') ?? null,
   }
   validateGroupCommerceFields(result)
   return result
@@ -725,7 +773,12 @@ function parseGroupPatch(body: Record<string, unknown>) {
     catalog_mode: GroupRow['catalog_mode'];
     group_type: GroupRow['group_type']; is_exclusive: number;
     daily_quota_micros: number | null; weekly_quota_micros: number | null;
-    monthly_quota_micros: number | null
+    monthly_quota_micros: number | null;
+    allow_image_generation: number; allow_batch_image_generation: number;
+    image_rate_independent: number; image_rate_multiplier_ppm: number;
+    batch_image_discount_multiplier_ppm: number; batch_image_hold_multiplier_ppm: number;
+    image_price_1k_micros: number | null; image_price_2k_micros: number | null;
+    image_price_4k_micros: number | null
   }> = {}
   const name = optionalString(body, 'name', 128)
   if (name !== undefined) result.name = name
@@ -752,6 +805,30 @@ function parseGroupPatch(body: Record<string, unknown>) {
   if (groupType !== undefined) result.group_type = groupType
   const exclusive = optionalBoolean(body, 'is_exclusive')
   if (exclusive !== undefined) result.is_exclusive = exclusive ? 1 : 0
+  for (const field of [
+    'allow_image_generation',
+    'allow_batch_image_generation',
+    'image_rate_independent',
+  ] as const) {
+    const value = optionalBoolean(body, field)
+    if (value !== undefined) result[field] = value ? 1 : 0
+  }
+  for (const field of [
+    'image_rate_multiplier_ppm',
+    'batch_image_discount_multiplier_ppm',
+    'batch_image_hold_multiplier_ppm',
+  ] as const) {
+    const value = optionalSafeInteger(body, field, 0, 10_000_000)
+    if (value !== undefined) result[field] = value
+  }
+  for (const field of [
+    'image_price_1k_micros',
+    'image_price_2k_micros',
+    'image_price_4k_micros',
+  ] as const) {
+    const value = optionalNullableImagePrice(body, field)
+    if (value !== undefined) result[field] = value
+  }
   for (const field of [
     'daily_quota_micros',
     'weekly_quota_micros',
@@ -782,8 +859,20 @@ function optionalNullableMicros(
   return requireSafeInteger(body, field)
 }
 
+function optionalNullableImagePrice(
+  body: Record<string, unknown>,
+  field: 'image_price_1k_micros' | 'image_price_2k_micros' | 'image_price_4k_micros',
+): number | null | undefined {
+  if (body[field] === undefined) return undefined
+  if (body[field] === null) return null
+  return requireSafeInteger(body, field)
+}
+
 function validateGroupCommerceFields(
-  group: Pick<GroupRow, 'group_type' | 'daily_quota_micros' | 'weekly_quota_micros' | 'monthly_quota_micros'>,
+  group: Pick<GroupRow,
+    'platform' | 'group_type' | 'daily_quota_micros' | 'weekly_quota_micros' |
+    'monthly_quota_micros' | 'allow_image_generation' | 'allow_batch_image_generation' |
+    'batch_image_discount_multiplier_ppm' | 'batch_image_hold_multiplier_ppm'>,
 ): void {
   if (
     group.group_type === 'standard' &&
@@ -794,6 +883,27 @@ function validateGroupCommerceFields(
       400,
       'standard_group_subscription_quota',
       'Subscription quota fields require group_type subscription',
+    )
+  }
+  if (group.allow_batch_image_generation === 1 && group.allow_image_generation !== 1) {
+    throw new GatewayError(
+      400,
+      'batch_image_requires_image_generation',
+      'Batch image generation requires image generation to be enabled',
+    )
+  }
+  if (group.allow_batch_image_generation === 1 && group.platform !== 'gemini') {
+    throw new GatewayError(
+      400,
+      'batch_image_platform_not_supported',
+      'Batch image generation is currently supported only for Gemini groups',
+    )
+  }
+  if (group.batch_image_hold_multiplier_ppm < group.batch_image_discount_multiplier_ppm) {
+    throw new GatewayError(
+      400,
+      'invalid_batch_image_hold_multiplier',
+      'Batch image hold multiplier must cover the discount multiplier',
     )
   }
 }
@@ -930,6 +1040,9 @@ function publicGroup(row: GroupRow) {
     ...row,
     enabled: row.enabled === 1,
     is_exclusive: row.is_exclusive === 1,
+    allow_image_generation: row.allow_image_generation === 1,
+    allow_batch_image_generation: row.allow_batch_image_generation === 1,
+    image_rate_independent: row.image_rate_independent === 1,
     status: row.enabled === 1 ? 'active' as const : 'inactive' as const,
   }
 }

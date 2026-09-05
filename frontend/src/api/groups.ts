@@ -16,6 +16,8 @@ export interface AvailableUserGroup {
   is_exclusive: boolean
   status: 'active'
   subscription_type: SubscriptionType
+  allow_image_generation: boolean
+  allow_batch_image_generation: boolean
   peak_rate_enabled?: boolean
   peak_start?: string
   peak_end?: string

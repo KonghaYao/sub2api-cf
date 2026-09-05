@@ -16,6 +16,7 @@ import {
   repairObservabilityPayloadMetadata,
   runObservabilityRetention,
 } from './observability/retention'
+import { recoverPendingMediaTasks } from './media/queue'
 
 export { ApiKeyLimitDO, AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
 
@@ -35,6 +36,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     runObservabilityRetention(env, { beforeMs: now - 30 * 86_400_000, limit: 100 }),
     repairObservabilityPayloadMetadata(env, { nowMs: now, limit: 50 }),
     cleanupObservabilityR2Orphans(env, { beforeMs: now - 31 * 86_400_000, limit: 50 }),
+    recoverPendingMediaTasks(env),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -53,6 +55,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'observability_retention',
           'observability_payload_repair',
           'observability_r2_orphans',
+          'media_tasks',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

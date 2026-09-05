@@ -29,6 +29,7 @@ import {
   StateApiError,
 } from "./http";
 import type { Env, PlatformEvent, UserStateChangedPayload } from "../env";
+import { isProviderPlatform } from "../gateway/platform";
 import { groupAccessPredicate } from "../user/group-access";
 
 interface UserProfileRow {
@@ -544,7 +545,7 @@ export class UserStateDO {
     if (result === null) {
       throw new StateApiError(401, "invalid_api_key", "API key authorization is no longer valid");
     }
-    if (result.group_enabled !== 1 || result.platform !== "openai") {
+    if (result.group_enabled !== 1 || !isProviderPlatform(result.platform)) {
       throw new StateApiError(403, "group_unavailable", "API key group is unavailable");
     }
     if (result.group_accessible !== 1) {

@@ -65,7 +65,10 @@ class CatalogStatement {
     if (this.query.includes('INSERT INTO "groups"')) {
       const [
         id, name, description, platform, enabled, sortOrder, multiplier, rpmLimit,
-        catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota, createdAt, updatedAt,
+        catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
+        allowImage, allowBatchImage, imageRateIndependent, imageRateMultiplier,
+        batchDiscountMultiplier, batchHoldMultiplier, imagePrice1k, imagePrice2k,
+        imagePrice4k, createdAt, updatedAt,
       ] = this.values
       this.database.groups.set(String(id), {
         id: String(id),
@@ -82,6 +85,15 @@ class CatalogStatement {
         daily_quota_micros: dailyQuota === null ? null : Number(dailyQuota),
         weekly_quota_micros: weeklyQuota === null ? null : Number(weeklyQuota),
         monthly_quota_micros: monthlyQuota === null ? null : Number(monthlyQuota),
+        allow_image_generation: Number(allowImage),
+        allow_batch_image_generation: Number(allowBatchImage),
+        image_rate_independent: Number(imageRateIndependent),
+        image_rate_multiplier_ppm: Number(imageRateMultiplier),
+        batch_image_discount_multiplier_ppm: Number(batchDiscountMultiplier),
+        batch_image_hold_multiplier_ppm: Number(batchHoldMultiplier),
+        image_price_1k_micros: imagePrice1k === null ? null : Number(imagePrice1k),
+        image_price_2k_micros: imagePrice2k === null ? null : Number(imagePrice2k),
+        image_price_4k_micros: imagePrice4k === null ? null : Number(imagePrice4k),
         control_version: 0,
         created_at_ms: Number(createdAt),
         updated_at_ms: Number(updatedAt),
@@ -99,7 +111,9 @@ class CatalogStatement {
       const [
         name, description, platform, enabled, sortOrder, multiplier, rpmLimit,
         catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
-        expected, nextVersion, updatedAt, id,
+        allowImage, allowBatchImage, imageRateIndependent, imageRateMultiplier,
+        batchDiscountMultiplier, batchHoldMultiplier, imagePrice1k, imagePrice2k,
+        imagePrice4k, expected, nextVersion, updatedAt, id,
       ] = this.values
       const group = this.database.requireRow(this.database.groups, String(id))
       this.database.assertVersion(group, Number(expected))
@@ -117,6 +131,15 @@ class CatalogStatement {
         daily_quota_micros: dailyQuota === null ? null : Number(dailyQuota),
         weekly_quota_micros: weeklyQuota === null ? null : Number(weeklyQuota),
         monthly_quota_micros: monthlyQuota === null ? null : Number(monthlyQuota),
+        allow_image_generation: Number(allowImage),
+        allow_batch_image_generation: Number(allowBatchImage),
+        image_rate_independent: Number(imageRateIndependent),
+        image_rate_multiplier_ppm: Number(imageRateMultiplier),
+        batch_image_discount_multiplier_ppm: Number(batchDiscountMultiplier),
+        batch_image_hold_multiplier_ppm: Number(batchHoldMultiplier),
+        image_price_1k_micros: imagePrice1k === null ? null : Number(imagePrice1k),
+        image_price_2k_micros: imagePrice2k === null ? null : Number(imagePrice2k),
+        image_price_4k_micros: imagePrice4k === null ? null : Number(imagePrice4k),
         control_version: Number(nextVersion),
         updated_at_ms: Number(updatedAt),
       })

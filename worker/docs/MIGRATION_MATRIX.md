@@ -45,7 +45,7 @@ Status meanings:
 | API-key monetary limits | Per-key total quota plus 5h/1d/7d amount windows and reset lifecycle | Done | Migrations 0024/0025, Admin/User CAS contracts and the Keys UI use exact integer micros with independent total/window reset epochs. A user-sharded SQLite Durable Object enforces anti-oversell before Pool/fetch, tracks unlimited keys, renews long streams and rejects stale reset generations. Main billing, per-key settlement and monotonic D1 projection are persisted as three independently replayable recovery stages; race, reset, expiry, disconnect and migration fixtures pass locally. |
 | User/platform quota | Balance reservation/settlement, subscription and platform windows | Done | Migration 0031 adds authoritative per-user/per-platform daily, weekly and monthly micro-unit windows plus registration defaults. Owner reads and admin default/user replace/reset APIs use ETag, CAS, idempotency and audit; `ApiKeyLimitDO` configures, reserves, settles and cancels platform holds before Pool selection while preserving the existing balance and subscription authorities. Migration, state-machine, HTTP and gateway handler tests pass locally. |
 | Usage and billing API | `/v1/usage` and `/v1/sub2api/billing` with immutable price version | Partial | Routes and balance/subscription billing attribution exist. Migration 0041 projects platform, request type, inbound/upstream endpoint, billing mode and native-compaction dimensions; an explicit dimensions version distinguishes rolling-deploy writes from genuine `unknown` request types while legacy rows are backfilled. Complete legacy aggregate/filter coverage remains |
-| Media generation | Images, async/batch images, video, voice/live and task polling | Planned | Provider fixtures, R2 artifacts, Queue workflow tests |
+| Media generation | D1 task/job metadata and an implicit durable enqueue intent, replay-safe Queue workflows, R2 media/ZIP artifacts and exact media billing. v0.21 is deliberately limited to the batch Images public/UI slice | Partial | v0.21 proves owner-scoped batch submit/list/models/get/items/cancel/delete, deterministic output expansion, public status/error mapping, pre-submit hold plus successful-only exact settlement/release, Queue/CAS recovery, R2 item/ZIP download and a frontend flow beyond the old 100-item default. Synchronous Images, ordinary async Images, provider-job result reconciliation, video, audio/voice/live, task polling outside the batch surface and realtime/WebSocket remain Pending; see `LEGACY_GATEWAY_TEST_MAP.md` |
 | Search extensions | Web/X search and provider-specific alpha routes | Planned | Explicit compatibility fixtures |
 | Request policy | Bounded JSON bodies, gzip/deflate decoding, prompt policy and sensitive-data redaction | Partial | Raw and decompressed 2 MiB limits, encoding rejection, lenient-client JSON and pre-reservation failure tests pass; multipart, prompt policy and broader redaction remain |
 | Realtime/WebSocket | Responses realtime session relay with Workers WebSocket pairs | Planned | Upgrade, relay, accounting, timeout and close-code tests |
@@ -198,9 +198,18 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
    have private signup/first-bind defaults backed by an exactly-once grant ledger and recoverable
    Durable Object effects, plus a CAS-protected Worker settings UI. Production still needs a verified
    Email Service sender, deployed identity E2E and the optional legacy pending-account chooser.
-4. **Media and realtime**: image/audio/video task APIs backed by Queue and R2, task polling and
-   cancellation, followed by WebSocket realtime relay. Legacy provider-specific variants may be
-   collapsed into one capability-based task contract.
+4. **Media and realtime**: v0.21 delivers only the batch Images tracer bullet. Its acceptance boundary is
+   the frontend-used `/v1/images/batches` submit/list/models/get/items/cancel/delete-record and
+   item/ZIP download surface; Gemini-group entitlement and model discovery; deterministic
+   `output_count` expansion; owner/key-scoped idempotency; public state/error fidelity; a submitted
+   pricing snapshot with pre-submit hold, successful-item-only exact settlement and idempotent release;
+   replay-safe D1 outbox/Queue/CAS recovery; private R2 artifacts; and an isolated binding E2E plus
+   frontend smoke that covers a job with more than 100 items. Local module, frontend and isolated
+   binding tests are the acceptance evidence; production deployment and smoke remain separate gates.
+   Synchronous `/images/generations` and `/images/edits`, ordinary asynchronous
+   `/images/*/async` plus `/images/tasks/:task_id`, and all video, audio/voice/live and
+   realtime/WebSocket work explicitly remain after v0.21. Provider-specific internals may be
+   simplified only when the retained public behavior has an explicit compatibility decision.
 5. **Operations and governance**: granular admin RBAC, a bounded immutable audit reader, payment
    dashboard, payment-reconciliation actions and a first request/error Explorer with D1/R2 retention
    exist; request/error resolve/reopen now has CAS and immutable actor audit. Remaining work is broader
