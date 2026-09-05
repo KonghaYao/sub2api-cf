@@ -72,6 +72,7 @@ interface ModelCapability {
   chat_completions: boolean
   responses: boolean
   embeddings: boolean
+  image_generation: boolean
   control_version: number
 }
 
@@ -100,6 +101,7 @@ interface ModelCapabilityInput {
   chat_completions: boolean
   responses: boolean
   embeddings?: boolean
+  image_generation?: boolean
 }
 
 interface AccountPatch {
@@ -141,10 +143,12 @@ const ACCOUNT_PROJECTION = `
              'chat_completions', capabilities.chat_completions,
              'responses', capabilities.responses,
              'embeddings', capabilities.embeddings,
+             'image_generation', capabilities.image_generation,
              'control_version', capabilities.control_version
            ))
              FROM (
-               SELECT model_id, chat_completions, responses, embeddings, control_version
+               SELECT model_id, chat_completions, responses, embeddings, image_generation,
+                      control_version
                  FROM account_models
                 WHERE account_id = a.id
                 ORDER BY model_id ASC
@@ -274,6 +278,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       model_capabilities: input.model_capabilities.map((value) => ({
         ...value,
         embeddings: value.embeddings ?? false,
+        image_generation: value.image_generation ?? false,
         control_version: 0,
       })),
     })
@@ -479,12 +484,14 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
     const now = Date.now()
     await mutateAccountRelation(context.env, account, context.env.DB.prepare(
       `INSERT INTO account_models (
-         account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         account_id, model_id, chat_completions, responses, embeddings, image_generation,
+         created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id, model_id) DO UPDATE SET
          chat_completions = excluded.chat_completions,
          responses = excluded.responses,
          embeddings = excluded.embeddings,
+         image_generation = excluded.image_generation,
          control_version = account_models.control_version + 1,
          updated_at_ms = excluded.updated_at_ms`,
     ).bind(
@@ -493,6 +500,7 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
       capability.chat_completions ? 1 : 0,
       capability.responses ? 1 : 0,
       capability.embeddings ? 1 : 0,
+      capability.image_generation ? 1 : 0,
       now,
       now,
     ), now)
@@ -929,7 +937,8 @@ function parseModelCapability(body: Record<string, unknown>, resourceId?: string
   const chatCompletions = optionalBoolean(body, 'chat_completions') ?? true
   const responses = optionalBoolean(body, 'responses') ?? true
   const embeddings = optionalBoolean(body, 'embeddings')
-  if (!chatCompletions && !responses && !embeddings) {
+  const imageGeneration = optionalBoolean(body, 'image_generation')
+  if (!chatCompletions && !responses && !embeddings && !imageGeneration) {
     throw new GatewayError(400, 'invalid_model_capability', 'At least one endpoint capability must be enabled')
   }
   return {
@@ -937,6 +946,7 @@ function parseModelCapability(body: Record<string, unknown>, resourceId?: string
     chat_completions: chatCompletions,
     responses,
     ...(embeddings === undefined ? {} : { embeddings }),
+    ...(imageGeneration === undefined ? {} : { image_generation: imageGeneration }),
   }
 }
 
@@ -1009,14 +1019,16 @@ function capabilityInsertStatements(
 ): D1PreparedStatement[] {
   return capabilities.map((capability) => env.DB.prepare(
     `INSERT INTO account_models (
-       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       account_id, model_id, chat_completions, responses, embeddings, image_generation,
+       created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     accountId,
     capability.model_id,
     capability.chat_completions ? 1 : 0,
     capability.responses ? 1 : 0,
     capability.embeddings ? 1 : 0,
+    capability.image_generation ? 1 : 0,
     now,
     now,
   ))
@@ -1072,6 +1084,7 @@ function publicAccount(row: AccountRow) {
       chat_completions: Number(value.chat_completions) === 1,
       responses: Number(value.responses) === 1,
       embeddings: Number(value.embeddings) === 1,
+      image_generation: Number(value.image_generation) === 1,
       control_version: Number(value.control_version),
     }))
   return accountResponse({

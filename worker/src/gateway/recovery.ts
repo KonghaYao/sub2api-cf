@@ -34,6 +34,95 @@ interface SettlementRecoveryRow {
 
 const MAX_AUTOMATIC_ATTEMPTS = 20
 
+export interface SettlementCommandPayload {
+  request_id: string
+  user_id: string
+  billing_type: 'balance' | 'subscription'
+  subscription_id: string | null
+  api_key_id: string
+  platform_quota_platform: PlatformQuotaPolicy['platform'] | null
+  amount_micros: number
+  usage_event: PlatformEvent<UsageSettledPayload>
+}
+
+export function createSettlementCommandEvent(
+  reference: BillingReference & ApiKeyMonetaryReference & PlatformQuotaReference,
+  requestId: string,
+  amountMicros: number,
+  usageEvent: PlatformEvent<UsageSettledPayload>,
+): PlatformEvent<SettlementCommandPayload> {
+  const payload: SettlementCommandPayload = {
+    request_id: requestId,
+    user_id: reference.user_id,
+    billing_type: reference.billing.type,
+    subscription_id: reference.billing.type === 'subscription' ? reference.billing.subscription_id : null,
+    api_key_id: reference.api_key_id,
+    platform_quota_platform: reference.billing.type === 'balance'
+      ? reference.platform_quota?.platform ?? null
+      : null,
+    amount_micros: amountMicros,
+    usage_event: usageEvent,
+  }
+  return {
+    schema_version: 1,
+    event_id: `settlement-command:${requestId}`,
+    event_type: 'settlement.command.v1',
+    occurred_at_ms: Date.now(),
+    aggregate_type: 'gateway_request',
+    aggregate_id: requestId,
+    payload,
+  }
+}
+
+export function isSettlementCommandEvent(value: unknown): value is PlatformEvent<SettlementCommandPayload> {
+  if (value === null || typeof value !== 'object') return false
+  const event = value as Partial<PlatformEvent<Partial<SettlementCommandPayload>>>
+  const payload = event.payload
+  return event.schema_version === 1 && event.event_type === 'settlement.command.v1' &&
+    typeof event.event_id === 'string' && typeof event.aggregate_id === 'string' &&
+    payload !== null && typeof payload === 'object' &&
+    event.event_id === `settlement-command:${payload.request_id ?? ''}` &&
+    event.aggregate_id === payload.request_id &&
+    typeof payload.user_id === 'string' && typeof payload.api_key_id === 'string' &&
+    (payload.billing_type === 'balance' || payload.billing_type === 'subscription') &&
+    (payload.billing_type === 'balance' ? payload.subscription_id === null : typeof payload.subscription_id === 'string') &&
+    Number.isSafeInteger(payload.amount_micros) && (payload.amount_micros as number) >= 0 &&
+    payload.usage_event !== null && typeof payload.usage_event === 'object' &&
+    payload.usage_event.event_type === 'usage.settled.v1' &&
+    payload.usage_event.payload?.request_id === payload.request_id
+}
+
+export async function enqueueSettlementCommand(
+  env: Env,
+  reference: BillingReference & ApiKeyMonetaryReference & PlatformQuotaReference,
+  requestId: string,
+  amountMicros: number,
+  usageEvent: PlatformEvent<UsageSettledPayload>,
+): Promise<void> {
+  await env.EVENTS_QUEUE.send(createSettlementCommandEvent(reference, requestId, amountMicros, usageEvent))
+}
+
+export async function consumeSettlementCommand(
+  env: Env,
+  event: PlatformEvent<SettlementCommandPayload>,
+): Promise<void> {
+  const payload = event.payload
+  const reference: BillingReference & ApiKeyMonetaryReference & PlatformQuotaReference = {
+    user_id: payload.user_id,
+    api_key_id: payload.api_key_id,
+    billing: payload.billing_type === 'subscription'
+      ? { type: 'subscription', subscription_id: payload.subscription_id as string }
+      : { type: 'balance' },
+    platform_quota: payload.platform_quota_platform === null
+      ? null
+      : { platform: payload.platform_quota_platform },
+  }
+  await persistSettlementRecovery(env, reference, payload.request_id, payload.amount_micros, payload.usage_event)
+  if (!await settleRecoveryRequest(env, payload.request_id, true)) {
+    throw new Error('Queued settlement command did not complete')
+  }
+}
+
 export async function persistSettlementRecovery(
   env: Env,
   reference: BillingReference & ApiKeyMonetaryReference & PlatformQuotaReference,

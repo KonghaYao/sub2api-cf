@@ -131,6 +131,74 @@ describe('gateway repository embeddings routing', () => {
   })
 })
 
+describe('gateway repository image routing', () => {
+  it('lists, resolves and loads credentials only when model and account image capabilities are enabled', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedImageRoute(raw)
+    const testEnv = { DB: d1 } as Env
+
+    await expect(listModels(testEnv, 'group-images')).resolves.toEqual([
+      expect.objectContaining({
+        model_id: 'model-images',
+        public_name: 'gpt-image-public',
+        image_generation: 1,
+      }),
+    ])
+    const route = await resolveGatewayRoute(
+      testEnv,
+      'group-images',
+      'gpt-image-public',
+      'images',
+      'user-1',
+    )
+    expect(route.upstream_endpoint).toBe('images')
+    expect(route.model).toMatchObject({ model_id: 'model-images', image_generation: 1 })
+    expect(route.candidates.map((candidate) => candidate.account_id)).toEqual(['account-images'])
+    await expect(getAccountCredential(
+      testEnv,
+      'group-images',
+      'model-images',
+      'images',
+      'account-images',
+    )).resolves.toMatchObject({ account_id: 'account-images', secret_id: 'secret-images' })
+
+    raw.prepare(`UPDATE account_models SET image_generation = 0 WHERE account_id = 'account-images'`)
+      .run()
+    await expect(resolveGatewayRoute(
+      testEnv,
+      'group-images',
+      'gpt-image-public',
+      'images',
+      'user-1',
+    )).rejects.toMatchObject({ status: 503, code: 'no_upstream_accounts' })
+    await expect(getAccountCredential(
+      testEnv,
+      'group-images',
+      'model-images',
+      'images',
+      'account-images',
+    )).rejects.toMatchObject({ status: 503, code: 'credential_unavailable' })
+    raw.close()
+  })
+
+  it('does not resolve an image route when only the account capability is enabled', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedImageRoute(raw)
+    raw.prepare(`UPDATE models SET image_generation = 0 WHERE id = 'model-images'`).run()
+
+    await expect(resolveGatewayRoute(
+      { DB: d1 } as Env,
+      'group-images',
+      'gpt-image-public',
+      'images',
+      'user-1',
+    )).rejects.toMatchObject({ status: 404, code: 'model_not_found' })
+    raw.close()
+  })
+})
+
 describe('gateway repository provider routing', () => {
   it('keeps primary protocol cohorts separate and falls back from Chat to Responses explicitly', async () => {
     const { raw, d1 } = createSqliteD1()
@@ -291,6 +359,50 @@ function seedEmbeddingRoute(database: any): void {
     INSERT INTO account_models (
       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
     ) VALUES ('account-1', 'model-1', 0, 0, 1, 1, 1);
+  `)
+}
+
+function seedImageRoute(database: any): void {
+  database.exec(`
+    INSERT INTO "groups" (
+      id, name, platform, enabled, created_at_ms, updated_at_ms
+    ) VALUES ('group-images', 'images', 'openai', 1, 1, 1);
+    INSERT INTO models (
+      id, platform, public_name, upstream_name, endpoint, embeddings, image_generation,
+      enabled, created_at_ms, updated_at_ms
+    ) VALUES (
+      'model-images', 'openai', 'gpt-image-public', 'gpt-image-upstream',
+      'responses', 0, 1, 1, 1, 1
+    );
+    INSERT INTO group_models (
+      group_id, model_id, enabled, catalog_visible, created_at_ms, updated_at_ms
+    ) VALUES ('group-images', 'model-images', 1, 1, 1, 1);
+    INSERT INTO model_prices (
+      id, group_id, model_id, version, active,
+      input_micros_per_million, output_micros_per_million,
+      cache_read_micros_per_million, per_request_micros,
+      minimum_reservation_micros, effective_at_ms, created_at_ms
+    ) VALUES (
+      'price-images', 'group-images', 'model-images', 1, 1,
+      0, 0, 0, 0, 1, 1, 1
+    );
+    INSERT INTO accounts (
+      id, platform, name, credential_ref, enabled, max_concurrency,
+      created_at_ms, updated_at_ms, protocol, base_url, auth_scheme, config_version
+    ) VALUES (
+      'account-images', 'openai', 'images-primary', 'secret-images', 1, 4,
+      1, 1, 'openai', 'https://images.upstream.example/v1', 'bearer', 1
+    );
+    INSERT INTO account_secrets (
+      id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
+    ) VALUES ('secret-images', 'account-images', 1, 'nonce', 'ciphertext', 1, 1);
+    INSERT INTO account_groups (
+      account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+    ) VALUES ('account-images', 'group-images', 0, 1, 1, 1);
+    INSERT INTO account_models (
+      account_id, model_id, chat_completions, responses, embeddings, image_generation,
+      created_at_ms, updated_at_ms
+    ) VALUES ('account-images', 'model-images', 0, 0, 0, 1, 1, 1);
   `)
 }
 

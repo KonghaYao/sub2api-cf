@@ -19,7 +19,11 @@ import {
   isTotpEmailVerificationEvent,
 } from '../user/totp'
 import { sha256Hex } from './crypto'
-import { settleRecoveryRequest } from './recovery'
+import {
+  consumeSettlementCommand,
+  isSettlementCommandEvent,
+  settleRecoveryRequest,
+} from './recovery'
 import {
   consumeAccountHealthProbe,
   isAccountHealthProbeEvent,
@@ -112,6 +116,11 @@ export async function consumeEvents(
       }
       if (isSettlementRetryEvent(message.body)) {
         await settleRecoveryRequest(env, message.body.payload.request_id)
+        message.ack()
+        continue
+      }
+      if (isSettlementCommandEvent(message.body)) {
+        await consumeSettlementCommand(env, message.body)
         message.ack()
         continue
       }

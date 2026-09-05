@@ -5,6 +5,7 @@ import {
   createAdminAccount,
   getAdminAccount,
   listAdminAccounts,
+  putAdminAccountModelCapability,
   testAdminAccount,
   updateAdminAccount,
 } from '../../src/control/accounts'
@@ -30,6 +31,7 @@ function fixture(): Fixture {
   app.post('/accounts', createAdminAccount)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
+  app.put('/accounts/:id/models/:model_id', putAdminAccountModelCapability)
   app.post('/accounts/:id/test', testAdminAccount)
   return {
     raw,
@@ -102,6 +104,76 @@ afterEach(() => {
 })
 
 describe('admin provider account control plane on D1', () => {
+  it('creates, reads and updates an image-only model capability', async () => {
+    const test = fixture()
+    test.raw.exec(`
+      INSERT INTO models (
+        id, platform, public_name, upstream_name, endpoint, image_generation,
+        enabled, created_at_ms, updated_at_ms
+      ) VALUES (
+        'image-model', 'openai', 'gpt-image-public', 'gpt-image-upstream',
+        'responses', 1, 1, 1, 1
+      );
+    `)
+    const createResponse = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'image-account-create',
+      },
+      body: JSON.stringify({
+        name: 'image-primary',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'image-secret',
+        model_capabilities: [{
+          model_id: 'image-model',
+          chat_completions: false,
+          responses: false,
+          image_generation: true,
+        }],
+      }),
+    }, test.env)
+    const created = await createResponse.json() as any
+    expect(createResponse.status, JSON.stringify(created)).toBe(201)
+    expect(created.data.model_capabilities).toEqual([
+      expect.objectContaining({
+        model_id: 'image-model',
+        chat_completions: false,
+        responses: false,
+        embeddings: false,
+        image_generation: true,
+      }),
+    ])
+    expect(test.raw.prepare(`
+      SELECT image_generation FROM account_models
+       WHERE account_id = ? AND model_id = 'image-model'
+    `).get(created.data.id)).toEqual({ image_generation: 1 })
+
+    const updateResponse = await test.app.request(
+      `/accounts/${created.data.id}/models/image-model`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+        body: JSON.stringify({
+          chat_completions: false,
+          responses: false,
+          embeddings: true,
+          image_generation: false,
+        }),
+      },
+      test.env,
+    )
+    const updated = await updateResponse.json() as any
+    expect(updateResponse.status, JSON.stringify(updated)).toBe(200)
+    expect(updated.data.model_capabilities).toEqual([
+      expect.objectContaining({
+        model_id: 'image-model',
+        embeddings: true,
+        image_generation: false,
+      }),
+    ])
+  })
+
   it('persists all provider contracts with encrypted credentials and safe projections', async () => {
     const test = fixture()
     const created = await Promise.all(

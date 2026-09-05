@@ -133,9 +133,12 @@ class Statement {
       this.deleteRelations(this.db.groupLinks); return result()
     }
     if (this.sql.includes('INSERT INTO account_models')) {
-      const [account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms] = this.values
+      const [
+        account_id, model_id, chat_completions, responses, embeddings, image_generation,
+        created_at_ms, updated_at_ms,
+      ] = this.values
       const key = `${account_id}:${model_id}`; const old = this.db.modelCaps.get(key)
-      this.db.modelCaps.set(key, { account_id, model_id, chat_completions, responses, embeddings, created_at_ms: old?.created_at_ms ?? created_at_ms, updated_at_ms, control_version: old ? old.control_version + 1 : 0 })
+      this.db.modelCaps.set(key, { account_id, model_id, chat_completions, responses, embeddings, image_generation, created_at_ms: old?.created_at_ms ?? created_at_ms, updated_at_ms, control_version: old ? old.control_version + 1 : 0 })
       return result()
     }
     if (this.sql.includes('DELETE FROM account_models')) {
@@ -221,7 +224,7 @@ describe('admin account control plane', () => {
     expect((await decryptCredential(secret.nonce_b64, secret.ciphertext_b64, 'm'.repeat(32), credentialAad('test', account.id, secret.id, 1))).api_key).toBe(input.api_key)
     expect(payload.data).toMatchObject({ base_url: 'https://api.example.com/v1', status: 'active', config_version: 1, control_version: 0, credentials_status: { has_api_key: true } })
     expect(payload.data.model_capabilities).toEqual([
-      expect.objectContaining({ model_id: 'model-a', embeddings: false }),
+      expect.objectContaining({ model_id: 'model-a', embeddings: false, image_generation: false }),
     ])
   })
 

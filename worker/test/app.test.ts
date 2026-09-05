@@ -165,6 +165,32 @@ describe('worker app', () => {
     expect(response.status).toBe(401)
   })
 
+  it.each([
+    '/v1/images/generations',
+    '/images/generations',
+    '/v1/images/edits',
+    '/images/edits',
+  ])('routes the synchronous Images contract at %s', async (path) => {
+    const response = await createApp().request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat' }),
+    }, testEnv())
+
+    expect(response.status).toBe(401)
+  })
+
+  it('does not add loose OpenAI-prefixed Images aliases', async () => {
+    const response = await createApp().request('/openai/v1/images/generations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat' }),
+    }, testEnv())
+
+    expect(response.status).toBe(200)
+    await expect(response.text()).resolves.toBe('asset')
+  })
+
   it('still delegates non-API routes to Static Assets', async () => {
     const response = await createApp().request('/dashboard', {}, testEnv())
 

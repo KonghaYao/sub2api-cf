@@ -11,6 +11,8 @@ export type ProviderOperation =
   | 'responses_compact'
   | 'responses_input_tokens'
   | 'embeddings'
+  | 'images_generations'
+  | 'images_edits'
   | 'messages'
   | 'count_tokens'
   | 'generate_content'
@@ -284,6 +286,8 @@ function openAiPath(operation: ProviderOperation): { pathname: string; search: s
     responses_compact: '/v1/responses/compact',
     responses_input_tokens: '/v1/responses/input_tokens',
     embeddings: '/v1/embeddings',
+    images_generations: '/v1/images/generations',
+    images_edits: '/v1/images/edits',
   }
   return supportedPath('openai', operation, supported)
 }

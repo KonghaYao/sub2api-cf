@@ -18,6 +18,20 @@ export default defineConfig(async () => {
             ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
             }
+            if (url.pathname === '/v1/images/generations') {
+              const body = await request.json() as Record<string, unknown>
+              if (
+                body.model !== 'gpt-image-binding-upstream' ||
+                body.prompt !== 'binding image' ||
+                body.size !== '1024x1024'
+              ) return Response.json({ error: 'unexpected Images request', body }, { status: 422 })
+              return Response.json({
+                created: 1_700_000_000,
+                data: [{
+                  b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+                }],
+              })
+            }
             if (url.pathname === '/v1/responses') {
               const body = await request.json() as Record<string, unknown>
               if (body.model === 'gpt-bridge-failover-upstream') {

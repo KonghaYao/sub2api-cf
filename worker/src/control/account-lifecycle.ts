@@ -711,6 +711,9 @@ async function loadPoolTargets(env: Env, job: ProbeJobRow): Promise<PoolTargetRo
          UNION ALL
          SELECT account_id, model_id, 'embeddings' AS endpoint
            FROM account_models WHERE embeddings = 1
+         UNION ALL
+         SELECT account_id, model_id, 'images' AS endpoint
+           FROM account_models WHERE image_generation = 1
        ) am
        JOIN account_groups ag ON ag.account_id = am.account_id
        JOIN accounts a ON a.id = am.account_id
@@ -718,6 +721,7 @@ async function loadPoolTargets(env: Env, job: ProbeJobRow): Promise<PoolTargetRo
        JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = am.model_id
       WHERE a.id = ? AND a.enabled = 1 AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1
+        AND (am.endpoint <> 'images' OR m.image_generation = 1)
       ORDER BY ag.group_id ASC, am.model_id ASC, am.endpoint ASC`,
   ).bind(job.account_id).all<PoolTargetRow>()
   if (result.results.length > 1_000) throw new Error('Account has too many Pool targets')
@@ -730,7 +734,9 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
     ? 'am.chat_completions'
     : target.endpoint === 'responses'
       ? 'am.responses'
-      : 'am.embeddings'
+      : target.endpoint === 'embeddings'
+        ? 'am.embeddings'
+        : 'am.image_generation'
   return env.DB.prepare(
     `SELECT a.id AS account_id, a.max_concurrency, ag.priority, ag.weight
        FROM account_groups ag
@@ -895,7 +901,7 @@ function validatePoolTarget(row: PoolTargetRow): void {
   if (
     typeof row.group_id !== 'string' || row.group_id.length === 0 ||
     typeof row.model_id !== 'string' || row.model_id.length === 0 ||
-    !['chat_completions', 'responses', 'embeddings'].includes(row.endpoint)
+    !['chat_completions', 'responses', 'embeddings', 'images'].includes(row.endpoint)
   ) throw new Error('Pool target projection is invalid')
 }
 

@@ -5,8 +5,8 @@ import type {
   ProviderProtocol,
 } from './providers'
 
-export type GatewayEndpoint = 'chat_completions' | 'responses' | 'embeddings'
-export type GenerativeGatewayEndpoint = Exclude<GatewayEndpoint, 'embeddings'>
+export type GatewayEndpoint = 'chat_completions' | 'responses' | 'embeddings' | 'images'
+export type GenerativeGatewayEndpoint = Exclude<GatewayEndpoint, 'embeddings' | 'images'>
 
 export interface GatewayPrincipal {
   api_key_id: string
@@ -134,6 +134,8 @@ export interface ModelRoute {
   endpoint: GenerativeGatewayEndpoint | 'both'
   /** D1 capability flag; absent only in legacy test fixtures constructed before migration 0008. */
   embeddings?: number
+  /** D1 capability flag; absent only in legacy test fixtures constructed before migration 0044. */
+  image_generation?: number
   price_id: string
   price_version: number
   input_micros_per_million: number

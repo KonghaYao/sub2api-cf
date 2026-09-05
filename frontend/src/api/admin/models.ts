@@ -7,6 +7,7 @@ export interface WorkerAdminModel {
   upstream_name: string
   endpoint: 'chat_completions' | 'responses' | 'both'
   embeddings: boolean
+  image_generation: boolean
   enabled: boolean
   control_version: number
 }

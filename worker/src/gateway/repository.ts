@@ -405,7 +405,8 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
                  (a.platform = 'openai' AND am.chat_completions = 1)
                )) OR
                (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
-               (m.embeddings = 1 AND am.embeddings = 1)
+               (m.embeddings = 1 AND am.embeddings = 1) OR
+               (m.image_generation = 1 AND am.image_generation = 1)
              )
         )
       ORDER BY gm.sort_order ASC, m.public_name ASC`,
@@ -430,8 +431,10 @@ export async function resolveGatewayRoute(
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const modelCapability = endpoint === 'embeddings'
     ? 'm.embeddings = 1'
-    : `(m.endpoint = ? OR m.endpoint = 'both')`
-  const routeBindings = endpoint === 'embeddings'
+    : endpoint === 'images'
+      ? 'm.image_generation = 1'
+      : `(m.endpoint = ? OR m.endpoint = 'both')`
+  const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, publicName]
     : [groupId, publicName, endpoint]
   const modelBindings = [userId, ...routeBindings]
@@ -486,7 +489,7 @@ function accountCandidatesStatement(
   env: Env,
   groupId: string,
   publicName: string,
-  capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings',
+  capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation',
   platformConstraint?: 'openai' | 'openai_or_codex',
 ): D1PreparedStatement {
   const platformPredicate = platformConstraint === 'openai'
@@ -622,7 +625,8 @@ function modelSelect(includeUserRate = false): string {
   return `SELECT revision.revision AS config_revision,
                  m.id AS model_id, m.platform, m.public_name,
                  COALESCE(gm.upstream_name_override, m.upstream_name) AS upstream_name,
-                 m.endpoint, m.embeddings, p.id AS price_id, p.version AS price_version,
+                 m.endpoint, m.embeddings, m.image_generation,
+                 p.id AS price_id, p.version AS price_version,
                  p.input_micros_per_million, p.output_micros_per_million,
                  p.cache_read_micros_per_million, p.per_request_micros,
                  p.minimum_reservation_micros,
@@ -708,10 +712,11 @@ function invalidProviderAccount(): never {
 
 function accountCapabilityColumn(
   endpoint: GatewayEndpoint,
-): 'am.chat_completions' | 'am.responses' | 'am.embeddings' {
+): 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation' {
   switch (endpoint) {
     case 'chat_completions': return 'am.chat_completions'
     case 'responses': return 'am.responses'
     case 'embeddings': return 'am.embeddings'
+    case 'images': return 'am.image_generation'
   }
 }

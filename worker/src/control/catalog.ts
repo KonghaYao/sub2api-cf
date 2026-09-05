@@ -62,6 +62,7 @@ interface ModelRow {
   upstream_name: string
   endpoint: 'chat_completions' | 'responses' | 'both'
   embeddings: number
+  image_generation: number
   enabled: number
   control_version: number
   created_at_ms: number
@@ -75,6 +76,7 @@ interface GroupModelRow {
   upstream_name: string
   endpoint: ModelRow['endpoint']
   embeddings: number
+  image_generation: number
   upstream_name_override: string | null
   enabled: number
   catalog_visible: number
@@ -117,7 +119,8 @@ const GROUP_COLUMNS = `id, name, description, platform, enabled, sort_order,
   batch_image_hold_multiplier_ppm, image_price_1k_micros,
   image_price_2k_micros, image_price_4k_micros,
   control_version, created_at_ms, updated_at_ms`
-const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings, enabled,
+const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings,
+  image_generation, enabled,
   control_version, created_at_ms, updated_at_ms`
 
 export async function listAdminGroups(context: Context<ControlBindings>): Promise<Response> {
@@ -380,6 +383,7 @@ export async function createAdminModel(context: Context<ControlBindings>): Promi
       id: await deterministicUuid('admin.models.create.v1', key),
       ...input,
       embeddings: input.embeddings ? 1 : 0,
+      image_generation: input.image_generation ? 1 : 0,
       enabled: input.enabled ? 1 : 0,
       control_version: 0,
       created_at_ms: now,
@@ -390,12 +394,13 @@ export async function createAdminModel(context: Context<ControlBindings>): Promi
       await context.env.DB.batch([
         context.env.DB.prepare(
           `INSERT INTO models (
-             id, platform, public_name, upstream_name, endpoint, embeddings, enabled,
+             id, platform, public_name, upstream_name, endpoint, embeddings,
+             image_generation, enabled,
              created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id, row.platform, row.public_name, row.upstream_name,
-          row.endpoint, row.embeddings, row.enabled, now, now,
+          row.endpoint, row.embeddings, row.image_generation, row.enabled, now, now,
         ),
         controlIdempotencyInsert(context.env, idem, 'model', row.id, response, now),
       ])
@@ -434,6 +439,9 @@ export async function updateAdminModel(context: Context<ControlBindings>): Promi
       ...current,
       ...patch,
       embeddings: patch.embeddings === undefined ? current.embeddings : patch.embeddings ? 1 : 0,
+      image_generation: patch.image_generation === undefined
+        ? current.image_generation
+        : patch.image_generation ? 1 : 0,
       enabled: patch.enabled === undefined ? current.enabled : patch.enabled ? 1 : 0,
     }
     ensureSupportedPlatform(next.platform, next.enabled === 1)
@@ -442,11 +450,13 @@ export async function updateAdminModel(context: Context<ControlBindings>): Promi
     try {
       await context.env.DB.batch([
         context.env.DB.prepare(
-          `UPDATE models SET platform = ?, public_name = ?, upstream_name = ?, endpoint = ?, embeddings = ?, enabled = ?,
+          `UPDATE models SET platform = ?, public_name = ?, upstream_name = ?, endpoint = ?,
+             embeddings = ?, image_generation = ?, enabled = ?,
              control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END, updated_at_ms = ?
            WHERE id = ?`,
         ).bind(
-          next.platform, next.public_name, next.upstream_name, next.endpoint, next.embeddings, next.enabled,
+          next.platform, next.public_name, next.upstream_name, next.endpoint,
+          next.embeddings, next.image_generation, next.enabled,
           expected, expected + 1, updatedAt, id,
         ),
         controlIdempotencyInsert(context.env, idem, 'model', id, response, updatedAt),
@@ -508,6 +518,7 @@ export async function putAdminGroupModel(context: Context<ControlBindings>): Pro
       upstream_name: model.upstream_name,
       endpoint: model.endpoint,
       embeddings: model.embeddings === 1,
+      image_generation: model.image_generation === 1,
       ...patch,
       control_version: nextVersion,
       created_at_ms: current?.created_at_ms ?? now,
@@ -918,12 +929,14 @@ function parseCreateModel(body: Record<string, unknown>) {
   }
   const publicName = requireString(body, 'public_name', 256)
   const embeddings = optionalBoolean(body, 'embeddings')
+  const imageGeneration = optionalBoolean(body, 'image_generation')
   return {
     platform,
     public_name: publicName,
     upstream_name: optionalString(body, 'upstream_name', 256) ?? publicName,
     endpoint: endpoint as ModelRow['endpoint'],
     ...(embeddings === undefined ? {} : { embeddings }),
+    ...(imageGeneration === undefined ? {} : { image_generation: imageGeneration }),
     enabled,
   }
 }
@@ -931,7 +944,7 @@ function parseCreateModel(body: Record<string, unknown>) {
 function parseModelPatch(body: Record<string, unknown>) {
   const result: Partial<{
     platform: string; public_name: string; upstream_name: string;
-    endpoint: ModelRow['endpoint']; embeddings: boolean; enabled: boolean
+    endpoint: ModelRow['endpoint']; embeddings: boolean; image_generation: boolean; enabled: boolean
   }> = {}
   const platform = optionalString(body, 'platform', 32)
   if (platform !== undefined) result.platform = platform
@@ -948,6 +961,8 @@ function parseModelPatch(body: Record<string, unknown>) {
   }
   const embeddings = optionalBoolean(body, 'embeddings')
   if (embeddings !== undefined) result.embeddings = embeddings
+  const imageGeneration = optionalBoolean(body, 'image_generation')
+  if (imageGeneration !== undefined) result.image_generation = imageGeneration
   const enabled = parseEnabled(body)
   if (enabled !== undefined) result.enabled = enabled
   if (Object.keys(result).length === 0) throw new GatewayError(400, 'empty_update', 'At least one field is required')
@@ -1023,7 +1038,8 @@ async function findGroupModel(env: Env, groupId: string, modelId: string): Promi
 }
 
 function groupModelSelect(): string {
-  return `SELECT gm.group_id, gm.model_id, m.public_name, m.upstream_name, m.endpoint, m.embeddings,
+  return `SELECT gm.group_id, gm.model_id, m.public_name, m.upstream_name, m.endpoint,
+    m.embeddings, m.image_generation,
     gm.upstream_name_override, gm.enabled, gm.catalog_visible, gm.sort_order,
     gm.max_output_tokens, gm.default_max_output_tokens, gm.control_version,
     gm.created_at_ms, gm.updated_at_ms,
@@ -1051,6 +1067,7 @@ function publicModel(row: ModelRow) {
   return {
     ...row,
     embeddings: row.embeddings === 1,
+    image_generation: row.image_generation === 1,
     enabled: row.enabled === 1,
     status: row.enabled === 1 ? 'active' as const : 'inactive' as const,
   }
@@ -1060,6 +1077,7 @@ function publicGroupModel(row: GroupModelRow) {
   return {
     ...row,
     embeddings: row.embeddings === 1,
+    image_generation: row.image_generation === 1,
     enabled: row.enabled === 1,
     catalog_visible: row.catalog_visible === 1,
     price: row.price_id === null ? null : {

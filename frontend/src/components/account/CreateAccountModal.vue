@@ -5360,6 +5360,7 @@ const handleWorkerCreate = async () => {
           chat_completions: model.endpoint === 'chat_completions' || model.endpoint === 'both',
           responses: model.endpoint === 'responses' || model.endpoint === 'both',
           embeddings: model.embeddings === true,
+          image_generation: model.image_generation === true,
         }
       }),
     } as unknown as CreateAccountRequest)

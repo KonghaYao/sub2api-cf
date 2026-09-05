@@ -146,7 +146,10 @@ class CatalogStatement {
       return result()
     }
     if (this.query.includes('INSERT INTO models')) {
-      const [id, platform, publicName, upstreamName, endpoint, embeddings, enabled, createdAt, updatedAt] = this.values
+      const [
+        id, platform, publicName, upstreamName, endpoint, embeddings, imageGeneration,
+        enabled, createdAt, updatedAt,
+      ] = this.values
       this.database.models.set(String(id), {
         id: String(id),
         platform: String(platform),
@@ -154,6 +157,7 @@ class CatalogStatement {
         upstream_name: String(upstreamName),
         endpoint: String(endpoint),
         embeddings: Number(embeddings),
+        image_generation: Number(imageGeneration),
         enabled: Number(enabled),
         control_version: 0,
         created_at_ms: Number(createdAt),
@@ -162,7 +166,7 @@ class CatalogStatement {
       return result()
     }
     if (this.query.includes('UPDATE models SET platform')) {
-      const [platform, publicName, upstreamName, endpoint, embeddings, enabled,
+      const [platform, publicName, upstreamName, endpoint, embeddings, imageGeneration, enabled,
         expected, nextVersion, updatedAt, id] = this.values
       const model = this.database.requireRow(this.database.models, String(id))
       this.database.assertVersion(model, Number(expected))
@@ -172,6 +176,7 @@ class CatalogStatement {
         upstream_name: String(upstreamName),
         endpoint: String(endpoint),
         embeddings: Number(embeddings),
+        image_generation: Number(imageGeneration),
         enabled: Number(enabled),
         control_version: Number(nextVersion),
         updated_at_ms: Number(updatedAt),
@@ -328,6 +333,7 @@ class CatalogDatabase {
       upstream_name: model.upstream_name,
       endpoint: model.endpoint,
       embeddings: model.embeddings,
+      image_generation: model.image_generation,
       price_id: price?.id ?? null,
       price_version: price?.version ?? null,
       input_micros_per_million: price?.input_micros_per_million ?? null,
@@ -604,26 +610,38 @@ describe('admin catalog control plane', () => {
     expect(database.models).toHaveLength(1)
   })
 
-  it('creates and updates an explicit model embeddings capability while defaulting old clients to false', async () => {
+  it('creates and updates explicit model embeddings/image capabilities while defaulting old clients to false', async () => {
     const database = new CatalogDatabase()
-    const embeddingModel = await createModel(database, 'model-embeddings', { embeddings: true })
+    const embeddingModel = await createModel(database, 'model-embeddings', {
+      embeddings: true,
+      image_generation: true,
+    })
     const defaultModel = await createModel(database, 'model-default-embeddings')
 
-    expect(embeddingModel).toMatchObject({ embeddings: true, platform: 'openai' })
-    expect(defaultModel).toMatchObject({ embeddings: false, platform: 'openai' })
+    expect(embeddingModel).toMatchObject({
+      embeddings: true,
+      image_generation: true,
+      platform: 'openai',
+    })
+    expect(defaultModel).toMatchObject({
+      embeddings: false,
+      image_generation: false,
+      platform: 'openai',
+    })
 
     const updated = await request(
       database,
       `/api/v1/admin/models/${embeddingModel.id}`,
       'PUT',
       'model-embeddings-update',
-      { expected_control_version: 0, embeddings: false },
+      { expected_control_version: 0, embeddings: false, image_generation: false },
     )
 
     expect(updated.status).toBe(200)
     expect((await json(updated)).data).toMatchObject({
       id: embeddingModel.id,
       embeddings: false,
+      image_generation: false,
       control_version: 1,
     })
   })

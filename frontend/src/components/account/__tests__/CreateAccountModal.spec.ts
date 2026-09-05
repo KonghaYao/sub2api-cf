@@ -165,6 +165,7 @@ function mountWorkerModal(
     upstream_name: 'gpt-test',
     endpoint: 'both',
     embeddings: false,
+    image_generation: false,
     enabled: true,
     control_version: 0,
   }]
@@ -268,6 +269,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
         chat_completions: true,
         responses: true,
         embeddings: false,
+        image_generation: false,
       }],
     })
     expect(wrapper.get('[data-testid="worker-account-platform"]').findAll('option')).toHaveLength(4)
@@ -293,6 +295,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
           upstream_name: 'OpenAI Model',
           endpoint: 'both',
           embeddings: false,
+          image_generation: false,
           enabled: true,
           control_version: 0,
         },
@@ -303,6 +306,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
           upstream_name: `${platform} Model`,
           endpoint: 'both',
           embeddings: platform === 'gemini',
+          image_generation: platform === 'openai',
           enabled: true,
           control_version: 0,
         },

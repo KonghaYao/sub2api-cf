@@ -365,6 +365,11 @@ describe('scheduled account health lifecycle', () => {
     const test = fixture()
     const accountId = await seedAccount(test, 'openai')
     linkResponsePool(test, accountId)
+    test.raw.exec(`
+      UPDATE models SET image_generation = 1 WHERE id = 'model-openai';
+      UPDATE account_models SET image_generation = 1
+       WHERE account_id = '${accountId}' AND model_id = 'model-openai';
+    `)
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')))
     const before = test.raw.prepare(
       `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
@@ -377,16 +382,26 @@ describe('scheduled account health lifecycle', () => {
       `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
     ).get().revision
     expect(after).toBe(before + 1)
-    expect(test.pool.calls).toHaveLength(1)
-    expect(test.pool.calls[0]).toMatchObject({
-      name: 'group:group-openai:platform:openai:model:model-openai:endpoint:responses:shard:0',
-      body: {
-        schema_version: 1,
-        config_revision: after,
-        config_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
-        accounts: [{ account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 }],
-      },
-    })
+    expect(test.pool.calls).toHaveLength(2)
+    expect(test.pool.calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'group:group-openai:platform:openai:model:model-openai:endpoint:responses:shard:0',
+        body: expect.objectContaining({
+          schema_version: 1,
+          config_revision: after,
+          config_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 }],
+        }),
+      }),
+      expect.objectContaining({
+        name: 'group:group-openai:platform:openai:model:model-openai:endpoint:images:shard:0',
+        body: expect.objectContaining({
+          schema_version: 1,
+          config_revision: after,
+          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 }],
+        }),
+      }),
+    ]))
     expect(job(test, accountId)).toMatchObject({
       status: 'completed', account_health_revision: 1, pool_revision: after,
     })

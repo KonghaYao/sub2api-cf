@@ -58,6 +58,23 @@ describe('provider request adapters', () => {
     })
   })
 
+  it.each([
+    ['images_generations', 'https://api.openai.test/v1/images/generations'],
+    ['images_edits', 'https://api.openai.test/v1/images/edits'],
+  ] as const)('builds the OpenAI %s endpoint from a versioned base URL', (operation, url) => {
+    const plan = buildProviderRequest({
+      account: account('openai'),
+      credential,
+      operation,
+      body: { model: 'gpt-image-2', prompt: 'a lighthouse' },
+      client_headers: { authorization: 'Bearer attacker', cookie: 'private=true' },
+    })
+
+    expect(plan.url).toBe(url)
+    expect(plan.headers.get('authorization')).toBe('Bearer provider-secret')
+    expect(plan.headers.has('cookie')).toBe(false)
+  })
+
   it.each(['openai', 'codex'] as const)(
     'restores the %s native compaction v2 wire contract',
     (platform) => {

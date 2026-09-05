@@ -108,6 +108,7 @@ import {
 } from './usage'
 
 type GatewayBindings = { Bindings: Env }
+type TextGatewayEndpoint = Exclude<GatewayEndpoint, 'images'>
 
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const MAX_SSE_EVENT_CHARS = 256 * 1024
@@ -163,7 +164,7 @@ export async function handleBootstrap(context: Context<GatewayBindings>): Promis
 
 export async function handleGateway(
   context: Context<GatewayBindings>,
-  endpoint: GatewayEndpoint,
+  endpoint: TextGatewayEndpoint,
 ): Promise<Response> {
   return dispatchGateway(
     context,
@@ -940,7 +941,7 @@ interface PreparedGatewayRequest {
   nativeCompactionV2?: boolean
   resolveUpstream: (
     model: ModelRoute,
-    upstreamEndpoint: GatewayEndpoint,
+    upstreamEndpoint: TextGatewayEndpoint,
     platform: ProviderPlatform,
   ) => ProviderDispatch
   protocolFallback?: 'responses_to_chat' | 'chat_to_responses'
@@ -969,7 +970,7 @@ type GatewayErrorResponder = (error: GatewayError, requestId?: string) => Respon
 
 function prepareOpenAiRequest(
   body: Record<string, unknown>,
-  endpoint: GatewayEndpoint,
+  endpoint: TextGatewayEndpoint,
   allowProtocolFallback = endpoint !== 'embeddings',
 ): PreparedGatewayRequest {
   const normalizedBody = normalizeOpenAiServiceTier(body)
@@ -1053,7 +1054,7 @@ function prepareOpenAiRequest(
 
 async function dispatchGateway(
   context: Context<GatewayBindings>,
-  endpoint: GatewayEndpoint,
+  endpoint: TextGatewayEndpoint,
   prepare: PrepareGatewayRequest,
   errorResponse: GatewayErrorResponder,
   preserveUnsafeIntegers = false,
@@ -1109,7 +1110,7 @@ async function dispatchGateway(
           : undefined,
     )
     const model = route.model
-    const upstreamEndpoint = route.upstream_endpoint
+    const upstreamEndpoint = route.upstream_endpoint as TextGatewayEndpoint
     const provider = providerForCandidates(route.candidates)
     observedPlatform = provider
     const affinityKey = await gatewaySessionAffinityKey(
@@ -1444,7 +1445,7 @@ async function acquireUpstream(
   groupId: string,
   modelId: string,
   requestId: string,
-  endpoint: GatewayEndpoint,
+  endpoint: TextGatewayEndpoint,
   body: unknown,
   candidateCount: number,
   inboundHeaders: Headers,
@@ -1574,8 +1575,8 @@ async function acquireUpstream(
 interface FinalizeInput {
   env: Env
   response: Response
-  endpoint: GatewayEndpoint
-  upstreamEndpoint: GatewayEndpoint
+  endpoint: TextGatewayEndpoint
+  upstreamEndpoint: TextGatewayEndpoint
   pool: DurableObjectStub
   leaseId: string
   accountId: string
@@ -2913,13 +2914,13 @@ async function settleAndProject(
   }
 }
 
-function gatewayEndpointPath(endpoint: GatewayEndpoint): string {
+function gatewayEndpointPath(endpoint: TextGatewayEndpoint): string {
   if (endpoint === 'chat_completions') return '/v1/chat/completions'
   if (endpoint === 'responses') return '/v1/responses'
   return '/v1/embeddings'
 }
 
-function canonicalGatewayInboundPath(path: string, fallback: GatewayEndpoint): string {
+function canonicalGatewayInboundPath(path: string, fallback: TextGatewayEndpoint): string {
   const normalized = path.trim().replace(/\/+$/, '')
   if (
     normalized === '/v1/responses/compact' ||
@@ -3237,7 +3238,7 @@ async function isRetryableEmbeddingsResponse(response: Response): Promise<boolea
     response.status >= 500
 }
 
-function isRetryableAttemptError(error: GatewayError, endpoint: GatewayEndpoint): boolean {
+function isRetryableAttemptError(error: GatewayError, endpoint: TextGatewayEndpoint): boolean {
   if (error.code === 'no_capacity') return true
   if (endpoint !== 'embeddings') return true
   return error.code === 'credential_unavailable' ||
@@ -3368,7 +3369,7 @@ async function gatewaySessionAffinityKey(
   env: Env,
   principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>,
   modelId: string,
-  endpoint: GatewayEndpoint,
+  endpoint: TextGatewayEndpoint,
 ): Promise<string | undefined> {
   const signal = sessionAffinitySignal(headers, body)
   if (signal === undefined || !env.API_KEY_PEPPER) return undefined

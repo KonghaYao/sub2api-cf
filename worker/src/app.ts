@@ -191,6 +191,7 @@ import {
   submitGatewayMediaTask,
   submitUserMediaTask,
 } from './media/handlers'
+import { handleSyncImages } from './media/sync-handler'
 import { validateInvitationCode, validatePromotionCode } from './commercial/registration'
 import {
   accrueAdminAffiliateRebate,
@@ -732,6 +733,10 @@ export function createApp() {
   app.post('/messages/count_tokens', handleAnthropicCountTokens)
   app.post('/v1/embeddings', handleEmbeddings)
   app.post('/embeddings', handleEmbeddings)
+  app.post('/v1/images/generations', (context) => handleSyncImages(context, 'generations'))
+  app.post('/images/generations', (context) => handleSyncImages(context, 'generations'))
+  app.post('/v1/images/edits', (context) => handleSyncImages(context, 'edits'))
+  app.post('/images/edits', (context) => handleSyncImages(context, 'edits'))
   app.post('/v1/images/batches', submitGatewayMediaTask)
   app.get('/v1/images/batches', listGatewayMediaTasks)
   app.get('/v1/images/batches/models', listGatewayMediaModels)
