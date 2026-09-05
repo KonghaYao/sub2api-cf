@@ -1,6 +1,8 @@
 export interface Env {
   APP_VERSION: string
   ENVIRONMENT: string
+  /** Enables the bounded Gemini Batch bridge for eligible image batches. */
+  BATCH_PROVIDER_JOBS_ENABLED?: string
   /** Canonical externally reachable origin for OAuth callbacks and public links. */
   PUBLIC_ORIGIN?: string
 

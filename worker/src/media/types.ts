@@ -1,5 +1,6 @@
 import type { Env, PlatformEvent } from '../env'
 import type { GatewayPrincipal } from '../gateway/types'
+import type { GeminiBatchClient } from './gemini-batch'
 
 export type MediaTaskStatus =
   | 'created'
@@ -52,6 +53,7 @@ export interface MediaTaskRow {
   image_size: '1K' | '2K' | '4K'
   response_mime_type: 'image/png' | 'image/jpeg' | 'image/webp'
   aspect_ratio: string | null
+  execution_mode: 'inline_v1' | 'provider_job_v1'
   status: MediaTaskStatus
   item_count: number
   expected_output_count: number
@@ -109,6 +111,60 @@ export interface MediaTaskItemRow {
   attempt_count: number
   created_at_ms: number
   completed_at_ms: number | null
+  provider_record_object_key: string | null
+  provider_record_sha256: string | null
+  provider_record_ordinal: number | null
+}
+
+export type MediaProviderJobPhase =
+  | 'input_pending'
+  | 'submit_pending'
+  | 'submit_unknown'
+  | 'poll_pending'
+  | 'result_pending'
+  | 'materialize_pending'
+  | 'cancel_pending'
+  | 'attention'
+  | 'cleanup_pending'
+  | 'done'
+
+export interface MediaProviderJobRow {
+  task_id: string
+  provider_account_id: string
+  submission_key: string
+  provider_job_id: string | null
+  phase: MediaProviderJobPhase
+  provider_raw_state: string | null
+  next_action_at_ms: number
+  deadline_at_ms: number
+  attempt_count: number
+  consecutive_errors: number
+  poll_count: number
+  reservation_renewal_sequence: number
+  lease_token: string | null
+  lease_expires_at_ms: number | null
+  result_manifest_object_key: string | null
+  result_manifest_sha256: string | null
+  result_cursor_json: string | null
+  result_complete: number
+  cancel_requested_at_ms: number | null
+  provider_terminal_at_ms: number | null
+  version: number
+  created_at_ms: number
+  updated_at_ms: number
+  last_error_class: string | null
+  last_error_code: string | null
+}
+
+export interface MediaProviderJobAccount {
+  id: string
+  baseUrl: string
+  apiKey: string
+}
+
+export interface MediaProviderJobAccountResolver {
+  select(env: MediaEnv, task: Pick<MediaTaskRow, 'group_id' | 'model' | 'upstream_model'>): Promise<MediaProviderJobAccount>
+  exact(env: MediaEnv, accountId: string): Promise<MediaProviderJobAccount>
 }
 
 export interface MediaTaskOutputRow {
@@ -163,6 +219,12 @@ export interface MediaBillingSettlementInput {
   occurredAtMs: number
 }
 
+export interface MediaBillingRenewalInput {
+  env: MediaEnv
+  task: MediaTaskRow
+  sequence: number
+}
+
 export interface MediaBillingCancellationInput {
   env: MediaEnv
   task: MediaTaskRow
@@ -170,6 +232,7 @@ export interface MediaBillingCancellationInput {
 
 export interface MediaBilling {
   reserve(input: MediaBillingInput): Promise<void>
+  renew(input: MediaBillingRenewalInput): Promise<void>
   settle(input: MediaBillingSettlementInput): Promise<void>
   cancel(input: MediaBillingCancellationInput): Promise<void>
 }
@@ -181,6 +244,10 @@ export interface MediaEnv extends Env {
   MEDIA_BILLING?: MediaBilling
   /** Optional dedicated bucket. Production otherwise uses OBJECTS. */
   MEDIA_OBJECTS?: R2Bucket
+  /** Test/extension seam. Production uses the built-in Gemini Batch client. */
+  MEDIA_PROVIDER_JOB_CLIENT?: GeminiBatchClient
+  /** Test seam for schedulable and exact-account credential resolution. */
+  MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER?: MediaProviderJobAccountResolver
 }
 
 export interface MediaTaskExecutePayload {
@@ -190,6 +257,16 @@ export interface MediaTaskExecutePayload {
 export type MediaTaskExecuteEvent = PlatformEvent<MediaTaskExecutePayload> & {
   event_type: 'media.task.execute.v1'
   aggregate_type: 'media_task'
+}
+
+export interface MediaProviderJobAdvancePayload {
+  task_id: string
+  expected_version: number
+}
+
+export type MediaProviderJobAdvanceEvent = PlatformEvent<MediaProviderJobAdvancePayload> & {
+  event_type: 'media.provider_job.advance.v1'
+  aggregate_type: 'media_provider_job'
 }
 
 export interface MediaTaskOwner {

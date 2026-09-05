@@ -60,7 +60,7 @@ export async function consumeMediaTaskExecute(value: unknown, env: MediaEnv): Pr
   if (!isMediaTaskExecuteEvent(value)) return false
   const taskId = value.payload.task_id
   let task = await findMediaTask(env, taskId)
-  if (task === null || terminal(task)) return true
+  if (task === null || task.execution_mode !== 'inline_v1' || terminal(task)) return true
   if (task.status === 'queued') {
     await claimMediaTask(env, task.id, Date.now())
     task = await findMediaTask(env, task.id)
@@ -265,7 +265,7 @@ async function continueOrFinishMediaTask(env: MediaEnv, taskId: string): Promise
   await finishOrAwaitMediaTask(env, taskId)
 }
 
-async function finishOrAwaitMediaTask(env: MediaEnv, taskId: string): Promise<void> {
+export async function finishOrAwaitMediaTask(env: MediaEnv, taskId: string): Promise<void> {
   const task = await requiredTask(env, taskId)
   if (task.status !== 'running') return
   const aggregate = await mediaTaskAggregate(env, taskId)
@@ -303,7 +303,7 @@ async function finishOrAwaitMediaTask(env: MediaEnv, taskId: string): Promise<vo
   await settleMediaTask(env, await requiredTask(env, task.id))
 }
 
-async function settleMediaTask(env: MediaEnv, task: MediaTaskRow): Promise<void> {
+export async function settleMediaTask(env: MediaEnv, task: MediaTaskRow): Promise<void> {
   if (task.status !== 'settling' || task.actual_cost_micros === null) return
   const now = Date.now()
   await mediaBilling(env).settle({ env, task, amountMicros: task.actual_cost_micros, occurredAtMs: now })

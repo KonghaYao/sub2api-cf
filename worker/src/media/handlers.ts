@@ -17,6 +17,11 @@ import {
 } from './domain'
 import { enqueueMediaTask, settleCancelledMediaTask } from './queue'
 import {
+  enqueueMediaProviderJobForTask,
+  planMediaProviderJob,
+  requestMediaProviderJobCancellation,
+} from './provider-job'
+import {
   createMediaTask,
   appendMediaEvent,
   cancelPendingMediaItems,
@@ -218,6 +223,13 @@ async function submitMediaTask(
   }
 
   const taskId = mediaTaskId()
+  const now = Date.now()
+  const providerJob = await planMediaProviderJob(context.env, {
+    taskId,
+    groupId: principal.group_id,
+    manifest,
+    now,
+  })
   const inputObjectKey = `${mediaObjectPrefix(context.env.ENVIRONMENT, taskId)}/input.json`
   await mediaBucket(context.env).put(inputObjectKey, JSON.stringify(manifest), {
     httpMetadata: { contentType: 'application/json' },
@@ -233,7 +245,8 @@ async function submitMediaTask(
       idempotencyKeyHash,
       requestHash,
       inputObjectKey,
-      now: Date.now(),
+      now,
+      providerJob,
     })
   } catch (error) {
     const winner = await findMediaTaskByIdempotency(context.env, principal.api_key_id, idempotencyKeyHash)
@@ -270,7 +283,8 @@ async function ensureTaskReady(
     task = await requiredTask(env, task.id)
   }
   if (task.status === 'queued' && task.enqueued_at_ms === null) {
-    await enqueueMediaTask(env, task.id)
+    if (task.execution_mode === 'provider_job_v1') await enqueueMediaProviderJobForTask(env, task.id)
+    else await enqueueMediaTask(env, task.id)
     await markMediaTaskEnqueued(env, task.id, Date.now())
     task = await requiredTask(env, task.id)
   }
@@ -360,6 +374,10 @@ async function cancelTask(
   let task = await requireOwnedTask(context.env, owner, taskParam(context))
   if (!['created', 'queued', 'running', 'cancelled'].includes(task.status)) {
     throw new GatewayError(409, 'BATCH_IMAGE_INVALID_STATE', `Cannot cancel a ${task.status} batch`)
+  }
+  if (task.execution_mode === 'provider_job_v1') {
+    await requestMediaProviderJobCancellation(context.env, task)
+    return publicMediaTask(await requireOwnedTask(context.env, owner, task.id))
   }
   const now = Date.now()
   if (task.status !== 'cancelled') {

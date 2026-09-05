@@ -6,6 +6,8 @@ import type {
   MediaEnv,
   MediaManifest,
   MediaProvider,
+  MediaProviderJobAccount,
+  MediaProviderJobAccountResolver,
   MediaProviderItemResult,
   MediaProviderOutput,
   MediaSubmitItem,
@@ -26,7 +28,7 @@ interface GeminiMediaAccountRow {
   ciphertext_b64: string
 }
 
-interface GeminiMediaAccount {
+interface GeminiMediaAccount extends MediaProviderJobAccount {
   id: string
   baseUrl: string
   providerConfig: ProviderConfig
@@ -60,7 +62,7 @@ export function createGeminiMediaProvider(fetcher: Fetcher = fetch): MediaProvid
 /** Default production provider; no optional Worker binding is required. */
 export const geminiMediaProvider: MediaProvider = createGeminiMediaProvider()
 
-async function resolveGeminiMediaAccount(
+export async function resolveGeminiMediaAccount(
   env: MediaEnv,
   groupId: string,
   publicModel: string,
@@ -104,6 +106,48 @@ async function resolveGeminiMediaAccount(
       'server_error',
     )
   }
+  return materializeGeminiMediaAccount(env, row, upstreamModel)
+}
+
+export async function resolveExactGeminiMediaAccount(
+  env: MediaEnv,
+  accountId: string,
+): Promise<GeminiMediaAccount> {
+  const row = await env.DB.prepare(
+    `SELECT a.id AS account_id, a.base_url, a.protocol, a.auth_scheme,
+            a.provider_config_json, secret.id AS secret_id, secret.key_version,
+            secret.nonce_b64, secret.ciphertext_b64
+       FROM accounts AS a
+       JOIN account_secrets AS secret
+         ON secret.id = a.credential_ref AND secret.account_id = a.id
+      WHERE a.id = ? AND a.platform = 'gemini' AND a.protocol = 'gemini'
+        AND a.auth_scheme = 'x-goog-api-key'
+        AND a.base_url IS NOT NULL AND trim(a.base_url) <> ''
+      LIMIT 1`,
+  ).bind(accountId).first<GeminiMediaAccountRow>()
+  if (row === null) {
+    throw new GatewayError(
+      503,
+      'BATCH_IMAGE_UPSTREAM_ACCOUNT_LOST',
+      'The Gemini account assigned to this batch is unavailable',
+      'server_error',
+    )
+  }
+  return materializeGeminiMediaAccount(env, row)
+}
+
+export const geminiMediaProviderJobAccounts: MediaProviderJobAccountResolver = {
+  async select(env, task) {
+    return resolveGeminiMediaAccount(env, task.group_id, task.model, task.upstream_model)
+  },
+  exact: resolveExactGeminiMediaAccount,
+}
+
+async function materializeGeminiMediaAccount(
+  env: MediaEnv,
+  row: GeminiMediaAccountRow,
+  upstreamModel = 'gemini-provider-job',
+): Promise<GeminiMediaAccount> {
   const masterKey = env.CREDENTIALS_MASTER_KEY
   if (typeof masterKey !== 'string' || masterKey.length < 32) {
     throw new GatewayError(

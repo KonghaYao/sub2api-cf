@@ -7,6 +7,9 @@ import {
   prepareApiKeyMonetaryReservation,
   prepareBillingReservation,
   preparePlatformQuotaReservation,
+  renewApiKeyMonetaryReservation,
+  renewBillingReservation,
+  renewPlatformQuotaReservation,
 } from '../gateway/state-client'
 import type { MediaBilling, MediaTaskRow } from './types'
 
@@ -20,6 +23,18 @@ export const durableObjectMediaBilling: MediaBilling = {
       await cancelReservations(env, principal, requestId)
       throw error
     }
+  },
+
+  async renew({ env, task, sequence }) {
+    const reference = taskReference(task)
+    const requestId = mediaBillingRequestId(task.id)
+    const results = await Promise.allSettled([
+      renewBillingReservation(env, reference, requestId, sequence),
+      renewApiKeyMonetaryReservation(env, reference, requestId, sequence),
+      renewPlatformQuotaReservation(env, reference, requestId, sequence),
+    ])
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (rejected !== undefined) throw rejected.reason
   },
 
   async settle({ env, task, amountMicros, occurredAtMs }) {

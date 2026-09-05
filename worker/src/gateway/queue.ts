@@ -33,6 +33,10 @@ import {
   isObservabilityPayloadRetryMessage,
 } from '../observability/recorder'
 import { consumeMediaTaskExecute, isMediaTaskExecuteEvent } from '../media/queue'
+import {
+  consumeMediaProviderJobAdvance,
+  isMediaProviderJobAdvanceEvent,
+} from '../media/provider-job'
 import { consumeImageTaskExecute, isImageTaskExecuteEvent } from '../media/image-task'
 
 const CONSUMER = 'usage-projection-v1'
@@ -74,6 +78,11 @@ export async function consumeEvents(
 ): Promise<void> {
   for (const message of batch.messages) {
     try {
+      if (isMediaProviderJobAdvanceEvent(message.body)) {
+        await consumeMediaProviderJobAdvance(message.body, env)
+        message.ack()
+        continue
+      }
       if (isImageTaskExecuteEvent(message.body)) {
         await consumeImageTaskExecute(message.body, env)
         message.ack()

@@ -25,6 +25,8 @@ import {
   submitGatewayMediaTask,
 } from '../../src/media/handlers'
 import { consumeMediaTaskExecute, recoverPendingMediaTasks } from '../../src/media/queue'
+import { consumeMediaProviderJobAdvance } from '../../src/media/provider-job'
+import type { GeminiBatchClient } from '../../src/media/gemini-batch'
 import type { MediaBilling, MediaEnv, MediaProvider } from '../../src/media/types'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
@@ -124,10 +126,12 @@ async function fixture() {
   } as unknown as R2Bucket
   const queued: unknown[] = []
   const reserve = vi.fn(async () => undefined)
+  const renew = vi.fn(async () => undefined)
   const cancel = vi.fn(async () => undefined)
   const settle = vi.fn(async () => undefined)
   const billing: MediaBilling = {
     reserve,
+    renew,
     settle,
     cancel,
   }
@@ -152,7 +156,7 @@ async function fixture() {
     MEDIA_PROVIDER: provider,
     MEDIA_BILLING: billing,
   } as MediaEnv
-  return { raw, env, objects, queued, reserve, settle, cancel, sessionAuth: `Bearer ${accessToken}` }
+  return { raw, env, objects, queued, reserve, renew, settle, cancel, sessionAuth: `Bearer ${accessToken}` }
 }
 
 function app() {
@@ -414,6 +418,372 @@ describe('media task handlers', () => {
       method: 'DELETE', headers: { authorization: test.sessionAuth },
     }, test.env)
     expect(deleted.status).toBe(204)
+  })
+
+  it('submits an eligible batch once, reconciles provider results, and settles through Queue', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '49494949-4949-4949-8949-494949494949',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({
+        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret',
+      })),
+      exact: vi.fn(async () => ({
+        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret',
+      })),
+    }
+    const submitBatch = vi.fn(async () => ({
+      providerJobId: 'batches/job-49', rawState: 'JOB_STATE_PENDING', pollAfterMs: 1_000,
+    }))
+    const succeededPoll = {
+      state: 'succeeded' as const,
+      rawState: 'JOB_STATE_SUCCEEDED',
+      done: true,
+      pollAfterMs: 1_000,
+      items: [
+        { customId: 'cover_01', outputs: [{ bytes: new Uint8Array([1, 2, 3]).buffer, mimeType: 'image/png' as const }] },
+        { customId: 'cover_02', outputs: [{ bytes: new Uint8Array([4, 5, 6]).buffer, mimeType: 'image/png' as const }] },
+      ],
+    }
+    const poll = vi.fn()
+      .mockResolvedValueOnce({
+        state: 'running', rawState: 'JOB_STATE_RUNNING', done: false, pollAfterMs: 1_000,
+      })
+      .mockResolvedValue(succeededPoll)
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: submitBatch,
+      poll,
+      cancel: vi.fn(async () => ({ requested: true as const })),
+      findByDisplayName: vi.fn(async () => ({ status: 'absent' as const })),
+    } satisfies GeminiBatchClient
+    test.settle.mockRejectedValueOnce(new Error('transient settlement outage'))
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    const first = test.queued.shift()
+    expect(first).toMatchObject({
+      event_type: 'media.provider_job.advance.v1',
+      aggregate_id: id,
+      payload: { task_id: id, expected_version: 0 },
+    })
+    expect(test.raw.prepare(
+      'SELECT execution_mode FROM media_tasks WHERE id = ?',
+    ).get(id)).toEqual({ execution_mode: 'provider_job_v1' })
+
+    expect(await consumeMediaTaskExecute({
+      schema_version: 1,
+      event_id: `media-execute:${id}`,
+      event_type: 'media.task.execute.v1',
+      occurred_at_ms: Date.now(),
+      aggregate_type: 'media_task',
+      aggregate_id: id,
+      payload: { task_id: id },
+    }, test.env)).toBe(true)
+    expect(submitBatch).not.toHaveBeenCalled()
+
+    expect(await consumeMediaProviderJobAdvance(first, test.env)).toBe(true)
+    expect(await consumeMediaProviderJobAdvance(first, test.env)).toBe(true)
+    expect(submitBatch).toHaveBeenCalledTimes(1)
+    expect(await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)).toBe(true)
+    const originalBatch = test.env.DB.batch.bind(test.env.DB)
+    let rejectedResultCommit = false
+    const batchSpy = vi.spyOn(test.env.DB, 'batch').mockImplementation(async (statements) => {
+      const isResultCommit = statements.some((statement) =>
+        String((statement as unknown as { sql?: string }).sql).includes("phase = 'materialize_pending'"))
+      if (isResultCommit && !rejectedResultCommit) {
+        rejectedResultCommit = true
+        throw new Error('transient D1 result commit outage')
+      }
+      return originalBatch(statements)
+    })
+    expect(await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)).toBe(true)
+    expect([...test.objects.keys()]).toEqual([`media/test/${id}/input.json`])
+    batchSpy.mockRestore()
+    while (test.queued.length > 0) {
+      expect(await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)).toBe(true)
+    }
+
+    expect(poll).toHaveBeenCalledTimes(3)
+    expect(test.settle).toHaveBeenCalledTimes(2)
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({ amountMicros: 100_000 }))
+    const detail = await app().request(`/v1/images/batches/${id}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    const body = await detail.json() as Record<string, unknown>
+    expect(body).toMatchObject({ status: 'completed', success_count: 2, fail_count: 0, actual_cost: 0.1 })
+    expect(JSON.stringify(body)).not.toContain('batches/job-49')
+    const objectKeys = [...test.objects.keys()].sort()
+    expect(objectKeys).toHaveLength(4)
+    expect(objectKeys).toContain(`media/test/${id}/input.json`)
+    expect(objectKeys).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^media/test/${id}/provider/result-v\\d+-[a-f0-9]{16}\\.json$`)),
+      expect.stringMatching(new RegExp(`^media/test/${id}/outputs/0-0-v\\d+-[a-f0-9]{16}\\.png$`)),
+      expect.stringMatching(new RegExp(`^media/test/${id}/outputs/1-0-v\\d+-[a-f0-9]{16}\\.png$`)),
+    ]))
+  })
+
+  it('keeps larger batches on the bounded per-item Queue path', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '52525252-5252-4252-8252-525252525252',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    const select = vi.fn()
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select,
+      exact: vi.fn(),
+    }
+    const response = await app().request('/v1/images/batches', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${RAW_KEY}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'media-large-fallback-0001',
+      },
+      body: JSON.stringify({
+        model: 'gemini-image',
+        items: Array.from({ length: 9 }, (_, index) => ({ custom_id: `item-${index}`, prompt: `image ${index}` })),
+      }),
+    }, test.env)
+    expect(response.status).toBe(200)
+    const body = await response.json() as { id: string }
+    expect(select).not.toHaveBeenCalled()
+    expect(test.raw.prepare(
+      'SELECT execution_mode FROM media_tasks WHERE id = ?',
+    ).get(body.id)).toEqual({ execution_mode: 'inline_v1' })
+    expect(test.queued).toEqual([expect.objectContaining({ event_type: 'media.task.execute.v1' })])
+  })
+
+  it('waits for the provider cancellation terminal state before releasing the hold', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '50505050-5050-4050-8050-505050505050',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+      exact: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+    }
+    const requestCancel = vi.fn(async () => ({ requested: true as const }))
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: vi.fn(async () => ({
+        providerJobId: 'batches/job-cancel', rawState: 'JOB_STATE_PENDING', pollAfterMs: 1_000,
+      })),
+      poll: vi.fn()
+        .mockResolvedValueOnce({
+          state: 'running' as const,
+          rawState: 'JOB_STATE_RUNNING',
+          done: false,
+          pollAfterMs: 1_000,
+        })
+        .mockResolvedValueOnce({
+          state: 'cancelled' as const,
+          rawState: 'JOB_STATE_CANCELLED',
+          done: true,
+          pollAfterMs: 1_000,
+          error: { code: 'GEMINI_BATCH_CANCELLED', message: 'cancelled' },
+        }),
+      cancel: requestCancel,
+      findByDisplayName: vi.fn(async () => ({ status: 'absent' as const })),
+    }
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    const response = await app().request(`/v1/images/batches/${id}/cancel`, {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ id, status: 'running' })
+    expect(test.cancel).not.toHaveBeenCalled()
+
+    while (requestCancel.mock.calls.length === 0 && test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+    const repeated = await app().request(`/v1/images/batches/${id}/cancel`, {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    expect(repeated.status).toBe(200)
+    while (test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+    expect(requestCancel).toHaveBeenCalledTimes(1)
+    expect(test.cancel).toHaveBeenCalledTimes(1)
+    const final = await app().request(`/v1/images/batches/${id}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(final.json()).resolves.toMatchObject({ id, status: 'cancelled', actual_cost: 0 })
+  })
+
+  it('reports a provider deadline as a terminal failure instead of a user cancellation', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '54545454-5454-4454-8454-545454545454',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+      exact: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+    }
+    const requestCancel = vi.fn(async () => ({ requested: true as const }))
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: vi.fn(async () => ({
+        providerJobId: 'batches/job-deadline', rawState: 'JOB_STATE_PENDING', pollAfterMs: 1_000,
+      })),
+      poll: vi.fn(async () => ({
+        state: 'cancelled' as const,
+        rawState: 'JOB_STATE_CANCELLED',
+        done: true,
+        pollAfterMs: 1_000,
+        error: { code: 'GEMINI_BATCH_CANCELLED', message: 'cancelled' },
+      })),
+      cancel: requestCancel,
+      findByDisplayName: vi.fn(async () => ({ status: 'absent' as const })),
+    }
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    test.raw.prepare(
+      'UPDATE media_provider_jobs SET deadline_at_ms = created_at_ms WHERE task_id = ?',
+    ).run(id)
+    while (test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+
+    expect(requestCancel).toHaveBeenCalledTimes(1)
+    expect(test.cancel).toHaveBeenCalledTimes(1)
+    const final = await app().request(`/v1/images/batches/${id}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(final.json()).resolves.toMatchObject({
+      id,
+      status: 'completed',
+      actual_cost: 0,
+      error: { code: 'GEMINI_BATCH_DEADLINE_EXCEEDED' },
+    })
+  })
+
+  it('settles a provider-initiated cancellation without local cancel metadata', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '56565656-5656-4656-8656-565656565656',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+      exact: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+    }
+    const requestCancel = vi.fn(async () => ({ requested: true as const }))
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: vi.fn(async () => ({
+        providerJobId: 'batches/job-provider-cancel', rawState: 'JOB_STATE_PENDING', pollAfterMs: 1_000,
+      })),
+      poll: vi.fn(async () => ({
+        state: 'cancelled' as const,
+        rawState: 'JOB_STATE_CANCELLED',
+        done: true,
+        pollAfterMs: 1_000,
+        error: { code: 'GEMINI_BATCH_CANCELLED', message: 'cancelled upstream' },
+      })),
+      cancel: requestCancel,
+      findByDisplayName: vi.fn(async () => ({ status: 'absent' as const })),
+    }
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    while (test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+
+    expect(requestCancel).not.toHaveBeenCalled()
+    expect(test.cancel).toHaveBeenCalledTimes(1)
+    const final = await app().request(`/v1/images/batches/${id}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(final.json()).resolves.toMatchObject({ id, status: 'cancelled', actual_cost: 0 })
+  })
+
+  it('never blindly resubmits when the paid create response is ambiguous', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '51515151-5151-4151-8151-515151515151',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+      exact: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+    }
+    const submitBatch = vi.fn(async () => { throw new Error('response lost after create') })
+    const findByDisplayName = vi.fn(async () => ({ status: 'absent' as const }))
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: submitBatch,
+      poll: vi.fn(),
+      cancel: vi.fn(async () => ({ requested: true as const })),
+      findByDisplayName,
+    }
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    while (test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+
+    expect(submitBatch).toHaveBeenCalledTimes(1)
+    expect(findByDisplayName).toHaveBeenCalledTimes(3)
+    expect(test.raw.prepare(
+      'SELECT phase, last_error_code FROM media_provider_jobs WHERE task_id = ?',
+    ).get(id)).toEqual({ phase: 'attention', last_error_code: 'GEMINI_BATCH_SUBMIT_UNRESOLVED' })
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.cancel).not.toHaveBeenCalled()
+  })
+
+  it('marks missing provider records failed and releases a zero-success hold', async () => {
+    const test = await fixture()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
+      '53535353-5353-4353-8353-535353535353',
+    )
+    test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
+    test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
+      select: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+      exact: vi.fn(async () => ({ id: 'account-1', baseUrl: 'https://gemini.test', apiKey: 'secret' })),
+    }
+    test.env.MEDIA_PROVIDER_JOB_CLIENT = {
+      submit: vi.fn(async () => ({
+        providerJobId: 'batches/job-missing', rawState: 'JOB_STATE_PENDING', pollAfterMs: 1_000,
+      })),
+      poll: vi.fn(async () => ({
+        state: 'succeeded' as const,
+        rawState: 'JOB_STATE_SUCCEEDED',
+        done: true,
+        pollAfterMs: 1_000,
+        items: [],
+      })),
+      cancel: vi.fn(async () => ({ requested: true as const })),
+      findByDisplayName: vi.fn(async () => ({ status: 'absent' as const })),
+    }
+
+    const submitted = await submit(test)
+    const id = String(submitted.id)
+    while (test.queued.length > 0) {
+      await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)
+    }
+
+    expect(test.cancel).toHaveBeenCalledTimes(1)
+    expect(test.settle).not.toHaveBeenCalled()
+    const final = await app().request(`/v1/images/batches/${id}`, {
+      headers: { authorization: `Bearer ${RAW_KEY}` },
+    }, test.env)
+    await expect(final.json()).resolves.toMatchObject({
+      id,
+      status: 'completed',
+      success_count: 0,
+      fail_count: 2,
+      actual_cost: 0,
+      error: { code: 'BATCH_IMAGE_ALL_ITEMS_FAILED' },
+    })
   })
 
   it('charges completed outputs and releases the unused hold when cancellation races execution', async () => {

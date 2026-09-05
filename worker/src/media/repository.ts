@@ -15,6 +15,7 @@ import type {
 
 const TASK_COLUMNS = `id, user_id, api_key_id, group_id, parent_task_id, task_name,
   provider, model, upstream_model, image_size, response_mime_type, aspect_ratio, status,
+  execution_mode,
   item_count, expected_output_count, success_count, fail_count, cancelled_count,
   base_unit_price_micros, price_id, effective_rate_multiplier_ppm,
   batch_discount_multiplier_ppm, hold_multiplier_ppm, billable_unit_price_micros,
@@ -49,6 +50,11 @@ export interface NewMediaTask {
   requestHash: string
   inputObjectKey: string
   now: number
+  providerJob?: {
+    accountId: string
+    submissionKey: string
+    deadlineAtMs: number
+  }
 }
 
 export async function resolveMediaPricing(
@@ -156,7 +162,7 @@ export async function createMediaTask(env: MediaEnv, input: NewMediaTask): Promi
       `INSERT INTO media_tasks (
          id, user_id, api_key_id, group_id, parent_task_id, task_name,
          provider, model, upstream_model, image_size, response_mime_type, aspect_ratio,
-         status, item_count, expected_output_count,
+         execution_mode, status, item_count, expected_output_count,
          base_unit_price_micros, price_id, effective_rate_multiplier_ppm,
          batch_discount_multiplier_ppm, hold_multiplier_ppm,
          billable_unit_price_micros, hold_unit_price_micros,
@@ -165,7 +171,7 @@ export async function createMediaTask(env: MediaEnv, input: NewMediaTask): Promi
          idempotency_key_hash, request_hash, input_object_key,
          created_at_ms, updated_at_ms
        ) VALUES (
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        )`,
     ).bind(
       input.id,
@@ -180,6 +186,7 @@ export async function createMediaTask(env: MediaEnv, input: NewMediaTask): Promi
       input.manifest.image_size,
       input.manifest.response_mime_type,
       input.manifest.aspect_ratio,
+      input.providerJob === undefined ? 'inline_v1' : 'provider_job_v1',
       input.expectedOutputCount,
       input.expectedOutputCount,
       input.pricing.baseUnitPriceMicros,
@@ -202,6 +209,20 @@ export async function createMediaTask(env: MediaEnv, input: NewMediaTask): Promi
       input.now,
       input.now,
     ),
+    ...(input.providerJob === undefined ? [] : [env.DB.prepare(
+      `INSERT INTO media_provider_jobs (
+         task_id, provider_account_id, submission_key, phase,
+         next_action_at_ms, deadline_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, 'submit_pending', ?, ?, ?, ?)`,
+    ).bind(
+      input.id,
+      input.providerJob.accountId,
+      input.providerJob.submissionKey,
+      input.now,
+      input.providerJob.deadlineAtMs,
+      input.now,
+      input.now,
+    )]),
     ...input.manifest.items.map((item, ordinal) => env.DB.prepare(
       `INSERT INTO media_task_items (
          task_id, custom_id, ordinal, status, output_count, prompt_preview,
@@ -358,7 +379,8 @@ export async function listMediaTaskItems(
     `SELECT task_id, custom_id, ordinal, status, output_count, image_count,
             prompt_preview, request_hash, mime_type, file_extension,
             error_code, error_message, attempt_token, attempt_started_at_ms,
-            attempt_count, created_at_ms, completed_at_ms
+            attempt_count, created_at_ms, completed_at_ms,
+            provider_record_object_key, provider_record_sha256, provider_record_ordinal
        FROM media_task_items WHERE task_id = ?${condition}
       ORDER BY ordinal, custom_id`,
   ).bind(...values).all<MediaTaskItemRow>()
@@ -394,7 +416,8 @@ export async function claimNextMediaTaskItem(
     `SELECT task_id, custom_id, ordinal, status, output_count, image_count,
             prompt_preview, request_hash, mime_type, file_extension,
             error_code, error_message, attempt_token, attempt_started_at_ms,
-            attempt_count, created_at_ms, completed_at_ms
+            attempt_count, created_at_ms, completed_at_ms,
+            provider_record_object_key, provider_record_sha256, provider_record_ordinal
        FROM media_task_items WHERE task_id = ? AND attempt_token = ? LIMIT 1`,
   ).bind(taskId, attemptToken).first<MediaTaskItemRow>()
 }
@@ -566,7 +589,7 @@ export async function listRecoverableMediaTasks(
 ): Promise<MediaTaskRow[]> {
   const result = await env.DB.prepare(
     `SELECT ${TASK_COLUMNS} FROM media_tasks
-      WHERE user_deleted_at_ms IS NULL AND (
+      WHERE execution_mode = 'inline_v1' AND user_deleted_at_ms IS NULL AND (
         (status = 'created' AND billing_status = 'unreserved')
         OR (status = 'queued' AND (enqueued_at_ms IS NULL OR updated_at_ms <= ?))
         OR (status = 'running' AND updated_at_ms <= ?)
