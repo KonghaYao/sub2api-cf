@@ -81,7 +81,7 @@ class Statement {
       const [
         id, platform, name, credential_ref, enabled, max_concurrency,
         created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
-        provider_config_json, image_adapter, credential_kind,
+        provider_config_json, image_adapter, credential_kind, billing_rate_multiplier_ppm,
       ] = this.values
       if ([...this.db.accounts.values()].some((row) => row.name === name)) {
         throw new Error('UNIQUE constraint failed: accounts.platform, accounts.name')
@@ -89,6 +89,7 @@ class Statement {
       this.db.accounts.set(String(id), {
         id, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms, base_url,
         platform, protocol, auth_scheme, provider_config_json, image_adapter, credential_kind,
+        billing_rate_multiplier_ppm,
         config_version: 1,
         control_version: 0, health_status: 'unknown', last_checked_at_ms: null,
         last_latency_ms: null, last_health_error: null,
@@ -106,7 +107,7 @@ class Statement {
     if (this.sql.includes('UPDATE accounts') && this.sql.includes('control_version = CASE')) {
       const [
         name, enabled, max, base, providerConfig, imageAdapter, credentialKind,
-        config, expected, control, reset, , , , updated, id,
+        billingRateMultiplier, config, expected, control, reset, , , , updated, id,
       ] = this.values
       const row = this.db.accounts.get(String(id))
       if (!row) return result([], 0)
@@ -119,6 +120,7 @@ class Statement {
         provider_config_json: providerConfig,
         image_adapter: imageAdapter,
         credential_kind: credentialKind,
+        billing_rate_multiplier_ppm: billingRateMultiplier,
         config_version: config,
         control_version: control,
         updated_at_ms: updated,
@@ -304,6 +306,44 @@ describe('admin account control plane', () => {
     expect(JSON.stringify(updated)).not.toContain('rotated-secret')
     const secret = [...db.secrets.values()][0]
     expect((await decryptCredential(secret.nonce_b64, secret.ciphertext_b64, 'm'.repeat(32), credentialAad('test', id, secret.id, 2))).api_key).toBe('rotated-secret')
+  })
+
+  it('round-trips an exact decimal account rate multiplier through ppm storage', async () => {
+    const db = new MemoryDb()
+    const createdResponse = await createApp().request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'account-rate-create' },
+      body: JSON.stringify({ ...input, rate_multiplier: 1.25 }),
+    }, env(db))
+    const created = await json(createdResponse)
+    expect(createdResponse.status).toBe(201)
+    expect(created.data.rate_multiplier).toBe(1.25)
+    expect(created.data).not.toHaveProperty('billing_rate_multiplier_ppm')
+    expect(db.accounts.get(created.data.id)?.billing_rate_multiplier_ppm).toBe(1_250_000)
+
+    const updatedResponse = await createApp().request(`/accounts/${created.data.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '0' },
+      body: JSON.stringify({ rate_multiplier: 0 }),
+    }, env(db))
+    expect(updatedResponse.status).toBe(200)
+    expect((await json(updatedResponse)).data.rate_multiplier).toBe(0)
+    expect(db.accounts.get(created.data.id)?.billing_rate_multiplier_ppm).toBe(0)
+
+    const maximumResponse = await createApp().request(`/accounts/${created.data.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '1' },
+      body: JSON.stringify({ rate_multiplier: 10 }),
+    }, env(db))
+    expect(maximumResponse.status).toBe(200)
+    expect((await json(maximumResponse)).data.rate_multiplier).toBe(10)
+
+    for (const invalid of [-1, 0.0000001, 10.000001, Number.MAX_SAFE_INTEGER]) {
+      const response = await createApp().request(`/accounts/${created.data.id}`, {
+        method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '2' },
+        body: JSON.stringify({ rate_multiplier: invalid }),
+      }, env(db))
+      expect(response.status).toBe(400)
+      expect((await json(response)).code).toBe('invalid_rate_multiplier')
+    }
   })
 
   it('enforces If-Match, rolls failed batches back, and soft-disables without deleting links/secrets', async () => {

@@ -208,6 +208,9 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   if (/^\/api\/v1\/admin\/accounts\/[^/]+\/test$/.test(pathname)) {
     return ['admin.catalog.write', 'admin.operations.write']
   }
+  if (/^\/api\/v1\/admin\/accounts\/[^/]+\/stats$/.test(pathname)) {
+    return ['admin.catalog.read', 'admin.operations.read']
+  }
   if (
     /^\/api\/v1\/admin\/payment\/orders\/[^/]+\/(?:cancel|retry|refund\/query)$/.test(pathname)
   ) {

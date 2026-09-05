@@ -38,6 +38,7 @@ import {
 import {
   calculateSyncImageActualCost,
   calculateSyncImageReservation,
+  calculateSyncImageStandardCost,
   resolveSyncImagePricePolicy,
 } from './sync-pricing'
 import {
@@ -331,6 +332,8 @@ async function executeSyncImages(
               requestedModel: manifest.model,
               upstreamModel: route.model.upstream_name,
               amountMicros: calculateSyncImageActualCost(pricing, outputBilling.tiers),
+              standardCostMicros: calculateSyncImageStandardCost(pricing, outputBilling.tiers),
+              providerPlatform: route.model.platform,
               initialReservedMicros: reservedMicros,
               operation,
               ...outputBilling.dimensions,
@@ -446,6 +449,8 @@ async function executeSyncImages(
       requestedModel: manifest.model,
       upstreamModel: route.model.upstream_name,
       amountMicros: actualMicros,
+      standardCostMicros: calculateSyncImageStandardCost(pricing, outputBilling.tiers),
+      providerPlatform: route.model.platform,
       initialReservedMicros: reservedMicros,
       operation,
       ...outputBilling.dimensions,

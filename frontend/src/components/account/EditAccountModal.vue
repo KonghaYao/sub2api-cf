@@ -66,6 +66,18 @@
             class="input"
           />
         </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.billingRateMultiplier') }}</label>
+          <input
+            v-model.number="workerForm.rate_multiplier"
+            data-testid="worker-account-edit-rate-multiplier"
+            type="number"
+            min="0"
+            step="0.000001"
+            required
+            class="input"
+          />
+        </div>
         <label class="flex items-center gap-3 pt-7 text-sm text-gray-700 dark:text-gray-300">
           <input v-model="workerForm.enabled" type="checkbox" class="rounded border-gray-300" />
           {{ t('common.enabled') }}
@@ -3037,6 +3049,7 @@ const workerForm = reactive({
   account_id: '',
   enabled: true,
   max_concurrency: 4,
+  rate_multiplier: 1,
 })
 
 const workerContractDetails = computed(() => {
@@ -3071,6 +3084,9 @@ watch(
       : ''
     workerForm.enabled = workerAccount.enabled === true || account.status === 'active'
     workerForm.max_concurrency = Number(workerAccount.max_concurrency ?? account.concurrency) || 4
+    workerForm.rate_multiplier = Number.isFinite(Number(account.rate_multiplier))
+      ? Number(account.rate_multiplier)
+      : 1
   },
   { immediate: true }
 )
@@ -4750,6 +4766,10 @@ const handleWorkerUpdate = async () => {
     appStore.showError('Reload the account before updating it')
     return
   }
+  if (!Number.isFinite(workerForm.rate_multiplier) || workerForm.rate_multiplier < 0) {
+    appStore.showError(t('admin.accounts.rateMultiplierInvalid'))
+    return
+  }
 
   submitting.value = true
   try {
@@ -4758,6 +4778,7 @@ const handleWorkerUpdate = async () => {
       base_url: workerForm.base_url.trim(),
       enabled: workerForm.enabled,
       max_concurrency: workerForm.max_concurrency,
+      rate_multiplier: workerForm.rate_multiplier,
       expected_control_version: controlVersion,
     }
     if (workerForm.api_key.trim()) payload.api_key = workerForm.api_key.trim()

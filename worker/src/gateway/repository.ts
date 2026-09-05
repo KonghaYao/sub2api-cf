@@ -474,14 +474,21 @@ export async function resolveGatewayRoute(
     await env.DB.batch(statements)
   const model = modelResult.results[0] as unknown as ModelRoute | undefined
   if (model === undefined) {
-    throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
+    return resolveExternalChannelAlias(
+      env,
+      groupId,
+      publicName,
+      endpoint,
+      userId,
+      fallbackEndpoint,
+    )
   }
   const channelPolicy = channelResult.results[0] as unknown as ChannelModelPolicyRow | undefined
   const routedModel = applyChannelModelPolicy(publicName, model, channelPolicy)
 
-  // Account eligibility remains attached to the requested catalog model. The
-  // channel only rewrites the provider-facing name, so the original price and
-  // account capability snapshot stay authoritative.
+  // Account eligibility and customer billing remain attached to the requested
+  // catalog model. The channel policy may independently snapshot a uniquely
+  // resolved mapped model's base price for provider-account cost reporting.
   let candidates = candidateResult.results.map(parseAccountCandidate)
   let upstreamEndpoint = endpoint
   if (
@@ -505,6 +512,278 @@ export async function resolveGatewayRoute(
     upstream_endpoint: upstreamEndpoint,
     platform_quota: quotaRow === undefined ? null : platformQuotaPolicy(quotaRow),
   }
+}
+
+interface ExternalAliasModelRow extends ModelRoute {
+  billing_model_source: string
+  match_count: number
+}
+
+async function resolveExternalChannelAlias(
+  env: Env,
+  groupId: string,
+  publicName: string,
+  endpoint: GatewayEndpoint,
+  userId: string,
+  fallbackEndpoint?: GatewayEndpoint,
+): Promise<{
+  model: ModelRoute
+  candidates: AccountCandidate[]
+  upstream_endpoint: GatewayEndpoint
+  platform_quota: GatewayPrincipal['platform_quota']
+}> {
+  const capabilityColumn = accountCapabilityColumn(endpoint)
+  const statements = [
+    externalAliasModelStatement(env, groupId, publicName, endpoint, userId),
+    externalAliasCandidatesStatement(env, groupId, publicName, endpoint, capabilityColumn),
+    externalAliasQuotaStatement(env, groupId, publicName, endpoint, userId),
+  ]
+  if (
+    (endpoint === 'responses' && fallbackEndpoint === 'chat_completions') ||
+    (endpoint === 'chat_completions' && fallbackEndpoint === 'responses')
+  ) {
+    statements.push(externalAliasCandidatesStatement(
+      env,
+      groupId,
+      publicName,
+      endpoint,
+      accountCapabilityColumn(fallbackEndpoint),
+      endpoint === 'chat_completions' ? 'openai_or_codex' : 'openai',
+    ))
+  }
+
+  const [modelResult, candidateResult, quotaResult, fallbackCandidateResult] =
+    await env.DB.batch(statements)
+  const modelRows = modelResult.results as unknown as ExternalAliasModelRow[]
+  if (modelRows.length === 0) {
+    throw new GatewayError(404, 'model_not_found', `Model '${publicName}' is not available`, 'invalid_request_error')
+  }
+  if (modelRows.length !== 1 || modelRows[0].match_count !== 1) {
+    throw new GatewayError(
+      409,
+      'ambiguous_model_alias',
+      `Model alias '${publicName}' resolves to more than one provider`,
+      'invalid_request_error',
+    )
+  }
+  const aliasModel = modelRows[0]
+  assertSupportedChannelBillingSource(aliasModel.billing_model_source)
+  const { billing_model_source: _billingSource, match_count: _matchCount, ...model } = aliasModel
+  let candidates = candidateResult.results.map(parseAccountCandidate)
+  let upstreamEndpoint = endpoint
+  if (
+    candidates.length === 0 &&
+    fallbackEndpoint !== undefined &&
+    fallbackCandidateResult !== undefined
+  ) {
+    candidates = fallbackCandidateResult.results.map(parseAccountCandidate)
+    upstreamEndpoint = fallbackEndpoint
+  }
+  if (
+    candidates.length === 0 ||
+    candidates.some((candidate) => candidate.config_revision !== model.config_revision)
+  ) {
+    throw new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
+  }
+  const quotaRow = quotaResult.results[0] as unknown as PrincipalRow | undefined
+  return {
+    model,
+    candidates,
+    upstream_endpoint: upstreamEndpoint,
+    platform_quota: quotaRow === undefined ? null : platformQuotaPolicy(quotaRow),
+  }
+}
+
+function externalAliasCte(
+  groupId: string,
+  publicName: string,
+  endpoint: GatewayEndpoint,
+): { sql: string; bindings: unknown[] } {
+  const modelCapability = endpoint === 'embeddings'
+    ? 'm.embeddings = 1'
+    : endpoint === 'images'
+      ? 'm.image_generation = 1'
+      : `(m.endpoint = ? OR m.endpoint = 'both')`
+  const bindings: unknown[] = [publicName, groupId, groupId]
+  if (endpoint !== 'embeddings' && endpoint !== 'images') bindings.push(endpoint)
+  return {
+    sql: `WITH request_input(requested_model) AS (VALUES (?)),
+      matching_mappings AS (
+        SELECT c.billing_model_source, mapping.platform,
+               mapping.source_pattern, mapping.target_pattern,
+               mapping.source_is_wildcard, mapping.target_is_wildcard,
+               mapping.sort_order,
+               ROW_NUMBER() OVER (
+                 PARTITION BY mapping.platform
+                 ORDER BY mapping.source_is_wildcard ASC, mapping.sort_order ASC,
+                          length(mapping.source_pattern) DESC, mapping.source_pattern ASC
+               ) AS mapping_rank
+          FROM channel_groups cg
+          JOIN channels c ON c.id = cg.channel_id
+          JOIN "groups" channel_group ON channel_group.id = cg.group_id
+          JOIN channel_model_mappings mapping ON mapping.channel_id = c.id
+          CROSS JOIN request_input request
+         WHERE cg.group_id = ? AND c.status = 'active' AND channel_group.enabled = 1
+           AND (channel_group.platform = 'composite' OR mapping.platform = channel_group.platform)
+           AND (
+             (mapping.source_is_wildcard = 0 AND mapping.source_pattern = request.requested_model COLLATE NOCASE)
+             OR
+             (mapping.source_is_wildcard = 1 AND
+               substr(lower(request.requested_model), 1, length(mapping.source_pattern) - 1) =
+                 lower(substr(mapping.source_pattern, 1, length(mapping.source_pattern) - 1)))
+           )
+      ), selected_mappings AS (
+        SELECT billing_model_source, platform, source_pattern, target_pattern,
+               source_is_wildcard, target_is_wildcard,
+               CASE WHEN target_is_wildcard = 1
+                 THEN substr(target_pattern, 1, length(target_pattern) - 1) ||
+                      CASE WHEN source_is_wildcard = 1
+                        THEN substr(request.requested_model, length(source_pattern))
+                        ELSE ''
+                      END
+                 ELSE target_pattern
+               END AS expanded_target
+          FROM matching_mappings
+          CROSS JOIN request_input request
+         WHERE mapping_rank = 1 AND target_pattern <> ''
+      ), backing_matches AS (
+        SELECT mapping.billing_model_source, mapping.expanded_target,
+               COALESCE(gm.upstream_name_override, m.upstream_name) AS backing_upstream_name,
+               gm.group_id, gm.model_id, gm.max_output_tokens, gm.default_max_output_tokens,
+               g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
+               m.platform, m.endpoint, m.embeddings, m.image_generation,
+               p.id AS price_id, p.version AS price_version,
+               p.input_micros_per_million, p.output_micros_per_million,
+               p.cache_read_micros_per_million, p.per_request_micros,
+               p.minimum_reservation_micros
+          FROM selected_mappings mapping
+          JOIN group_models gm ON gm.group_id = ?
+          JOIN "groups" g ON g.id = gm.group_id
+          JOIN models m ON m.id = gm.model_id AND m.platform = mapping.platform
+          JOIN model_prices p ON p.group_id = gm.group_id AND p.model_id = gm.model_id
+         WHERE gm.enabled = 1 AND m.enabled = 1 AND p.active = 1 AND g.enabled = 1
+           AND ${modelCapability}
+           AND (
+             m.public_name = mapping.expanded_target COLLATE NOCASE OR
+             COALESCE(gm.upstream_name_override, m.upstream_name) = mapping.expanded_target COLLATE NOCASE
+           )
+      ), resolved_alias AS (
+        SELECT backing.*, COUNT(*) OVER () AS match_count
+          FROM backing_matches backing
+      )`,
+    bindings,
+  }
+}
+
+function externalAliasModelStatement(
+  env: Env,
+  groupId: string,
+  publicName: string,
+  endpoint: GatewayEndpoint,
+  userId: string,
+): D1PreparedStatement {
+  const cte = externalAliasCte(groupId, publicName, endpoint)
+  return env.DB.prepare(
+    `${cte.sql}
+     SELECT revision.revision AS config_revision,
+            alias.model_id, alias.platform, ? AS public_name,
+            alias.backing_upstream_name AS upstream_name,
+            alias.endpoint, alias.embeddings, alias.image_generation,
+            alias.price_id, alias.price_version,
+            alias.input_micros_per_million, alias.output_micros_per_million,
+            alias.cache_read_micros_per_million, alias.per_request_micros,
+            alias.minimum_reservation_micros,
+            alias.price_id AS account_cost_base_price_id,
+            alias.price_version AS account_cost_base_price_version,
+            alias.input_micros_per_million AS account_cost_base_input_micros_per_million,
+            alias.output_micros_per_million AS account_cost_base_output_micros_per_million,
+            alias.cache_read_micros_per_million AS account_cost_base_cache_read_micros_per_million,
+            alias.per_request_micros AS account_cost_base_per_request_micros,
+            alias.group_rate_multiplier_ppm,
+            user_rate.rate_multiplier_ppm AS user_rate_multiplier_ppm,
+            COALESCE(user_rate.rate_multiplier_ppm, alias.group_rate_multiplier_ppm) AS rate_multiplier_ppm,
+            alias.max_output_tokens, alias.default_max_output_tokens,
+            alias.billing_model_source, alias.match_count
+       FROM resolved_alias alias
+       LEFT JOIN user_group_rate_overrides user_rate
+         ON user_rate.group_id = alias.group_id AND user_rate.user_id = ?
+       CROSS JOIN gateway_config_revision revision
+      ORDER BY alias.platform ASC, alias.model_id ASC
+      LIMIT 2`,
+  ).bind(...cte.bindings, publicName, userId)
+}
+
+function externalAliasCandidatesStatement(
+  env: Env,
+  groupId: string,
+  publicName: string,
+  modelEndpoint: GatewayEndpoint,
+  capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation',
+  platformConstraint?: 'openai' | 'openai_or_codex',
+): D1PreparedStatement {
+  const cte = externalAliasCte(groupId, publicName, modelEndpoint)
+  const platformPredicate = platformConstraint === 'openai'
+    ? "AND a.platform = 'openai'"
+    : platformConstraint === 'openai_or_codex'
+      ? "AND a.platform IN ('openai', 'codex')"
+      : ''
+  return env.DB.prepare(
+    `${cte.sql}
+     SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
+            a.image_adapter, a.credential_kind,
+            a.provider_config_json, a.base_url, a.max_concurrency,
+            ag.priority, ag.weight, a.config_version,
+            revision.revision AS config_revision, am.model_id
+       FROM resolved_alias resolved
+       JOIN account_models am ON am.model_id = resolved.model_id
+       JOIN accounts a ON a.id = am.account_id AND a.platform = resolved.platform
+       JOIN account_groups ag ON ag.account_id = a.id AND ag.group_id = resolved.group_id
+       JOIN "groups" g ON g.id = ag.group_id
+       CROSS JOIN gateway_config_revision revision
+      WHERE resolved.match_count = 1 AND a.enabled = 1 AND a.base_url IS NOT NULL
+        AND a.health_status <> 'unhealthy'
+        AND (g.platform = a.platform OR g.platform = 'composite')
+        AND ${capabilityColumn} = 1
+        ${platformPredicate}
+      ORDER BY ag.priority ASC, a.id ASC`,
+  ).bind(...cte.bindings)
+}
+
+function externalAliasQuotaStatement(
+  env: Env,
+  groupId: string,
+  publicName: string,
+  endpoint: GatewayEndpoint,
+  userId: string,
+): D1PreparedStatement {
+  const cte = externalAliasCte(groupId, publicName, endpoint)
+  return env.DB.prepare(
+    `${cte.sql}
+     SELECT quota.platform AS platform_quota_platform,
+            quota.enabled AS platform_quota_enabled,
+            quota.control_version AS platform_quota_control_version,
+            quota.daily_limit_micros AS platform_daily_limit_micros,
+            quota.weekly_limit_micros AS platform_weekly_limit_micros,
+            quota.monthly_limit_micros AS platform_monthly_limit_micros,
+            quota.daily_used_micros AS platform_daily_used_micros,
+            quota.weekly_used_micros AS platform_weekly_used_micros,
+            quota.monthly_used_micros AS platform_monthly_used_micros,
+            quota.daily_window_start_ms AS platform_daily_window_start_ms,
+            quota.weekly_window_start_ms AS platform_weekly_window_start_ms,
+            quota.monthly_window_start_ms AS platform_monthly_window_start_ms,
+            quota.daily_reset_epoch AS platform_daily_reset_epoch,
+            quota.weekly_reset_epoch AS platform_weekly_reset_epoch,
+            quota.monthly_reset_epoch AS platform_monthly_reset_epoch
+       FROM resolved_alias resolved
+       JOIN user_platform_quotas quota
+         ON quota.user_id = ?
+        AND quota.platform = CASE
+          WHEN resolved.platform = 'codex' THEN 'openai'
+          ELSE resolved.platform
+        END
+      WHERE resolved.match_count = 1
+      LIMIT 1`,
+  ).bind(...cte.bindings, userId)
 }
 
 function platformQuotaStatement(
@@ -565,12 +844,31 @@ function platformQuotaStatement(
 
 interface ChannelModelPolicyRow {
   channel_id: string
+  billing_model_source: string
   restrict_models: number
   source_pattern: string | null
   target_pattern: string | null
   source_is_wildcard: number | null
   target_is_wildcard: number | null
   pricing_match: number
+  account_cost_base_match_count: number | null
+  account_cost_base_price_id: string | null
+  account_cost_base_price_version: number | null
+  account_cost_base_input_micros_per_million: number | null
+  account_cost_base_output_micros_per_million: number | null
+  account_cost_base_cache_read_micros_per_million: number | null
+  account_cost_base_per_request_micros: number | null
+}
+
+function assertSupportedChannelBillingSource(value: string): void {
+  if (value !== 'channel_mapped') {
+    throw new GatewayError(
+      409,
+      'unsupported_billing_model_source',
+      `Channel billing model source '${value}' is not supported by the Worker gateway`,
+      'invalid_request_error',
+    )
+  }
 }
 
 function channelModelPolicyStatement(
@@ -584,12 +882,19 @@ function channelModelPolicyStatement(
     : endpoint === 'images'
       ? 'resolved.image_generation = 1'
       : `(resolved.endpoint = ? OR resolved.endpoint = 'both')`
+  const accountCostModelCapability = endpoint === 'embeddings'
+    ? 'account_cost_model.embeddings = 1'
+    : endpoint === 'images'
+      ? 'account_cost_model.image_generation = 1'
+      : `(account_cost_model.endpoint = '${endpoint}' OR account_cost_model.endpoint = 'both')`
   const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, requestedModel]
     : [groupId, requestedModel, endpoint]
   return env.DB.prepare(
     `WITH active_channel AS (
-       SELECT c.id, c.restrict_models, resolved.platform AS target_platform
+       SELECT c.id, c.billing_model_source, c.restrict_models,
+              gm.group_id,
+              resolved.platform AS target_platform
          FROM channel_groups cg
          JOIN channels c ON c.id = cg.channel_id
          JOIN "groups" g ON g.id = cg.group_id
@@ -618,8 +923,48 @@ function channelModelPolicyStatement(
         ORDER BY mapping.source_is_wildcard ASC, mapping.sort_order ASC,
                  length(mapping.source_pattern) DESC, mapping.source_pattern ASC
         LIMIT 1
+     ), mapped_target AS (
+       SELECT channel.group_id, channel.target_platform,
+              CASE WHEN mapping.target_is_wildcard = 1
+                THEN substr(mapping.target_pattern, 1, length(mapping.target_pattern) - 1) ||
+                     CASE WHEN mapping.source_is_wildcard = 1
+                       THEN substr(?, length(mapping.source_pattern))
+                       ELSE ''
+                     END
+                ELSE mapping.target_pattern
+              END AS expanded_target
+         FROM active_channel channel
+         JOIN matched_mapping mapping ON mapping.channel_id = channel.id
+        WHERE mapping.target_pattern <> ''
+     ), account_cost_matches AS (
+       SELECT account_cost_price.id AS price_id,
+              account_cost_price.version AS price_version,
+              account_cost_price.input_micros_per_million,
+              account_cost_price.output_micros_per_million,
+              account_cost_price.cache_read_micros_per_million,
+              account_cost_price.per_request_micros,
+              COUNT(*) OVER () AS match_count
+         FROM mapped_target target
+         JOIN group_models account_cost_group_model
+           ON account_cost_group_model.group_id = target.group_id
+         JOIN models account_cost_model
+           ON account_cost_model.id = account_cost_group_model.model_id
+          AND account_cost_model.platform = target.target_platform
+         JOIN model_prices account_cost_price
+           ON account_cost_price.group_id = account_cost_group_model.group_id
+          AND account_cost_price.model_id = account_cost_group_model.model_id
+        WHERE account_cost_group_model.enabled = 1
+          AND account_cost_model.enabled = 1
+          AND account_cost_price.active = 1
+          AND ${accountCostModelCapability}
+          AND (
+            account_cost_model.public_name = target.expanded_target COLLATE NOCASE OR
+            COALESCE(account_cost_group_model.upstream_name_override, account_cost_model.upstream_name) =
+              target.expanded_target COLLATE NOCASE
+          )
      )
-     SELECT channel.id AS channel_id, channel.restrict_models,
+     SELECT channel.id AS channel_id, channel.billing_model_source,
+            channel.restrict_models,
             mapping.source_pattern, mapping.target_pattern,
             mapping.source_is_wildcard, mapping.target_is_wildcard,
             EXISTS (
@@ -634,13 +979,28 @@ function channelModelPolicyStatement(
                      lower(substr(allowed.model_pattern, 1, length(allowed.model_pattern) - 1)))
                )
                LIMIT 1
-            ) AS pricing_match
+            ) AS pricing_match,
+            account_cost.match_count AS account_cost_base_match_count,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.price_id END
+              AS account_cost_base_price_id,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.price_version END
+              AS account_cost_base_price_version,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.input_micros_per_million END
+              AS account_cost_base_input_micros_per_million,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.output_micros_per_million END
+              AS account_cost_base_output_micros_per_million,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.cache_read_micros_per_million END
+              AS account_cost_base_cache_read_micros_per_million,
+            CASE WHEN account_cost.match_count = 1 THEN account_cost.per_request_micros END
+              AS account_cost_base_per_request_micros
        FROM active_channel channel
       LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
+      LEFT JOIN account_cost_matches account_cost ON 1 = 1
       LIMIT 1`,
   )
     .bind(
       ...routeBindings,
+      requestedModel,
       requestedModel,
       requestedModel,
       requestedModel,
@@ -655,6 +1015,7 @@ function applyChannelModelPolicy(
 ): ModelRoute {
   // An unlinked or inactive channel deliberately preserves pre-channel routing.
   if (row === undefined) return model
+  assertSupportedChannelBillingSource(row.billing_model_source)
 
   const mapped = row.target_pattern !== null && row.target_pattern !== ''
   if (!mapped) {
@@ -672,6 +1033,25 @@ function applyChannelModelPolicy(
   return {
     ...model,
     upstream_name: expandChannelMappingTarget(requestedModel, row),
+    ...(row.account_cost_base_match_count === 1 &&
+      row.account_cost_base_price_id !== null &&
+      row.account_cost_base_price_version !== null &&
+      row.account_cost_base_input_micros_per_million !== null &&
+      row.account_cost_base_output_micros_per_million !== null &&
+      row.account_cost_base_cache_read_micros_per_million !== null &&
+      row.account_cost_base_per_request_micros !== null
+      ? {
+          account_cost_base_price_id: row.account_cost_base_price_id,
+          account_cost_base_price_version: row.account_cost_base_price_version,
+          account_cost_base_input_micros_per_million:
+            row.account_cost_base_input_micros_per_million,
+          account_cost_base_output_micros_per_million:
+            row.account_cost_base_output_micros_per_million,
+          account_cost_base_cache_read_micros_per_million:
+            row.account_cost_base_cache_read_micros_per_million,
+          account_cost_base_per_request_micros: row.account_cost_base_per_request_micros,
+        }
+      : {}),
   }
 }
 
@@ -860,6 +1240,12 @@ function modelSelect(includeUserRate = false): string {
                  p.input_micros_per_million, p.output_micros_per_million,
                  p.cache_read_micros_per_million, p.per_request_micros,
                  p.minimum_reservation_micros,
+                 p.id AS account_cost_base_price_id,
+                 p.version AS account_cost_base_price_version,
+                 p.input_micros_per_million AS account_cost_base_input_micros_per_million,
+                 p.output_micros_per_million AS account_cost_base_output_micros_per_million,
+                 p.cache_read_micros_per_million AS account_cost_base_cache_read_micros_per_million,
+                 p.per_request_micros AS account_cost_base_per_request_micros,
                  g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
                  ${userRate} AS user_rate_multiplier_ppm,
                  COALESCE(${userRate}, g.rate_multiplier_ppm) AS rate_multiplier_ppm,

@@ -338,6 +338,7 @@ describe('EditAccountModal', () => {
       base_url: 'https://api.openai.com/v1',
       enabled: true,
       max_concurrency: 4,
+      rate_multiplier: 1.25,
       control_version: 6,
       group_links: [{ group_id: 'group-1', priority: 0, weight: 1 }],
       model_capabilities: [{ model_id: 'model-1', responses: true }],
@@ -361,6 +362,9 @@ describe('EditAccountModal', () => {
 
     await wrapper.get('[data-testid="worker-account-edit-name"]').setValue('Updated worker')
     await wrapper.get('[data-testid="worker-account-edit-api-key"]').setValue('replacement-key')
+    expect((wrapper.get('[data-testid="worker-account-edit-rate-multiplier"]').element as HTMLInputElement).value)
+      .toBe('1.25')
+    await wrapper.get('[data-testid="worker-account-edit-rate-multiplier"]').setValue('1.5')
     await wrapper.get('form#edit-worker-account-form').trigger('submit.prevent')
 
     expect(updateAccountMock).toHaveBeenCalledWith('account-uuid', {
@@ -369,6 +373,7 @@ describe('EditAccountModal', () => {
       api_key: 'replacement-key',
       enabled: true,
       max_concurrency: 4,
+      rate_multiplier: 1.5,
       expected_control_version: 6,
     })
     expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('openai')
@@ -421,6 +426,7 @@ describe('EditAccountModal', () => {
       base_url: 'https://chatgpt.com',
       enabled: true,
       max_concurrency: 2,
+      rate_multiplier: 1,
       provider_config: { account_id: 'acct_new' },
       expected_control_version: 8,
     })

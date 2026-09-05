@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { getBrowserTimeZone } from '@/utils/format'
 import {
   isCloudflareWorkerContractActive,
   sanitizeCloudflareAccountCreatePayload,
@@ -516,11 +517,16 @@ export async function applyOAuthCredentials(
  * Get account usage statistics
  * @param id - Account ID
  * @param days - Number of days (default: 30)
+ * @param timezone - IANA timezone used to define daily statistic boundaries
  * @returns Account usage statistics with history, summary, and models
  */
-export async function getStats(id: number, days: number = 30): Promise<AccountUsageStatsResponse> {
+export async function getStats(
+  id: number | string,
+  days: number = 30,
+  timezone: string = getBrowserTimeZone()
+): Promise<AccountUsageStatsResponse> {
   const { data } = await apiClient.get<AccountUsageStatsResponse>(`/admin/accounts/${id}/stats`, {
-    params: { days }
+    params: { days, timezone }
   })
   return data
 }

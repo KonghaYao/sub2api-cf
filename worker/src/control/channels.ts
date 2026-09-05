@@ -1,6 +1,21 @@
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import {
+  accountStatsGraphRows,
+  accountStatsStatements,
+  emptyAccountStatsRelated,
+  loadAccountStatsRelated,
+  materializeAccountStatsGraph,
+  parseAccountStatsRules,
+  parsedAccountStatsRules,
+  publicAccountStatsRules,
+  relatedAccountStatsFromGraph,
+  validateAccountStatsScopes,
+  type AccountStatsRelated,
+  type MaterializedAccountStatsGraph,
+  type ParsedAccountStatsRule,
+} from './account-stats-pricing'
 import { authenticateAdminSession, type AdminActor } from './admin-auth'
 import {
   controlIdempotency,
@@ -129,6 +144,7 @@ interface ParsedChannel {
   group_ids: string[]
   mappings: ParsedMapping[]
   pricing: ParsedPricing[]
+  account_stats_pricing_rules: ParsedAccountStatsRule[]
 }
 
 interface RelatedRows {
@@ -137,6 +153,14 @@ interface RelatedRows {
   pricing: PricingRow[]
   models: PricingModelRow[]
   intervals: IntervalRow[]
+  accountStats: AccountStatsRelated
+}
+
+interface RelatedLoadOptions {
+  groups?: boolean
+  mappings?: boolean
+  pricing?: boolean
+  accountStats?: boolean
 }
 
 export async function listAdminChannels(context: Context<ControlBindings>): Promise<Response> {
@@ -207,6 +231,7 @@ export async function createAdminChannel(context: Context<ControlBindings>): Pro
     const replay = await findControlIdempotency(context.env, idempotency)
     if (replay !== null) return versioned(parseIdempotentResponse(replay, 'channel'))
     await validateGroups(context.env, input.group_ids)
+    await validateAccountStatsScopes(context.env, input.group_ids, input.account_stats_pricing_rules)
     const now = Date.now()
     const id = await deterministicUuid('admin.channels.create.v1', key)
     const graph = await materializeGraph(input, key, now)
@@ -262,11 +287,19 @@ export async function updateAdminChannel(context: Context<ControlBindings>): Pro
     if (replay !== null) return versioned(parseIdempotentResponse(replay, 'channel'))
     const current = await requireChannel(context.env, id)
     assertVersion(current.control_version, expected)
-    const currentRelated = await loadRelated(context.env, [id])
+    const currentRelated = await loadRelated(context.env, [id], {
+      groups: patch.group_ids === undefined,
+      mappings: patch.mappings === undefined,
+      pricing: patch.pricing === undefined,
+      accountStats: patch.account_stats_pricing_rules === undefined,
+    })
     const base = parsedFromStored(current, currentRelated)
     const next: ParsedChannel = { ...base, ...patch }
     validateGraphBudget(next)
-    await validateGroups(context.env, next.group_ids, id)
+    if (patch.group_ids !== undefined) await validateGroups(context.env, next.group_ids, id)
+    if (patch.group_ids !== undefined || patch.account_stats_pricing_rules !== undefined) {
+      await validateAccountStatsScopes(context.env, next.group_ids, next.account_stats_pricing_rules)
+    }
     const now = Date.now()
     const graph = await materializeGraph(next, key, now)
     const nextRow: ChannelRow = {
@@ -295,10 +328,24 @@ export async function updateAdminChannel(context: Context<ControlBindings>): Pro
         nextRow.restrict_models, nextRow.features_config_json,
         nextRow.apply_pricing_to_account_stats, expected, expected + 1, now, id,
       ),
-      context.env.DB.prepare('DELETE FROM channel_groups WHERE channel_id = ?').bind(id),
-      context.env.DB.prepare('DELETE FROM channel_model_pricing WHERE channel_id = ?').bind(id),
-      context.env.DB.prepare('DELETE FROM channel_model_mappings WHERE channel_id = ?').bind(id),
-      ...graphStatements(context.env, id, next, graph, now),
+      ...(patch.group_ids === undefined ? [] : [
+        context.env.DB.prepare('DELETE FROM channel_groups WHERE channel_id = ?').bind(id),
+      ]),
+      ...(patch.account_stats_pricing_rules === undefined ? [] : [
+        context.env.DB.prepare('DELETE FROM channel_account_stats_pricing_rules WHERE channel_id = ?').bind(id),
+      ]),
+      ...(patch.pricing === undefined ? [] : [
+        context.env.DB.prepare('DELETE FROM channel_model_pricing WHERE channel_id = ?').bind(id),
+      ]),
+      ...(patch.mappings === undefined ? [] : [
+        context.env.DB.prepare('DELETE FROM channel_model_mappings WHERE channel_id = ?').bind(id),
+      ]),
+      ...graphStatements(context.env, id, next, graph, now, {
+        groups: patch.group_ids !== undefined,
+        mappings: patch.mappings !== undefined,
+        pricing: patch.pricing !== undefined,
+        accountStats: patch.account_stats_pricing_rules !== undefined,
+      }),
       guardedAuditInsert(context.env, actor, 'channel.update', id, expected + 1, idempotency.key_hash, changedFields, now),
       guardedIdempotencyInsert(context.env, idempotency, id, response, expected + 1, now),
     ]
@@ -348,7 +395,6 @@ export async function deleteAdminChannel(context: Context<ControlBindings>): Pro
 
 function parseCreate(body: Record<string, unknown>): ParsedChannel {
   rejectCredentialFields(body)
-  rejectAccountStatsRules(body)
   const input: ParsedChannel = {
     name: requiredText(body.name, 'name', 128),
     description: optionalText(body.description, 'description', 4096) ?? '',
@@ -356,10 +402,11 @@ function parseCreate(body: Record<string, unknown>): ParsedChannel {
     billing_model_source: parseBillingSource(body.billing_model_source ?? 'channel_mapped'),
     restrict_models: optionalBoolean(body.restrict_models, 'restrict_models') ?? false,
     features_config: parseObject(body.features_config ?? {}, 'features_config', 65_536),
-    apply_pricing_to_account_stats: optionalBoolean(body.apply_pricing_to_account_stats, 'apply_pricing_to_account_stats') ?? false,
+    apply_pricing_to_account_stats: parseApplyPricingToAccountStats(body.apply_pricing_to_account_stats),
     group_ids: parseStringList(body.group_ids ?? [], 'group_ids', 100, 128),
     mappings: parseMappings(body.model_mapping ?? {}),
     pricing: parsePricing(body.model_pricing ?? []),
+    account_stats_pricing_rules: parseAccountStatsRules(body.account_stats_pricing_rules ?? []),
   }
   validateGraphBudget(input)
   return input
@@ -367,7 +414,6 @@ function parseCreate(body: Record<string, unknown>): ParsedChannel {
 
 function parsePatch(body: Record<string, unknown>): Partial<ParsedChannel> {
   rejectCredentialFields(body)
-  rejectAccountStatsRules(body)
   const patch: Partial<ParsedChannel> = {}
   if (body.name !== undefined) patch.name = requiredText(body.name, 'name', 128)
   if (body.description !== undefined) patch.description = optionalText(body.description, 'description', 4096) ?? ''
@@ -376,11 +422,14 @@ function parsePatch(body: Record<string, unknown>): Partial<ParsedChannel> {
   if (body.restrict_models !== undefined) patch.restrict_models = requiredBoolean(body.restrict_models, 'restrict_models')
   if (body.features_config !== undefined) patch.features_config = parseObject(body.features_config, 'features_config', 65_536)
   if (body.apply_pricing_to_account_stats !== undefined) {
-    patch.apply_pricing_to_account_stats = requiredBoolean(body.apply_pricing_to_account_stats, 'apply_pricing_to_account_stats')
+    patch.apply_pricing_to_account_stats = parseApplyPricingToAccountStats(body.apply_pricing_to_account_stats)
   }
   if (body.group_ids !== undefined) patch.group_ids = parseStringList(body.group_ids, 'group_ids', 100, 128)
   if (body.model_mapping !== undefined) patch.mappings = parseMappings(body.model_mapping)
   if (body.model_pricing !== undefined) patch.pricing = parsePricing(body.model_pricing)
+  if (body.account_stats_pricing_rules !== undefined) {
+    patch.account_stats_pricing_rules = parseAccountStatsRules(body.account_stats_pricing_rules)
+  }
   return patch
 }
 
@@ -600,17 +649,27 @@ async function requireChannel(env: Env, rawId: string | undefined): Promise<Chan
   return row
 }
 
-async function loadRelated(env: Env, channelIds: string[]): Promise<RelatedRows> {
-  if (channelIds.length === 0) return { groups: [], mappings: [], pricing: [], models: [], intervals: [] }
+async function loadRelated(
+  env: Env,
+  channelIds: string[],
+  options: RelatedLoadOptions = {},
+): Promise<RelatedRows> {
+  if (channelIds.length === 0) {
+    return { groups: [], mappings: [], pricing: [], models: [], intervals: [], accountStats: emptyAccountStatsRelated() }
+  }
+  const includeGroups = options.groups ?? true
+  const includeMappings = options.mappings ?? true
+  const includePricing = options.pricing ?? true
+  const includeAccountStats = options.accountStats ?? true
   const placeholders = channelIds.map(() => '?').join(', ')
-  const [groups, mappings, pricing] = await env.DB.batch([
-    env.DB.prepare(`SELECT channel_id, group_id FROM channel_groups WHERE channel_id IN (${placeholders}) ORDER BY group_id`).bind(...channelIds),
-    env.DB.prepare(
+  const [groups, mappings, pricing, accountStats] = await Promise.all([
+    includeGroups ? env.DB.prepare(`SELECT channel_id, group_id FROM channel_groups WHERE channel_id IN (${placeholders}) ORDER BY group_id`).bind(...channelIds).all() : Promise.resolve({ results: [] }),
+    includeMappings ? env.DB.prepare(
       `SELECT channel_id, platform, source_pattern, target_pattern, source_is_wildcard,
               target_is_wildcard, sort_order FROM channel_model_mappings
        WHERE channel_id IN (${placeholders}) ORDER BY channel_id, platform, sort_order, source_pattern`,
-    ).bind(...channelIds),
-    env.DB.prepare(
+    ).bind(...channelIds).all() : Promise.resolve({ results: [] }),
+    includePricing ? env.DB.prepare(
       `SELECT id, channel_id, platform, billing_mode, input_micros_per_million,
               output_micros_per_million, cache_write_micros_per_million,
               cache_write_1h_micros_per_million, cache_read_micros_per_million,
@@ -619,13 +678,14 @@ async function loadRelated(env: Env, channelIds: string[]): Promise<RelatedRows>
               time_pricing_json, control_version, created_at_ms, updated_at_ms
          FROM channel_model_pricing WHERE channel_id IN (${placeholders})
         ORDER BY channel_id, platform, id`,
-    ).bind(...channelIds),
+    ).bind(...channelIds).all() : Promise.resolve({ results: [] }),
+    includeAccountStats ? loadAccountStatsRelated(env, channelIds) : Promise.resolve(emptyAccountStatsRelated()),
   ])
   const prices = pricing.results as unknown as PricingRow[]
   if (prices.length === 0) {
     return {
       groups: groups.results as unknown as GroupRow[],
-      mappings: mappings.results as unknown as MappingRow[], pricing: [], models: [], intervals: [],
+      mappings: mappings.results as unknown as MappingRow[], pricing: [], models: [], intervals: [], accountStats,
     }
   }
   const [models, intervals] = await env.DB.batch([
@@ -655,6 +715,7 @@ async function loadRelated(env: Env, channelIds: string[]): Promise<RelatedRows>
     pricing: prices,
     models: models.results as unknown as PricingModelRow[],
     intervals: intervals.results as unknown as IntervalRow[],
+    accountStats,
   }
 }
 
@@ -692,7 +753,7 @@ function publicChannel(row: ChannelRow, related: RelatedRows) {
     })),
     model_mapping: mapping,
     apply_pricing_to_account_stats: row.apply_pricing_to_account_stats === 1,
-    account_stats_pricing_rules: [],
+    account_stats_pricing_rules: publicAccountStatsRules(row.id, related.accountStats),
     control_version: row.control_version,
     created_at: new Date(row.created_at_ms).toISOString(),
     updated_at: new Date(row.updated_at_ms).toISOString(),
@@ -737,6 +798,7 @@ function parsedFromStored(row: ChannelRow, related: RelatedRows): ParsedChannel 
         return { id, ...interval }
       }),
     })),
+    account_stats_pricing_rules: parsedAccountStatsRules(row.id, related.accountStats),
   }
 }
 
@@ -745,6 +807,7 @@ interface MaterializedGraph {
     id: string
     intervals: Array<Omit<ParsedInterval, 'id'> & { id: string }>
   }>
+  accountStats: MaterializedAccountStatsGraph
 }
 
 async function materializeGraph(input: ParsedChannel, key: string, _now: number): Promise<MaterializedGraph> {
@@ -760,6 +823,7 @@ async function materializeGraph(input: ParsedChannel, key: string, _now: number)
         }))),
       }
     })),
+    accountStats: await materializeAccountStatsGraph(input.account_stats_pricing_rules, key),
   }
 }
 
@@ -783,15 +847,27 @@ function relatedFromGraph(channelId: string, input: ParsedChannel, graph: Materi
     })),
     models: graph.pricing.flatMap((price) => price.models.map((model) => ({ pricing_id: price.id, ...model }))),
     intervals: graph.pricing.flatMap((price) => price.intervals.map((interval) => ({ pricing_id: price.id, ...interval }))),
+    accountStats: relatedAccountStatsFromGraph(channelId, graph.accountStats),
   }
 }
 
-function graphStatements(env: Env, channelId: string, input: ParsedChannel, graph: MaterializedGraph, now: number): D1PreparedStatement[] {
+function graphStatements(
+  env: Env,
+  channelId: string,
+  input: ParsedChannel,
+  graph: MaterializedGraph,
+  now: number,
+  options: RelatedLoadOptions = {},
+): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = []
-  for (const groupId of input.group_ids) {
+  const includeGroups = options.groups ?? true
+  const includeMappings = options.mappings ?? true
+  const includePricing = options.pricing ?? true
+  const includeAccountStats = options.accountStats ?? true
+  for (const groupId of includeGroups ? input.group_ids : []) {
     statements.push(env.DB.prepare('INSERT INTO channel_groups (channel_id, group_id, created_at_ms) VALUES (?, ?, ?)').bind(channelId, groupId, now))
   }
-  for (const mapping of input.mappings) {
+  for (const mapping of includeMappings ? input.mappings : []) {
     statements.push(env.DB.prepare(
       `INSERT INTO channel_model_mappings (
          channel_id, platform, source_pattern, target_pattern, source_is_wildcard,
@@ -802,7 +878,7 @@ function graphStatements(env: Env, channelId: string, input: ParsedChannel, grap
       mapping.source_is_wildcard, mapping.target_is_wildcard, mapping.sort_order, now,
     ))
   }
-  for (const price of graph.pricing) {
+  for (const price of includePricing ? graph.pricing : []) {
     statements.push(env.DB.prepare(
       `INSERT INTO channel_model_pricing (
          id, channel_id, platform, billing_mode, input_micros_per_million,
@@ -849,6 +925,9 @@ function graphStatements(env: Env, channelId: string, input: ParsedChannel, grap
         interval.sort_order, now, now,
       ))
     }
+  }
+  if (includeAccountStats) {
+    statements.push(...accountStatsStatements(env, channelId, graph.accountStats, now))
   }
   return statements
 }
@@ -930,10 +1009,29 @@ function publicStatus(value: ChannelStatus): PublicChannelStatus {
 }
 
 function parseBillingSource(value: unknown): BillingModelSource {
-  if (['requested', 'upstream', 'channel_mapped', 'response_model'].includes(String(value))) {
-    return value as BillingModelSource
+  if (value === 'channel_mapped') return value
+  if (['requested', 'upstream', 'response_model'].includes(String(value))) {
+    throw new GatewayError(
+      409,
+      'billing_model_source_not_supported',
+      'This billing model source is not implemented by the Worker runtime yet',
+    )
   }
   throw invalid('billing_model_source', 'billing_model_source is invalid')
+}
+
+function parseApplyPricingToAccountStats(value: unknown): boolean {
+  const enabled = value === undefined
+    ? false
+    : requiredBoolean(value, 'apply_pricing_to_account_stats')
+  if (enabled) {
+    throw new GatewayError(
+      409,
+      'apply_pricing_to_account_stats_not_supported',
+      'Channel model pricing cannot be applied to account statistics by the Worker runtime yet',
+    )
+  }
+  return false
 }
 
 function parseStringList(value: unknown, field: string, maximumItems: number, maximumLength: number, minimumItems = 0): string[] {
@@ -1033,17 +1131,10 @@ function rejectCredentialFields(body: Record<string, unknown>): void {
   }
 }
 
-function rejectAccountStatsRules(body: Record<string, unknown>): void {
-  if (body.account_stats_pricing_rules !== undefined) {
-    if (!Array.isArray(body.account_stats_pricing_rules) || body.account_stats_pricing_rules.length !== 0) {
-      throw new GatewayError(409, 'account_stats_pricing_rules_not_supported', 'Account statistics pricing rules are not migrated yet')
-    }
-  }
-}
-
 function validateGraphBudget(input: ParsedChannel): void {
   const rows = input.group_ids.length + input.mappings.length + input.pricing.length
     + input.pricing.reduce((total, price) => total + price.models.length + price.intervals.length, 0)
+    + accountStatsGraphRows(input.account_stats_pricing_rules)
   if (rows > MAX_GRAPH_ROWS) {
     throw invalid('channel_graph', `channel graph must contain at most ${MAX_GRAPH_ROWS} normalized rows`)
   }

@@ -222,7 +222,11 @@
             <!-- Billing Basis -->
             <div>
               <label class="input-label">{{ t('admin.channels.form.billingModelSource', 'Billing Basis') }}</label>
-              <Select v-model="form.billing_model_source" :options="billingModelSourceOptions" />
+              <Select
+                v-model="form.billing_model_source"
+                data-testid="channel-billing-model-source"
+                :options="billingModelSourceOptions"
+              />
               <p class="mt-1 text-xs text-gray-400">
                 {{ t('admin.channels.form.billingModelSourceHint', 'Controls which model name is used for pricing lookup') }}
               </p>
@@ -423,7 +427,6 @@
                 <label class="input-label text-xs mb-0">{{ t('admin.channels.form.modelPricing', 'Model Pricing') }}</label>
                 <div class="flex items-center gap-2">
                   <button
-                    v-if="!workerContractActive"
                     type="button"
                     @click="syncLatestModels(sIdx)"
                     :disabled="syncingPlatform === section.platform"
@@ -448,7 +451,7 @@
                   :key="idx"
                   :entry="entry"
                   :platform="section.platform"
-                  :enable-default-pricing="!workerContractActive"
+                  enable-default-pricing
                   enable-time-pricing
                   enable-tier-multipliers
                   @update="updatePricingEntry(sIdx, idx, $event)"
@@ -458,7 +461,7 @@
             </div>
 
             <!-- Account Stats Pricing Rules (per-platform, always visible) -->
-            <div v-if="!workerContractActive" class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-700 space-y-3">
+            <div class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-700 space-y-3">
               <div class="flex items-center justify-between">
                 <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300">
                   {{ t('admin.channels.form.accountStatsPricingRules') }}
@@ -580,7 +583,10 @@
                       v-for="(entry, pIdx) in rule.pricing"
                       :key="pIdx"
                       :entry="entry"
-                      :platform="section.platform"
+                      :platform="entry.account_stats_platform || section.platform"
+                      :account-stats-worker-mode="workerContractActive"
+                      :enable-default-pricing="!workerContractActive"
+                      :supported-billing-modes="workerContractActive ? ['token', 'per_request', 'image'] : undefined"
                       @update="rule.pricing.splice(pIdx, 1, $event)"
                       @remove="removeRulePricingEntry(sIdx, ruleIndex, pIdx)"
                     />
@@ -718,12 +724,18 @@ const statusEditOptions = computed(() => [
   { value: 'disabled', label: t('admin.channels.statusDisabled', 'Disabled') }
 ])
 
-const billingModelSourceOptions = computed(() => [
-  { value: 'channel_mapped', label: t('admin.channels.form.billingModelSourceChannelMapped', 'Bill by channel-mapped model') },
-  { value: 'requested', label: t('admin.channels.form.billingModelSourceRequested', 'Bill by requested model') },
-  { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') },
-  { value: 'response_model', label: t('admin.channels.form.billingModelSourceResponse', 'Bill by upstream response model') }
-])
+const billingModelSourceOptions = computed(() => {
+  const supported = [
+    { value: 'channel_mapped', label: t('admin.channels.form.billingModelSourceChannelMapped', 'Bill by channel-mapped model') }
+  ]
+  if (workerContractActive) return supported
+  return [
+    ...supported,
+    { value: 'requested', label: t('admin.channels.form.billingModelSourceRequested', 'Bill by requested model') },
+    { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') },
+    { value: 'response_model', label: t('admin.channels.form.billingModelSourceResponse', 'Bill by upstream response model') }
+  ]
+})
 
 // ── State ──
 const channels = ref<Channel[]>([])
@@ -968,6 +980,7 @@ function addAccountStatsRule(sectionIdx: number) {
 
 function addRulePricingEntry(sectionIdx: number, ruleIndex: number) {
   form.platforms[sectionIdx].account_stats_pricing_rules[ruleIndex].pricing.push({
+    account_stats_platform: form.platforms[sectionIdx].platform,
     models: [],
     billing_mode: 'token',
     input_price: null,
@@ -1085,7 +1098,7 @@ function accountStatsRulesToAPI(): AccountStatsPricingRule[] {
         pricing: rule.pricing
           .filter(p => p.models.length > 0)
           .map(p => ({
-            platform: section.platform,
+            platform: p.account_stats_platform ?? section.platform,
             models: p.models,
             billing_mode: p.billing_mode,
             input_price: mTokToPerToken(p.input_price),
@@ -1378,8 +1391,12 @@ async function openEditDialog(channel: Channel) {
   form.description = channel.description || ''
   form.status = channel.status
   form.restrict_models = channel.restrict_models || false
-  form.billing_model_source = channel.billing_model_source || 'channel_mapped'
-  form.apply_pricing_to_account_stats = channel.apply_pricing_to_account_stats || false
+  form.billing_model_source = workerContractActive
+    ? 'channel_mapped'
+    : channel.billing_model_source || 'channel_mapped'
+  form.apply_pricing_to_account_stats = workerContractActive
+    ? false
+    : channel.apply_pricing_to_account_stats || false
   // Must load groups first so apiToForm can map groupID → platform
   await Promise.all([loadGroups(), loadAllChannelsForConflict()])
   form.platforms = apiToForm(channel)
@@ -1402,28 +1419,39 @@ function distributeRulesToPlatforms(apiRules: AccountStatsPricingRule[]) {
   }
 
   for (const apiRule of apiRules) {
-    // Infer platform from group_ids
-    const platforms = new Set<GroupPlatform>()
+    // The section is only a UI carrier. Each price keeps its own source
+    // platform so opening and saving a mixed-platform rule is lossless.
+    const scopedPlatforms = new Set<GroupPlatform>()
     for (const gid of apiRule.group_ids || []) {
       const p = groupPlatformMap.get(gid)
-      if (p && p !== 'composite') platforms.add(p)
+      if (p && p !== 'composite') scopedPlatforms.add(p)
     }
-    // If pricing has a platform field, use that as fallback
-    if (platforms.size === 0 && apiRule.pricing?.length > 0) {
-      const p = apiRule.pricing[0].platform as GroupPlatform | undefined
-      if (p) platforms.add(p)
+    const pricedPlatform = (apiRule.pricing || [])
+      .map(price => price.platform as GroupPlatform)
+      .find(platform => platformOrder.includes(platform))
+    const scopedPlatform = [...scopedPlatforms]
+      .sort((left, right) => platformOrder.indexOf(left) - platformOrder.indexOf(right))[0]
+    const preferredPlatform = pricedPlatform ?? scopedPlatform
+    const section = (preferredPlatform
+      ? form.platforms.find(item => item.enabled && item.platform === preferredPlatform)
+      : undefined)
+      ?? form.platforms
+        .filter(item => item.enabled)
+        .sort((left, right) => platformOrder.indexOf(left.platform) - platformOrder.indexOf(right.platform))[0]
+    if (!section) {
+      addPlatformSection(preferredPlatform ?? platformOrder[0])
     }
-    const targetPlatform = platforms.size >= 1 ? [...platforms][0] : null
-    if (!targetPlatform) continue
-
-    const section = form.platforms.find(s => s.platform === targetPlatform)
-    if (!section) continue
+    const targetSection = section ?? form.platforms.find(
+      item => item.enabled && item.platform === (preferredPlatform ?? platformOrder[0])
+    )
+    if (!targetSection) continue
 
     const formRule: FormPricingRule = {
       name: apiRule.name || '',
       group_ids: [...(apiRule.group_ids || [])],
       account_ids: [...(apiRule.account_ids || [])],
       pricing: (apiRule.pricing || []).map(p => ({
+        account_stats_platform: p.platform ?? '',
         models: [...(p.models || [])],
         billing_mode: p.billing_mode,
         input_price: perTokenToMTok(p.input_price),
@@ -1438,7 +1466,7 @@ function distributeRulesToPlatforms(apiRules: AccountStatsPricingRule[]) {
         time_pricing: createDefaultTimePricingForm()
       } as PricingFormEntry))
     }
-    section.account_stats_pricing_rules.push(formRule)
+    targetSection.account_stats_pricing_rules.push(formRule)
   }
 }
 
@@ -1479,6 +1507,35 @@ async function handleSubmit() {
   if (!form.name.trim()) {
     appStore.showError(t('admin.channels.nameRequired', 'Please enter a channel name'))
     return
+  }
+
+  for (const section of form.platforms.filter(s => s.enabled)) {
+    for (const rule of section.account_stats_pricing_rules) {
+      if (rule.group_ids.length === 0 && rule.account_ids.length === 0) {
+        appStore.showError(t(
+          'admin.channels.form.accountStatsRuleScopeRequired',
+          'Select at least one group or account for every account-stat pricing rule'
+        ))
+        activeTab.value = section.platform
+        return
+      }
+      if (rule.pricing.length === 0 || rule.pricing.some(entry => entry.models.length === 0)) {
+        appStore.showError(t(
+          'admin.channels.form.accountStatsRulePricingRequired',
+          'Every account-stat pricing rule needs at least one model price'
+        ))
+        activeTab.value = section.platform
+        return
+      }
+      if (workerContractActive && rule.pricing.some(entry => entry.billing_mode === 'video')) {
+        appStore.showError(t(
+          'admin.channels.form.accountStatsRuleVideoUnsupported',
+          'Worker account-stat pricing supports token, request, and image modes'
+        ))
+        activeTab.value = section.platform
+        return
+      }
+    }
   }
 
   // Check for pricing entries with empty models (would be silently skipped)
@@ -1595,7 +1652,7 @@ async function handleSubmit() {
         billing_model_source: form.billing_model_source,
         restrict_models: form.restrict_models,
         features_config,
-        apply_pricing_to_account_stats: form.apply_pricing_to_account_stats,
+        apply_pricing_to_account_stats: workerContractActive ? false : form.apply_pricing_to_account_stats,
         account_stats_pricing_rules: accountStatsRulesToAPI()
       }
       await adminAPI.channels.update(editingChannel.value.id, req)
@@ -1610,7 +1667,7 @@ async function handleSubmit() {
         billing_model_source: form.billing_model_source,
         restrict_models: form.restrict_models,
         features_config,
-        apply_pricing_to_account_stats: form.apply_pricing_to_account_stats,
+        apply_pricing_to_account_stats: workerContractActive ? false : form.apply_pricing_to_account_stats,
         account_stats_pricing_rules: accountStatsRulesToAPI()
       }
       await adminAPI.channels.create(req)

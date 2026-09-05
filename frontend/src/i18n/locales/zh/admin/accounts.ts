@@ -1012,6 +1012,7 @@ export default {
       priorityHint: '优先级越小的账号优先使用',
       billingRateMultiplier: '账号计费倍率',
       billingRateMultiplierHint: '0 表示不计费，仅影响账号计费',
+      rateMultiplierInvalid: '账号计费倍率必须大于或等于 0',
       expiresAt: '过期时间',
       expiresAtHint: '留空表示不过期',
       expiresAtTimezoneHint: '输入按浏览器本地时区（{timezone}）解释。',

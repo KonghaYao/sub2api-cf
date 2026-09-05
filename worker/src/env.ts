@@ -71,6 +71,14 @@ export interface UsageSettledPayload {
   cache_amount_micros: number
   base_amount_micros: number
   amount_micros: number
+  /** Added in v0.31; absent only on older queued events. */
+  standard_cost_micros?: number
+  /** Custom/channel account-statistics override before the account multiplier. */
+  account_stats_cost_micros?: number | null
+  /** Added in v0.31; absent only on older queued events. */
+  account_rate_multiplier_ppm?: number
+  /** Immutable provider-account cost after the account multiplier. */
+  account_cost_micros?: number
   outcome: 'completed' | 'failed' | 'cancelled'
   stream: boolean
   platform: string

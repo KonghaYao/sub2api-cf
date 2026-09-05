@@ -161,8 +161,46 @@ interface WorkerTimePricing extends Omit<ChannelTimePricing, 'periods'> {
   periods: Array<Omit<ChannelTimePricingPeriod, 'multiplier'> & { multiplier_ppm: number }>
 }
 
-interface WorkerChannel extends Omit<Channel, 'model_pricing'> {
+interface WorkerAccountStatsPricingInterval {
+  id?: ChannelId
+  min_tokens: number
+  max_tokens: number | null
+  tier_label: string
+  input_micros_per_million: number | null
+  output_micros_per_million: number | null
+  cache_write_micros_per_million: number | null
+  cache_write_1h_micros_per_million?: number | null
+  cache_read_micros_per_million: number | null
+  per_request_micros: number | null
+  sort_order: number
+}
+
+interface WorkerAccountStatsModelPricing {
+  id?: ChannelId
+  platform: string
+  models: string[]
+  billing_mode: BillingMode
+  input_micros_per_million: number | null
+  output_micros_per_million: number | null
+  cache_write_micros_per_million: number | null
+  cache_write_1h_micros_per_million?: number | null
+  cache_read_micros_per_million: number | null
+  image_output_micros_per_million: number | null
+  per_request_micros: number | null
+  intervals: WorkerAccountStatsPricingInterval[]
+}
+
+interface WorkerAccountStatsPricingRule {
+  id?: ChannelId
+  name: string
+  group_ids: ChannelGroupId[]
+  account_ids: ChannelId[]
+  pricing: WorkerAccountStatsModelPricing[]
+}
+
+interface WorkerChannel extends Omit<Channel, 'model_pricing' | 'account_stats_pricing_rules'> {
   model_pricing: WorkerChannelModelPricing[]
+  account_stats_pricing_rules: WorkerAccountStatsPricingRule[]
   control_version: number
 }
 
@@ -193,6 +231,13 @@ function optionalExactInteger(value: number | null | undefined, scale: number, f
     })
   }
   return exact
+}
+
+function rejectUnsupportedAccountStatsPrice(field: string, value: unknown): void {
+  if (value === null || value === undefined) return
+  throw Object.assign(new Error(`${field} is not supported for Worker account-stat pricing yet`), {
+    code: 'account_stats_token_type_not_supported',
+  })
 }
 
 const microsPerMillionToPerToken = (value: number | null | undefined): number | null =>
@@ -251,14 +296,64 @@ function adaptWorkerPricing(pricing: WorkerChannelModelPricing): ChannelModelPri
   }
 }
 
+function adaptWorkerAccountStatsInterval(interval: WorkerAccountStatsPricingInterval): PricingInterval {
+  return {
+    id: interval.id,
+    min_tokens: interval.min_tokens,
+    max_tokens: interval.max_tokens,
+    tier_label: interval.tier_label,
+    input_price: microsPerMillionToPerToken(interval.input_micros_per_million),
+    output_price: microsPerMillionToPerToken(interval.output_micros_per_million),
+    cache_write_price: microsPerMillionToPerToken(interval.cache_write_micros_per_million),
+    cache_write_1h_price: microsPerMillionToPerToken(interval.cache_write_1h_micros_per_million),
+    cache_read_price: microsPerMillionToPerToken(interval.cache_read_micros_per_million),
+    input_multiplier: null,
+    output_multiplier: null,
+    cache_write_multiplier: null,
+    cache_read_multiplier: null,
+    per_request_price: microsToUsd(interval.per_request_micros),
+    sort_order: interval.sort_order,
+  }
+}
+
+function adaptWorkerAccountStatsPricing(pricing: WorkerAccountStatsModelPricing): ChannelModelPricing {
+  return {
+    id: pricing.id,
+    platform: pricing.platform,
+    models: pricing.models,
+    billing_mode: pricing.billing_mode,
+    input_price: microsPerMillionToPerToken(pricing.input_micros_per_million),
+    output_price: microsPerMillionToPerToken(pricing.output_micros_per_million),
+    cache_write_price: microsPerMillionToPerToken(pricing.cache_write_micros_per_million),
+    cache_write_1h_price: microsPerMillionToPerToken(pricing.cache_write_1h_micros_per_million),
+    cache_read_price: microsPerMillionToPerToken(pricing.cache_read_micros_per_million),
+    fast_multiplier: null,
+    flex_multiplier: null,
+    image_input_price: null,
+    image_output_price: microsPerMillionToPerToken(pricing.image_output_micros_per_million),
+    per_request_price: microsToUsd(pricing.per_request_micros),
+    intervals: pricing.intervals.map(adaptWorkerAccountStatsInterval),
+    time_pricing: null,
+  }
+}
+
 function adaptWorkerChannel(raw: Channel | WorkerChannel): Channel {
   if (!isCloudflareWorkerContractActive()) return raw as Channel
   const channel = raw as WorkerChannel
   const adapted: Channel = {
     ...channel,
+    // Channel model pricing is not part of Worker customer billing yet. Do not
+    // expose a stale backend flag as an effective setting in the admin UI.
+    apply_pricing_to_account_stats: false,
     group_ids: channel.group_ids.map((id) => String(id)),
     model_pricing: channel.model_pricing.map(adaptWorkerPricing),
-    account_stats_pricing_rules: [],
+    account_stats_pricing_rules: (channel.account_stats_pricing_rules ?? []).map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      group_ids: rule.group_ids.map((id) => String(id)),
+      account_ids: rule.account_ids.map((id) => String(id)),
+      pricing: rule.pricing.map(adaptWorkerAccountStatsPricing),
+    })),
     created_at: channel.created_at,
     updated_at: channel.updated_at,
   }
@@ -315,6 +410,48 @@ function workerPricing(pricing: ChannelModelPricing): Record<string, unknown> {
   }
 }
 
+function workerAccountStatsInterval(interval: PricingInterval): Record<string, unknown> {
+  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_price', interval.cache_write_price)
+  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_1h_price', interval.cache_write_1h_price)
+  return {
+    ...(interval.id === undefined ? {} : { id: interval.id }),
+    min_tokens: interval.min_tokens,
+    max_tokens: interval.max_tokens,
+    tier_label: interval.tier_label,
+    input_micros_per_million: optionalExactInteger(interval.input_price, 1_000_000_000_000, 'account_stats.input_price'),
+    output_micros_per_million: optionalExactInteger(interval.output_price, 1_000_000_000_000, 'account_stats.output_price'),
+    cache_read_micros_per_million: optionalExactInteger(interval.cache_read_price, 1_000_000_000_000, 'account_stats.cache_read_price'),
+    per_request_micros: optionalExactInteger(interval.per_request_price, 1_000_000, 'account_stats.per_request_price'),
+    sort_order: interval.sort_order,
+  }
+}
+
+function workerAccountStatsPricing(pricing: ChannelModelPricing): Record<string, unknown> {
+  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_price', pricing.cache_write_price)
+  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_1h_price', pricing.cache_write_1h_price)
+  rejectUnsupportedAccountStatsPrice('account_stats.image_input_price', pricing.image_input_price)
+  rejectUnsupportedAccountStatsPrice('account_stats.image_output_price', pricing.image_output_price)
+  if ((pricing.billing_mode === 'per_request' || pricing.billing_mode === 'image')
+    && pricing.per_request_price == null) {
+    throw Object.assign(new Error('A top-level per-request price is required for Worker account-stat pricing'), {
+      code: 'account_stats_per_request_price_required',
+    })
+  }
+  return {
+    ...(pricing.id === undefined ? {} : { id: pricing.id }),
+    platform: pricing.platform,
+    models: pricing.models,
+    billing_mode: pricing.billing_mode,
+    input_micros_per_million: optionalExactInteger(pricing.input_price, 1_000_000_000_000, 'account_stats.input_price'),
+    output_micros_per_million: optionalExactInteger(pricing.output_price, 1_000_000_000_000, 'account_stats.output_price'),
+    cache_read_micros_per_million: optionalExactInteger(pricing.cache_read_price, 1_000_000_000_000, 'account_stats.cache_read_price'),
+    per_request_micros: optionalExactInteger(pricing.per_request_price, 1_000_000, 'account_stats.per_request_price'),
+    intervals: pricing.billing_mode === 'token'
+      ? pricing.intervals.map(workerAccountStatsInterval)
+      : [],
+  }
+}
+
 function workerPayload(request: CreateChannelRequest | UpdateChannelRequest): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
   const source = request as Record<string, unknown>
@@ -326,6 +463,18 @@ function workerPayload(request: CreateChannelRequest | UpdateChannelRequest): Re
   }
   if (request.model_pricing !== undefined) {
     payload.model_pricing = request.model_pricing.map(workerPricing)
+  }
+  if (request.apply_pricing_to_account_stats !== undefined) {
+    payload.apply_pricing_to_account_stats = false
+  }
+  if (request.account_stats_pricing_rules !== undefined) {
+    payload.account_stats_pricing_rules = request.account_stats_pricing_rules.map((rule) => ({
+      ...(rule.id === undefined ? {} : { id: rule.id }),
+      name: rule.name,
+      group_ids: rule.group_ids,
+      account_ids: rule.account_ids,
+      pricing: rule.pricing.map(workerAccountStatsPricing),
+    }))
   }
   return payload
 }

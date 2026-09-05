@@ -446,6 +446,16 @@
                 </svg>
                 <span class="text-xs">{{ t('admin.accounts.testConnection') }}</span>
               </button>
+              <button
+                v-if="cloudflareWorkerContract"
+                :data-testid="`worker-account-stats-${row.id}`"
+                :title="t('admin.accounts.viewStats')"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-900/20 dark:hover:text-indigo-400"
+                @click="handleViewStats(row)"
+              >
+                <Icon name="chart" size="sm" />
+                <span class="text-xs">{{ t('admin.accounts.viewStats') }}</span>
+              </button>
               <button @click="handleEdit(row)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400">
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                 <span class="text-xs">{{ t('common.edit') }}</span>
@@ -469,7 +479,7 @@
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" :cloudflare-worker="cloudflareWorkerContract" @close="showEdit = false" @updated="handleAccountUpdated" />
     <ReAuthAccountModal v-if="!cloudflareWorkerContract" :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal v-if="!cloudflareWorkerContract" :show="showTest" :account="testingAcc" @close="closeTestModal" />
-    <AccountStatsModal v-if="!cloudflareWorkerContract" :show="showStats" :account="statsAcc" @close="closeStatsModal" />
+    <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel v-if="!cloudflareWorkerContract" :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu v-if="!cloudflareWorkerContract" :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
     <SyncFromCrsModal v-if="!cloudflareWorkerContract" :show="showSync" @close="showSync = false" @synced="reload" />

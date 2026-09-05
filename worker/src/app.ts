@@ -39,6 +39,7 @@ import {
   deleteAdminAccountGroupLink,
   deleteAdminAccountModelCapability,
   getAdminAccount,
+  getAdminAccountStats,
   listAdminAccounts,
   putAdminAccountGroupLink,
   putAdminAccountModelCapability,
@@ -99,6 +100,10 @@ import {
   listAdminChannels,
   updateAdminChannel,
 } from './control/channels'
+import {
+  getAdminChannelModelPricing,
+  listAdminChannelPricingModels,
+} from './control/channel-pricing-catalog'
 import { getAdminSettings, updateAdminSettings } from './control/settings'
 import {
   disableAdminOAuthProvider,
@@ -577,11 +582,14 @@ export function createApp() {
   app.delete('/api/v1/admin/models/:id', deleteAdminModel)
   app.get('/api/v1/admin/channels', listAdminChannels)
   app.post('/api/v1/admin/channels', createAdminChannel)
+  app.get('/api/v1/admin/channels/model-pricing', getAdminChannelModelPricing)
+  app.get('/api/v1/admin/channels/pricing/sync-models', listAdminChannelPricingModels)
   app.get('/api/v1/admin/channels/:id', getAdminChannel)
   app.put('/api/v1/admin/channels/:id', updateAdminChannel)
   app.delete('/api/v1/admin/channels/:id', deleteAdminChannel)
   app.get('/api/v1/admin/accounts', listAdminAccounts)
   app.post('/api/v1/admin/accounts', createAdminAccount)
+  app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)
   app.delete('/api/v1/admin/accounts/:id', deleteAdminAccount)

@@ -19,6 +19,7 @@ import {
 import { recoverPendingMediaTasks } from './media/queue'
 import { recoverPendingProviderMediaJobs } from './media/provider-job'
 import { recoverImageTasks } from './media/image-task'
+import { recoverAccountStatsRollups } from './gateway/account-stats-rollup'
 
 export { ApiKeyLimitDO, AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
 
@@ -41,6 +42,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverPendingMediaTasks(env),
     recoverPendingProviderMediaJobs(env),
     recoverImageTasks(env),
+    recoverAccountStatsRollups(env),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -62,6 +64,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'media_tasks',
           'media_provider_jobs',
           'image_tasks',
+          'account_stats_rollups',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

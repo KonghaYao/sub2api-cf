@@ -31,6 +31,10 @@ describe('synchronous image billing', () => {
       upstream_endpoint: '/v1/images/generations',
       amount_micros: 320_000,
       base_amount_micros: 320_000,
+      standard_cost_micros: 320_000,
+      account_stats_cost_micros: null,
+      account_rate_multiplier_ppm: 1_000_000,
+      account_cost_micros: 320_000,
       input_tokens: 0,
       output_tokens: 0,
       cache_read_tokens: 0,
@@ -107,6 +111,14 @@ describe('synchronous image billing', () => {
         request_id: 'image-request-queue',
         initial_reserved_micros: 80_000,
         amount_micros: 100_000,
+        usage_event: {
+          payload: {
+            standard_cost_micros: 100_000,
+            account_stats_cost_micros: null,
+            account_rate_multiplier_ppm: 1_000_000,
+            account_cost_micros: 100_000,
+          },
+        },
       },
     })
   })

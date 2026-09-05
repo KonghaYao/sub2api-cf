@@ -1,5 +1,6 @@
 import type { Context } from 'hono'
 import type { Env, UsageSettledPayload } from '../env'
+import { resolveAccountCostSnapshot } from './account-stats'
 import {
   recordRequestContext,
   recordRequestOutcome,
@@ -2797,6 +2798,31 @@ async function settleAndProject(
       amount_micros: 0,
     }
     : calculateCost(input.model, usage, input.serviceTier)
+  const standardCost = zeroCost
+    ? 0
+    : calculateCost(
+        { ...input.model, rate_multiplier_ppm: 1_000_000 },
+        usage,
+        input.serviceTier,
+      ).amount_micros
+  const accountCost = await resolveAccountCostSnapshot(input.env, {
+    accountId: input.accountId,
+    groupId: input.principal.group_id,
+    platform: input.model.platform,
+    upstreamModel: input.model.upstream_name,
+    usage,
+    standardCostMicros: standardCost,
+    ...(!zeroCost && hasAccountCostBasePrice(input.model) ? {
+      accountCostBasePrice: {
+        input_micros_per_million: input.model.account_cost_base_input_micros_per_million,
+        output_micros_per_million: input.model.account_cost_base_output_micros_per_million,
+        cache_read_micros_per_million: input.model.account_cost_base_cache_read_micros_per_million,
+        per_request_micros: input.model.account_cost_base_per_request_micros,
+      },
+      serviceTier: input.serviceTier,
+    } : {}),
+    requestCount: 1,
+  })
   const payload: UsageSettledPayload = {
     request_id: input.requestId,
     user_id: input.principal.user_id,
@@ -2814,6 +2840,7 @@ async function settleAndProject(
     output_tokens: usage.output_tokens,
     cache_read_tokens: usage.cache_read_tokens,
     ...cost,
+    ...accountCost,
     outcome,
     stream: input.stream,
     // Match the legacy "effective platform" contract: usage belongs to the
@@ -2916,6 +2943,20 @@ async function settleAndProject(
           }),
     })
   }
+}
+
+function hasAccountCostBasePrice(model: ModelRoute): model is ModelRoute & {
+  account_cost_base_input_micros_per_million: number
+  account_cost_base_output_micros_per_million: number
+  account_cost_base_cache_read_micros_per_million: number
+  account_cost_base_per_request_micros: number
+} {
+  return [
+    model.account_cost_base_input_micros_per_million,
+    model.account_cost_base_output_micros_per_million,
+    model.account_cost_base_cache_read_micros_per_million,
+    model.account_cost_base_per_request_micros,
+  ].every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
 }
 
 function gatewayEndpointPath(endpoint: TextGatewayEndpoint): string {

@@ -47,11 +47,13 @@ class FakeStatement {
 
   async first<T>(): Promise<T | null> {
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
-    if (this.query.includes('FROM channel_groups cg')) return this.database.channelPolicy as T
+    if (this.query.includes('FROM resolved_alias alias')) return this.database.externalAliasModel as T | null
     if (this.query.includes('JOIN user_platform_quotas quota')) {
       return this.database.routePlatformQuota as T | null
     }
+    if (this.query.includes('FROM channel_groups cg')) return this.database.channelPolicy as T
     if (this.query.includes('FROM group_models gm')) {
+      if (this.database.directModelMissing) return null
       return { ...model, platform: this.database.principal.platform } as T
     }
     if (this.query.includes('FROM accounts a') && this.query.includes('account_secrets')) {
@@ -114,6 +116,32 @@ class FakeStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
+    if (this.query.includes('FROM resolved_alias resolved')) {
+      const credentials = [
+        this.database.credential,
+        ...this.database.additionalCredentials.values(),
+      ]
+      return {
+        success: true,
+        results: credentials.map((credential) =>
+          ({
+            ...withAccountExecutionDefaults(credential),
+            account_id: credential.account_id,
+            platform: credential.platform,
+            protocol: credential.protocol,
+            auth_scheme: credential.auth_scheme,
+            provider_config_json: credential.provider_config_json,
+            base_url: credential.base_url,
+            max_concurrency: 4,
+            priority: 0,
+            weight: 1,
+            config_version: 1,
+            config_revision: 1,
+            model_id: 'model-1',
+          } as T)),
+        meta: {} as D1Meta & Record<string, unknown>,
+      }
+    }
     if (this.query.includes('FROM group_models gm')) {
       return {
         success: true,
@@ -176,6 +204,8 @@ class FakeDatabase {
   chatOnly = false
   responsesOnly = false
   channelPolicy: Record<string, unknown> | null = null
+  directModelMissing = false
+  externalAliasModel: Record<string, unknown> | null = null
   routePlatformQuota: Record<string, unknown> | null = null
   readonly principal = {
     api_key_id: 'key-1',
@@ -221,7 +251,11 @@ class FakeDatabase {
     this.batchQueries.push(statements.map((statement) => statement.query))
     const values: D1Result<unknown>[] = []
     for (const statement of statements) {
-      if (statement.query.includes('FROM account_groups ag')) {
+      if (
+        statement.query.includes('FROM account_groups ag') ||
+        statement.query.includes('FROM resolved_alias resolved') &&
+          statement.query.includes('JOIN account_models am')
+      ) {
         values.push(await statement.all())
       } else if (
         statement.query.includes('UPDATE api_keys') ||
@@ -856,16 +890,24 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
   })
 
-  it('forwards a channel-mapped model while restoring the public model and original billing snapshot', async () => {
+  it('bills the user from the requested model but accounts for a mapped upstream catalog price and service tier', async () => {
     const { env, database, user } = await harness()
     database.channelPolicy = {
       channel_id: 'channel-1',
+      billing_model_source: 'channel_mapped',
       restrict_models: 1,
       source_pattern: 'gpt-public',
       target_pattern: 'channel-upstream',
       source_is_wildcard: 0,
       target_is_wildcard: 0,
       pricing_match: 0,
+      account_cost_base_match_count: 1,
+      account_cost_base_price_id: 'price-upstream',
+      account_cost_base_price_version: 3,
+      account_cost_base_input_micros_per_million: 3_000_000,
+      account_cost_base_output_micros_per_million: 7_000_000,
+      account_cost_base_cache_read_micros_per_million: 1_000_000,
+      account_cost_base_per_request_micros: 2,
     }
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
       Response.json({
@@ -880,7 +922,11 @@ describe('OpenAI-compatible gateway', () => {
     const response = await createApp().request('/v1/chat/completions', {
       method: 'POST',
       headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }] }),
+      body: JSON.stringify({
+        model: 'gpt-public',
+        messages: [{ role: 'user', content: 'hi' }],
+        service_tier: 'priority',
+      }),
     }, env)
 
     expect(response.status).toBe(200)
@@ -898,16 +944,95 @@ describe('OpenAI-compatible gateway', () => {
       return 'other'
     })).toEqual(['model', 'channel', 'candidate', 'quota', 'candidate'])
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
-      amount_micros: 40,
+      amount_micros: 80,
       usage_event: {
         event_type: 'usage.settled.v1',
         payload: {
           price_id: 'price-1',
           requested_model: 'gpt-public',
           upstream_model: 'channel-upstream',
+          standard_cost_micros: 134,
+          account_stats_cost_micros: null,
+          account_rate_multiplier_ppm: 1_000_000,
+          account_cost_micros: 134,
         },
       },
     })
+  })
+
+  it('routes a catalog-external channel alias through its backing model and restores the alias', async () => {
+    const { env, database, user, poolNames } = await harness()
+    database.directModelMissing = true
+    database.externalAliasModel = {
+      ...model,
+      public_name: 'customer-alias',
+      upstream_name: 'gpt-upstream',
+      billing_model_source: 'channel_mapped',
+      match_count: 1,
+    }
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'chatcmpl-external-alias',
+        model: 'gpt-upstream',
+        choices: [{ message: { role: 'assistant', content: 'hello' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'customer-alias', messages: [{ role: 'user', content: 'hi' }] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ model: 'customer-alias' })
+    expect(JSON.parse(String(upstream.mock.calls[0]?.[1]?.body))).toMatchObject({ model: 'gpt-upstream' })
+    expect(poolNames).toContain(
+      'group:group-1:platform:openai:model:model-1:endpoint:chat_completions:shard:0',
+    )
+    const routeBatches = database.batchQueries.filter((queries) =>
+      queries.some((query) => query.includes('FROM group_models gm') || query.includes('FROM resolved_alias alias')))
+    expect(routeBatches).toHaveLength(2)
+    expect(routeBatches[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining('FROM resolved_alias alias'),
+    ]))
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: { requested_model: 'customer-alias', upstream_model: 'gpt-upstream' },
+      },
+    })
+  })
+
+  it('returns a fail-closed error before reservations for an unsupported channel billing source', async () => {
+    const { env, database, user, limit } = await harness()
+    database.channelPolicy = {
+      channel_id: 'channel-1',
+      billing_model_source: 'upstream',
+      restrict_models: 0,
+      source_pattern: null,
+      target_pattern: null,
+      source_is_wildcard: null,
+      target_is_wildcard: null,
+      pricing_match: 0,
+    }
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }] }),
+    }, env)
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_billing_model_source' },
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expect(user.calls).toEqual([])
+    expect(limit.calls).toEqual([])
   })
 
   it('enforces the resolved provider quota for a composite group', async () => {
@@ -1319,6 +1444,10 @@ describe('OpenAI-compatible gateway', () => {
             billing_type: 'subscription',
             subscription_id: 'subscription-1',
             amount_micros: 32,
+            standard_cost_micros: 40,
+            account_stats_cost_micros: null,
+            account_rate_multiplier_ppm: 1_000_000,
+            account_cost_micros: 40,
           },
         },
       })

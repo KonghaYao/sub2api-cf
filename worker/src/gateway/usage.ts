@@ -60,7 +60,9 @@ export function estimatedUsage(inputBytes: number, outputBytes: number): TokenUs
 }
 
 export function calculateCost(
-  model: ModelRoute,
+  model: Pick<ModelRoute,
+    'upstream_name' | 'input_micros_per_million' | 'output_micros_per_million' |
+    'cache_read_micros_per_million' | 'per_request_micros' | 'rate_multiplier_ppm'>,
   usage: TokenUsage,
   serviceTier?: string,
 ): CostBreakdown {

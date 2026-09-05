@@ -67,20 +67,35 @@ export function calculateSyncImageActualCost(
   return total
 }
 
+/** Provider list-price snapshot before the customer group/user multiplier. */
+export function calculateSyncImageStandardCost(
+  policy: SyncImagePricePolicy,
+  outputTiers: ImageBillingTier[],
+): number {
+  let total = 0
+  for (const tier of outputTiers) total = safeSum(total, baseUnitPrice(policy, tier))
+  return total
+}
+
 function ratedUnitPrice(policy: SyncImagePricePolicy, tier: ImageBillingTier): number {
   if (!Number.isSafeInteger(policy.rateMultiplierPpm) || policy.rateMultiplierPpm < 0) {
     throw pricingUnavailable()
   }
+  const base = baseUnitPrice(policy, tier)
+  const result = (BigInt(base) * BigInt(policy.rateMultiplierPpm) + 500_000n) / 1_000_000n
+  const value = Number(result)
+  if (!Number.isSafeInteger(value)) throw pricingOverflow()
+  return value
+}
+
+function baseUnitPrice(policy: SyncImagePricePolicy, tier: ImageBillingTier): number {
   const base = tier === '1K'
     ? policy.price1kMicros
     : tier === '2K'
       ? policy.price2kMicros
       : policy.price4kMicros
   if (!Number.isSafeInteger(base) || (base as number) < 0) throw pricingUnavailable()
-  const result = (BigInt(base as number) * BigInt(policy.rateMultiplierPpm) + 500_000n) / 1_000_000n
-  const value = Number(result)
-  if (!Number.isSafeInteger(value)) throw pricingOverflow()
-  return value
+  return base as number
 }
 
 function safeProduct(left: number, right: number): number {

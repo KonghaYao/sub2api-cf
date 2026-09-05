@@ -941,6 +941,7 @@ export default {
       priorityHint: 'Lower value accounts are used first',
       billingRateMultiplier: 'Billing Rate Multiplier',
       billingRateMultiplierHint: '0 = free, affects account billing only',
+      rateMultiplierInvalid: 'Billing rate multiplier must be zero or greater',
       expiresAt: 'Expires At',
       expiresAtHint: 'Leave empty for no expiration',
       expiresAtTimezoneHint: 'Input is interpreted in your browser time zone ({timezone}).',

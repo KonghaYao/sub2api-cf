@@ -67,11 +67,33 @@ describe('production admin route permission matrix', () => {
     grantRole('channel-reader', ['admin.catalog.read'])
 
     const list = await request('/api/v1/admin/channels')
+    const defaultPricing = await request(
+      '/api/v1/admin/channels/model-pricing?model=claude-sonnet-4',
+    )
+    const syncedModels = await request(
+      '/api/v1/admin/channels/pricing/sync-models?platform=antigravity',
+    )
+    const accountStats = await request('/api/v1/admin/accounts/missing/stats?days=30')
     const create = await request('/api/v1/admin/channels', 'POST')
 
     expect(list.status).toBe(200)
     await expect(list.json()).resolves.toMatchObject({
       data: { items: [], total: 0 },
+    })
+    expect(defaultPricing.status).toBe(200)
+    await expect(defaultPricing.json()).resolves.toMatchObject({
+      data: { found: true, input_price: 3e-6, output_price: 15e-6 },
+    })
+    expect(syncedModels.status).toBe(200)
+    await expect(syncedModels.json()).resolves.toMatchObject({
+      data: { models: expect.arrayContaining(['claude-sonnet-4']) },
+    })
+    expect(accountStats.status).toBe(403)
+    await expect(accountStats.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.read'),
+      },
     })
     expect(create.status).toBe(403)
     await expect(create.json()).resolves.toMatchObject({
@@ -79,6 +101,26 @@ describe('production admin route permission matrix', () => {
         code: 'admin_permission_required',
         message: expect.stringContaining('admin.catalog.write'),
       },
+    })
+  })
+
+  it('requires both catalog and operations read permissions for account statistics', async () => {
+    grantRole('operations-reader-only', ['admin.operations.read'])
+
+    const missingCatalog = await request('/api/v1/admin/accounts/missing/stats?days=30')
+    expect(missingCatalog.status).toBe(403)
+    await expect(missingCatalog.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.catalog.read'),
+      },
+    })
+
+    grantRole('catalog-reader-too', ['admin.catalog.read'])
+    const authorized = await request('/api/v1/admin/accounts/missing/stats?days=30')
+    expect(authorized.status).toBe(404)
+    await expect(authorized.json()).resolves.toMatchObject({
+      error: { code: 'account_not_found' },
     })
   })
 

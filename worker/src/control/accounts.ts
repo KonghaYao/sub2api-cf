@@ -55,6 +55,7 @@ interface AccountRow {
   last_health_error: string | null
   created_at_ms: number
   updated_at_ms: number
+  billing_rate_multiplier_ppm: number
   secret_id: string
   key_version: number
   nonce_b64: string
@@ -91,6 +92,7 @@ interface CreateAccountInput {
   api_key: string
   enabled: boolean
   max_concurrency: number
+  billing_rate_multiplier_ppm: number
   group_links: GroupLinkInput[]
   model_capabilities: ModelCapabilityInput[]
 }
@@ -120,6 +122,7 @@ interface AccountPatch {
   model_capabilities?: ModelCapabilityInput[]
   image_adapter?: AccountImageAdapter
   credential_kind?: AccountCredentialKind
+  billing_rate_multiplier_ppm?: number
 }
 
 const ACCOUNT_PROJECTION = `
@@ -128,7 +131,7 @@ const ACCOUNT_PROJECTION = `
          a.provider_config_json, a.image_adapter, a.credential_kind,
          a.config_version, a.control_version, a.health_status,
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
-         a.created_at_ms, a.updated_at_ms,
+         a.created_at_ms, a.updated_at_ms, a.billing_rate_multiplier_ppm,
          s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64,
          COALESCE((
            SELECT json_group_array(json_object(
@@ -238,6 +241,397 @@ export async function getAdminAccount(context: Context<ControlBindings>): Promis
   }
 }
 
+interface AccountStatsRow {
+  date?: string
+  model?: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  standard_cost_micros: number
+  account_cost_micros: number
+  user_cost_micros: number
+}
+
+interface AccountEndpointStatsRow extends AccountStatsRow { endpoint: string }
+
+type AccountStatsProjectionKind = 'daily' | 'model' | 'endpoint' | 'upstream_endpoint' | 'summary' | 'overflow'
+
+interface AccountStatsProjectionRow extends AccountStatsRow {
+  kind: AccountStatsProjectionKind
+  dimension: string | null
+  duration_total_ms: number
+  duration_count: number
+}
+
+interface AccountStatsTimezone {
+  formatter: Intl.DateTimeFormat
+}
+
+interface AccountStatsRollupReadState {
+  migration_started_at_ms: number
+  legacy_write_grace_until_ms: number
+  cutoff_ms: number | null
+  cursor_occurred_at_ms: number | null
+  cursor_event_id: string | null
+  status: 'active' | 'complete' | null
+}
+
+const ACCOUNT_STATS_DAY_MS = 86_400_000
+
+export async function getAdminAccountStats(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    const days = queryInteger(context.req.query('days'), 'days', 30, 1, 90)
+    const timezone = parseAccountStatsTimezone(context.req.query('timezone'))
+    const todayDate = accountStatsLocalDate(Date.now(), timezone.formatter)
+    const firstDate = addAccountStatsCalendarDays(todayDate, -(days - 1))
+    const dates = Array.from(
+      { length: days + 1 },
+      (_, index) => addAccountStatsCalendarDays(firstDate, index),
+    )
+    const boundaries = dates.map((date) => accountStatsZonedDayStart(date, timezone.formatter))
+    const buckets = dates.slice(0, -1).map((date, index) => ({
+      date,
+      start_ms: boundaries[index]!,
+      end_ms: boundaries[index + 1]!,
+    }))
+    const start = buckets[0]!.start_ms
+    const end = buckets.at(-1)!.end_ms
+    const rollupState = await context.env.DB.prepare(
+      `SELECT maintenance.migration_started_at_ms,
+              maintenance.legacy_write_grace_until_ms,
+              progress.cutoff_ms, progress.cursor_occurred_at_ms,
+              progress.cursor_event_id, progress.status
+         FROM account_stats_rollup_maintenance maintenance
+         LEFT JOIN account_stats_rollup_progress progress ON progress.account_id = ?
+        WHERE maintenance.id = 'global'`,
+    ).bind(account.id).first<AccountStatsRollupReadState>()
+    if (rollupState === null) {
+      throw new GatewayError(500, 'invalid_account_stats_projection', 'Account statistics rollup state is missing', 'server_error')
+    }
+    const aggregate = `COALESCE(SUM(requests), 0) AS requests,
+      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+      COALESCE(SUM(standard_cost_micros), 0) AS standard_cost_micros,
+      COALESCE(SUM(account_cost_micros), 0) AS account_cost_micros,
+      COALESCE(SUM(user_cost_micros), 0) AS user_cost_micros,
+      COALESCE(SUM(duration_total_ms), 0) AS duration_total_ms,
+      COALESCE(SUM(duration_count), 0) AS duration_count`
+    const rawMode = boundaries.some((boundary) => boundary % 900_000 !== 0) ? 1 : 0
+    const rawPredicateValues: unknown[] = []
+    let rawVersionPredicate = ''
+    if (rawMode === 0) {
+      if (account.created_at_ms >= rollupState.legacy_write_grace_until_ms || rollupState.status === 'complete') {
+        rawVersionPredicate = 'AND 1 = 0'
+      } else if (
+        rollupState.status === 'active' &&
+        rollupState.cursor_occurred_at_ms !== null && rollupState.cursor_event_id !== null
+      ) {
+        rawVersionPredicate = `AND account_stats_rollup_version = 0
+          AND (occurred_at_ms < ? OR (occurred_at_ms = ? AND event_id < ?))`
+        rawPredicateValues.push(
+          rollupState.cursor_occurred_at_ms,
+          rollupState.cursor_occurred_at_ms,
+          rollupState.cursor_event_id,
+        )
+      } else {
+        rawVersionPredicate = 'AND account_stats_rollup_version = 0'
+      }
+    }
+    const rollupPredicate = rawMode === 0 ? '1 = 1' : '1 = 0'
+    const projection = await context.env.DB.prepare(
+      `WITH buckets(local_date, start_ms, end_ms) AS MATERIALIZED (
+         SELECT json_extract(value, '$.date'),
+                CAST(json_extract(value, '$.start_ms') AS INTEGER),
+                CAST(json_extract(value, '$.end_ms') AS INTEGER)
+           FROM json_each(?)
+       ),
+       raw_rows AS MATERIALIZED (
+         SELECT event_id, model, inbound_endpoint, upstream_endpoint, occurred_at_ms,
+                input_tokens, output_tokens, cache_read_tokens,
+                COALESCE(standard_cost_micros, amount_micros) AS standard_cost_micros,
+                COALESCE(account_cost_micros, account_stats_cost_micros,
+                  standard_cost_micros, amount_micros) AS account_cost_micros,
+                amount_micros AS user_cost_micros, duration_ms
+          FROM usage_projection
+          WHERE account_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?
+            ${rawVersionPredicate}
+          ORDER BY occurred_at_ms, event_id
+          LIMIT 10001
+       ),
+       source AS MATERIALIZED (
+         SELECT bucket.local_date, raw.model, raw.inbound_endpoint, raw.upstream_endpoint,
+                1 AS requests, raw.input_tokens, raw.output_tokens, raw.cache_read_tokens,
+                raw.standard_cost_micros, raw.account_cost_micros, raw.user_cost_micros,
+                raw.duration_ms AS duration_total_ms, 1 AS duration_count
+           FROM raw_rows raw
+           JOIN buckets bucket
+             ON raw.occurred_at_ms >= bucket.start_ms AND raw.occurred_at_ms < bucket.end_ms
+         UNION ALL
+         SELECT bucket.local_date, rollup.model, rollup.inbound_endpoint, rollup.upstream_endpoint,
+                rollup.requests, rollup.input_tokens, rollup.output_tokens, rollup.cache_read_tokens,
+                rollup.standard_cost_micros, rollup.account_cost_micros, rollup.user_cost_micros,
+                rollup.duration_total_ms, rollup.duration_count
+           FROM account_usage_15m_rollup rollup
+           JOIN buckets bucket
+             ON rollup.bucket_start_ms >= bucket.start_ms
+            AND rollup.bucket_start_ms < bucket.end_ms
+          WHERE ${rollupPredicate} AND rollup.account_id = ?
+            AND rollup.bucket_start_ms >= ? AND rollup.bucket_start_ms < ?
+       )
+       SELECT 'daily' AS kind, local_date AS dimension, ${aggregate}
+         FROM source GROUP BY local_date
+       UNION ALL
+       SELECT 'model', model, ${aggregate}
+         FROM source GROUP BY model
+       UNION ALL
+       SELECT 'endpoint', inbound_endpoint, ${aggregate}
+         FROM source WHERE trim(inbound_endpoint) <> '' GROUP BY inbound_endpoint
+       UNION ALL
+       SELECT 'upstream_endpoint', upstream_endpoint, ${aggregate}
+         FROM source WHERE trim(upstream_endpoint) <> '' GROUP BY upstream_endpoint
+       UNION ALL
+       SELECT 'summary', NULL, ${aggregate} FROM source
+       UNION ALL
+       SELECT 'overflow', NULL, COUNT(*), 0, 0, 0, 0, 0, 0, 0, 0
+         FROM raw_rows HAVING COUNT(*) > 10000`,
+    ).bind(
+      JSON.stringify(buckets), account.id, start, end,
+      ...rawPredicateValues,
+      account.id, start, end,
+    ).all<AccountStatsProjectionRow>()
+    const rows = projection.results
+    if (rows.some((row) => row.kind === 'overflow')) {
+      throw new GatewayError(
+        503,
+        'account_stats_history_not_rolled_up',
+        'Historical account statistics exceed the bounded compatibility window',
+        'server_error',
+      )
+    }
+    const dailyRows = rows
+      .filter((row) => row.kind === 'daily')
+      .map((row) => validateAccountStatsRow({ ...row, date: requireStatsString(row.dimension ?? undefined, 'date') }))
+      .sort((left, right) => requireStatsString(left.date, 'date').localeCompare(requireStatsString(right.date, 'date')))
+    const modelRows = rows
+      .filter((row) => row.kind === 'model')
+      .map((row) => validateAccountStatsRow({ ...row, model: requireStatsString(row.dimension ?? undefined, 'model') }))
+      .sort((left, right) =>
+        (right.input_tokens + right.output_tokens) - (left.input_tokens + left.output_tokens) ||
+        requireStatsString(left.model, 'model').localeCompare(requireStatsString(right.model, 'model')))
+    const endpointRows = rows
+      .filter((row) => row.kind === 'endpoint')
+      .map((row) => validateEndpointStatsRow({ ...row, endpoint: requireStatsString(row.dimension ?? undefined, 'endpoint') }))
+      .sort(compareEndpointStats)
+    const upstreamEndpointRows = rows
+      .filter((row) => row.kind === 'upstream_endpoint')
+      .map((row) => validateEndpointStatsRow({ ...row, endpoint: requireStatsString(row.dimension ?? undefined, 'endpoint') }))
+      .sort(compareEndpointStats)
+    const summaryRow = rows.find((row) => row.kind === 'summary')
+    if (summaryRow === undefined) {
+      throw new GatewayError(500, 'invalid_account_stats_projection', 'Account statistics summary is missing', 'server_error')
+    }
+    requireStatsInteger(summaryRow.duration_total_ms, 'duration_total_ms')
+    requireStatsInteger(summaryRow.duration_count, 'duration_count')
+    const averageDuration = summaryRow.duration_count === 0
+      ? 0
+      : summaryRow.duration_total_ms / summaryRow.duration_count
+    if (!Number.isFinite(averageDuration) || averageDuration < 0) {
+      throw new GatewayError(500, 'invalid_account_stats_projection', 'Account statistics duration is invalid', 'server_error')
+    }
+    const history = dailyRows.map((row) => ({
+      date: requireStatsString(row.date, 'date'),
+      label: requireStatsString(row.date, 'date').slice(5).replace('-', '/'),
+      requests: row.requests,
+      tokens: row.input_tokens + row.output_tokens,
+      cost: microsToUsd(row.standard_cost_micros),
+      actual_cost: microsToUsd(row.account_cost_micros),
+      user_cost: microsToUsd(row.user_cost_micros),
+    }))
+    const total = dailyRows.reduce((value, row) => ({
+      requests: value.requests + row.requests,
+      tokens: value.tokens + row.input_tokens + row.output_tokens,
+      standard: value.standard + row.standard_cost_micros,
+      account: value.account + row.account_cost_micros,
+      user: value.user + row.user_cost_micros,
+    }), { requests: 0, tokens: 0, standard: 0, account: 0, user: 0 })
+    for (const [field, value] of Object.entries(total)) requireStatsInteger(value, field)
+    const divisor = history.length === 0 ? 1 : history.length
+    const highestCostDay = history.reduce<typeof history[number] | null>(
+      (highest, row) => highest === null || row.actual_cost > highest.actual_cost ? row : highest,
+      null,
+    )
+    const highestRequestDay = history.reduce<typeof history[number] | null>(
+      (highest, row) => highest === null || row.requests > highest.requests ? row : highest,
+      null,
+    )
+    const today = history.find((row) => row.date === todayDate)
+    return controlSuccess({
+      history,
+      summary: {
+        days,
+        actual_days_used: divisor,
+        total_cost: microsToUsd(total.account),
+        total_user_cost: microsToUsd(total.user),
+        total_standard_cost: microsToUsd(total.standard),
+        total_requests: total.requests,
+        total_tokens: total.tokens,
+        avg_daily_cost: microsToUsd(total.account) / divisor,
+        avg_daily_user_cost: microsToUsd(total.user) / divisor,
+        avg_daily_requests: total.requests / divisor,
+        avg_daily_tokens: total.tokens / divisor,
+        avg_duration_ms: averageDuration,
+        today: today === undefined ? null : {
+          date: today.date, cost: today.actual_cost, user_cost: today.user_cost,
+          requests: today.requests, tokens: today.tokens,
+        },
+        highest_cost_day: highestCostDay === null ? null : {
+          date: highestCostDay.date, label: highestCostDay.label,
+          cost: highestCostDay.actual_cost, user_cost: highestCostDay.user_cost,
+          requests: highestCostDay.requests,
+        },
+        highest_request_day: highestRequestDay === null ? null : {
+          date: highestRequestDay.date, label: highestRequestDay.label,
+          requests: highestRequestDay.requests, cost: highestRequestDay.actual_cost,
+          user_cost: highestRequestDay.user_cost,
+        },
+      },
+      models: modelRows.map((row) => ({
+        model: requireStatsString(row.model, 'model'),
+        requests: row.requests,
+        input_tokens: row.input_tokens - row.cache_read_tokens,
+        output_tokens: row.output_tokens,
+        cache_creation_tokens: 0,
+        cache_read_tokens: row.cache_read_tokens,
+        total_tokens: row.input_tokens + row.output_tokens,
+        cost: microsToUsd(row.standard_cost_micros),
+        actual_cost: microsToUsd(row.account_cost_micros),
+        account_cost: microsToUsd(row.account_cost_micros),
+      })),
+      endpoints: endpointRows.map(publicEndpointStats),
+      upstream_endpoints: upstreamEndpointRows.map(publicEndpointStats),
+    })
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+function parseAccountStatsTimezone(raw: string | undefined): AccountStatsTimezone {
+  const timezone = raw?.trim() || 'UTC'
+  if (timezone.length > 64) {
+    throw new GatewayError(400, 'invalid_timezone', 'timezone is invalid')
+  }
+  try {
+    return {
+      formatter: new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric', month: '2-digit', day: '2-digit', hourCycle: 'h23',
+      }),
+    }
+  } catch {
+    throw new GatewayError(400, 'invalid_timezone', 'timezone is invalid')
+  }
+}
+
+function accountStatsCalendarDayNumber(date: string): number {
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number]
+  return Math.floor(Date.UTC(year, month - 1, day) / ACCOUNT_STATS_DAY_MS)
+}
+
+function addAccountStatsCalendarDays(date: string, days: number): string {
+  return new Date((accountStatsCalendarDayNumber(date) + days) * ACCOUNT_STATS_DAY_MS)
+    .toISOString().slice(0, 10)
+}
+
+function accountStatsLocalDate(timestamp: number, formatter: Intl.DateTimeFormat): string {
+  const parts = accountStatsDateParts(timestamp, formatter)
+  return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
+}
+
+function accountStatsZonedDayStart(date: string, formatter: Intl.DateTimeFormat): number {
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number]
+  const target = Date.UTC(year, month - 1, day)
+  // Some zones advance their clocks at midnight, so 00:00 may not exist.
+  // Local dates are monotonic in this narrow window: binary-search the first
+  // instant whose rendered local date is at least the requested date.
+  let low = target - 36 * 60 * 60 * 1000
+  let high = target + 36 * 60 * 60 * 1000
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (accountStatsLocalDate(middle, formatter) < date) low = middle + 1
+    else high = middle
+  }
+  if (accountStatsLocalDate(low, formatter) !== date) {
+    throw new GatewayError(400, 'invalid_timezone', 'timezone has no valid local day boundary')
+  }
+  return low
+}
+
+function accountStatsDateParts(timestamp: number, formatter: Intl.DateTimeFormat): {
+  year: number; month: number; day: number
+} {
+  const values = Object.fromEntries(
+    formatter.formatToParts(new Date(timestamp))
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, Number(part.value)]),
+  ) as Record<string, number>
+  return {
+    year: values.year!, month: values.month!, day: values.day!,
+  }
+}
+
+function validateEndpointStatsRow(row: AccountEndpointStatsRow): AccountEndpointStatsRow {
+  validateAccountStatsRow(row)
+  requireStatsString(row.endpoint, 'endpoint')
+  return row
+}
+
+function compareEndpointStats(left: AccountEndpointStatsRow, right: AccountEndpointStatsRow): number {
+  return (right.input_tokens + right.output_tokens) - (left.input_tokens + left.output_tokens) ||
+    left.endpoint.localeCompare(right.endpoint)
+}
+
+function publicEndpointStats(row: AccountEndpointStatsRow) {
+  return {
+    endpoint: row.endpoint,
+    requests: row.requests,
+    total_tokens: row.input_tokens + row.output_tokens,
+    cost: microsToUsd(row.standard_cost_micros),
+    actual_cost: microsToUsd(row.account_cost_micros),
+  }
+}
+
+function validateAccountStatsRow(row: AccountStatsRow): AccountStatsRow {
+  for (const field of [
+    'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'standard_cost_micros',
+    'account_cost_micros', 'user_cost_micros',
+  ] as const) requireStatsInteger(row[field], field)
+  if (row.cache_read_tokens > row.input_tokens) {
+    throw new GatewayError(500, 'invalid_account_stats_projection', 'Account statistics cache tokens exceed input tokens', 'server_error')
+  }
+  return row
+}
+
+function requireStatsInteger(value: number, field: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new GatewayError(500, 'invalid_account_stats_projection', `Account statistics ${field} is invalid`, 'server_error')
+  }
+  return value
+}
+
+function requireStatsString(value: string | undefined, field: string): string {
+  if (typeof value !== 'string' || value === '') {
+    throw new GatewayError(500, 'invalid_account_stats_projection', `Account statistics ${field} is invalid`, 'server_error')
+  }
+  return value
+}
+
+function microsToUsd(value: number): number {
+  return value / 1_000_000
+}
+
 export async function createAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
@@ -268,6 +662,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       name: input.name,
       enabled: input.enabled,
       max_concurrency: input.max_concurrency,
+      billing_rate_multiplier_ppm: input.billing_rate_multiplier_ppm,
       protocol: input.protocol,
       base_url: input.base_url,
       auth_scheme: input.auth_scheme,
@@ -296,8 +691,9 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         `INSERT INTO accounts (
            id, platform, name, credential_ref, enabled, max_concurrency,
            created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
-           provider_config_json, image_adapter, credential_kind, config_version
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           provider_config_json, image_adapter, credential_kind, config_version,
+           billing_rate_multiplier_ppm
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
       ).bind(
         accountId,
         input.platform,
@@ -313,6 +709,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         JSON.stringify(input.provider_config),
         input.image_adapter,
         input.credential_kind,
+        input.billing_rate_multiplier_ppm,
       ),
       context.env.DB.prepare(
         `INSERT INTO account_secrets (
@@ -371,6 +768,7 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
         provider_config: providerConfig,
         image_adapter: patch.image_adapter ?? account.image_adapter,
         credential_kind: patch.credential_kind ?? account.credential_kind,
+        billing_rate_multiplier_ppm: patch.billing_rate_multiplier_ppm ?? account.billing_rate_multiplier_ppm,
         config_version: nextConfigVersion,
         control_version: nextControlVersion,
         now,
@@ -445,6 +843,7 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
         provider_config: parseProviderConfigProjection(account.provider_config_json),
         image_adapter: account.image_adapter,
         credential_kind: account.credential_kind,
+        billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
         config_version: incrementVersion(account.config_version, 'config_version'),
         control_version: incrementVersion(account.control_version, 'control_version'),
         now,
@@ -648,6 +1047,7 @@ async function mutateAccountRelation(
       provider_config: parseProviderConfigProjection(account.provider_config_json),
       image_adapter: account.image_adapter,
       credential_kind: account.credential_kind,
+      billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
       config_version: incrementVersion(account.config_version, 'config_version'),
       control_version: incrementVersion(account.control_version, 'control_version'),
       now,
@@ -669,6 +1069,7 @@ function accountCasStatement(
     provider_config: ProviderConfig
     image_adapter: AccountImageAdapter
     credential_kind: AccountCredentialKind
+    billing_rate_multiplier_ppm: number
     config_version: number
     control_version: number
     now: number
@@ -678,7 +1079,7 @@ function accountCasStatement(
   return env.DB.prepare(
     `UPDATE accounts
         SET name = ?, enabled = ?, max_concurrency = ?, base_url = ?, provider_config_json = ?,
-            image_adapter = ?, credential_kind = ?,
+            image_adapter = ?, credential_kind = ?, billing_rate_multiplier_ppm = ?,
             config_version = ?,
             control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
             health_status = CASE WHEN ? = 1 THEN 'unknown' ELSE health_status END,
@@ -695,6 +1096,7 @@ function accountCasStatement(
     JSON.stringify(value.provider_config),
     value.image_adapter,
     value.credential_kind,
+    value.billing_rate_multiplier_ppm,
     value.config_version,
     expectedControlVersion,
     value.control_version,
@@ -765,6 +1167,7 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     max_concurrency: body.max_concurrency === undefined
       ? 4
       : requireSafeInteger(body, 'max_concurrency', 1, 1_000),
+    billing_rate_multiplier_ppm: parseRateMultiplier(body.rate_multiplier ?? 1),
     group_links: parseGroupLinks(body.group_links),
     model_capabilities: parseModelCapabilities(body.model_capabilities),
   }
@@ -803,6 +1206,9 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.max_concurrency !== undefined) {
     patch.max_concurrency = requireSafeInteger(body, 'max_concurrency', 1, 1_000)
   }
+  if (body.rate_multiplier !== undefined) {
+    patch.billing_rate_multiplier_ppm = parseRateMultiplier(body.rate_multiplier)
+  }
   if (body.group_links !== undefined) patch.group_links = parseGroupLinks(body.group_links)
   if (body.model_capabilities !== undefined) {
     patch.model_capabilities = parseModelCapabilities(body.model_capabilities)
@@ -817,6 +1223,7 @@ const CREATE_ACCOUNT_FIELDS = new Set([
   'name', 'platform', 'protocol', 'base_url', 'auth_scheme', 'provider_config',
   'api_key', 'enabled', 'status', 'max_concurrency', 'group_links',
   'model_capabilities', 'image_adapter', 'credential_kind', 'type',
+  'rate_multiplier',
 ])
 const UPDATE_ACCOUNT_FIELDS = new Set([
   ...CREATE_ACCOUNT_FIELDS,
@@ -1184,6 +1591,7 @@ function publicAccount(row: AccountRow) {
     name: row.name,
     enabled: row.enabled === 1,
     max_concurrency: row.max_concurrency,
+    billing_rate_multiplier_ppm: row.billing_rate_multiplier_ppm,
     protocol: row.protocol,
     base_url: row.base_url,
     auth_scheme: row.auth_scheme,
@@ -1210,6 +1618,7 @@ function accountResponse(value: {
   name: string
   enabled: boolean
   max_concurrency: number
+  billing_rate_multiplier_ppm: number
   protocol: ProviderProtocol
   base_url: string
   auth_scheme: ProviderAuthScheme
@@ -1228,12 +1637,25 @@ function accountResponse(value: {
   group_links: GroupLink[]
   model_capabilities: ModelCapability[]
 }) {
+  const { billing_rate_multiplier_ppm: multiplierPpm, ...publicValue } = value
   return {
-    ...value,
+    ...publicValue,
+    rate_multiplier: multiplierPpm / 1_000_000,
     enabled: value.enabled,
     status: value.enabled ? 'active' as const : 'inactive' as const,
     credentials_status: { has_api_key: true },
   }
+}
+
+function parseRateMultiplier(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new GatewayError(400, 'invalid_rate_multiplier', 'rate_multiplier must be a non-negative exact decimal')
+  }
+  const ppm = value * 1_000_000
+  if (!Number.isSafeInteger(ppm) || ppm > 10_000_000) {
+    throw new GatewayError(400, 'invalid_rate_multiplier', 'rate_multiplier must be an exact decimal between 0 and 10')
+  }
+  return ppm
 }
 
 function parseProjectionArray<T>(raw: string, description: string): T[] {

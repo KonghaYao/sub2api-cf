@@ -20,6 +20,8 @@ export interface IntervalFormEntry {
 }
 
 export interface PricingFormEntry {
+  /** UI-only source platform for channel account-stat pricing round-trips. */
+  account_stats_platform?: string
   models: string[]
   billing_mode: BillingMode
   input_price: number | string | null

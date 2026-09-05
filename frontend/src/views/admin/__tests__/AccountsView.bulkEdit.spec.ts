@@ -305,6 +305,43 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(showSuccess).toHaveBeenCalledWith('admin.accounts.testCompleted')
   })
 
+  it('opens account cost statistics from a Worker account row', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    const account = {
+      id: 'account-uuid',
+      name: 'Anthropic primary',
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      type: 'apikey',
+      credentials: { base_url: 'https://api.anthropic.com' },
+      base_url: 'https://api.anthropic.com',
+      enabled: true,
+      max_concurrency: 3,
+      concurrency: 3,
+      priority: 0,
+      rate_multiplier: 1.25,
+      status: 'active',
+      group_ids: [],
+      auto_pause_on_expired: false,
+      created_at: '2026-09-05T00:00:00.000Z',
+      updated_at: '2026-09-05T00:00:00.000Z',
+      control_version: 1,
+    }
+    listAccounts.mockResolvedValueOnce({
+      items: [account], total: 1, page: 1, page_size: 20, pages: 1,
+    })
+    const wrapper = mountWorkerView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="worker-account-stats-account-uuid"]').trigger('click')
+
+    const modal = wrapper.findComponent({ name: 'AccountStatsModal' })
+    expect(modal.exists()).toBe(true)
+    expect(modal.props('show')).toBe(true)
+    expect(modal.props('account')).toMatchObject({ id: 'account-uuid', rate_multiplier: 1.25 })
+  })
+
   it('merges a partial Worker health response without losing identity and de-duplicates an in-flight probe', async () => {
     workerSettings.cloudflareWorkerContract = true
     const account = {

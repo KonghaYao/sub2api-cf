@@ -505,6 +505,7 @@ import EndpointDistributionChart from '@/components/charts/EndpointDistributionC
 import Icon from '@/components/icons/Icon.vue'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageStatsResponse } from '@/types'
+import { getBrowserTimeZone } from '@/utils/format'
 
 ChartJS.register(
   CategoryScale,
@@ -695,7 +696,7 @@ const loadStats = async () => {
 
   loading.value = true
   try {
-    stats.value = await adminAPI.accounts.getStats(props.account.id, 30)
+    stats.value = await adminAPI.accounts.getStats(props.account.id, 30, getBrowserTimeZone())
   } catch (error) {
     console.error('Failed to load account stats:', error)
     stats.value = null

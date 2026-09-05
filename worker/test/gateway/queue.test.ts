@@ -62,6 +62,10 @@ const payload: UsageSettledPayload = {
   cache_amount_micros: 1,
   base_amount_micros: 3,
   amount_micros: 40,
+  standard_cost_micros: 50,
+  account_stats_cost_micros: 32,
+  account_rate_multiplier_ppm: 1_250_000,
+  account_cost_micros: 40,
   outcome: 'completed',
   stream: false,
   platform: 'openai',
@@ -101,11 +105,19 @@ describe('usage queue projection', () => {
     expect(database.batches).toHaveLength(1)
     expect(database.batches[0][0].query).toContain('INSERT INTO usage_projection')
     expect(database.batches[0][0].query).toContain('base_amount_micros')
+    expect(database.batches[0][0].query).toContain('standard_cost_micros')
     expect(database.batches[0][0].query).toContain('inbound_endpoint')
+    expect(database.batches[0][0].values.slice(9, 13)).toEqual([50, 32, 1_250_000, 40])
     expect(database.batches[0][0].values.slice(-14, -6)).toEqual([
       'openai', 'group-1', 1, '/v1/chat/completions', '/v1/responses', 'token', 0, 1,
     ])
     expect(database.batches[0][1].query).toContain('INSERT INTO inbox')
+    expect(database.batches[0][3].query).toContain('INSERT INTO account_usage_15m_rollup')
+    expect(database.batches[0][3].query).toContain('ON CONFLICT')
+    expect(database.batches[0][3].values).toEqual([
+      'account-1', 0, 'gpt-public', '/v1/chat/completions', '/v1/responses',
+      10, 5, 2, 50, 40, 40, 123,
+    ])
   })
 
   it('persists image billing audit dimensions from the immutable usage event', async () => {
@@ -140,6 +152,10 @@ describe('usage queue projection', () => {
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).upstream_endpoint
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).billing_mode
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).native_compaction_v2
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).standard_cost_micros
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).account_stats_cost_micros
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).account_rate_multiplier_ppm
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).account_cost_micros
     const database = new QueueDatabase()
     const item = message(legacyEvent)
 
@@ -147,6 +163,7 @@ describe('usage queue projection', () => {
 
     expect(item.ack).toHaveBeenCalledOnce()
     expect(item.retry).not.toHaveBeenCalled()
+    expect(database.batches[0][0].values.slice(9, 13)).toEqual([40, null, 1_000_000, 40])
     expect(database.batches[0][0].values.slice(-16, -6)).toEqual([
       'balance', null, '', 'group-1', 1, '', '', 'token', 0, 1,
     ])
@@ -216,6 +233,25 @@ describe('usage queue projection', () => {
     expect(partial.retry).toHaveBeenCalledOnce()
     expect(contradictory.ack).not.toHaveBeenCalled()
     expect(contradictory.retry).toHaveBeenCalledOnce()
+    expect(database.batches).toHaveLength(0)
+  })
+
+  it('rejects partial or arithmetically inconsistent account-cost snapshots', async () => {
+    const partialEvent = createUsageEvent({ ...payload }, 1_000)
+    delete (partialEvent.payload as Partial<UsageSettledPayload>).account_cost_micros
+    const inconsistentEvent = createUsageEvent({ ...payload, account_cost_micros: 41 }, 1_000)
+    const partial = message(partialEvent)
+    const inconsistent = message(inconsistentEvent)
+    const database = new QueueDatabase()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await consumeEvents(
+      { queue: 'events', messages: [partial, inconsistent] } as unknown as MessageBatch<unknown>,
+      env(database),
+    )
+
+    expect(partial.retry).toHaveBeenCalledOnce()
+    expect(inconsistent.retry).toHaveBeenCalledOnce()
     expect(database.batches).toHaveLength(0)
   })
 

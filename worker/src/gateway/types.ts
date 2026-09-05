@@ -143,6 +143,17 @@ export interface ModelRoute {
   cache_read_micros_per_million: number
   per_request_micros: number
   minimum_reservation_micros: number
+  /**
+   * Immutable base catalog price used for provider-account cost reporting.
+   * A channel mapping may point these fields at a different known catalog
+   * model while the unprefixed price fields remain the customer charge basis.
+   */
+  account_cost_base_price_id?: string
+  account_cost_base_price_version?: number
+  account_cost_base_input_micros_per_million?: number
+  account_cost_base_output_micros_per_million?: number
+  account_cost_base_cache_read_micros_per_million?: number
+  account_cost_base_per_request_micros?: number
   group_rate_multiplier_ppm: number
   user_rate_multiplier_ppm: number | null
   /** Effective multiplier used for reservation and settlement calculations. */

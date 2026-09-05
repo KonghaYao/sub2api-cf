@@ -1,4 +1,8 @@
 import type { Env, UsageSettledPayload } from '../env'
+import {
+  resolveAccountCostSnapshot,
+  type AccountCostSnapshot,
+} from '../gateway/account-stats'
 import { createUsageEvent } from '../gateway/queue'
 import {
   enqueueSettlementCommandV2,
@@ -32,6 +36,11 @@ export interface SyncImageUsageInput {
   requestedModel: string
   upstreamModel: string
   amountMicros: number
+  /** Provider list price before the customer group/user multiplier. */
+  standardCostMicros?: number
+  /** Final provider platform used only for account-statistics pricing rules. */
+  providerPlatform?: string
+  accountCostSnapshot?: AccountCostSnapshot
   operation: SyncImageOperation
   imageCount?: number
   imageSize?: '1K' | '2K' | '4K'
@@ -115,7 +124,21 @@ export async function settleSyncImageBilling(
 ): Promise<void> {
   const { initialReservedMicros, ...usageInput } = input
   const occurredAt = Date.now()
-  const payload = buildSyncImageUsagePayload({ ...usageInput, principal, occurredAt })
+  const accountCostSnapshot = await resolveAccountCostSnapshot(env, {
+    accountId: usageInput.accountId,
+    groupId: principal.group_id,
+    platform: usageInput.providerPlatform ?? principal.platform,
+    upstreamModel: usageInput.upstreamModel,
+    usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false },
+    standardCostMicros: usageInput.standardCostMicros ?? usageInput.amountMicros,
+    requestCount: Math.max(1, usageInput.imageCount ?? 0),
+  })
+  const payload = buildSyncImageUsagePayload({
+    ...usageInput,
+    principal,
+    occurredAt,
+    accountCostSnapshot,
+  })
   const event = createUsageEvent(payload, occurredAt)
   // Once the provider has produced an image this hold represents real cost.
   // A persistence outage must retain the hold so the caller can retry this
@@ -166,6 +189,12 @@ export async function settleSyncImageBilling(
 
 export function buildSyncImageUsagePayload(input: SyncImageUsageInput): UsageSettledPayload {
   const endpoint = `/v1/images/${input.operation}`
+  const accountCost = input.accountCostSnapshot ?? {
+    standard_cost_micros: input.standardCostMicros ?? input.amountMicros,
+    account_stats_cost_micros: null,
+    account_rate_multiplier_ppm: 1_000_000,
+    account_cost_micros: input.standardCostMicros ?? input.amountMicros,
+  }
   return {
     request_id: input.requestId,
     user_id: input.principal.user_id,
@@ -187,6 +216,7 @@ export function buildSyncImageUsagePayload(input: SyncImageUsageInput): UsageSet
     cache_amount_micros: 0,
     base_amount_micros: input.amountMicros,
     amount_micros: input.amountMicros,
+    ...accountCost,
     outcome: input.outcome ?? 'completed',
     stream: input.stream ?? false,
     platform: input.principal.platform,

@@ -170,3 +170,21 @@ Queue retries and the minute Cron trigger recover transient Durable Object
 failures, and exhausted Queue messages are retained in a production DLQ.
 Settlement recovery is parked for manual review after 20 failed automatic
 attempts instead of consuming Cron work forever.
+
+Account acquisition cost is stored separately from the customer charge. The
+v0.31 schema snapshots the canonical cost, an optional scoped account-stat
+override, the account's exact PPM multiplier, and the resulting account cost
+on each usage row so later pricing edits cannot rewrite historical margins.
+The Queue consumer also maintains a sparse 15-minute D1 rollup for account
+statistics. Migration does not rewrite the historical usage table; scheduled,
+write-budgeted recovery folds recent legacy facts into the rollup while the
+read path uses a bounded raw fallback. When a public channel alias resolves to
+a unique different upstream model, the account-cost snapshot uses that
+upstream model's base catalog price while the customer charge keeps its public
+model snapshot.
+Custom rules currently support input, output and cache-read tokens plus flat
+per-request/image prices. Cache-write and image-token dimensions are rejected
+until the gateway usage projection carries those quantities. The legacy
+`apply_pricing_to_account_stats` switch is also rejected in Worker mode until
+channel model prices participate in customer billing; this prevents a saved
+configuration from silently using the canonical catalog price instead.

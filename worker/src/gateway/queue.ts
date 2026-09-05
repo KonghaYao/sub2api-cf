@@ -169,17 +169,21 @@ export async function consumeEvents(
         env.DB.prepare(
           `INSERT INTO usage_projection (
              event_id, request_id, user_id, api_key_id, account_id, model,
-             input_tokens, output_tokens, amount_micros, occurred_at_ms, projected_at_ms,
+             input_tokens, output_tokens, amount_micros,
+             standard_cost_micros, account_stats_cost_micros,
+             account_rate_multiplier_ppm, account_cost_micros,
+             occurred_at_ms, projected_at_ms,
              group_id, price_id, requested_model, upstream_model, cache_read_tokens,
              input_amount_micros, output_amount_micros, cache_amount_micros,
              base_amount_micros, outcome, stream, duration_ms
              , billing_type, subscription_id, platform, request_type,
              inbound_endpoint, upstream_endpoint, billing_mode, native_compaction_v2,
              dimensions_version, image_count, image_size, image_input_size,
-             image_output_size, image_size_source, image_size_breakdown
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             image_output_size, image_size_source, image_size_breakdown,
+             account_stats_rollup_version
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -190,6 +194,10 @@ export async function consumeEvents(
           payload.input_tokens,
           payload.output_tokens,
           payload.amount_micros,
+          payload.standard_cost_micros,
+          payload.account_stats_cost_micros,
+          payload.account_rate_multiplier_ppm,
+          payload.account_cost_micros,
           event.occurred_at_ms,
           Date.now(),
           payload.group_id,
@@ -233,6 +241,38 @@ export async function consumeEvents(
                   END
             WHERE id = ?`,
         ).bind(event.occurred_at_ms, event.occurred_at_ms, payload.api_key_id),
+        env.DB.prepare(
+          `INSERT INTO account_usage_15m_rollup (
+             account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint,
+             requests, input_tokens, output_tokens, cache_read_tokens,
+             standard_cost_micros, account_cost_micros, user_cost_micros,
+             duration_total_ms, duration_count
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT (account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint)
+           DO UPDATE SET
+             requests = account_usage_15m_rollup.requests + excluded.requests,
+             input_tokens = account_usage_15m_rollup.input_tokens + excluded.input_tokens,
+             output_tokens = account_usage_15m_rollup.output_tokens + excluded.output_tokens,
+             cache_read_tokens = account_usage_15m_rollup.cache_read_tokens + excluded.cache_read_tokens,
+             standard_cost_micros = account_usage_15m_rollup.standard_cost_micros + excluded.standard_cost_micros,
+             account_cost_micros = account_usage_15m_rollup.account_cost_micros + excluded.account_cost_micros,
+             user_cost_micros = account_usage_15m_rollup.user_cost_micros + excluded.user_cost_micros,
+             duration_total_ms = account_usage_15m_rollup.duration_total_ms + excluded.duration_total_ms,
+             duration_count = account_usage_15m_rollup.duration_count + excluded.duration_count`,
+        ).bind(
+          payload.account_id,
+          Math.floor(event.occurred_at_ms / 900_000) * 900_000,
+          payload.requested_model,
+          payload.inbound_endpoint,
+          payload.upstream_endpoint,
+          payload.input_tokens,
+          payload.output_tokens,
+          payload.cache_read_tokens,
+          payload.standard_cost_micros,
+          payload.account_cost_micros,
+          payload.amount_micros,
+          payload.duration_ms,
+        ),
       ])
       message.ack()
     } catch (error) {
@@ -446,6 +486,25 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
   } else if (hasBillingType !== hasSubscriptionId) {
     throw new Error('Incomplete usage billing reference')
   }
+  const accountCostFields = [
+    'standard_cost_micros',
+    'account_stats_cost_micros',
+    'account_rate_multiplier_ppm',
+    'account_cost_micros',
+  ] as const
+  const accountCostFieldCount = accountCostFields
+    .filter((field) => Object.hasOwn(payload, field)).length
+  if (accountCostFieldCount === 0) {
+    payload = {
+      ...payload,
+      standard_cost_micros: payload.amount_micros,
+      account_stats_cost_micros: null,
+      account_rate_multiplier_ppm: 1_000_000,
+      account_cost_micros: payload.amount_micros,
+    }
+  } else if (accountCostFieldCount !== accountCostFields.length) {
+    throw new Error('Incomplete usage account-cost snapshot')
+  }
   payload = {
     ...payload,
     platform: payload.platform ?? '',
@@ -496,11 +555,20 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     'cache_amount_micros',
     'base_amount_micros',
     'amount_micros',
+    'standard_cost_micros',
+    'account_rate_multiplier_ppm',
+    'account_cost_micros',
     'duration_ms',
   ] as const) {
     if (!Number.isSafeInteger(payload[field]) || (payload[field] as number) < 0) {
       throw new Error(`Invalid usage payload field ${field}`)
     }
+  }
+  if (
+    payload.account_stats_cost_micros !== null &&
+    (!Number.isSafeInteger(payload.account_stats_cost_micros) || payload.account_stats_cost_micros! < 0)
+  ) {
+    throw new Error('Invalid usage payload field account_stats_cost_micros')
   }
   if (!['completed', 'failed', 'cancelled'].includes(payload.outcome ?? '')) {
     throw new Error('Invalid usage outcome')
@@ -544,6 +612,13 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
       payload.base_amount_micros!
   ) {
     throw new Error('Usage amount does not match its cost components')
+  }
+  const accountCostBasis = payload.account_stats_cost_micros ?? payload.standard_cost_micros!
+  const expectedAccountCost = Number(
+    (BigInt(accountCostBasis) * BigInt(payload.account_rate_multiplier_ppm!) + 999_999n) / 1_000_000n,
+  )
+  if (!Number.isSafeInteger(expectedAccountCost) || payload.account_cost_micros !== expectedAccountCost) {
+    throw new Error('Usage account cost does not match its snapshot')
   }
   return event as PlatformEvent<UsageSettledPayload>
 }

@@ -82,6 +82,7 @@ describe('admin accounts Worker transport capabilities', () => {
           provider_config: platform === 'codex' ? { account_id: 'acct_codex' } : {},
           enabled: true,
           max_concurrency: 6,
+          rate_multiplier: 1.25,
           control_version: 3,
           created_at_ms: 1_788_451_200_000,
           updated_at_ms: 1_788_451_260_000,
@@ -103,6 +104,7 @@ describe('admin accounts Worker transport capabilities', () => {
         provider_config: platform === 'codex' ? { account_id: 'acct_codex' } : {},
         type: 'apikey',
         concurrency: 6,
+        rate_multiplier: 1.25,
         priority: 2,
         status: 'active',
         group_ids: [`${platform}-group`],
@@ -242,6 +244,36 @@ describe('admin accounts Worker transport capabilities', () => {
       name: 'updated',
     }, {
       headers: { 'If-Match': '"7"' },
+    })
+  })
+
+  it('preserves the public decimal account billing multiplier on Worker update', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { update } = await import('@/api/admin/accounts')
+
+    await update('account-uuid', {
+      rate_multiplier: 1.375,
+      expected_control_version: 9,
+    } as never)
+
+    expect(put).toHaveBeenCalledWith('/admin/accounts/account-uuid', {
+      rate_multiplier: 1.375,
+    }, {
+      headers: { 'If-Match': '"9"' },
+    })
+  })
+
+  it('requests account statistics with a Worker UUID without numeric coercion', async () => {
+    get.mockResolvedValueOnce({ data: { history: [], summary: {}, models: [] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { getStats } = await import('@/api/admin/accounts')
+
+    await getStats('account-uuid', 30, 'Asia/Shanghai')
+
+    expect(get).toHaveBeenCalledWith('/admin/accounts/account-uuid/stats', {
+      params: { days: 30, timezone: 'Asia/Shanghai' },
     })
   })
 

@@ -4,6 +4,7 @@ import { GatewayError } from '../../src/gateway/errors'
 import {
   calculateSyncImageActualCost,
   calculateSyncImageReservation,
+  calculateSyncImageStandardCost,
   resolveSyncImagePricePolicy,
   type SyncImagePricePolicy,
 } from '../../src/media/sync-pricing'
@@ -24,7 +25,9 @@ describe('synchronous image pricing', () => {
 
   it('settles each successful output at its actual decoded tier', () => {
     expect(calculateSyncImageActualCost(policy, ['1K', '4K'])).toBe(750_000)
+    expect(calculateSyncImageStandardCost(policy, ['1K', '4K'])).toBe(500_000)
     expect(calculateSyncImageActualCost(policy, [])).toBe(0)
+    expect(calculateSyncImageStandardCost(policy, [])).toBe(0)
   })
 
   it('supports explicitly free image groups and fails closed on missing prices', () => {
