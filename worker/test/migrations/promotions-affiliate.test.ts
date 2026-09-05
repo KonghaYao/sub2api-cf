@@ -10,9 +10,6 @@ describe('promotions and affiliate migration', () => {
     expect(raw.prepare(
       `SELECT version, name FROM schema_migrations WHERE version = 35`,
     ).get()).toEqual({ version: 35, name: 'affiliate_refund_debt' })
-    expect(raw.prepare(
-      `SELECT MAX(version) AS version FROM schema_migrations`,
-    ).get()).toEqual({ version: 35 })
   })
 
   it('upgrades completed and processing affiliate adjustments from schema 34 safely', () => {

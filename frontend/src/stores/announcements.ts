@@ -14,7 +14,7 @@ export const useAnnouncementStore = defineStore('announcements', () => {
   const currentPopup = ref<UserAnnouncement | null>(null)
 
   // Session-scoped dedup set — not reactive, used as plain lookup only
-  let shownPopupIds = new Set<number>()
+  let shownPopupIds = new Set<string | number>()
 
   // Getters
   const unreadCount = computed(() =>
@@ -85,7 +85,7 @@ export const useAnnouncementStore = defineStore('announcements', () => {
     }
   }
 
-  async function markAsRead(id: number) {
+  async function markAsRead(id: string | number) {
     try {
       await announcementsAPI.markRead(id)
       const ann = announcements.value.find((a) => a.id === id)

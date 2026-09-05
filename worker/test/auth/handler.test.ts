@@ -301,7 +301,11 @@ class FakeAuthRateLimitNamespace {
 function authEnv(
   database: AuthDatabase,
   rateLimit: FakeAuthRateLimitNamespace | null = new FakeAuthRateLimitNamespace(),
-  settings: { registration_enabled: boolean; turnstile_enabled: boolean } = {
+  settings: {
+    registration_enabled: boolean
+    turnstile_enabled: boolean
+    registration_email_suffix_whitelist?: string[]
+  } = {
     registration_enabled: true,
     turnstile_enabled: false,
   },
@@ -327,6 +331,35 @@ function authEnv(
 
 describe('password identity and rotating sessions', () => {
   beforeEach(() => vi.restoreAllMocks())
+
+  it('enforces exact and wildcard registration email suffixes server-side', async () => {
+    const database = new AuthDatabase()
+    const env = authEnv(database, new FakeAuthRateLimitNamespace(), {
+      registration_enabled: true,
+      turnstile_enabled: false,
+      registration_email_suffix_whitelist: ['@qq.com', '*.edu.cn'],
+    })
+    const app = createApp()
+
+    const denied = await app.request('/api/v1/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'person@example.com', password: 'correct-horse-battery-staple',
+      }),
+    }, env)
+    expect(denied.status).toBe(400)
+    await expect(denied.json()).resolves.toMatchObject({ code: 'EMAIL_SUFFIX_NOT_ALLOWED' })
+
+    const allowed = await app.request('/api/v1/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'student@cs.edu.cn', password: 'correct-horse-battery-staple',
+      }),
+    }, env)
+    expect(allowed.status).toBe(201)
+  })
 
   it('registers, persists only a password credential, and authenticates /auth/me', async () => {
     const database = new AuthDatabase()

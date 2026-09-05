@@ -4,6 +4,8 @@
  * never spread into an upstream request or a downstream response.
  */
 
+import { flattenNamespaceToolName } from './responses'
+
 const MAX_MESSAGES = 1_000
 const MAX_CONTENT_BLOCKS = 1_000
 const MAX_TOOLS = 256
@@ -336,13 +338,15 @@ export function responsesToAnthropicMessage(
           content.push({ type: 'text', text: boundedString(part.text, `response.output[${index}].content[${partIndex}].text`, MAX_TEXT_CHARS) })
         }
       }
-    } else if (item.type === 'function_call') {
+    } else if (item.type === 'function_call' || item.type === 'custom_tool_call') {
       hasToolUse = true
       content.push({
         type: 'tool_use',
         id: safeIdentifier(item.call_id, `response.output[${index}].call_id`, 'toolu'),
-        name: safeIdentifier(item.name, `response.output[${index}].name`, 'tool'),
-        input: parseArgumentsObject(item.arguments),
+        name: responsesToolName(item, `response.output[${index}]`),
+        input: item.type === 'custom_tool_call'
+          ? customToolInputObject(item.input, `response.output[${index}].input`)
+          : parseArgumentsObject(item.arguments),
       })
     }
   }
@@ -472,7 +476,10 @@ export class ResponsesToAnthropicEventCodec {
   private blockIndex = 0
   private currentBlock: 'text' | 'tool_use' | null = null
   private readonly outputBlocks = new Map<number, number>()
+  private readonly outputKinds = new Map<number, 'function' | 'custom'>()
   private readonly outputBlocksWithArgumentDeltas = new Set<number>()
+  private readonly customInputDeltas = new Map<number, string>()
+  private readonly customInputsDone = new Set<number>()
   private hasToolUse = false
   private usage: AnthropicUsage = emptyUsage()
 
@@ -494,10 +501,13 @@ export class ResponsesToAnthropicEventCodec {
       case 'response.output_text.done':
         return this.closeBlock()
       case 'response.function_call_arguments.delta':
-      case 'response.custom_tool_call_input.delta':
         return this.toolArgumentsDelta(event)
+      case 'response.custom_tool_call_input.delta':
+        return this.customToolInputDelta(event)
       case 'response.function_call_arguments.done':
         return this.toolArgumentsDone(event)
+      case 'response.custom_tool_call_input.done':
+        return this.customToolInputDone(event)
       case 'response.output_item.done':
         return this.outputItemDone(event)
       case 'response.completed':
@@ -550,6 +560,7 @@ export class ResponsesToAnthropicEventCodec {
     const outputIndex = nonNegativeIntegerOrZero(event.output_index)
     const index = this.blockIndex
     this.outputBlocks.set(outputIndex, index)
+    this.outputKinds.set(outputIndex, item.type === 'custom_tool_call' ? 'custom' : 'function')
     this.currentBlock = 'tool_use'
     this.hasToolUse = true
     events.push({
@@ -558,7 +569,7 @@ export class ResponsesToAnthropicEventCodec {
       content_block: {
         type: 'tool_use',
         id: safeIdentifier(item.call_id, 'event.item.call_id', 'toolu'),
-        name: safeIdentifier(item.name, 'event.item.name', 'tool'),
+        name: responsesToolName(item, 'event.item'),
         input: {},
       },
     })
@@ -602,6 +613,43 @@ export class ResponsesToAnthropicEventCodec {
     }]
   }
 
+  private customToolInputDelta(event: JsonObject): AnthropicSseEvent[] {
+    if (typeof event.delta !== 'string' || event.delta === '') return []
+    const outputIndex = nonNegativeIntegerOrZero(event.output_index)
+    if (this.outputKinds.get(outputIndex) !== 'custom') return []
+    const delta = boundedString(event.delta, 'event.delta', MAX_JSON_CHARS)
+    const input = (this.customInputDeltas.get(outputIndex) ?? '') + delta
+    if (input.length > MAX_JSON_CHARS) fail('event.delta', `accumulated input exceeds ${MAX_JSON_CHARS} characters`)
+    this.customInputDeltas.set(outputIndex, input)
+    return []
+  }
+
+  private customToolInputDone(event: JsonObject): AnthropicSseEvent[] {
+    const outputIndex = nonNegativeIntegerOrZero(event.output_index)
+    if (this.outputKinds.get(outputIndex) !== 'custom' || this.customInputsDone.has(outputIndex)) return []
+    const accumulated = this.customInputDeltas.get(outputIndex) ?? ''
+    const input = event.input === undefined
+      ? accumulated
+      : boundedString(event.input, 'event.input', MAX_JSON_CHARS)
+    if (accumulated !== '' && input !== accumulated) {
+      fail('event.input', 'does not match accumulated custom tool input deltas')
+    }
+    this.customInputsDone.add(outputIndex)
+    const index = this.outputBlocks.get(outputIndex)
+    if (index === undefined) fail('event.output_index', 'has no matching custom tool item')
+    return [
+      {
+        type: 'content_block_delta',
+        index,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify({ input }),
+        },
+      },
+      ...this.closeBlock(),
+    ]
+  }
+
   private toolArgumentsDone(event: JsonObject): AnthropicSseEvent[] {
     if (this.currentBlock !== 'tool_use') return []
     if (typeof event.arguments === 'string' && event.arguments !== '') {
@@ -625,7 +673,10 @@ export class ResponsesToAnthropicEventCodec {
 
   private outputItemDone(event: JsonObject): AnthropicSseEvent[] {
     const item = event.item === undefined ? undefined : objectAt(event.item, 'event.item')
-    if (item?.type === 'function_call' && this.currentBlock === 'tool_use') return this.closeBlock()
+    if (
+      (item?.type === 'function_call' || item?.type === 'custom_tool_call') &&
+      this.currentBlock === 'tool_use'
+    ) return this.closeBlock()
     return []
   }
 
@@ -1128,6 +1179,18 @@ function parseArgumentsObject(value: unknown): JsonObject {
   } catch {
     return {}
   }
+}
+
+function customToolInputObject(value: unknown, path: string): JsonObject {
+  if (value === undefined || value === null) return { input: '' }
+  return { input: boundedString(value, path, MAX_JSON_CHARS) }
+}
+
+function responsesToolName(item: JsonObject, path: string): string {
+  const name = safeIdentifier(item.name, `${path}.name`, 'tool')
+  if (item.namespace === undefined) return name
+  const namespace = safeIdentifier(item.namespace, `${path}.namespace`, 'namespace')
+  return flattenNamespaceToolName(namespace, name)
 }
 
 function safeIdentifier(value: unknown, path: string, prefix: string): string {

@@ -31,6 +31,7 @@ import {
   parseResponsesRequest,
   responsesToChatCompletionsRequest,
 } from './protocols/responses'
+import type { ResponsesToolMapping } from './protocols/responses'
 import {
   ChatToResponsesError,
   chatCompletionsToResponsesRequest,
@@ -950,6 +951,7 @@ interface ProviderDispatch {
   responseProtocol: ResponseProtocol
   transformResponse?: (value: unknown) => unknown
   includeUsage?: boolean
+  responsesToolMapping?: ResponsesToolMapping
 }
 
 type PrepareGatewayRequest = (body: Record<string, unknown>) => PreparedGatewayRequest
@@ -960,9 +962,10 @@ function prepareOpenAiRequest(
   endpoint: GatewayEndpoint,
   allowProtocolFallback = endpoint !== 'embeddings',
 ): PreparedGatewayRequest {
-  validateClientControls(body)
-  const requestedModel = requiredModel(body)
-  const stream = parseStream(body)
+  const normalizedBody = normalizeOpenAiServiceTier(body)
+  validateClientControls(normalizedBody)
+  const requestedModel = requiredModel(normalizedBody)
+  const stream = parseStream(normalizedBody)
   return {
     requestedModel,
     stream,
@@ -976,24 +979,26 @@ function prepareOpenAiRequest(
         allowProtocolFallback &&
         upstreamEndpoint === 'chat_completions'
       ) {
-        const fallbackBody = body.max_output_tokens === undefined
-          ? { ...body, max_output_tokens: model.default_max_output_tokens }
-          : body
+        const fallbackBody = normalizedBody.max_output_tokens === undefined
+          ? { ...normalizedBody, max_output_tokens: model.default_max_output_tokens }
+          : normalizedBody
+        const parsedFallback = parseResponsesRequest(fallbackBody)
         return {
           body: responsesToChatCompletionsRequest(
-            parseResponsesRequest(fallbackBody),
+            parsedFallback,
             model.upstream_name,
           ) as unknown as Record<string, unknown>,
           operation: 'chat_completions',
           responseProtocol: 'responses_from_chat',
+          responsesToolMapping: parsedFallback.tool_mapping,
         }
       }
       if (endpoint === 'chat_completions' && upstreamEndpoint === 'responses') {
-        const fallbackBody = body.max_output_tokens === undefined &&
-          body.max_completion_tokens === undefined &&
-          body.max_tokens === undefined
-          ? { ...body, max_completion_tokens: model.default_max_output_tokens }
-          : body
+        const fallbackBody = normalizedBody.max_output_tokens === undefined &&
+          normalizedBody.max_completion_tokens === undefined &&
+          normalizedBody.max_tokens === undefined
+          ? { ...normalizedBody, max_completion_tokens: model.default_max_output_tokens }
+          : normalizedBody
         return {
           body: chatCompletionsToResponsesRequest(
             fallbackBody,
@@ -1007,7 +1012,7 @@ function prepareOpenAiRequest(
           includeUsage: true,
         }
       }
-      const upstreamBody: Record<string, unknown> = { ...body, model: model.upstream_name }
+      const upstreamBody: Record<string, unknown> = { ...normalizedBody, model: model.upstream_name }
       if (
         upstreamBody.max_output_tokens === undefined &&
         upstreamBody.max_completion_tokens === undefined &&
@@ -1075,6 +1080,9 @@ async function dispatchGateway(
     )
     const providerDispatch = prepared.resolveUpstream(model, upstreamEndpoint, provider)
     const upstreamBody = providerDispatch.body
+    const serviceTier = typeof upstreamBody.service_tier === 'string'
+      ? upstreamBody.service_tier
+      : undefined
     const pricedReservationMicros = reservationForRequest(
       model,
       upstreamBody,
@@ -1166,6 +1174,7 @@ async function dispatchGateway(
         startedAt,
         admission,
         providerPlatform: provider,
+        serviceTier,
       })
     }
     if (
@@ -1195,8 +1204,10 @@ async function dispatchGateway(
         startedAt,
         admission,
         providerPlatform: provider,
+        serviceTier,
         responseProtocol: providerDispatch.responseProtocol,
         includeUsage: providerDispatch.includeUsage,
+        responsesToolMapping: providerDispatch.responsesToolMapping,
         waitUntil: optionalWaitUntil(context),
       })
     }
@@ -1219,8 +1230,14 @@ async function dispatchGateway(
       startedAt,
       admission,
       providerPlatform: provider,
+      serviceTier,
       transformResponse: providerDispatch.responseProtocol === 'responses_from_chat'
-        ? (value) => chatCompletionsResponseToResponses(value, requestedModel)
+        ? (value) => chatCompletionsResponseToResponses(
+            value,
+            requestedModel,
+            Math.floor(Date.now() / 1_000),
+            providerDispatch.responsesToolMapping,
+          )
         : providerDispatch.responseProtocol === 'chat_from_responses'
           ? (value) => responsesToChatCompletionsResponse(value, requestedModel)
         : providerDispatch.transformResponse,
@@ -1451,6 +1468,7 @@ interface FinalizeInput {
   startedAt: number
   admission: ApiKeyAdmissionLease | null
   providerPlatform: ProviderPlatform
+  serviceTier?: string
 }
 
 async function createBufferedChatFromResponsesStream(
@@ -1762,9 +1780,13 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
   private emittedBytes = 0
   private terminalValue: 'completed' | 'failed' | null = null
 
-  constructor(upstreamModel: string, private readonly publicModel: string) {
+  constructor(
+    upstreamModel: string,
+    private readonly publicModel: string,
+    toolMapping?: ResponsesToolMapping,
+  ) {
     this.accounting = new SseEventTransformer(upstreamModel, publicModel)
-    this.codec = new ChatCompletionsToResponsesEventCodec(publicModel)
+    this.codec = new ChatCompletionsToResponsesEventCodec(publicModel, undefined, toolMapping)
   }
 
   push(chunk: Uint8Array): Uint8Array[] {
@@ -2352,6 +2374,7 @@ function createStreamingResponse(input: FinalizeInput & {
   endpoint: GenerativeGatewayEndpoint
   responseProtocol: ResponseProtocol
   includeUsage?: boolean
+  responsesToolMapping?: ResponsesToolMapping
   waitUntil?: WaitUntil
 }): Response {
   const reader = input.response.body!.getReader()
@@ -2364,7 +2387,11 @@ function createStreamingResponse(input: FinalizeInput & {
         : input.responseProtocol === 'gemini'
           ? new GeminiResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
           : input.responseProtocol === 'responses_from_chat'
-            ? new ChatResponsesStreamTransformer(input.model.upstream_name, input.requestedModel)
+            ? new ChatResponsesStreamTransformer(
+                input.model.upstream_name,
+                input.requestedModel,
+                input.responsesToolMapping,
+              )
             : input.responseProtocol === 'chat_from_responses'
               ? new ResponsesChatStreamTransformer(
                 input.model.upstream_name,
@@ -2639,7 +2666,7 @@ async function settleAndProject(
       base_amount_micros: 0,
       amount_micros: 0,
     }
-    : calculateCost(input.model, usage)
+    : calculateCost(input.model, usage, input.serviceTier)
   const payload: UsageSettledPayload = {
     request_id: input.requestId,
     user_id: input.principal.user_id,
@@ -2884,6 +2911,29 @@ function parseStream(body: Record<string, unknown>): boolean {
     throw new GatewayError(400, 'invalid_stream', 'stream must be a boolean')
   }
   return body.stream
+}
+
+function normalizeOpenAiServiceTier(body: Record<string, unknown>): Record<string, unknown> {
+  const value = body.service_tier
+  if (value === undefined) return body
+  const normalized = { ...body }
+  if (value === null) {
+    delete normalized.service_tier
+    return normalized
+  }
+  if (typeof value !== 'string') {
+    throw new GatewayError(400, 'invalid_service_tier', 'service_tier must be a supported string')
+  }
+  const tier = value.trim().toLowerCase()
+  if (!['auto', 'default', 'flex', 'priority', 'fast', 'scale'].includes(tier)) {
+    throw new GatewayError(
+      400,
+      'invalid_service_tier',
+      'service_tier must be one of auto, default, flex, priority, fast, or scale',
+    )
+  }
+  normalized.service_tier = tier === 'fast' ? 'priority' : tier
+  return normalized
 }
 
 async function fetchWithHeaderTimeout(

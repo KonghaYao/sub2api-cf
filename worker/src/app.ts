@@ -9,7 +9,9 @@ import {
   requirePublicAuthStartCaptcha,
 } from './auth/handler'
 import {
+  bindEmailIdentity,
   confirmEmailVerification,
+  requestEmailIdentityBindingCode,
   requestEmailVerification,
   requestPasswordReset,
   requestRegistrationEmailVerification,
@@ -213,6 +215,16 @@ import {
   updateCurrentUser,
 } from './user/profile'
 import {
+  createAdminAnnouncement,
+  deleteAdminAnnouncement,
+  getAdminAnnouncement,
+  listAdminAnnouncementReadStatus,
+  listAdminAnnouncements,
+  listMyAnnouncements,
+  markMyAnnouncementRead,
+  updateAdminAnnouncement,
+} from './user/announcements'
+import {
   removeNotificationEmail,
   sendNotificationEmailVerificationCode,
   toggleNotificationEmail,
@@ -308,6 +320,7 @@ function defaultPublicSettings() {
   return {
     site_name: 'Sub2API',
     registration_enabled: false,
+    registration_email_suffix_whitelist: [],
     email_verification_enabled: false,
     email_verify_enabled: false,
     turnstile_enabled: false,
@@ -409,9 +422,13 @@ export function createApp() {
   registerOAuthIdentityRoutes(app)
 
   app.get('/api/v1/user/profile', getUserProfile)
+  app.get('/api/v1/announcements', listMyAnnouncements)
+  app.post('/api/v1/announcements/:id/read', markMyAnnouncementRead)
   app.get('/api/v1/user/platform-quotas', getMyPlatformQuotas)
   app.put('/api/v1/user', updateCurrentUser)
   app.put('/api/v1/user/password', changeUserPassword)
+  app.post('/api/v1/user/account-bindings/email/send-code', requestEmailIdentityBindingCode)
+  app.post('/api/v1/user/account-bindings/email', bindEmailIdentity)
   app.get('/api/v1/user/avatar/:id', getUserAvatar)
   app.post('/api/v1/user/notify-email/send-code', sendNotificationEmailVerificationCode)
   app.post('/api/v1/user/notify-email/verify', verifyNotificationEmail)
@@ -449,6 +466,12 @@ export function createApp() {
   )
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  app.get('/api/v1/admin/announcements', listAdminAnnouncements)
+  app.post('/api/v1/admin/announcements', createAdminAnnouncement)
+  app.get('/api/v1/admin/announcements/:id', getAdminAnnouncement)
+  app.put('/api/v1/admin/announcements/:id', updateAdminAnnouncement)
+  app.delete('/api/v1/admin/announcements/:id', deleteAdminAnnouncement)
+  app.get('/api/v1/admin/announcements/:id/read-status', listAdminAnnouncementReadStatus)
   app.get('/api/v1/admin/commercial/config', getAdminCommercialConfig)
   app.put('/api/v1/admin/commercial/config', updateAdminCommercialConfig)
   app.get('/api/v1/admin/oauth-providers', listAdminOAuthProviders)

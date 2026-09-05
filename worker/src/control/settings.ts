@@ -20,6 +20,7 @@ import {
   requireIdempotencyKey,
 } from './http'
 import { passkeyDeploymentConfiguration } from '../auth/passkey-config'
+import { normalizeRegistrationEmailSuffixWhitelist } from '../auth/email-policy'
 
 type ControlBindings = { Bindings: Env }
 
@@ -28,6 +29,7 @@ export const PUBLIC_SETTINGS_SCHEMA_VERSION = 1 as const
 export interface PublicSystemSettings {
   site_name: string
   registration_enabled: boolean
+  registration_email_suffix_whitelist: string[]
   email_verification_enabled: boolean
   turnstile_enabled: boolean
   turnstile_site_key: string
@@ -57,6 +59,7 @@ export interface AdminSystemSettings {
 interface PublicSettingsPatch {
   site_name?: string
   registration_enabled?: boolean
+  registration_email_suffix_whitelist?: string[]
   email_verification_enabled?: boolean
   turnstile_enabled?: boolean
   turnstile_site_key?: string
@@ -357,6 +360,8 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
   if (
     typeof settings.site_name !== 'string' ||
     typeof settings.registration_enabled !== 'boolean' ||
+    (settings.registration_email_suffix_whitelist !== undefined &&
+      !Array.isArray(settings.registration_email_suffix_whitelist)) ||
     typeof settings.email_verification_enabled !== 'boolean' ||
     typeof settings.turnstile_enabled !== 'boolean' ||
     typeof settings.turnstile_site_key !== 'string' ||
@@ -368,9 +373,18 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     (settings.invitation_code_enabled !== undefined && typeof settings.invitation_code_enabled !== 'boolean') ||
     (settings.affiliate_enabled !== undefined && typeof settings.affiliate_enabled !== 'boolean')
   ) return null
+  let registrationEmailSuffixWhitelist: string[]
+  try {
+    registrationEmailSuffixWhitelist = settings.registration_email_suffix_whitelist === undefined
+      ? []
+      : normalizeRegistrationEmailSuffixWhitelist(settings.registration_email_suffix_whitelist)
+  } catch {
+    return null
+  }
   return {
     site_name: settings.site_name,
     registration_enabled: settings.registration_enabled,
+    registration_email_suffix_whitelist: registrationEmailSuffixWhitelist,
     email_verification_enabled: settings.email_verification_enabled,
     turnstile_enabled: settings.turnstile_enabled,
     turnstile_site_key: settings.turnstile_site_key,
@@ -419,6 +433,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     rejectUnknownKeys(value, [
       'site_name',
       'registration_enabled',
+      'registration_email_suffix_whitelist',
       'email_verification_enabled',
       'turnstile_enabled',
       'turnstile_site_key',
@@ -436,6 +451,11 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (value.registration_enabled !== undefined) {
       publicPatch.registration_enabled = settingBoolean(value.registration_enabled, 'registration_enabled')
+    }
+    if (value.registration_email_suffix_whitelist !== undefined) {
+      publicPatch.registration_email_suffix_whitelist = normalizeRegistrationEmailSuffixWhitelist(
+        value.registration_email_suffix_whitelist,
+      )
     }
     if (value.email_verification_enabled !== undefined) {
       publicPatch.email_verification_enabled = settingBoolean(

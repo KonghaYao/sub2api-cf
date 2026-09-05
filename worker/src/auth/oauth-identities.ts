@@ -1095,7 +1095,7 @@ async function registerIdentityLogin(
       auditInsert(context.env, user.id, prepared.sessionId, 'auth.identity.register', config.provider, now),
     ])
   } catch (error) {
-    if (/UNIQUE constraint failed: (?:users\.email|auth_identities)/i.test(errorMessage(error))) {
+    if (/UNIQUE constraint failed: (?:users\.(?:email|canonical_email_inbox)|auth_identities|index 'uq_users_canonical_email_inbox')/i.test(errorMessage(error))) {
       throw new GatewayError(
         409,
         'oauth_account_binding_required',
@@ -1206,8 +1206,11 @@ async function identityProjection(env: Env, user: UserRow): Promise<{
     provider: 'email',
     bound: hasPassword,
     bound_count: hasPassword ? 1 : 0,
-    can_bind: false,
+    can_bind: !hasPassword,
     can_unbind: false,
+    verified_at: user.email_verified_at_ms === null
+      ? null
+      : new Date(user.email_verified_at_ms).toISOString(),
   }
   for (const provider of providers) {
     const selected = identities.filter((identity) => identity.provider === provider)

@@ -101,12 +101,12 @@ export async function processAdminRefund(
     const input = parseAdminRefundInput(body)
     const order = await requireOrder(context.env, orderId)
     const amountMicros = exactMajorMicros(input.amount, 'amount')
-    gatewayRefundMicros(order, amountMicros)
     const requestKeyHash = await sha256Hex(
       `payment-refund-admin-idempotency:v1\0${order.id}\0${idempotencyKey}`,
     )
 
     let refund = await findRefundByRequest(context.env, order.id, requestKeyHash)
+    let expectedClaimRefundId: string | null = null
     if (refund !== null) {
       assertRefundReplay(refund, order, amountMicros, input.reason, input, true)
       refund = await reconcilePendingRefundRollback(context.env, order, refund)
@@ -119,18 +119,19 @@ export async function processAdminRefund(
     } else {
       const existing = await findOrderRefund(context.env, order.id)
       if (existing !== null) {
-        assertRefundReplay(existing, order, amountMicros, input.reason, input, false)
         const reconciled = await reconcilePendingRefundRollback(context.env, order, existing)
         const replay = completedRefundResult(reconciled)
         if (replay !== null) {
-          await bestEffortAffiliateRefundClawback(context.env, reconciled.id)
-          return controlSuccess(replay)
+          expectedClaimRefundId = reconciled.id
+        } else {
+          assertRefundReplay(reconciled, order, amountMicros, input.reason, input, false)
+          if (reconciled.status === 'pending') return controlSuccess(pendingRefundResult())
+          refund = reconciled
         }
-        if (reconciled.status === 'pending') return controlSuccess(pendingRefundResult())
-        refund = reconciled
       }
     }
 
+    gatewayRefundMicros(order, amountMicros)
     validateAdminRefundOrder(order, amountMicros, input.deductBalance)
     const provider = await requireRefundProvider(context.env, order)
     if (!provider.credential.refund_enabled) {
@@ -146,6 +147,7 @@ export async function processAdminRefund(
 
     refund = await claimAdminRefund(context.env, order, {
       refund,
+      expectedClaimRefundId,
       requestKeyHash,
       amountMicros,
       reason: input.reason,
@@ -156,13 +158,16 @@ export async function processAdminRefund(
     const stripe = new StripeClient({ secretKey: provider.credential.api_key })
     let providerRefund: StripeRefund
     try {
+      const amountMinor = microsToMinorUnits(
+        gatewayRefundMicros(order, refund.amount_micros),
+        refund.currency,
+      )
       providerRefund = await stripe.createRefund({
         orderId: order.id,
+        refundId: refund.id,
+        idempotencyKey: stripeRefundIdempotencyKey(order, refund, amountMinor),
         paymentIntentId: order.payment_intent_id,
-        amountMinor: microsToMinorUnits(
-          gatewayRefundMicros(order, refund.amount_micros),
-          refund.currency,
-        ),
+        amountMinor,
       })
       validateProviderRefund(providerRefund, order, refund)
     } catch (error) {
@@ -246,6 +251,7 @@ export async function queryAdminRefund(
       }
       activeRefund = await claimAdminRefund(context.env, order, {
         refund,
+        expectedClaimRefundId: refund.id,
         requestKeyHash: refund.request_key_hash,
         amountMicros: refund.amount_micros,
         reason: refund.reason,
@@ -254,13 +260,16 @@ export async function queryAdminRefund(
       activeOrder = await requireOrder(context.env, order.id)
       activeRefund = await ensureRefundClawbackApplied(context.env, activeOrder, activeRefund)
       try {
+        const amountMinor = microsToMinorUnits(
+          gatewayRefundMicros(activeOrder, activeRefund.amount_micros),
+          activeRefund.currency,
+        )
         providerRefund = await stripe.createRefund({
           orderId: activeOrder.id,
+          refundId: activeRefund.id,
+          idempotencyKey: stripeRefundIdempotencyKey(activeOrder, activeRefund, amountMinor),
           paymentIntentId: order.payment_intent_id,
-          amountMinor: microsToMinorUnits(
-            gatewayRefundMicros(activeOrder, activeRefund.amount_micros),
-            activeRefund.currency,
-          ),
+          amountMinor,
         })
         validateProviderRefund(providerRefund, activeOrder, activeRefund)
       } catch (error) {
@@ -320,6 +329,9 @@ interface RefundRow {
   clawback_resource_id: string | null
   clawback_amount_micros: number
   clawback_days: number
+  clawback_duration_ms: number
+  clawback_term_refunded_before_ms: number
+  provider_idempotency_key_version: number
   clawback_forced: number
   clawback_previous_status: 'active' | 'suspended' | 'revoked' | 'expired' | null
   clawback_previous_expires_at_ms: number | null
@@ -335,7 +347,9 @@ const REFUND_COLUMNS = `id, order_id, request_key_hash, provider_key, provider_r
   amount_micros, settled_amount_micros, currency, status, reason,
   requested_by_user_id, last_error, created_at_ms, updated_at_ms, completed_at_ms,
   clawback_kind, clawback_status, clawback_resource_id, clawback_amount_micros,
-  clawback_days, clawback_forced, clawback_previous_status,
+  clawback_days, clawback_duration_ms, clawback_forced, clawback_previous_status,
+  clawback_term_refunded_before_ms,
+  provider_idempotency_key_version,
   clawback_previous_expires_at_ms, clawback_applied_control_version,
   clawback_applied_at_ms, clawback_rolled_back_at_ms,
   clawback_recovery_attempts, clawback_recovery_after_ms, clawback_last_error`
@@ -391,6 +405,7 @@ interface AdminRefundInput {
 
 interface ClaimRefundInput {
   refund: RefundRow | null
+  expectedClaimRefundId: string | null
   requestKeyHash: string
   amountMicros: number
   reason: string
@@ -411,7 +426,17 @@ interface ClawbackPlan {
   resourceId: string | null
   amountMicros: number
   days: number
+  durationMs: number
+  termRefundedBeforeMs: number
   forced: boolean
+}
+
+interface PaymentSubscriptionTermRow {
+  subscription_id: string
+  user_id: string
+  group_id: string
+  granted_duration_ms: number
+  refunded_duration_ms: number
 }
 
 interface SubscriptionClawbackRow {
@@ -465,15 +490,26 @@ function gatewayRefundMicros(order: PaymentOrderRow, principalMicros: number): n
   ) {
     throw new GatewayError(409, 'invalid_payment_amount', 'Payment order amount is invalid')
   }
-  if (principalMicros > order.amount_micros) {
+  const cumulativePrincipalMicros = order.refunded_amount_micros + principalMicros
+  if (
+    !Number.isSafeInteger(cumulativePrincipalMicros) ||
+    cumulativePrincipalMicros > order.amount_micros
+  ) {
     throw new GatewayError(400, 'refund_amount_too_large', 'Refund amount exceeds the order amount')
   }
   try {
     const paidMinor = microsToMinorUnits(order.paid_amount_micros, order.currency)
-    const numerator = BigInt(paidMinor) * BigInt(principalMicros)
-    const providerMinor = Number(
-      (numerator + BigInt(order.amount_micros) / 2n) / BigInt(order.amount_micros),
+    const denominator = BigInt(order.amount_micros)
+    const providerTargetMinor = (principalTargetMicros: number): number => (
+      principalTargetMicros === order.amount_micros
+        ? paidMinor
+        : Number(
+          (BigInt(paidMinor) * BigInt(principalTargetMicros) + denominator / 2n) /
+            denominator,
+        )
     )
+    const providerMinor = providerTargetMinor(cumulativePrincipalMicros) -
+      providerTargetMinor(order.refunded_amount_micros)
     if (!Number.isSafeInteger(providerMinor) || providerMinor <= 0) {
       throw new Error('refund amount is below the provider minimum unit')
     }
@@ -485,6 +521,24 @@ function gatewayRefundMicros(order: PaymentOrderRow, principalMicros: number): n
       error instanceof Error ? error.message : 'Refund amount is invalid',
     )
   }
+}
+
+function stripeRefundIdempotencyKey(
+  order: PaymentOrderRow,
+  refund: RefundRow,
+  amountMinor: number,
+): string {
+  if (refund.provider_idempotency_key_version === 1) return `re-${refund.id}`
+  if (refund.provider_idempotency_key_version === 0) {
+    // Refund rows created before migration 0036 may already have reached Stripe
+    // with the legacy key. Preserve it during recovery to avoid double refunds.
+    return `re-${order.id}-${amountMinor}`
+  }
+  throw new GatewayError(
+    409,
+    'refund_idempotency_version_invalid',
+    'Payment refund idempotency state is invalid',
+  )
 }
 
 async function findRefundByRequest(
@@ -501,8 +555,10 @@ async function findRefundByRequest(
 async function findOrderRefund(env: Env, orderId: string): Promise<RefundRow | null> {
   return env.DB.prepare(
     `SELECT ${REFUND_COLUMNS} FROM payment_refunds WHERE order_id = ?
-      ORDER BY created_at_ms DESC, id DESC LIMIT 1`,
-  ).bind(orderId).first<RefundRow>()
+      ORDER BY CASE WHEN id = (
+        SELECT refund_id FROM payment_refund_claims WHERE order_id = ?
+      ) THEN 0 ELSE 1 END, created_at_ms DESC, id DESC LIMIT 1`,
+  ).bind(orderId, orderId).first<RefundRow>()
 }
 
 function assertRefundReplay(
@@ -536,7 +592,7 @@ function completedRefundResult(refund: RefundRow): Record<string, unknown> | nul
       : 0,
     subscription_days_deducted:
       refund.clawback_kind === 'subscription' && refund.clawback_status === 'applied'
-        ? refund.clawback_days
+        ? refundClawbackDurationMs(refund) / DAY_MS
         : 0,
   }
 }
@@ -550,14 +606,12 @@ function validateAdminRefundOrder(
   principalMicros: number,
   deductBalance: boolean,
 ): void {
-  if (!['COMPLETED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_FAILED'].includes(order.status)) {
+  if (!['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_FAILED'].includes(order.status)) {
     throw new GatewayError(409, 'invalid_refund_status', `Order status ${order.status} cannot be refunded`)
   }
-  if (principalMicros > order.amount_micros) {
+  const remaining = order.amount_micros - order.refunded_amount_micros
+  if (!Number.isSafeInteger(remaining) || remaining < 0 || principalMicros > remaining) {
     throw new GatewayError(400, 'refund_amount_too_large', 'Refund amount exceeds the order amount')
-  }
-  if (order.refunded_amount_micros !== 0) {
-    throw new GatewayError(409, 'additional_partial_refund_unsupported', 'Only one refund per order is supported')
   }
   if (deductBalance && order.order_type === 'balance') throw refundClawbackUnavailable()
 }
@@ -580,7 +634,8 @@ async function prepareRefundClawback(
     return {
       clawback: {
         kind: 'none', status: 'not_required', resourceId: null,
-        amountMicros: 0, days: 0, forced: input.force,
+        amountMicros: 0, days: 0, durationMs: 0, termRefundedBeforeMs: 0,
+        forced: input.force,
       },
     }
   }
@@ -594,21 +649,48 @@ async function prepareRefundClawback(
       'The payment order has no valid subscription entitlement snapshot',
     )
   }
+  const term = await env.DB.prepare(
+    `SELECT subscription_id, user_id, group_id, granted_duration_ms, refunded_duration_ms
+       FROM payment_subscription_terms WHERE order_id = ?`,
+  ).bind(order.id).first<PaymentSubscriptionTermRow>()
+  if (term !== null && (
+    term.user_id !== order.user_id || term.group_id !== groupId ||
+    (order.subscription_id !== null && term.subscription_id !== order.subscription_id)
+  )) {
+    throw new GatewayError(
+      409,
+      'refund_entitlement_term_mismatch',
+      'The payment order subscription term does not match its entitlement',
+    )
+  }
+  const durationMs = term === null
+    ? days * DAY_MS
+    : await cumulativeRefundDurationMs(env, order, term, amountMicros)
+  const termRefundedBeforeMs = term?.refunded_duration_ms ?? 0
+  const compatibilityDays = Math.max(1, Math.ceil(durationMs / DAY_MS))
   const now = Date.now()
-  const subscription = await env.DB.prepare(
-    `SELECT ${SUBSCRIPTION_CLAWBACK_COLUMNS}
-       FROM user_subscriptions
-      WHERE user_id = ? AND group_id = ? AND status = 'active'
-        AND starts_at_ms <= ? AND expires_at_ms > ?
-      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, expires_at_ms DESC, id ASC
-      LIMIT 1`,
-  ).bind(order.user_id, groupId, now, now, order.subscription_id ?? '').first<SubscriptionClawbackRow>()
+  const subscription = term === null
+    ? await env.DB.prepare(
+      `SELECT ${SUBSCRIPTION_CLAWBACK_COLUMNS}
+         FROM user_subscriptions
+        WHERE user_id = ? AND group_id = ? AND status = 'active'
+          AND starts_at_ms <= ? AND expires_at_ms > ?
+        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, expires_at_ms DESC, id ASC
+        LIMIT 1`,
+    ).bind(order.user_id, groupId, now, now, order.subscription_id ?? '').first<SubscriptionClawbackRow>()
+    : await env.DB.prepare(
+      `SELECT ${SUBSCRIPTION_CLAWBACK_COLUMNS}
+         FROM user_subscriptions
+        WHERE id = ? AND user_id = ? AND group_id = ? AND status = 'active'
+          AND starts_at_ms <= ? AND expires_at_ms > ?`,
+    ).bind(term.subscription_id, order.user_id, groupId, now, now).first<SubscriptionClawbackRow>()
   if (subscription === null) {
     if (!input.force) {
       return {
         clawback: {
           kind: 'subscription', status: 'skipped', resourceId: null,
-          amountMicros: 0, days, forced: false,
+          amountMicros: 0, days: compatibilityDays, durationMs, termRefundedBeforeMs,
+          forced: false,
         },
         earlyResult: {
           success: false,
@@ -620,14 +702,16 @@ async function prepareRefundClawback(
     return {
       clawback: {
         kind: 'subscription', status: 'skipped', resourceId: null,
-        amountMicros: 0, days, forced: true,
+        amountMicros: 0, days: compatibilityDays, durationMs, termRefundedBeforeMs,
+        forced: true,
       },
     }
   }
   return {
     clawback: {
       kind: 'subscription', status: 'pending', resourceId: subscription.id,
-      amountMicros, days, forced: input.force,
+      amountMicros, days: compatibilityDays, durationMs, termRefundedBeforeMs,
+      forced: input.force,
     },
   }
 }
@@ -639,8 +723,70 @@ function clawbackPlanFromRefund(refund: RefundRow): ClawbackPlan {
     resourceId: refund.clawback_resource_id,
     amountMicros: refund.clawback_amount_micros,
     days: refund.clawback_days,
+    durationMs: refundClawbackDurationMs(refund),
+    termRefundedBeforeMs: refund.clawback_term_refunded_before_ms,
     forced: refund.clawback_forced === 1,
   }
+}
+
+async function cumulativeRefundDurationMs(
+  env: Env,
+  order: PaymentOrderRow,
+  term: PaymentSubscriptionTermRow,
+  refundAmountMicros: number,
+): Promise<number> {
+  if (
+    !Number.isSafeInteger(term.granted_duration_ms) || term.granted_duration_ms <= 0 ||
+    !Number.isSafeInteger(term.refunded_duration_ms) || term.refunded_duration_ms < 0 ||
+    term.refunded_duration_ms > term.granted_duration_ms ||
+    !Number.isSafeInteger(order.amount_micros) || order.amount_micros <= 0
+  ) {
+    throw new GatewayError(409, 'refund_entitlement_term_invalid', 'The payment subscription term is invalid')
+  }
+  const previous = await env.DB.prepare(
+    `SELECT COALESCE(SUM(amount_micros), 0) AS amount_micros
+       FROM payment_refunds
+      WHERE order_id = ? AND status IN ('partially_refunded', 'refunded')
+        AND clawback_kind = 'subscription' AND clawback_status = 'applied'`,
+  ).bind(order.id).first<{ amount_micros: number }>()
+  const previousAmountMicros = previous?.amount_micros ?? 0
+  const cumulativeAmountMicros = previousAmountMicros + refundAmountMicros
+  if (
+    !Number.isSafeInteger(previousAmountMicros) || previousAmountMicros < 0 ||
+    !Number.isSafeInteger(cumulativeAmountMicros) || cumulativeAmountMicros > order.amount_micros
+  ) {
+    throw new GatewayError(409, 'refund_entitlement_term_invalid', 'The payment subscription refund history is invalid')
+  }
+  const denominator = BigInt(order.amount_micros)
+  const previousTarget = Number(
+    (BigInt(term.granted_duration_ms) * BigInt(previousAmountMicros) + denominator / 2n) /
+      denominator,
+  )
+  const cumulativeTarget = cumulativeAmountMicros === order.amount_micros
+    ? term.granted_duration_ms
+    : Number(
+      (BigInt(term.granted_duration_ms) * BigInt(cumulativeAmountMicros) + denominator / 2n) /
+        denominator,
+    )
+  const durationMs = cumulativeTarget - previousTarget
+  if (
+    previousTarget !== term.refunded_duration_ms ||
+    !Number.isSafeInteger(durationMs) || durationMs <= 0 ||
+    cumulativeTarget > term.granted_duration_ms
+  ) {
+    throw new GatewayError(
+      409,
+      'refund_entitlement_term_exceeded',
+      'The refund exceeds the remaining payment subscription term',
+    )
+  }
+  return durationMs
+}
+
+function refundClawbackDurationMs(refund: RefundRow): number {
+  return refund.clawback_duration_ms > 0
+    ? refund.clawback_duration_ms
+    : refund.clawback_days * DAY_MS
 }
 
 const SUBSCRIPTION_CLAWBACK_COLUMNS = `id, user_id, group_id, status, starts_at_ms, expires_at_ms,
@@ -659,7 +805,8 @@ async function ensureRefundClawbackApplied(
       refund.clawback_status === 'skipped') return refund
   if (refund.clawback_kind === 'balance') throw refundClawbackUnavailable()
   const resourceId = refund.clawback_resource_id
-  if (resourceId === null || refund.clawback_days <= 0) {
+  const durationMs = refundClawbackDurationMs(refund)
+  if (resourceId === null || durationMs <= 0) {
     if (refund.clawback_forced === 1) return markRefundClawbackSkipped(env, refund)
     throw new GatewayError(409, 'refund_clawback_target_missing', 'Refund clawback target is missing')
   }
@@ -696,7 +843,6 @@ async function ensureRefundClawbackApplied(
     )
   }
 
-  const durationMs = refund.clawback_days * DAY_MS
   const revoke = subscription.expires_at_ms - durationMs <= Math.max(now, subscription.starts_at_ms)
   const nextStatus = revoke ? 'revoked' : 'active'
   const nextExpiresAt = revoke ? subscription.expires_at_ms : subscription.expires_at_ms - durationMs
@@ -734,6 +880,21 @@ async function ensureRefundClawbackApplied(
                AND refund.clawback_resource_id = user_subscriptions.id
                AND payment_order.user_id = user_subscriptions.user_id
                AND payment_order.plan_group_id_snapshot = user_subscriptions.group_id
+               AND (
+                 NOT EXISTS (
+                   SELECT 1 FROM payment_subscription_terms term
+                    WHERE term.order_id = payment_order.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM payment_subscription_terms term
+                    WHERE term.order_id = payment_order.id
+                      AND term.subscription_id = user_subscriptions.id
+                      AND term.refunded_duration_ms = refund.clawback_term_refunded_before_ms
+                      AND refund.clawback_duration_ms > 0
+                      AND refund.clawback_term_refunded_before_ms +
+                          refund.clawback_duration_ms <= term.granted_duration_ms
+                 )
+               )
           )`,
     ).bind(
       nextStatus,
@@ -761,6 +922,7 @@ async function ensureRefundClawbackApplied(
         refund_id: refund.id,
         subscription_id: subscription.id,
         days: refund.clawback_days,
+        duration_ms: durationMs,
         previous_status: subscription.status,
         previous_expires_at_ms: subscription.expires_at_ms,
         status: nextStatus,
@@ -788,6 +950,22 @@ async function ensureRefundClawbackApplied(
       now,
     ),
     env.DB.prepare(
+      `UPDATE payment_subscription_terms
+          SET refunded_duration_ms = refunded_duration_ms + ?, updated_at_ms = ?
+        WHERE order_id = ? AND subscription_id = ?
+          AND refunded_duration_ms = ?
+          AND refunded_duration_ms + ? <= granted_duration_ms
+          AND EXISTS (SELECT 1 FROM payment_events WHERE id = ?)`,
+    ).bind(
+      durationMs,
+      now,
+      order.id,
+      subscription.id,
+      refund.clawback_term_refunded_before_ms,
+      durationMs,
+      eventId,
+    ),
+    env.DB.prepare(
       `UPDATE payment_refunds
           SET clawback_status = 'applied', clawback_previous_status = ?,
               clawback_previous_expires_at_ms = ?, clawback_applied_control_version = ?,
@@ -800,6 +978,14 @@ async function ensureRefundClawbackApplied(
           AND EXISTS (
             SELECT 1 FROM user_subscriptions
              WHERE id = ? AND control_version = ? AND status = ? AND expires_at_ms = ?
+          )
+          AND (
+            NOT EXISTS (SELECT 1 FROM payment_subscription_terms WHERE order_id = ?)
+            OR EXISTS (
+              SELECT 1 FROM payment_subscription_terms
+               WHERE order_id = ? AND subscription_id = ?
+                 AND refunded_duration_ms = ? + ?
+            )
           )`,
     ).bind(
       subscription.status,
@@ -813,6 +999,11 @@ async function ensureRefundClawbackApplied(
       nextControlVersion,
       nextStatus,
       nextExpiresAt,
+      order.id,
+      order.id,
+      subscription.id,
+      refund.clawback_term_refunded_before_ms,
+      durationMs,
     ),
   ])
   const applied = await requireRefund(env, refund.id)
@@ -843,7 +1034,10 @@ async function rollbackRefundClawback(
     return false
   }
   const subscription = await findSubscriptionClawback(env, refund.clawback_resource_id)
-  if (subscription === null || !subscriptionStillHasClawback(subscription, refund)) {
+  const rollbackTarget = subscription === null
+    ? null
+    : await resolveRefundRollbackTarget(env, subscription, refund)
+  if (subscription === null || rollbackTarget === null) {
     await deferRefundClawbackRollback(
       env,
       refund,
@@ -853,6 +1047,7 @@ async function rollbackRefundClawback(
     )
     return false
   }
+  const durationMs = refundClawbackDurationMs(refund)
   const now = Date.now()
   const nextControlVersion = subscription.control_version + 1
   const eventId = await deterministicUuid(
@@ -866,8 +1061,8 @@ async function rollbackRefundClawback(
   const requestId = `payment-refund-clawback-rollback:${refund.id}:${nextControlVersion}`
   const configuration = subscriptionConfiguration(
     subscription,
-    refund.clawback_previous_status,
-    refund.clawback_previous_expires_at_ms,
+    rollbackTarget.status,
+    rollbackTarget.expiresAtMs,
     nextControlVersion,
     now,
   )
@@ -882,10 +1077,24 @@ async function rollbackRefundClawback(
                WHERE id = ? AND clawback_status IN ('applied', 'rollback_pending')
                  AND status IN ('processing', 'pending', 'failed', 'cancelled')
                  AND clawback_applied_control_version = ?
+                 AND (
+                   NOT EXISTS (
+                     SELECT 1 FROM payment_subscription_terms term
+                      WHERE term.order_id = payment_refunds.order_id
+                   )
+                   OR EXISTS (
+                     SELECT 1 FROM payment_subscription_terms term
+                     WHERE term.order_id = payment_refunds.order_id
+                        AND term.subscription_id = user_subscriptions.id
+                        AND term.refunded_duration_ms =
+                          payment_refunds.clawback_term_refunded_before_ms +
+                          payment_refunds.clawback_duration_ms
+                   )
+                 )
             )`,
       ).bind(
-        refund.clawback_previous_status,
-        refund.clawback_previous_expires_at_ms,
+        rollbackTarget.status,
+        rollbackTarget.expiresAtMs,
         nextControlVersion,
         now,
         subscription.id,
@@ -911,8 +1120,8 @@ async function rollbackRefundClawback(
         JSON.stringify({
           refund_id: refund.id,
           subscription_id: subscription.id,
-          restored_status: refund.clawback_previous_status,
-          restored_expires_at_ms: refund.clawback_previous_expires_at_ms,
+          restored_status: rollbackTarget.status,
+          restored_expires_at_ms: rollbackTarget.expiresAtMs,
           control_version: nextControlVersion,
         }),
         now,
@@ -920,8 +1129,8 @@ async function rollbackRefundClawback(
         order.id,
         subscription.id,
         nextControlVersion,
-        refund.clawback_previous_status,
-        refund.clawback_previous_expires_at_ms,
+        rollbackTarget.status,
+        rollbackTarget.expiresAtMs,
       ),
       subscriptionSyncStatement(
         env,
@@ -930,10 +1139,25 @@ async function rollbackRefundClawback(
         subscription.id,
         nextControlVersion,
         configuration,
-        refund.clawback_previous_status,
-        refund.clawback_previous_expires_at_ms,
+        rollbackTarget.status,
+        rollbackTarget.expiresAtMs,
         eventId,
         now,
+      ),
+      env.DB.prepare(
+        `UPDATE payment_subscription_terms
+            SET refunded_duration_ms = refunded_duration_ms - ?, updated_at_ms = ?
+          WHERE order_id = ? AND subscription_id = ?
+            AND refunded_duration_ms = ? + ?
+            AND EXISTS (SELECT 1 FROM payment_events WHERE id = ?)`,
+      ).bind(
+        durationMs,
+        now,
+        order.id,
+        subscription.id,
+        refund.clawback_term_refunded_before_ms,
+        durationMs,
+        eventId,
       ),
       env.DB.prepare(
         `UPDATE payment_refunds
@@ -943,8 +1167,24 @@ async function rollbackRefundClawback(
                 updated_at_ms = ?
           WHERE id = ? AND clawback_status IN ('applied', 'rollback_pending')
             AND status IN ('processing', 'pending', 'failed', 'cancelled')
-            AND EXISTS (SELECT 1 FROM subscription_state_sync WHERE id = ?)`,
-      ).bind(now, now, refund.id, intentId),
+            AND EXISTS (SELECT 1 FROM subscription_state_sync WHERE id = ?)
+            AND (
+              NOT EXISTS (SELECT 1 FROM payment_subscription_terms WHERE order_id = ?)
+              OR EXISTS (
+                SELECT 1 FROM payment_subscription_terms
+                 WHERE order_id = ? AND subscription_id = ? AND refunded_duration_ms = ?
+              )
+            )`,
+      ).bind(
+        now,
+        now,
+        refund.id,
+        intentId,
+        order.id,
+        order.id,
+        subscription.id,
+        refund.clawback_term_refunded_before_ms,
+      ),
     ])
     const rolledBack = await requireRefund(env, refund.id)
     if (rolledBack.status === 'refunded' || rolledBack.status === 'partially_refunded') return true
@@ -977,6 +1217,64 @@ async function rollbackRefundClawback(
   }
 }
 
+async function resolveRefundRollbackTarget(
+  env: Env,
+  subscription: SubscriptionClawbackRow,
+  refund: RefundRow,
+): Promise<{ status: SubscriptionClawbackRow['status']; expiresAtMs: number } | null> {
+  if (
+    refund.clawback_previous_status === null ||
+    refund.clawback_previous_expires_at_ms === null ||
+    refund.clawback_applied_at_ms === null ||
+    refund.clawback_applied_control_version === null
+  ) return null
+  if (subscriptionStillHasClawback(subscription, refund)) {
+    return {
+      status: refund.clawback_previous_status,
+      expiresAtMs: refund.clawback_previous_expires_at_ms,
+    }
+  }
+
+  // A paid renewal may commit while the provider call is in flight.  The term
+  // ledger proves that the only expiry delta is the sum of later immutable
+  // order contributions, so rollback can commute by adding this order's term
+  // back to the current tail instead of restoring a stale expiry snapshot.
+  if (
+    refund.clawback_previous_status !== 'active' || subscription.status !== 'active' ||
+    subscription.control_version <= refund.clawback_applied_control_version
+  ) return null
+  const durationMs = refundClawbackDurationMs(refund)
+  const baseExpiresAtMs = refund.clawback_previous_expires_at_ms - durationMs
+  if (baseExpiresAtMs <= Math.max(refund.clawback_applied_at_ms, subscription.starts_at_ms)) return null
+  const term = await env.DB.prepare(
+    `SELECT refunded_duration_ms
+       FROM payment_subscription_terms
+      WHERE order_id = ? AND subscription_id = ?`,
+  ).bind(refund.order_id, subscription.id).first<{ refunded_duration_ms: number }>()
+  if (
+    term?.refunded_duration_ms !==
+      refund.clawback_term_refunded_before_ms + durationMs
+  ) return null
+  const later = await env.DB.prepare(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(granted_duration_ms - refunded_duration_ms), 0) AS duration_ms
+       FROM payment_subscription_terms
+      WHERE subscription_id = ? AND order_id <> ? AND term_kind = 'extended'
+        AND created_at_ms >= ?`,
+  ).bind(
+    subscription.id,
+    refund.order_id,
+    refund.clawback_applied_at_ms,
+  ).first<{ count: number; duration_ms: number }>()
+  if (
+    later === null || later.count < 1 || !Number.isSafeInteger(later.duration_ms) ||
+    subscription.expires_at_ms !== baseExpiresAtMs + later.duration_ms
+  ) return null
+  const expiresAtMs = subscription.expires_at_ms + durationMs
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs > MAX_SQLITE_TIMESTAMP_MS) return null
+  return { status: 'active', expiresAtMs }
+}
+
 function subscriptionStillHasClawback(
   subscription: SubscriptionClawbackRow,
   refund: RefundRow,
@@ -986,7 +1284,7 @@ function subscriptionStillHasClawback(
     refund.clawback_applied_control_version === null ||
     subscription.control_version < refund.clawback_applied_control_version
   ) return false
-  const durationMs = refund.clawback_days * DAY_MS
+  const durationMs = refundClawbackDurationMs(refund)
   const revoked = refund.clawback_previous_expires_at_ms - durationMs <= Math.max(
     refund.clawback_applied_at_ms,
     subscription.starts_at_ms,
@@ -1196,7 +1494,7 @@ async function claimAdminRefund(
     `${order.id}\0${input.requestKeyHash}`,
   )
   const validPair = input.refund === null
-    ? order.status === 'COMPLETED'
+    ? order.status === 'COMPLETED' || order.status === 'PARTIALLY_REFUNDED'
     : input.refund.status === 'requested'
       ? order.status === 'REFUND_REQUESTED'
       : ['failed', 'cancelled'].includes(input.refund.status) && order.status === 'REFUND_FAILED'
@@ -1204,9 +1502,18 @@ async function claimAdminRefund(
   const eventId = await deterministicUuid('payment-event-refund-processing:v1', refundId)
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
-      `INSERT OR IGNORE INTO payment_refund_claims(order_id, refund_id, claimed_at_ms)
-       VALUES (?, ?, ?)`,
-    ).bind(order.id, refundId, now),
+      `INSERT INTO payment_refund_claims(order_id, refund_id, claimed_at_ms)
+       VALUES (?, ?, ?)
+       ON CONFLICT(order_id) DO UPDATE SET
+         refund_id = excluded.refund_id,
+         claimed_at_ms = excluded.claimed_at_ms
+       WHERE payment_refund_claims.refund_id = ?`,
+    ).bind(
+      order.id,
+      refundId,
+      now,
+      input.refund?.id ?? input.expectedClaimRefundId ?? '',
+    ),
     env.DB.prepare(
       `UPDATE payment_orders
           SET status = 'REFUNDING', refund_requested_at_ms = COALESCE(refund_requested_at_ms, ?),
@@ -1224,9 +1531,10 @@ async function claimAdminRefund(
          id, order_id, request_key_hash, provider_key, amount_micros,
          currency, status, reason, clawback_kind, clawback_status,
          clawback_resource_id, clawback_amount_micros, clawback_days,
-         clawback_forced, created_at_ms, updated_at_ms
+         clawback_duration_ms, clawback_term_refunded_before_ms,
+         provider_idempotency_key_version, clawback_forced, created_at_ms, updated_at_ms
        )
-       SELECT ?, id, ?, provider_key_snapshot, ?, currency, 'processing', ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, id, ?, provider_key_snapshot, ?, currency, 'processing', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?
          FROM payment_orders
         WHERE id = ? AND status = 'REFUNDING' AND version = ?
           AND EXISTS (
@@ -1243,6 +1551,8 @@ async function claimAdminRefund(
       input.clawback.resourceId,
       input.clawback.amountMicros,
       input.clawback.days,
+      input.clawback.durationMs,
+      input.clawback.termRefundedBeforeMs,
       Number(input.clawback.forced),
       now,
       now,
@@ -1289,6 +1599,7 @@ async function claimAdminRefund(
       clawback_status: input.clawback.status,
       clawback_resource_id: input.clawback.resourceId,
       clawback_days: input.clawback.days,
+      clawback_duration_ms: input.clawback.durationMs,
       force: input.clawback.forced,
     }),
     now, now, order.id, order.version + 1, refundId, refundId))
@@ -1344,7 +1655,10 @@ async function finalizeRefundSuccess(
           AND EXISTS (
             SELECT 1 FROM payment_refunds
              WHERE id = ? AND status IN ('processing', 'pending', 'failed')
-               AND (clawback_kind <> 'subscription' OR clawback_status = 'applied')
+               AND (
+                 clawback_kind <> 'subscription' OR clawback_status = 'applied'
+                 OR (clawback_status = 'skipped' AND clawback_forced = 1)
+               )
           )`,
     ).bind(orderStatus, total, now, now, order.id, order.version, refund.id),
     env.DB.prepare(
@@ -1352,7 +1666,10 @@ async function finalizeRefundSuccess(
           SET provider_refund_id = ?, status = 'refunded', settled_amount_micros = amount_micros,
               last_error = NULL, completed_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND status IN ('processing', 'pending', 'failed')
-          AND (clawback_kind <> 'subscription' OR clawback_status = 'applied')
+          AND (
+            clawback_kind <> 'subscription' OR clawback_status = 'applied'
+            OR (clawback_status = 'skipped' AND clawback_forced = 1)
+          )
           AND EXISTS (
             SELECT 1 FROM payment_orders
              WHERE id = ? AND status = ? AND version = ? AND refunded_amount_micros = ?

@@ -73,6 +73,20 @@ export interface ResponsesFunctionTool {
   description?: string
   parameters: JsonObject
   strict: boolean
+  source_type?: 'custom' | 'namespace'
+  namespace?: string
+  source_name?: string
+}
+
+export interface ResponsesNamespaceToolName {
+  namespace: string
+  name: string
+}
+
+export interface ResponsesToolMapping {
+  custom_tools: Record<string, true>
+  function_tools: Record<string, true>
+  namespace_tools: Record<string, ResponsesNamespaceToolName>
 }
 
 export interface ParsedResponsesRequest {
@@ -89,6 +103,7 @@ export interface ParsedResponsesRequest {
   reasoning?: { effort: string; summary?: string }
   text?: { format?: JsonObject }
   service_tier?: string
+  tool_mapping?: ResponsesToolMapping
 }
 
 export interface ChatCompletionsRequest {
@@ -108,7 +123,7 @@ export interface ChatCompletionsRequest {
 }
 
 export interface ResponsesOutputItem extends JsonObject {
-  type: 'reasoning' | 'message' | 'function_call'
+  type: 'reasoning' | 'message' | 'function_call' | 'custom_tool_call'
   id: string
   status: 'completed'
   role?: 'assistant'
@@ -120,6 +135,8 @@ export interface ResponsesOutputItem extends JsonObject {
   call_id?: string
   name?: string
   arguments?: string
+  input?: string
+  namespace?: string
 }
 
 export interface ConvertedResponsesResponse extends JsonObject {
@@ -174,10 +191,14 @@ interface ParsedChatChunk {
 }
 
 interface StreamTool {
-  id: string
-  itemId: string
-  name: string
+  id?: string
+  itemId?: string
+  upstreamName?: string
+  name?: string
+  namespace?: string
+  kind?: 'function' | 'custom' | 'namespace'
   arguments: string
+  announced: boolean
   outputIndex: number
 }
 
@@ -245,7 +266,12 @@ export function parseResponsesRequest(value: unknown): ParsedResponsesRequest {
     ? undefined
     : finiteNumberInRange(root.top_p, '$.top_p', 0, 1)
   const stream = root.stream === undefined ? false : booleanAt(root.stream, '$.stream')
-  const tools = root.tools === undefined ? undefined : parseTools(root.tools, '$.tools')
+  const declaredTools = root.tools === undefined
+    ? []
+    : arrayAt(root.tools, '$.tools', MAX_TOOLS)
+  const effectiveTools = [...declaredTools, ...additionalResponsesTools(root.input, '$.input')]
+  const tools = effectiveTools.length === 0 ? undefined : parseTools(effectiveTools, '$.tools')
+  const toolMapping = tools === undefined ? undefined : responsesToolMapping(tools)
   const toolChoice = root.tool_choice === undefined
     ? undefined
     : parseToolChoice(root.tool_choice, '$.tool_choice')
@@ -258,7 +284,7 @@ export function parseResponsesRequest(value: unknown): ParsedResponsesRequest {
   const text = root.text === undefined ? undefined : parseTextConfig(root.text, '$.text')
   const serviceTier = root.service_tier === undefined
     ? undefined
-    : enumString(root.service_tier, '$.service_tier', ['auto', 'default', 'flex', 'priority'])
+    : parseServiceTier(root.service_tier, '$.service_tier')
 
   if (typeof toolChoice === 'object') {
     if (tools === undefined || !tools.some((tool) => tool.name === toolChoice.name)) {
@@ -283,6 +309,7 @@ export function parseResponsesRequest(value: unknown): ParsedResponsesRequest {
     ...(reasoning === undefined ? {} : { reasoning }),
     ...(text === undefined ? {} : { text }),
     ...(serviceTier === undefined ? {} : { service_tier: serviceTier }),
+    ...(toolMapping === undefined ? {} : { tool_mapping: toolMapping }),
   }
 }
 
@@ -334,6 +361,7 @@ export function chatCompletionsResponseToResponses(
   value: unknown,
   publicModel: string,
   nowSeconds = Math.floor(Date.now() / 1_000),
+  toolMapping?: ResponsesToolMapping,
 ): ConvertedResponsesResponse {
   const response = objectAt(value, '$')
   exactKeys(response, [
@@ -363,7 +391,7 @@ export function chatCompletionsResponseToResponses(
       status = 'incomplete'
       incompleteReason = finishReason === 'length' ? 'max_output_tokens' : 'content_filter'
     }
-    output.push(...chatMessageToResponsesOutput(choice.message, '$.choices[0].message'))
+    output.push(...chatMessageToResponsesOutput(choice.message, '$.choices[0].message', toolMapping))
   }
   if (output.length === 0) output.push(responsesMessageOutput(''))
 
@@ -422,7 +450,11 @@ export class ChatCompletionsToResponsesEventCodec {
 
   private readonly tools = new Map<number, StreamTool>()
 
-  constructor(publicModel: string, nowSeconds = Math.floor(Date.now() / 1_000)) {
+  constructor(
+    publicModel: string,
+    nowSeconds = Math.floor(Date.now() / 1_000),
+    private readonly toolMapping?: ResponsesToolMapping,
+  ) {
     this.model = nonEmptyString(publicModel, 'publicModel', 256)
     this.createdAt = nonNegativeInteger(nowSeconds, 'nowSeconds')
   }
@@ -479,40 +511,43 @@ export class ChatCompletionsToResponsesEventCodec {
         events.push(...this.closeReasoningItem())
         let tool = this.tools.get(delta.index)
         if (tool === undefined) {
-          if (delta.id === undefined) fail('$.choices[].delta.tool_calls[].id', 'is required in the first tool delta')
-          if (delta.name === undefined) fail('$.choices[].delta.tool_calls[].function.name', 'is required in the first tool delta')
           tool = {
             id: delta.id,
-            itemId: generatedId('fc'),
-            name: delta.name,
+            upstreamName: delta.name,
             arguments: '',
+            announced: false,
             outputIndex: this.allocateOutputIndex(),
           }
           this.tools.set(delta.index, tool)
-          events.push(this.event('response.output_item.added', {
-            output_index: tool.outputIndex,
-            item: {
-              type: 'function_call',
-              id: tool.itemId,
-              call_id: tool.id,
-              name: tool.name,
-              arguments: '',
-              status: 'in_progress',
-            },
-          }))
         } else {
+          if (delta.id !== undefined && tool.id !== undefined && delta.id !== tool.id) {
+            fail('$.choices[].delta.tool_calls[].id', `changed from '${tool.id}' to '${delta.id}'`)
+          }
+          if (
+            delta.name !== undefined &&
+            tool.upstreamName !== undefined &&
+            delta.name !== tool.upstreamName
+          ) {
+            fail(
+              '$.choices[].delta.tool_calls[].function.name',
+              `changed from '${tool.upstreamName}' to '${delta.name}'`,
+            )
+          }
           if (delta.id !== undefined) tool.id = delta.id
-          if (delta.name !== undefined) tool.name = delta.name
+          if (delta.name !== undefined) tool.upstreamName = delta.name
         }
         if (delta.arguments !== undefined && delta.arguments !== '') {
           tool.arguments += delta.arguments
-          events.push(this.event('response.function_call_arguments.delta', {
-            output_index: tool.outputIndex,
-            item_id: tool.itemId,
-            call_id: tool.id,
-            name: tool.name,
-            delta: delta.arguments,
-          }))
+        }
+        if (!tool.announced && tool.id !== undefined && tool.upstreamName !== undefined) {
+          events.push(...this.announceTool(tool))
+        } else if (
+          tool.announced &&
+          tool.kind !== 'custom' &&
+          delta.arguments !== undefined &&
+          delta.arguments !== ''
+        ) {
+          events.push(this.functionArgumentsDelta(tool, delta.arguments))
         }
       }
       if (choice.finishReason !== undefined && choice.finishReason !== null) {
@@ -525,8 +560,11 @@ export class ChatCompletionsToResponsesEventCodec {
   finish(): ResponsesSseEvent[] {
     if (this.terminalSent) return []
     for (const tool of this.tools.values()) {
+      if (!tool.announced || tool.id === undefined || tool.upstreamName === undefined) {
+        fail('stream.tool_calls', 'tool call ended before its id and name were received')
+      }
       const args = tool.arguments.trim() === '' ? '{}' : tool.arguments
-      if (!isJsonObjectString(args)) {
+      if (tool.kind !== 'custom' && !isJsonObjectString(args)) {
         fail('stream.tool_calls', `tool call '${tool.id}' arguments contain invalid JSON`)
       }
     }
@@ -737,12 +775,38 @@ export class ChatCompletionsToResponsesEventCodec {
     const events: ResponsesSseEvent[] = []
     for (const [, tool] of [...this.tools.entries()].sort(([left], [right]) => left - right)) {
       const args = tool.arguments.trim() === '' ? '{}' : tool.arguments
+      if (tool.kind === 'custom') {
+        const input = customToolInput(tool.arguments)
+        if (input !== '') {
+          events.push(this.event('response.custom_tool_call_input.delta', {
+            output_index: tool.outputIndex,
+            item_id: tool.itemId!,
+            call_id: tool.id!,
+            name: tool.name!,
+            delta: input,
+          }))
+        }
+        events.push(
+          this.event('response.custom_tool_call_input.done', {
+            output_index: tool.outputIndex,
+            item_id: tool.itemId!,
+            call_id: tool.id!,
+            name: tool.name!,
+            input,
+          }),
+          this.event('response.output_item.done', {
+            output_index: tool.outputIndex,
+            item: this.toolOutput(tool),
+          }),
+        )
+        continue
+      }
       events.push(
         this.event('response.function_call_arguments.done', {
           output_index: tool.outputIndex,
-          item_id: tool.itemId,
-          call_id: tool.id,
-          name: tool.name,
+          item_id: tool.itemId!,
+          call_id: tool.id!,
+          name: tool.name!,
           arguments: args,
         }),
         this.event('response.output_item.done', {
@@ -789,14 +853,70 @@ export class ChatCompletionsToResponsesEventCodec {
   }
 
   private toolOutput(tool: StreamTool): JsonObject {
+    if (tool.kind === 'custom') {
+      return {
+        type: 'custom_tool_call',
+        id: tool.itemId!,
+        call_id: tool.id!,
+        name: tool.name!,
+        input: customToolInput(tool.arguments),
+        status: 'completed',
+      }
+    }
     return {
       type: 'function_call',
-      id: tool.itemId,
-      call_id: tool.id,
-      name: tool.name,
+      id: tool.itemId!,
+      call_id: tool.id!,
+      name: tool.name!,
+      ...(tool.kind === 'namespace' ? { namespace: tool.namespace! } : {}),
       arguments: tool.arguments.trim() === '' ? '{}' : tool.arguments,
       status: 'completed',
     }
+  }
+
+  private announceTool(tool: StreamTool): ResponsesSseEvent[] {
+    const identity = restoredToolIdentity(tool.upstreamName!, this.toolMapping)
+    tool.kind = identity.type
+    tool.name = identity.name
+    if (identity.type === 'namespace') tool.namespace = identity.namespace
+    tool.itemId = generatedId(identity.type === 'custom' ? 'ctc' : 'fc')
+    tool.announced = true
+    const item = identity.type === 'custom'
+      ? {
+          type: 'custom_tool_call',
+          id: tool.itemId,
+          call_id: tool.id,
+          name: tool.name,
+          input: '',
+          status: 'in_progress',
+        }
+      : {
+          type: 'function_call',
+          id: tool.itemId,
+          call_id: tool.id,
+          name: tool.name,
+          ...(identity.type === 'namespace' ? { namespace: identity.namespace } : {}),
+          arguments: '',
+          status: 'in_progress',
+        }
+    const events = [this.event('response.output_item.added', {
+      output_index: tool.outputIndex,
+      item,
+    })]
+    if (identity.type !== 'custom' && tool.arguments !== '') {
+      events.push(this.functionArgumentsDelta(tool, tool.arguments))
+    }
+    return events
+  }
+
+  private functionArgumentsDelta(tool: StreamTool, delta: string): ResponsesSseEvent {
+    return this.event('response.function_call_arguments.delta', {
+      output_index: tool.outputIndex,
+      item_id: tool.itemId!,
+      call_id: tool.id!,
+      name: tool.name!,
+      delta,
+    })
   }
 
   private responseShape(
@@ -836,7 +956,11 @@ export function formatResponsesSseEvent(event: ResponsesSseEvent): string {
   return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
 }
 
-function chatMessageToResponsesOutput(value: unknown, path: string): ResponsesOutputItem[] {
+function chatMessageToResponsesOutput(
+  value: unknown,
+  path: string,
+  toolMapping?: ResponsesToolMapping,
+): ResponsesOutputItem[] {
   const message = objectAt(value, path)
   exactKeys(message, [
     'role', 'content', 'reasoning_content', 'reasoning', 'tool_calls', 'refusal', 'annotations',
@@ -853,7 +977,7 @@ function chatMessageToResponsesOutput(value: unknown, path: string): ResponsesOu
       : stringAt(message.reasoning, `${path}.reasoning`, MAX_TEXT_CHARS)
   const toolCalls = message.tool_calls === undefined
     ? []
-    : parseChatToolCalls(message.tool_calls, `${path}.tool_calls`)
+    : parseChatToolCalls(message.tool_calls, `${path}.tool_calls`, toolMapping)
 
   const output: ResponsesOutputItem[] = []
   if (reasoning !== '') {
@@ -874,7 +998,11 @@ function chatMessageToResponsesOutput(value: unknown, path: string): ResponsesOu
   return output
 }
 
-function parseChatToolCalls(value: unknown, path: string): ResponsesOutputItem[] {
+function parseChatToolCalls(
+  value: unknown,
+  path: string,
+  toolMapping?: ResponsesToolMapping,
+): ResponsesOutputItem[] {
   const output: ResponsesOutputItem[] = []
   for (const [index, raw] of arrayAt(value, path, MAX_TOOLS).entries()) {
     const itemPath = `${path}[${index}]`
@@ -886,12 +1014,25 @@ function parseChatToolCalls(value: unknown, path: string): ResponsesOutputItem[]
     const callId = nonEmptyString(call.id, `${itemPath}.id`, 256)
     const name = validName(fn.name, `${itemPath}.function.name`)
     const argumentsValue = stringAt(fn.arguments, `${itemPath}.function.arguments`, MAX_JSON_CHARS)
+    const identity = restoredToolIdentity(name, toolMapping)
+    if (identity.type === 'custom') {
+      output.push({
+        type: 'custom_tool_call',
+        id: generatedId('ctc'),
+        call_id: callId,
+        name: identity.name,
+        input: customToolInput(argumentsValue),
+        status: 'completed',
+      })
+      continue
+    }
     if (!isJsonObjectString(argumentsValue)) continue
     output.push({
       type: 'function_call',
       id: generatedId('fc'),
       call_id: callId,
-      name,
+      name: identity.name,
+      ...(identity.type === 'namespace' ? { namespace: identity.namespace } : {}),
       arguments: argumentsValue,
       status: 'completed',
     })
@@ -1064,6 +1205,17 @@ function generatedId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`
 }
 
+export function flattenNamespaceToolName(namespace: string, name: string): string {
+  const joined = `${namespace}__${name}`
+  if (joined.length <= 64) return joined
+  let hash = 0x811c9dc5
+  for (let index = 0; index < joined.length; index += 1) {
+    hash ^= joined.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${joined.slice(0, 54)}__${hash.toString(16).padStart(8, '0')}`
+}
+
 function responsesInputToChatMessages(
   instructions: string | undefined,
   input: string | ResponsesInputItem[],
@@ -1173,14 +1325,26 @@ function normalizeChatToolHistory(messages: ChatMessage[]): ChatMessage[] {
 function parseResponsesInput(value: unknown, path: string): string | ResponsesInputItem[] {
   if (typeof value === 'string') return stringAt(value, path, MAX_TEXT_CHARS)
   return arrayAt(value, path, MAX_INPUT_ITEMS)
-    .map((item, index) => parseInputItem(item, `${path}[${index}]`))
+    .flatMap((item, index) => {
+      if (typeof item === 'string') {
+        return [{
+          type: 'message' as const,
+          role: 'user' as const,
+          content: stringAt(item, `${path}[${index}]`, MAX_TEXT_CHARS),
+        }]
+      }
+      const parsed = parseInputItem(item, `${path}[${index}]`)
+      return parsed === null ? [] : [parsed]
+    })
 }
 
-function parseInputItem(value: unknown, path: string): ResponsesInputItem {
+function parseInputItem(value: unknown, path: string): ResponsesInputItem | null {
   const item = objectAt(value, path)
   const type = item.type === undefined && item.role !== undefined
     ? 'message'
     : nonEmptyString(item.type, `${path}.type`, 64)
+
+  if (type === 'additional_tools') return null
 
   if (type === 'message') {
     exactKeys(item, ['type', 'role', 'content'], path)
@@ -1210,13 +1374,17 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem {
     }
   }
   if (type === 'function_call') {
-    exactKeys(item, ['type', 'id', 'call_id', 'name', 'arguments', 'status'], path)
+    exactKeys(item, ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'status'], path)
     const argumentsValue = stringAt(item.arguments, `${path}.arguments`, MAX_JSON_CHARS)
     requireJsonObjectString(argumentsValue, `${path}.arguments`)
+    const namespace = item.namespace === undefined
+      ? undefined
+      : validName(item.namespace, `${path}.namespace`)
+    const name = validName(item.name, `${path}.name`)
     return {
       type,
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
-      name: validName(item.name, `${path}.name`),
+      name: namespace === undefined ? name : flattenNamespaceToolName(namespace, name),
       arguments: argumentsValue,
     }
   }
@@ -1224,6 +1392,22 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem {
     exactKeys(item, ['type', 'id', 'call_id', 'output', 'status'], path)
     return {
       type,
+      call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
+      output: toolOutputText(item.output, `${path}.output`),
+    }
+  }
+  if (type === 'custom_tool_call') {
+    const input = stringAt(item.input, `${path}.input`, MAX_TEXT_CHARS)
+    return {
+      type: 'function_call',
+      call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
+      name: validName(item.name, `${path}.name`),
+      arguments: JSON.stringify({ input }),
+    }
+  }
+  if (type === 'custom_tool_call_output') {
+    return {
+      type: 'function_call_output',
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
       output: toolOutputText(item.output, `${path}.output`),
     }
@@ -1241,6 +1425,21 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem {
   fail(`${path}.type`, `unsupported input item type '${type}'`)
 }
 
+function additionalResponsesTools(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) return []
+  const tools: unknown[] = []
+  for (const [index, raw] of value.entries()) {
+    if (!isObject(raw) || raw.type !== 'additional_tools') continue
+    const itemPath = `${path}[${index}]`
+    const additional = arrayAt(raw.tools, `${itemPath}.tools`, MAX_TOOLS)
+    tools.push(...additional)
+    if (tools.length > MAX_TOOLS) {
+      fail(`${itemPath}.tools`, `effective tools must contain at most ${MAX_TOOLS} items`)
+    }
+  }
+  return tools
+}
+
 function parseMessageContent(value: unknown, path: string): string | ResponsesTextPart[] {
   if (typeof value === 'string') return stringAt(value, path, MAX_TEXT_CHARS)
   return arrayAt(value, path, MAX_CONTENT_PARTS).map((part, index) => {
@@ -1252,23 +1451,161 @@ function parseMessageContent(value: unknown, path: string): string | ResponsesTe
 }
 
 function parseTools(value: unknown, path: string): ResponsesFunctionTool[] {
-  return arrayAt(value, path, MAX_TOOLS).map((raw, index) => {
-    const itemPath = `${path}[${index}]`
-    const tool = objectAt(raw, itemPath)
-    exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict'], itemPath)
-    if (tool.type !== 'function') fail(`${itemPath}.type`, 'only function tools are supported by this bridge')
-    const parameters = objectAt(tool.parameters ?? {}, `${itemPath}.parameters`)
-    assertJsonSize(parameters, `${itemPath}.parameters`)
-    return {
-      type: 'function' as const,
-      name: validName(tool.name, `${itemPath}.name`),
-      ...(tool.description === undefined
-        ? {}
-        : { description: stringAt(tool.description, `${itemPath}.description`, 16_384) }),
-      parameters,
-      strict: tool.strict === undefined ? false : booleanAt(tool.strict, `${itemPath}.strict`),
+  const parsed: ResponsesFunctionTool[] = []
+  const owners = new Map<string, string>()
+  const append = (tool: ResponsesFunctionTool, owner: string, itemPath: string): void => {
+    const existing = owners.get(tool.name)
+    if (existing !== undefined) {
+      if (existing === owner && owner.startsWith('namespace:')) return
+      fail(itemPath, `executable tool name '${tool.name}' cannot be disambiguated`)
     }
-  })
+    owners.set(tool.name, owner)
+    parsed.push(tool)
+  }
+  for (const [index, raw] of arrayAt(value, path, MAX_TOOLS).entries()) {
+    const itemPath = `${path}[${index}]`
+    if (typeof raw === 'string') {
+      const tool = customTool(raw, undefined, itemPath)
+      append(tool, `custom:${tool.name}:${index}`, itemPath)
+      continue
+    }
+    const tool = objectAt(raw, itemPath)
+    if (tool.type === 'custom') {
+      const parsedTool = customTool(tool.name, tool.description, itemPath)
+      append(parsedTool, `custom:${parsedTool.name}:${index}`, itemPath)
+      continue
+    }
+    if (tool.type === 'namespace') {
+      const namespace = validName(tool.name, `${itemPath}.name`)
+      const children = arrayAt(tool.tools ?? tool.children, `${itemPath}.tools`, MAX_TOOLS)
+      for (const [childIndex, rawChild] of children.entries()) {
+        const childPath = `${itemPath}.tools[${childIndex}]`
+        const child = objectAt(rawChild, childPath)
+        if (child.type !== 'function') continue
+        const parsedChild = parseFunctionTool(child, childPath)
+        const flattened = {
+          ...parsedChild,
+          name: flattenNamespaceToolName(namespace, parsedChild.name),
+          source_type: 'namespace',
+          namespace,
+          source_name: parsedChild.name,
+        } satisfies ResponsesFunctionTool
+        append(flattened, `namespace:${namespace}/${parsedChild.name}`, childPath)
+      }
+      continue
+    }
+    if (tool.type !== 'function') {
+      fail(`${itemPath}.type`, 'only function, custom, and namespace tools are supported by this bridge')
+    }
+    const parsedTool = parseFunctionTool(tool, itemPath)
+    append(parsedTool, `function:${parsedTool.name}:${index}`, itemPath)
+  }
+  if (parsed.length > MAX_TOOLS) fail(path, `must contain at most ${MAX_TOOLS} executable tools`)
+  return parsed
+}
+
+function responsesToolMapping(tools: ResponsesFunctionTool[]): ResponsesToolMapping | undefined {
+  const mapping: ResponsesToolMapping = {
+    custom_tools: {},
+    function_tools: {},
+    namespace_tools: {},
+  }
+  for (const tool of tools) {
+    if (tool.source_type === 'custom') {
+      mapping.custom_tools[tool.name] = true
+    } else if (tool.source_type === 'namespace' && tool.namespace !== undefined) {
+      if (tool.source_name === undefined) fail('$.tools', `namespace mapping for '${tool.name}' is invalid`)
+      mapping.namespace_tools[tool.name] = {
+        namespace: tool.namespace,
+        name: tool.source_name,
+      }
+    } else {
+      mapping.function_tools[tool.name] = true
+    }
+  }
+  return Object.keys(mapping.custom_tools).length === 0 &&
+    Object.keys(mapping.function_tools).length === 0 &&
+    Object.keys(mapping.namespace_tools).length === 0
+    ? undefined
+    : mapping
+}
+
+function restoredToolIdentity(
+  name: string,
+  mapping: ResponsesToolMapping | undefined,
+):
+  | { type: 'function'; name: string }
+  | { type: 'custom'; name: string }
+  | { type: 'namespace'; namespace: string; name: string } {
+  if (mapping === undefined || mapping.function_tools[name]) return { type: 'function', name }
+  const namespaced = mapping.namespace_tools[name]
+  if (namespaced !== undefined) return { type: 'namespace', ...namespaced }
+  if (mapping.custom_tools[name]) return { type: 'custom', name }
+
+  let customAlias: string | undefined
+  const namespaces = new Set(Object.values(mapping.namespace_tools).map((tool) => tool.namespace))
+  for (const customName of Object.keys(mapping.custom_tools)) {
+    for (const namespace of namespaces) {
+      if (flattenNamespaceToolName(namespace, customName) !== name) continue
+      if (customAlias !== undefined && customAlias !== customName) return { type: 'function', name }
+      customAlias = customName
+    }
+  }
+  return customAlias === undefined
+    ? { type: 'function', name }
+    : { type: 'custom', name: customAlias }
+}
+
+function customToolInput(argumentsValue: string): string {
+  if (argumentsValue === '') return ''
+  try {
+    const decoded = JSON.parse(argumentsValue) as unknown
+    if (isObject(decoded)) {
+      if (typeof decoded.input === 'string') return decoded.input
+      if (Object.keys(decoded).length === 0) return ''
+    }
+  } catch {
+    // A freeform custom tool input need not be valid JSON.
+  }
+  return argumentsValue
+}
+
+function parseFunctionTool(tool: JsonObject, path: string): ResponsesFunctionTool {
+  const parameters = objectAt(tool.parameters ?? {}, `${path}.parameters`)
+  assertJsonSize(parameters, `${path}.parameters`)
+  return {
+    type: 'function',
+    name: validName(tool.name, `${path}.name`),
+    ...(tool.description === undefined
+      ? {}
+      : { description: stringAt(tool.description, `${path}.description`, 16_384) }),
+    parameters,
+    strict: tool.strict === undefined ? false : booleanAt(tool.strict, `${path}.strict`),
+  }
+}
+
+function customTool(nameValue: unknown, descriptionValue: unknown, path: string): ResponsesFunctionTool {
+  const description = descriptionValue === undefined
+    ? undefined
+    : stringAt(descriptionValue, `${path}.description`, 16_384)
+  return {
+    type: 'function',
+    name: validName(nameValue, `${path}.name`),
+    ...(description === undefined ? {} : { description }),
+    parameters: {
+      type: 'object',
+      properties: {
+        input: {
+          type: 'string',
+          description: 'The raw input for this tool, passed through verbatim.',
+        },
+      },
+      required: ['input'],
+      additionalProperties: false,
+    },
+    strict: false,
+    source_type: 'custom',
+  }
 }
 
 function parseToolChoice(
@@ -1277,9 +1614,22 @@ function parseToolChoice(
 ): ParsedResponsesRequest['tool_choice'] {
   if (typeof value === 'string') return enumString(value, path, ['auto', 'none', 'required'])
   const choice = objectAt(value, path)
-  exactKeys(choice, ['type', 'name'], path)
-  if (choice.type !== 'function') fail(`${path}.type`, 'must be function')
-  return { type: 'function', name: validName(choice.name, `${path}.name`) }
+  exactKeys(choice, ['type', 'name', 'namespace'], path)
+  if (choice.type === 'namespace') {
+    validName(choice.name, `${path}.name`)
+    return 'auto'
+  }
+  if (choice.type !== 'function' && choice.type !== 'custom') {
+    fail(`${path}.type`, 'must be function, custom, or namespace')
+  }
+  const name = validName(choice.name, `${path}.name`)
+  const namespace = choice.namespace === undefined
+    ? undefined
+    : validName(choice.namespace, `${path}.namespace`)
+  return {
+    type: 'function',
+    name: namespace === undefined ? name : flattenNamespaceToolName(namespace, name),
+  }
 }
 
 function parseReasoning(value: unknown, path: string): { effort: string; summary?: string } {
@@ -1453,4 +1803,14 @@ function exactKeys(value: JsonObject, keys: readonly string[], path: string): vo
 
 function fail(path: string, message: string): never {
   throw new ResponsesBridgeError(path, message)
+}
+
+function parseServiceTier(value: unknown, path: string): string | undefined {
+  if (value === null) return undefined
+  if (typeof value !== 'string') fail(path, 'must be a supported string')
+  const tier = value.trim().toLowerCase()
+  if (!['auto', 'default', 'flex', 'priority', 'fast', 'scale'].includes(tier)) {
+    fail(path, 'must be one of auto, default, flex, priority, fast, or scale')
+  }
+  return tier === 'fast' ? 'priority' : tier
 }

@@ -371,7 +371,7 @@ function closeDetail() {
   selectedAnnouncement.value = null
 }
 
-async function markAsRead(id: number) {
+async function markAsRead(id: string | number) {
   try {
     await announcementStore.markAsRead(id)
   } catch (err: any) {
@@ -379,7 +379,7 @@ async function markAsRead(id: number) {
   }
 }
 
-async function markAsReadAndClose(id: number) {
+async function markAsReadAndClose(id: string | number) {
   await markAsRead(id)
   appStore.showSuccess(t('announcements.markedAsRead'))
   closeDetail()

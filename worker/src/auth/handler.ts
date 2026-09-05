@@ -45,6 +45,7 @@ import {
   prepareCommercialRegistration,
 } from '../commercial/registration'
 import { initialPlatformQuotaStatements } from '../user/platform-quotas'
+import { requireRegistrationEmailSuffixAllowed } from './email-policy'
 
 type AuthBindings = { Bindings: Env }
 
@@ -54,6 +55,7 @@ const MAX_USER_AGENT_LENGTH = 512
 
 interface PublicAuthSettings {
   registration_enabled?: boolean
+  registration_email_suffix_whitelist?: string[]
   email_verification_enabled?: boolean
   turnstile_enabled?: boolean
 }
@@ -112,6 +114,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     }
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
+    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
     const password = requirePassword(body.password)
     validateNewPassword(password)
     const rateLimitSubject = await checkAuthRateLimit(
@@ -206,7 +209,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       )
       await context.env.DB.batch(statements)
     } catch (error) {
-      if (/UNIQUE constraint failed: users\.email/i.test(errorMessage(error))) {
+      if (/UNIQUE constraint failed: (?:users\.(?:email|canonical_email_inbox)|index 'uq_users_canonical_email_inbox')/i.test(errorMessage(error))) {
         await recordAuthRateLimitFailure(context.env, rateLimitSubject)
         throw new GatewayError(409, 'email_already_registered', 'Email is already registered')
       }
@@ -984,6 +987,7 @@ function authPayload(user: UserRow, issued: IssuedSession): Record<string, unkno
 }
 
 export function publicUser(user: UserRow): Record<string, unknown> {
+  const hasPassword = user.password_credential !== null
   return {
     id: user.id,
     username: user.display_name || user.email.slice(0, user.email.indexOf('@')),
@@ -998,8 +1002,12 @@ export function publicUser(user: UserRow): Record<string, unknown> {
     balance_notify_enabled: false,
     balance_notify_threshold: null,
     balance_notify_extra_emails: [],
-    email_bound: true,
-    auth_bindings: { email: { bound: true, verified_at: toIso(user.email_verified_at_ms) } },
+    has_password: hasPassword,
+    password_binding_required: !hasPassword,
+    email_bound: hasPassword,
+    auth_bindings: {
+      email: { bound: hasPassword, verified_at: toIso(user.email_verified_at_ms) },
+    },
     last_active_at: toIso(user.last_login_at_ms),
     created_at: new Date(user.created_at_ms).toISOString(),
     updated_at: new Date(user.updated_at_ms).toISOString(),

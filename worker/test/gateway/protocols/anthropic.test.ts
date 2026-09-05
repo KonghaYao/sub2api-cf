@@ -174,6 +174,69 @@ describe('Anthropic Messages request codec', () => {
 })
 
 describe('Responses SSE to Anthropic Messages codec', () => {
+  it('wraps custom input as valid Anthropic tool JSON and flattens namespace names', () => {
+    const codec = new ResponsesToAnthropicEventCodec('claude-public')
+    const events = [
+      ...codec.push({ type: 'response.created', response: { id: 'resp_tools' } }),
+      ...codec.push({
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'custom_tool_call', call_id: 'call_custom', name: 'shell' },
+      }),
+      ...codec.push({
+        type: 'response.custom_tool_call_input.delta',
+        output_index: 0,
+        delta: 'p',
+      }),
+      ...codec.push({
+        type: 'response.custom_tool_call_input.delta',
+        output_index: 0,
+        delta: 'wd',
+      }),
+      ...codec.push({
+        type: 'response.custom_tool_call_input.done',
+        output_index: 0,
+        input: 'pwd',
+      }),
+      ...codec.push({
+        type: 'response.output_item.added',
+        output_index: 1,
+        item: {
+          type: 'function_call',
+          call_id: 'call_namespace',
+          namespace: 'team',
+          name: 'send',
+        },
+      }),
+      ...codec.push({
+        type: 'response.function_call_arguments.done',
+        output_index: 1,
+        arguments: '{"message":"hi"}',
+      }),
+      ...codec.push({
+        type: 'response.completed',
+        response: { status: 'completed', usage: { input_tokens: 3, output_tokens: 2 } },
+      }),
+    ]
+
+    expect(events).toContainEqual({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'call_custom', name: 'shell', input: {} },
+    })
+    expect(events).toContainEqual({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: '{"input":"pwd"}' },
+    })
+    expect(events).toContainEqual({
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'tool_use', id: 'call_namespace', name: 'team__send', input: {} },
+    })
+    expect(events.at(-2)).toMatchObject({ delta: { stop_reason: 'tool_use' } })
+  })
+
   it('converts text events and emits one valid terminal sequence', () => {
     const codec = new ResponsesToAnthropicEventCodec('claude-public')
     const events = [
@@ -401,6 +464,49 @@ describe('Chat Completions SSE to Anthropic Messages codec', () => {
 })
 
 describe('Anthropic Messages response codec', () => {
+  it('maps buffered custom and namespace calls to stable Anthropic tool_use blocks', () => {
+    const result = responsesToAnthropicMessage(
+      {
+        id: 'resp_tools',
+        status: 'completed',
+        output: [
+          {
+            type: 'custom_tool_call',
+            id: 'ctc_1',
+            call_id: 'call_custom',
+            name: 'shell',
+            input: 'pwd',
+            dangerous: 'drop-me',
+          },
+          {
+            type: 'function_call',
+            id: 'fc_2',
+            call_id: 'call_namespace',
+            namespace: 'team',
+            name: 'send',
+            arguments: '{"message":"hi"}',
+          },
+        ],
+        usage: { input_tokens: 3, output_tokens: 2 },
+      },
+      'claude-public',
+    )
+
+    expect(result).toMatchObject({
+      content: [
+        { type: 'tool_use', id: 'call_custom', name: 'shell', input: { input: 'pwd' } },
+        {
+          type: 'tool_use',
+          id: 'call_namespace',
+          name: 'team__send',
+          input: { message: 'hi' },
+        },
+      ],
+      stop_reason: 'tool_use',
+    })
+    expect(JSON.stringify(result)).not.toContain('dangerous')
+  })
+
   it('maps Responses text, tools, stop reason, and usage without exposing the upstream model', () => {
     const result = responsesToAnthropicMessage(
       {

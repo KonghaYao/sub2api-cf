@@ -126,6 +126,9 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
     } catch (error) {
       const recovered = await findControlIdempotency(context.env, idempotency)
       if (recovered === null) {
+        if (isUniqueEmailError(error)) {
+          throw new GatewayError(409, 'email_already_exists', 'A user with this email already exists')
+        }
         const conflictingEmail = await findUserByEmail(context.env, input.email)
         if (conflictingEmail !== null) {
           throw new GatewayError(409, 'email_already_exists', 'A user with this email already exists')
@@ -782,7 +785,7 @@ function escapeLike(value: string): string {
 
 function isUniqueEmailError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /UNIQUE constraint failed:\s*users\.email/i.test(message)
+  return /UNIQUE constraint failed:\s*(?:users\.(?:email|canonical_email_inbox)|index 'uq_users_canonical_email_inbox')/i.test(message)
 }
 
 function isControlVersionError(error: unknown): boolean {

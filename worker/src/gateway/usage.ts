@@ -34,7 +34,7 @@ export function reservationForRequest(
     output_tokens: outputTokens,
     cache_read_tokens: 0,
     estimated: true,
-  }).amount_micros
+  }, typeof body.service_tier === 'string' ? body.service_tier : undefined).amount_micros
   return Math.max(model.minimum_reservation_micros, projected, 1)
 }
 
@@ -59,22 +59,34 @@ export function estimatedUsage(inputBytes: number, outputBytes: number): TokenUs
   }
 }
 
-export function calculateCost(model: ModelRoute, usage: TokenUsage): CostBreakdown {
+export function calculateCost(
+  model: ModelRoute,
+  usage: TokenUsage,
+  serviceTier?: string,
+): CostBreakdown {
   const cached = Math.min(usage.cache_read_tokens, usage.input_tokens)
   const regularInput = usage.input_tokens - cached
+  const tierMultiplierPpm = serviceTierMultiplierPpm(model.upstream_name, serviceTier)
   const inputAmount = multipliedMicros(
     pricedMicros(regularInput, model.input_micros_per_million),
     model.rate_multiplier_ppm,
+    tierMultiplierPpm,
   )
   const outputAmount = multipliedMicros(
     pricedMicros(usage.output_tokens, model.output_micros_per_million),
     model.rate_multiplier_ppm,
+    tierMultiplierPpm,
   )
   const cacheAmount = multipliedMicros(
     pricedMicros(cached, model.cache_read_micros_per_million),
     model.rate_multiplier_ppm,
+    tierMultiplierPpm,
   )
-  const baseAmount = multipliedMicros(model.per_request_micros, model.rate_multiplier_ppm)
+  const baseAmount = multipliedMicros(
+    model.per_request_micros,
+    model.rate_multiplier_ppm,
+    tierMultiplierPpm,
+  )
   const amount = checkedNumber(
     BigInt(inputAmount) + BigInt(outputAmount) + BigInt(cacheAmount) + BigInt(baseAmount),
   )
@@ -87,16 +99,30 @@ export function calculateCost(model: ModelRoute, usage: TokenUsage): CostBreakdo
   }
 }
 
-function multipliedMicros(amount: number, multiplierPpm: number): number {
+export function serviceTierMultiplierPpm(modelName: string, serviceTier?: string): number {
+  if (serviceTier?.trim().toLowerCase() !== 'priority') return 1_000_000
+  const canonical = modelName.trim().toLowerCase()
+  if (/^gpt-5\.5(?:$|-)/.test(canonical) && !/^gpt-5\.5-pro(?:$|-)/.test(canonical)) {
+    return 2_500_000
+  }
+  return 2_000_000
+}
+
+function multipliedMicros(amount: number, ...multipliersPpm: number[]): number {
   if (
     !Number.isSafeInteger(amount) ||
     amount < 0 ||
-    !Number.isSafeInteger(multiplierPpm) ||
-    multiplierPpm < 0
+    multipliersPpm.some((multiplier) => !Number.isSafeInteger(multiplier) || multiplier < 0)
   ) {
     throw new GatewayError(500, 'invalid_pricing_state', 'Pricing state is invalid', 'server_error')
   }
-  return checkedNumber((BigInt(amount) * BigInt(multiplierPpm) + 999_999n) / 1_000_000n)
+  let numerator = BigInt(amount)
+  let denominator = 1n
+  for (const multiplier of multipliersPpm) {
+    numerator *= BigInt(multiplier)
+    denominator *= 1_000_000n
+  }
+  return checkedNumber((numerator + denominator - 1n) / denominator)
 }
 
 export function rewriteModelNames(

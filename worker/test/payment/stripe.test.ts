@@ -147,33 +147,40 @@ describe('StripeClient checkout sessions', () => {
 })
 
 describe('StripeClient refunds', () => {
-  it('creates amount-specific idempotent refunds and retrieves them', async () => {
+  it('creates refund-saga-specific idempotent refunds and retrieves them', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(validRefund))
     const stripe = new StripeClient({ secretKey: 'sk_test_secret', fetch: fetchMock })
 
     const refund = {
       orderId: 'order-42',
+      refundId: 'refund-42-a',
+      idempotencyKey: 'persisted-refund-key-a',
       paymentIntentId: 'pi_test_123',
       amountMinor: 499,
     }
     await stripe.createRefund(refund)
     await stripe.createRefund(refund)
-    await stripe.createRefund({ ...refund, amountMinor: 500 })
+    await stripe.createRefund({
+      ...refund,
+      refundId: 'refund-42-b',
+      idempotencyKey: 'persisted-refund-key-b',
+    })
     await stripe.retrieveRefund('re_test_123')
 
     const [, createInit] = fetchMock.mock.calls[0]!
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.stripe.com/v1/refunds')
-    expect(createInit?.headers).toMatchObject({ 'idempotency-key': 're-order-42-499' })
+    expect(createInit?.headers).toMatchObject({ 'idempotency-key': 'persisted-refund-key-a' })
     expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({
-      'idempotency-key': 're-order-42-499',
+      'idempotency-key': 'persisted-refund-key-a',
     })
     expect(fetchMock.mock.calls[2]?.[1]?.headers).toMatchObject({
-      'idempotency-key': 're-order-42-500',
+      'idempotency-key': 'persisted-refund-key-b',
     })
     expect(Object.fromEntries(new URLSearchParams(String(createInit?.body)))).toEqual({
       payment_intent: 'pi_test_123',
       amount: '499',
       'metadata[order_id]': 'order-42',
+      'metadata[refund_id]': 'refund-42-a',
     })
     expect(fetchMock.mock.calls[3]?.[0]).toBe('https://api.stripe.com/v1/refunds/re_test_123')
     expect(fetchMock.mock.calls[3]?.[1]?.method).toBe('GET')

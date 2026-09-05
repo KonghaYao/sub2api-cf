@@ -43,6 +43,26 @@ describe('gateway usage accounting', () => {
     })
   })
 
+  it('prices priority service at 2x, with the gpt-5.5 family at 2.5x', () => {
+    const usage = { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, estimated: false }
+    expect(calculateCost(
+      { ...model, upstream_name: 'gpt-5.6-sol' }, usage, 'priority',
+    )).toMatchObject({
+      input_amount_micros: 4,
+      output_amount_micros: 8,
+      base_amount_micros: 6,
+      amount_micros: 18,
+    })
+    expect(calculateCost(
+      { ...model, upstream_name: 'gpt-5.5' }, usage, 'priority',
+    )).toMatchObject({
+      input_amount_micros: 5,
+      output_amount_micros: 10,
+      base_amount_micros: 8,
+      amount_micros: 23,
+    })
+  })
+
   it('uses integer micro-unit prices and separates cached input', () => {
     const usage = extractUsage({
       usage: {
@@ -68,6 +88,11 @@ describe('gateway usage accounting', () => {
 
   it('reserves a conservative bounded amount before contacting upstream', () => {
     expect(reservationForRequest(model, { max_tokens: 100 }, 100)).toBe(2_651)
+    expect(reservationForRequest(
+      model,
+      { max_tokens: 100, service_tier: 'priority' },
+      100,
+    )).toBe(5_302)
     expect(() => reservationForRequest(model, { max_tokens: 20_000 }, 100)).toThrow(
       'Maximum output tokens',
     )

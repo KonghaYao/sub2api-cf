@@ -32,7 +32,7 @@
         </div>
       </div>
 
-      <ProfilePasswordForm />
+      <ProfilePasswordForm v-if="user?.has_password !== false" />
 
       <ProfileBalanceNotifyCard
         v-if="user && balanceLowNotifyEnabled"

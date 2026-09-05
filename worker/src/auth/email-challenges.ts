@@ -4,20 +4,23 @@ import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { authenticateUserRequest, type UserRow } from './handler'
-import { hashPassword, PasswordValidationError, validateNewPassword } from './password'
+import { authenticateUserRequest, publicUser, type UserRow } from './handler'
+import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
 import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
+import { requireRegistrationEmailSuffixAllowed } from './email-policy'
 
 type AuthBindings = { Bindings: Env }
 export type EmailChallengePurpose =
   | 'registration_email_verification'
   | 'email_verification'
+  | 'email_binding'
   | 'password_reset'
 
 const EMAIL_VERIFICATION_TTL_MS = 15 * 60 * 1_000
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1_000
 const CHALLENGE_COOLDOWN_MS = 60 * 1_000
 const REGISTRATION_MAX_ATTEMPTS = 5
+const EMAIL_BINDING_MAX_ATTEMPTS = 5
 const DELIVERY_LEASE_MS = 60 * 1_000
 const TOKEN_BYTES = 32
 const TOKEN_PEPPER_MIN_BYTES = 32
@@ -43,6 +46,7 @@ interface EmailChallengeRow {
 
 interface EmailChallengePublicSettings {
   email_verification_enabled?: boolean
+  registration_email_suffix_whitelist?: string[]
   turnstile_enabled?: boolean
   site_name?: string
 }
@@ -96,6 +100,7 @@ export async function requestRegistrationEmailVerification(
       context.env,
       'registration_email_verification',
     )
+    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
     const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'register')
     await verifyTurnstile(context, settings, body.turnstile_token)
     await commitAuthRateLimitAttempt(context.env, rateLimit)
@@ -316,6 +321,238 @@ export async function requestEmailVerification(context: Context<AuthBindings>): 
   }
 }
 
+/** Authenticated endpoint for issuing a code tied to a new local email identity. */
+export async function requestEmailIdentityBindingCode(
+  context: Context<AuthBindings>,
+): Promise<Response> {
+  try {
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    const body = await readJsonObject(context.req.raw)
+    const email = requireBindableEmail(body.email)
+    const settings = await readEmailChallengeSettings(context.env)
+    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
+    const rateLimit = await checkAuthRateLimit(
+      context.env,
+      context.req.raw,
+      email,
+      'register',
+    )
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+    if (await findConflictingEmailInboxOwner(context.env, email, user.id) !== null) {
+      throw new GatewayError(409, 'email_exists', 'Email is already used by another account')
+    }
+    await issueEmailBindingChallenge(context.env, context.req.raw, user, email, settings)
+    return controlSuccess({ message: 'Verification code sent successfully', countdown: 60 })
+  } catch (error) {
+    return challengeError(error)
+  }
+}
+
+/**
+ * Consumes an authenticated, session-bound mailbox challenge and establishes
+ * the local email/password credential. Existing password users must re-enter
+ * their current password; OAuth-only users use the field as their new password.
+ */
+export async function bindEmailIdentity(context: Context<AuthBindings>): Promise<Response> {
+  try {
+    const user = await authenticateUserRequest(context.req.raw, context.env)
+    const body = await readJsonObject(context.req.raw)
+    const email = requireBindableEmail(body.email)
+    const settings = await readEmailChallengeSettings(context.env)
+    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
+    const token = requireChallengeToken(body.verify_code, 'email_binding')
+    const password = requirePassword(body.password)
+    const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'login')
+    await commitAuthRateLimitAttempt(context.env, rateLimit)
+
+    const now = Date.now()
+    const [emailHash, tokenHash] = await Promise.all([
+      sha256Hex(email),
+      challengeTokenDigest(context.env, token, 'email_binding'),
+    ])
+    const challenge = await context.env.DB.prepare(
+      `SELECT id, user_id, session_id, auth_version, email_hash, token_hash,
+              status, verification_attempts, expires_at_ms
+         FROM email_binding_challenges
+        WHERE user_id = ?
+        LIMIT 1`,
+    ).bind(user.id).first<{
+      id: string
+      user_id: string
+      session_id: string
+      auth_version: number
+      email_hash: string
+      token_hash: string
+      status: 'pending' | 'consumed'
+      verification_attempts: number
+      expires_at_ms: number
+    }>()
+    const addressMatches = challenge !== null && constantTimeHexEqual(challenge.email_hash, emailHash)
+    const tokenMatches = challenge !== null && constantTimeHexEqual(challenge.token_hash, tokenHash)
+    if (
+      challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now ||
+      challenge.verification_attempts >= EMAIL_BINDING_MAX_ATTEMPTS ||
+      challenge.user_id !== user.id || challenge.session_id !== user.session_id ||
+      challenge.auth_version !== user.auth_version || !addressMatches || !tokenMatches
+    ) {
+      if (
+        challenge !== null && challenge.status === 'pending' && challenge.expires_at_ms > now &&
+        challenge.session_id === user.session_id && challenge.auth_version === user.auth_version &&
+        addressMatches && !tokenMatches
+      ) {
+        await context.env.DB.prepare(
+          `UPDATE email_binding_challenges
+              SET verification_attempts = MIN(?, verification_attempts + 1), updated_at_ms = ?
+            WHERE id = ? AND status = 'pending' AND expires_at_ms > ?`,
+        ).bind(EMAIL_BINDING_MAX_ATTEMPTS, now, challenge.id, now).run()
+      }
+      throw invalidChallenge('email_binding')
+    }
+
+    // A valid, session-bound mailbox challenge is required before doing any
+    // password comparison so this route cannot become a password oracle for a
+    // stolen bearer session. The shared auth limiter bounds both code and
+    // password attempts before either expensive credential operation.
+    if (user.password_credential === null) {
+      validateNewPassword(password)
+    } else if (!(await verifyPassword(password, user.password_credential))) {
+      throw new GatewayError(
+        401,
+        'invalid_current_password',
+        'Current password is incorrect',
+        'authentication_error',
+      )
+    }
+
+    if (await findConflictingEmailInboxOwner(context.env, email, user.id) !== null) {
+      throw new GatewayError(409, 'email_exists', 'Email is already used by another account')
+    }
+    const nextAuthVersion = user.auth_version + 1
+    if (!Number.isSafeInteger(nextAuthVersion)) {
+      throw new GatewayError(409, 'auth_version_exhausted', 'Session security version is exhausted')
+    }
+    const credential = user.password_credential ?? await hashPassword(password)
+    const consumeNonce = crypto.randomUUID()
+    const condition = `auth_version = ? AND EXISTS (
+      SELECT 1 FROM email_binding_challenges
+       WHERE user_id = users.id AND consume_nonce = ? AND status = 'consumed'
+    )`
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `UPDATE email_binding_challenges
+            SET status = 'consumed', consumed_at_ms = ?, consume_nonce = ?, updated_at_ms = ?
+          WHERE id = ? AND user_id = ? AND session_id = ? AND auth_version = ?
+            AND email_hash = ? AND token_hash = ? AND status = 'pending'
+            AND verification_attempts < ? AND expires_at_ms > ?
+            AND EXISTS (
+              SELECT 1 FROM user_sessions s
+               JOIN users u ON u.id = s.user_id
+              WHERE s.id = email_binding_challenges.session_id
+                AND s.user_id = email_binding_challenges.user_id
+                AND s.auth_version = email_binding_challenges.auth_version
+                AND u.auth_version = email_binding_challenges.auth_version
+                AND u.status = 'active' AND s.revoked_at_ms IS NULL
+                AND s.refresh_expires_at_ms > ?
+            )
+          RETURNING id`,
+      ).bind(
+        now,
+        consumeNonce,
+        now,
+        challenge.id,
+        user.id,
+        user.session_id,
+        user.auth_version,
+        emailHash,
+        tokenHash,
+        EMAIL_BINDING_MAX_ATTEMPTS,
+        now,
+        now,
+      ),
+      context.env.DB.prepare(
+        `UPDATE users
+            SET email = CASE WHEN ${condition} THEN ? ELSE NULL END,
+                password_credential = CASE
+                  WHEN ${condition} AND password_credential IS NULL THEN ?
+                  ELSE password_credential
+                END,
+                email_verified_at_ms = CASE WHEN ${condition} THEN ? ELSE email_verified_at_ms END,
+                password_changed_at_ms = CASE
+                  WHEN ${condition} AND password_credential IS NULL THEN ?
+                  ELSE password_changed_at_ms
+                END,
+                auth_version = CASE WHEN ${condition} THEN ? ELSE 0 END,
+                updated_at_ms = CASE WHEN ${condition} THEN ? ELSE updated_at_ms END
+          WHERE id = ? AND status = 'active'
+          RETURNING id, email, display_name, role, status, balance_micros,
+                    concurrency, rpm_limit, state_version, auth_version,
+                    password_credential, email_verified_at_ms, password_changed_at_ms,
+                    last_login_at_ms, avatar_object_key, avatar_content_type,
+                    avatar_updated_at_ms, created_at_ms, updated_at_ms`,
+      ).bind(
+        user.auth_version, consumeNonce, email,
+        user.auth_version, consumeNonce, credential,
+        user.auth_version, consumeNonce, now,
+        user.auth_version, consumeNonce, now,
+        user.auth_version, consumeNonce, nextAuthVersion,
+        user.auth_version, consumeNonce, now,
+        user.id,
+      ),
+      context.env.DB.prepare(
+        `UPDATE user_sessions
+            SET revoked_at_ms = COALESCE(revoked_at_ms, ?),
+                revoke_reason = COALESCE(revoke_reason, 'email_identity_bound')
+          WHERE user_id = ? AND revoked_at_ms IS NULL
+            AND EXISTS (
+              SELECT 1 FROM email_binding_challenges
+               WHERE user_id = ? AND consume_nonce = ? AND status = 'consumed'
+            )`,
+      ).bind(now, user.id, user.id, consumeNonce),
+      context.env.DB.prepare(
+        `INSERT INTO auth_audit_events (
+           id, user_id, event_type, outcome, email_hash, ip_hash,
+           session_id, metadata_json, occurred_at_ms
+         )
+         SELECT ?, ?, 'auth.email_identity.bind', 'succeeded', email_hash, NULL,
+                ?, ?, ?
+           FROM email_binding_challenges
+          WHERE user_id = ? AND consume_nonce = ? AND status = 'consumed'`,
+      ).bind(
+        crypto.randomUUID(),
+        user.id,
+        user.session_id,
+        JSON.stringify({ password_created: user.password_credential === null }),
+        now,
+        user.id,
+        consumeNonce,
+      ),
+    ])
+    if (results[0].results.length !== 1 || results[1].results.length !== 1) {
+      throw invalidChallenge('email_binding')
+    }
+    const updated = results[1].results[0] as unknown as UserRow
+    const { projectOAuthIdentityBindings } = await import('./oauth-identities')
+    return controlSuccess(await projectOAuthIdentityBindings(
+      context.env,
+      updated,
+      publicUser(updated),
+    ))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/UNIQUE constraint failed: (?:users\.(?:email|canonical_email_inbox)|index 'uq_users_canonical_email_inbox')/i.test(message)) {
+      return controlError(new GatewayError(409, 'email_exists', 'Email is already used by another account'))
+    }
+    if (/NOT NULL constraint failed: users\.email|CHECK constraint failed: auth_version/i.test(message)) {
+      return controlError(new GatewayError(
+        409,
+        'concurrent_security_update',
+        'Security settings changed; request a new verification code',
+      ))
+    }
+    return challengeError(error)
+  }
+}
+
 /** Authenticated endpoint that binds a one-time challenge to the current user. */
 export async function confirmEmailVerification(context: Context<AuthBindings>): Promise<Response> {
   try {
@@ -405,13 +642,16 @@ export async function consumeEmailChallengeDelivery(
   env: Env,
 ): Promise<EmailChallengeDeliveryResult> {
   const event = requireEmailChallengeDeliveryEvent(value)
+  const challengeTable = event.payload.purpose === 'email_binding'
+    ? 'email_binding_challenges'
+    : 'email_challenges'
   const now = Date.now()
   const digest = await challengeTokenDigest(env, event.payload.token, event.payload.purpose)
   const eventHash = await emailDeliveryEventDigest(env, event)
   const challenge = await env.DB.prepare(
     `SELECT id, user_id, purpose, token_hash, generation, status,
             delivery_event_id, delivery_event_hash, delivery_state, created_at_ms, expires_at_ms
-       FROM email_challenges
+       FROM ${challengeTable}
       WHERE id = ? AND user_id IS ? AND email_hash = ? AND purpose = ? AND token_hash = ?
         AND delivery_event_hash = ?
         AND generation = ? AND delivery_event_id = ?
@@ -433,7 +673,7 @@ export async function consumeEmailChallengeDelivery(
 
   const leaseId = crypto.randomUUID()
   const lease = await env.DB.prepare(
-    `UPDATE email_challenges
+    `UPDATE ${challengeTable}
         SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
             delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
             last_delivery_error = NULL, updated_at_ms = ?
@@ -455,7 +695,7 @@ export async function consumeEmailChallengeDelivery(
   ).all<{ id: string }>()
   if (lease.results.length !== 1) {
     const current = await env.DB.prepare(
-      'SELECT delivery_state FROM email_challenges WHERE id = ?',
+      `SELECT delivery_state FROM ${challengeTable} WHERE id = ?`,
     ).bind(challenge.id).first<{ delivery_state: string }>()
     if (current?.delivery_state === 'sent') return 'already_delivered'
     throw new Error(`Email challenge delivery ${event.event_id} already has an active lease`)
@@ -464,7 +704,7 @@ export async function consumeEmailChallengeDelivery(
   try {
     await deliverEmailChallenge(event, env)
     const update = await env.DB.prepare(
-      `UPDATE email_challenges
+      `UPDATE ${challengeTable}
           SET delivery_state = 'sent', delivered_at_ms = ?, delivery_lease_id = NULL,
               delivery_lease_expires_at_ms = NULL, updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
@@ -476,7 +716,7 @@ export async function consumeEmailChallengeDelivery(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown delivery failure'
     await env.DB.prepare(
-      `UPDATE email_challenges
+      `UPDATE ${challengeTable}
           SET delivery_state = 'failed', delivery_lease_id = NULL,
               delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
@@ -536,6 +776,8 @@ function renderEmailChallenge(event: EmailChallengeDeliveryEvent): {
     ? { subject: 'Reset your password', heading: 'Reset your password', action: 'Reset password' }
     : event.payload.purpose === 'registration_email_verification'
     ? { subject: 'Verify your registration', heading: 'Verify your email', action: 'Verify email' }
+    : event.payload.purpose === 'email_binding'
+    ? { subject: 'Confirm your sign-in email', heading: 'Confirm your sign-in email', action: 'Confirm email' }
     : { subject: 'Verify your email', heading: 'Verify your email', action: 'Verify email' }
   const subject = `${siteName}: ${details.subject}`
   const text = [
@@ -730,6 +972,151 @@ async function issueChallenge(
   }
 }
 
+async function issueEmailBindingChallenge(
+  env: Env,
+  request: Request,
+  user: { id: string; session_id: string; auth_version: number },
+  email: string,
+  settings: EmailChallengePublicSettings,
+): Promise<void> {
+  const now = Date.now()
+  const emailHash = await sha256Hex(email)
+  const existing = await env.DB.prepare(
+    `SELECT id, session_id, auth_version, email_hash, generation, status,
+            created_at_ms, expires_at_ms
+       FROM email_binding_challenges
+      WHERE user_id = ?
+      LIMIT 1`,
+  ).bind(user.id).first<{
+    id: string
+    session_id: string
+    auth_version: number
+    email_hash: string
+    generation: number
+    status: 'pending' | 'consumed'
+    created_at_ms: number
+    expires_at_ms: number
+  }>()
+  if (
+    existing !== null &&
+    existing.session_id === user.session_id &&
+    existing.auth_version === user.auth_version &&
+    existing.email_hash === emailHash &&
+    existing.status === 'pending' &&
+    existing.expires_at_ms > now &&
+    existing.created_at_ms + CHALLENGE_COOLDOWN_MS > now
+  ) {
+    return
+  }
+
+  const token = createChallengeToken('email_binding')
+  const challengeId = crypto.randomUUID()
+  const generation = (existing?.generation ?? 0) + 1
+  const eventId = `email-challenge:${challengeId}:${generation}`
+  const [tokenHash, ipHash] = await Promise.all([
+    challengeTokenDigest(env, token, 'email_binding'),
+    requestIpHash(request),
+  ])
+  const expiresAtMs = now + challengeTtl('email_binding')
+  const event = createEmailChallengeDeliveryEvent({
+    challenge_id: challengeId,
+    user_id: user.id,
+    email_hash: emailHash,
+    purpose: 'email_binding',
+    recipient_email: email,
+    token,
+    action_url: challengeActionUrl(request, email, token, 'email_binding'),
+    site_name: normalizedSiteName(settings.site_name),
+    locale: request.headers.get('accept-language')?.slice(0, 128) ?? '',
+    expires_at_ms: expiresAtMs,
+    generation,
+  }, now)
+  const eventHash = await emailDeliveryEventDigest(env, event)
+  let changed = 0
+  try {
+    if (existing === null) {
+      const insert = await env.DB.prepare(
+        `INSERT INTO email_binding_challenges (
+           id, user_id, session_id, auth_version, email_hash, token_hash,
+           generation, status, delivery_event_id, delivery_event_hash,
+           delivery_state, delivery_attempts, verification_attempts,
+           requested_ip_hash, created_at_ms, expires_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 'pending', 0, 0, ?, ?, ?, ?)`,
+      ).bind(
+        challengeId,
+        user.id,
+        user.session_id,
+        user.auth_version,
+        emailHash,
+        tokenHash,
+        generation,
+        eventId,
+        eventHash,
+        ipHash,
+        now,
+        expiresAtMs,
+        now,
+      ).run()
+      changed = resultChanges(insert)
+    } else {
+      const update = await env.DB.prepare(
+        `UPDATE email_binding_challenges
+            SET id = ?, session_id = ?, auth_version = ?, email_hash = ?, token_hash = ?,
+                generation = ?, status = 'pending', delivery_event_id = ?,
+                delivery_event_hash = ?, delivery_state = 'pending', delivery_attempts = 0,
+                verification_attempts = 0, delivery_lease_id = NULL,
+                delivery_lease_expires_at_ms = NULL, last_delivery_error = NULL,
+                requested_ip_hash = ?, created_at_ms = ?, expires_at_ms = ?,
+                delivered_at_ms = NULL, consumed_at_ms = NULL, consume_nonce = NULL,
+                updated_at_ms = ?
+          WHERE user_id = ? AND id = ? AND generation = ?`,
+      ).bind(
+        challengeId,
+        user.session_id,
+        user.auth_version,
+        emailHash,
+        tokenHash,
+        generation,
+        eventId,
+        eventHash,
+        ipHash,
+        now,
+        expiresAtMs,
+        now,
+        user.id,
+        existing.id,
+        existing.generation,
+      ).run()
+      changed = resultChanges(update)
+    }
+  } catch (error) {
+    if (isConstraintConflict(error)) {
+      throw new GatewayError(409, 'email_binding_conflict', 'Email binding is already in progress')
+    }
+    throw error
+  }
+  if (changed !== 1) {
+    throw new GatewayError(409, 'concurrent_email_binding_request', 'Email binding changed; retry')
+  }
+
+  try {
+    await env.EVENTS_QUEUE.send(event)
+    await env.DB.prepare(
+      `UPDATE email_binding_challenges SET delivery_state = 'queued', updated_at_ms = ?
+        WHERE id = ? AND delivery_event_id = ? AND delivery_state = 'pending'`,
+    ).bind(Date.now(), challengeId, eventId).run()
+  } catch (error) {
+    await env.DB.prepare(
+      `UPDATE email_binding_challenges
+          SET delivery_state = 'failed', last_delivery_error = ?, updated_at_ms = ?
+        WHERE id = ? AND delivery_event_id = ? AND delivery_state = 'pending'`,
+    ).bind('queue enqueue failed', Date.now(), challengeId, eventId).run()
+    console.error('email binding challenge enqueue failed', {
+      name: error instanceof Error ? error.name : 'unknown',
+    })
+  }
+}
+
 export function createEmailChallengeDeliveryEvent(
   payload: EmailChallengeDeliveryPayload,
   occurredAtMs: number,
@@ -763,7 +1150,8 @@ function requireEmailChallengeDeliveryEvent(value: unknown): EmailChallengeDeliv
     event.aggregate_type !== (payload.user_id === null ? 'email_identity' : 'user') ||
     event.aggregate_id !== (payload.user_id ?? payload.email_hash) ||
     (payload.purpose !== 'registration_email_verification' &&
-      payload.purpose !== 'email_verification' && payload.purpose !== 'password_reset') ||
+      payload.purpose !== 'email_verification' && payload.purpose !== 'email_binding' &&
+      payload.purpose !== 'password_reset') ||
     typeof payload.recipient_email !== 'string' || payload.recipient_email.length > 320 ||
     !isChallengeToken(payload.token, payload.purpose) ||
     typeof payload.action_url !== 'string' || payload.action_url.length > 2_048 ||
@@ -796,10 +1184,52 @@ async function findUserByEmail(env: Env, email: string): Promise<Pick<UserRow, '
     .first<Pick<UserRow, 'id'>>()
 }
 
+/** Uses the migration-owned canonical inbox index shared by every users writer. */
+async function findConflictingEmailInboxOwner(
+  env: Env,
+  email: string,
+  currentUserId: string,
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT id FROM users
+      WHERE canonical_email_inbox = ? AND id <> ?
+      LIMIT 1`,
+  ).bind(canonicalEmailInbox(email), currentUserId).first<{ id: string }>()
+  return row?.id ?? null
+}
+
+function canonicalEmailInbox(value: string): string {
+  const normalized = value.trim().toLowerCase()
+  const at = normalized.lastIndexOf('@')
+  let local = normalized.slice(0, at)
+  let domain = normalized.slice(at + 1).replace(/\.+$/, '')
+  const plus = local.indexOf('+')
+  if (plus > 0) local = local.slice(0, plus)
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    const dotless = local.replaceAll('.', '')
+    if (dotless !== '') local = dotless
+    domain = 'gmail.com'
+  }
+  return `${local}@${domain}`
+}
+
 async function requireEmailChallengeSettings(
   env: Env,
   purpose: EmailChallengePurpose,
 ): Promise<EmailChallengePublicSettings> {
+  const settings = await readEmailChallengeSettings(env)
+  if (settings.email_verification_enabled !== true) {
+    throw new GatewayError(
+      403,
+      purpose === 'password_reset' ? 'PASSWORD_RESET_DISABLED' : 'EMAIL_VERIFICATION_DISABLED',
+      purpose === 'password_reset' ? 'Password reset is not enabled' : 'Email verification is not enabled',
+      'permission_error',
+    )
+  }
+  return settings
+}
+
+async function readEmailChallengeSettings(env: Env): Promise<EmailChallengePublicSettings> {
   let settings: EmailChallengePublicSettings | null
   try {
     settings = await env.CONFIG_KV.get<EmailChallengePublicSettings>(
@@ -809,13 +1239,8 @@ async function requireEmailChallengeSettings(
   } catch {
     throw new GatewayError(503, 'settings_unavailable', 'Authentication settings are unavailable', 'server_error')
   }
-  if (settings?.email_verification_enabled !== true) {
-    throw new GatewayError(
-      403,
-      purpose === 'password_reset' ? 'PASSWORD_RESET_DISABLED' : 'EMAIL_VERIFICATION_DISABLED',
-      purpose === 'password_reset' ? 'Password reset is not enabled' : 'Email verification is not enabled',
-      'permission_error',
-    )
+  if (settings === null) {
+    throw new GatewayError(503, 'settings_unavailable', 'Authentication settings are unavailable', 'server_error')
   }
   return settings
 }
@@ -854,7 +1279,9 @@ async function verifyTurnstile(
 }
 
 function createChallengeToken(purpose: EmailChallengePurpose): string {
-  if (purpose === 'registration_email_verification') return createSixDigitCode()
+  if (purpose === 'registration_email_verification' || purpose === 'email_binding') {
+    return createSixDigitCode()
+  }
   const bytes = crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
@@ -909,7 +1336,12 @@ function challengeActionUrl(
   token: string,
   purpose: EmailChallengePurpose,
 ): string {
-  const target = new URL(purpose === 'password_reset' ? '/reset-password' : '/email-verify', request.url)
+  const pathname = purpose === 'password_reset'
+    ? '/reset-password'
+    : purpose === 'email_binding'
+    ? '/profile'
+    : '/email-verify'
+  const target = new URL(pathname, request.url)
   target.searchParams.set('email', email)
   target.searchParams.set('token', token)
   return target.toString()
@@ -938,6 +1370,14 @@ function requireEmail(value: unknown): string {
   return email
 }
 
+function requireBindableEmail(value: unknown): string {
+  const email = requireEmail(value)
+  if (canonicalEmailInbox(email).endsWith('.invalid')) {
+    throw new GatewayError(400, 'email_reserved', 'Email address is reserved')
+  }
+  return email
+}
+
 function requirePassword(value: unknown): string {
   if (typeof value !== 'string') throw new GatewayError(400, 'invalid_password', 'Password is invalid')
   return value
@@ -950,7 +1390,7 @@ function requireChallengeToken(value: unknown, purpose: EmailChallengePurpose): 
 
 function isChallengeToken(value: unknown, purpose: EmailChallengePurpose): value is string {
   return typeof value === 'string' && (
-    purpose === 'registration_email_verification'
+    purpose === 'registration_email_verification' || purpose === 'email_binding'
       ? REGISTRATION_CODE_PATTERN.test(value)
       : purpose === 'email_verification'
       ? EMAIL_VERIFICATION_TOKEN_PATTERN.test(value)
@@ -972,7 +1412,7 @@ function passwordResetRequestAccepted(): Response {
 }
 
 function invalidChallenge(purpose: EmailChallengePurpose): GatewayError {
-  if (purpose === 'registration_email_verification') {
+  if (purpose === 'registration_email_verification' || purpose === 'email_binding') {
     return new GatewayError(400, 'INVALID_VERIFY_CODE', 'Invalid or expired verification code')
   }
   return new GatewayError(

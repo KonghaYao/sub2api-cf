@@ -5,6 +5,17 @@ import {
 } from '../../src/gateway/protocols/chat-responses'
 
 describe('legacy Chat Completions to Responses contract', () => {
+  it('normalizes fast and accepts scale service tiers', () => {
+    expect(chatCompletionsToResponsesRequest({
+      model: 'public-model', messages: [{ role: 'user', content: 'Hello' }],
+      service_tier: ' FAST ',
+    }).service_tier).toBe('priority')
+    expect(chatCompletionsToResponsesRequest({
+      model: 'public-model', messages: [{ role: 'user', content: 'Hello' }],
+      service_tier: 'scale',
+    }).service_tier).toBe('scale')
+  })
+
   it('forces the upstream stream needed by the bridge and preserves supported controls', () => {
     expect(chatCompletionsToResponsesRequest({
       model: 'public-model',

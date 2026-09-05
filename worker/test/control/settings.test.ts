@@ -25,6 +25,7 @@ interface SettingsResponse {
     public: {
       site_name: string
       registration_enabled: boolean
+      registration_email_suffix_whitelist: string[]
       email_verification_enabled: boolean
       turnstile_enabled: boolean
       turnstile_site_key: string
@@ -149,6 +150,7 @@ describe('admin system settings', () => {
         public: {
           site_name: 'Sub2API',
           registration_enabled: false,
+          registration_email_suffix_whitelist: [],
           email_verification_enabled: false,
           turnstile_enabled: false,
           turnstile_site_key: '',
@@ -206,6 +208,7 @@ describe('admin system settings', () => {
         public: {
           site_name: 'Edge Sub2API',
           registration_enabled: true,
+          registration_email_suffix_whitelist: ['example.com', '@EXAMPLE.com', '*.EDU.cn'],
           email_verification_enabled: true,
           turnstile_enabled: true,
           turnstile_site_key: 'site-key-public',
@@ -230,6 +233,7 @@ describe('admin system settings', () => {
       public: {
         site_name: 'Edge Sub2API',
         registration_enabled: true,
+        registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
         email_verification_enabled: true,
         turnstile_enabled: true,
         turnstile_site_key: 'site-key-public',
@@ -250,6 +254,7 @@ describe('admin system settings', () => {
       control_version: 1,
       site_name: 'Edge Sub2API',
       registration_enabled: true,
+      registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
       email_verification_enabled: true,
       turnstile_enabled: true,
       turnstile_site_key: 'site-key-public',
@@ -293,6 +298,7 @@ describe('admin system settings', () => {
       'public.model_plaza_require_auth',
       'public.passkey_enabled',
       'public.promo_code_enabled',
+      'public.registration_email_suffix_whitelist',
       'public.registration_enabled',
       'public.site_name',
       'public.turnstile_enabled',

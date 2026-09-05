@@ -93,9 +93,8 @@ export function chatCompletionsToResponsesRequest(
     if (root.top_p !== undefined) result.top_p = finiteNumber(root.top_p, '$.top_p')
   }
 
-  if (root.service_tier !== undefined) {
-    result.service_tier = nonEmptyString(root.service_tier, '$.service_tier', 64)
-  }
+  const serviceTier = parseServiceTier(root.service_tier, '$.service_tier')
+  if (serviceTier !== undefined) result.service_tier = serviceTier
   if (root.parallel_tool_calls !== undefined) {
     if (typeof root.parallel_tool_calls !== 'boolean') {
       fail('$.parallel_tool_calls', 'must be a boolean')
@@ -427,4 +426,14 @@ function finiteNumber(value: unknown, path: string): number {
 
 function fail(path: string, message: string): never {
   throw new ChatToResponsesError(path, message)
+}
+
+function parseServiceTier(value: unknown, path: string): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') fail(path, 'must be a supported string')
+  const tier = value.trim().toLowerCase()
+  if (!['auto', 'default', 'flex', 'priority', 'fast', 'scale'].includes(tier)) {
+    fail(path, 'must be one of auto, default, flex, priority, fast, or scale')
+  }
+  return tier === 'fast' ? 'priority' : tier
 }

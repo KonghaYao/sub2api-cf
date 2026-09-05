@@ -167,6 +167,8 @@ export interface StripeCheckoutSession {
 
 export interface StripeCreateRefundInput {
   orderId: string
+  refundId: string
+  idempotencyKey: string
   paymentIntentId: string
   amountMinor: number
 }
@@ -256,19 +258,22 @@ export class StripeClient {
 
   async createRefund(input: StripeCreateRefundInput): Promise<StripeRefund> {
     assertIdentifier(input.orderId, 'orderId')
+    assertIdentifier(input.refundId, 'refundId')
+    assertIdentifier(input.idempotencyKey, 'idempotencyKey')
     assertIdentifier(input.paymentIntentId, 'paymentIntentId')
     assertPositiveMinorAmount(input.amountMinor)
     const form = new URLSearchParams({
       payment_intent: input.paymentIntentId,
       amount: String(input.amountMinor),
       'metadata[order_id]': input.orderId,
+      'metadata[refund_id]': input.refundId,
     })
 
     return this.request(
       '/refunds',
       {
         method: 'POST',
-        headers: this.headers(`re-${input.orderId}-${input.amountMinor}`, true),
+        headers: this.headers(input.idempotencyKey, true),
         body: form.toString(),
       },
       parseRefund,

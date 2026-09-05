@@ -263,7 +263,7 @@ import { useAppStore } from '@/stores/app'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { adminAPI } from '@/api/admin'
 import { formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '@/utils/format'
-import type { AdminGroup, Announcement, AnnouncementTargeting } from '@/types'
+import type { Announcement, AnnouncementTargeting, OpaqueAdminGroup } from '@/types'
 import type { Column } from '@/components/common/types'
 
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -437,7 +437,7 @@ const form = reactive({
   targeting: { any_of: [] } as AnnouncementTargeting
 })
 
-const subscriptionGroups = ref<AdminGroup[]>([])
+const subscriptionGroups = ref<OpaqueAdminGroup[]>([])
 
 async function loadSubscriptionGroups() {
   try {
@@ -562,7 +562,7 @@ async function handleSave() {
 
     const original = editingAnnouncement.value
     const payload = buildUpdatePayload(original)
-    await adminAPI.announcements.update(original.id, payload)
+    await adminAPI.announcements.update(original.id, payload, original.control_version)
     appStore.showSuccess(t('common.success'))
     showEditDialog.value = false
     editingAnnouncement.value = null
@@ -588,7 +588,10 @@ async function confirmDelete() {
   if (!deletingAnnouncement.value) return
 
   try {
-    await adminAPI.announcements.delete(deletingAnnouncement.value.id)
+    await adminAPI.announcements.delete(
+      deletingAnnouncement.value.id,
+      deletingAnnouncement.value.control_version
+    )
     appStore.showSuccess(t('common.success'))
     showDeleteDialog.value = false
     deletingAnnouncement.value = null
@@ -601,7 +604,7 @@ async function confirmDelete() {
 
 // ===== Read status =====
 const showReadStatusDialog = ref(false)
-const readStatusAnnouncementId = ref<number | null>(null)
+const readStatusAnnouncementId = ref<string | number | null>(null)
 const previewAnnouncement = ref<Announcement | null>(null)
 
 function openPreview(row: Announcement) {

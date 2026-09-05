@@ -70,6 +70,50 @@ describe('payment subscription fulfillment', () => {
     expect(isPaymentFulfillmentEvent({ ...event, payload: { order_id: 'another-order' } })).toBe(false)
   })
 
+  it('creates one initial term and sends its exact configuration to SubscriptionStateDO', async () => {
+    const test = fixture()
+    insertOrder(test.raw, 'order-initial')
+
+    const result = await fulfillPaymentOrder(test.env, 'order-initial')
+
+    expect(result.status).toBe('applied')
+    const row = subscription(test.raw, result.subscription_id)
+    expect(row).toMatchObject({
+      status: 'active',
+      starts_at_ms: NOW,
+      expires_at_ms: NOW + 30 * DAY_MS,
+      daily_used_micros: 0,
+      weekly_used_micros: 0,
+      monthly_used_micros: 0,
+      control_version: 0,
+    })
+    expect(test.raw.prepare(
+      `SELECT term_kind, previous_status, previous_starts_at_ms,
+              previous_expires_at_ms, starts_at_ms, expires_at_ms, granted_duration_ms
+         FROM payment_subscription_terms WHERE order_id = 'order-initial'`,
+    ).get()).toEqual({
+      term_kind: 'initial',
+      previous_status: null,
+      previous_starts_at_ms: null,
+      previous_expires_at_ms: null,
+      starts_at_ms: NOW,
+      expires_at_ms: NOW + 30 * DAY_MS,
+      granted_duration_ms: 30 * DAY_MS,
+    })
+    expect(test.state.calls).toHaveLength(1)
+    expect(test.state.calls[0]).toMatchObject({
+      subscriptionId: result.subscription_id,
+      path: '/configure',
+      body: {
+        subscription_id: result.subscription_id,
+        starts_at_ms: NOW,
+        expires_at_ms: NOW + 30 * DAY_MS,
+        control_version: 0,
+        enabled: true,
+      },
+    })
+  })
+
   it('extends an active subscription once from immutable order snapshots', async () => {
     const test = fixture()
     const oldExpiry = NOW + 5 * DAY_MS
@@ -113,6 +157,22 @@ describe('payment subscription fulfillment', () => {
       source_type: 'payment',
       source_id: 'order-active',
     }])
+    expect(test.raw.prepare(
+      `SELECT subscription_id, term_kind, previous_status,
+              previous_starts_at_ms, previous_expires_at_ms,
+              starts_at_ms, expires_at_ms, granted_duration_ms, refunded_duration_ms
+         FROM payment_subscription_terms WHERE order_id = ?`,
+    ).get('order-active')).toEqual({
+      subscription_id: 'subscription-active',
+      term_kind: 'extended',
+      previous_status: 'active',
+      previous_starts_at_ms: NOW - 10 * DAY_MS,
+      previous_expires_at_ms: oldExpiry,
+      starts_at_ms: NOW - 10 * DAY_MS,
+      expires_at_ms: oldExpiry + 30 * DAY_MS,
+      granted_duration_ms: 30 * DAY_MS,
+      refunded_duration_ms: 0,
+    })
     expect(test.raw.prepare(
       `SELECT status, result_resource_id FROM payment_fulfillments WHERE order_id = ?`,
     ).get('order-active')).toEqual({ status: 'applied', result_resource_id: 'subscription-active' })
@@ -184,8 +244,66 @@ describe('payment subscription fulfillment', () => {
         WHERE source_type = 'payment' AND source_id = ?`,
     ).get('order-retry')).toEqual({ count: 1 })
     expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM payment_subscription_terms WHERE order_id = ?`,
+    ).get('order-retry')).toEqual({ count: 1 })
+    expect(test.raw.prepare(
       `SELECT status, attempts FROM subscription_state_sync WHERE request_id = ?`,
     ).get('payment:order-retry')).toEqual({ status: 'applied', attempts: 1 })
+  })
+
+  it('serializes different paid renewal orders and applies both contributions', async () => {
+    const test = fixture()
+    const oldExpiry = NOW + 5 * DAY_MS
+    seedSubscription(test.raw, {
+      id: 'subscription-concurrent-renewal',
+      status: 'active',
+      startsAt: NOW - 10 * DAY_MS,
+      expiresAt: oldExpiry,
+      usedMicros: 321,
+      controlVersion: 2,
+    })
+    insertOrder(test.raw, 'order-concurrent-a', '1'.repeat(64))
+    insertOrder(test.raw, 'order-concurrent-b', '2'.repeat(64))
+    const database = test.env.DB
+    const originalBatch = database.batch.bind(database)
+    let arrivals = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    database.batch = async <T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
+      if (statements.some((statement) => (
+        statement as D1PreparedStatement & { sql?: string }
+      ).sql?.includes('INSERT INTO user_subscriptions'))) {
+        arrivals += 1
+        if (arrivals === 2) release()
+        else await gate
+      }
+      return originalBatch<T>(statements)
+    }
+
+    const results = await Promise.all([
+      fulfillPaymentOrder(test.env, 'order-concurrent-a'),
+      fulfillPaymentOrder(test.env, 'order-concurrent-b'),
+    ])
+
+    expect(results.map((result) => result.status)).toEqual(['applied', 'applied'])
+    expect(subscription(test.raw, 'subscription-concurrent-renewal')).toMatchObject({
+      status: 'active',
+      starts_at_ms: NOW - 10 * DAY_MS,
+      expires_at_ms: oldExpiry + 60 * DAY_MS,
+      daily_used_micros: 321,
+      control_version: 4,
+    })
+    expect(test.raw.prepare(
+      `SELECT order_id, granted_duration_ms FROM payment_subscription_terms
+        WHERE subscription_id = ? ORDER BY order_id`,
+    ).all('subscription-concurrent-renewal')).toEqual([
+      { order_id: 'order-concurrent-a', granted_duration_ms: 30 * DAY_MS },
+      { order_id: 'order-concurrent-b', granted_duration_ms: 30 * DAY_MS },
+    ])
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM subscription_events
+        WHERE source_type = 'payment' AND source_id IN (?, ?)`,
+    ).get('order-concurrent-a', 'order-concurrent-b')).toEqual({ count: 2 })
   })
 
   it('restarts an expired term with fresh windows and snapshot quotas', async () => {
@@ -217,6 +335,21 @@ describe('payment subscription fulfillment', () => {
       source_type: 'payment',
       source_id: 'order-restart',
       control_version: 9,
+    })
+    expect(test.raw.prepare(
+      `SELECT term_kind, previous_status, previous_starts_at_ms,
+              previous_expires_at_ms, starts_at_ms, expires_at_ms,
+              granted_duration_ms, refunded_duration_ms
+         FROM payment_subscription_terms WHERE order_id = 'order-restart'`,
+    ).get()).toEqual({
+      term_kind: 'restarted',
+      previous_status: 'expired',
+      previous_starts_at_ms: NOW - 60 * DAY_MS,
+      previous_expires_at_ms: NOW - DAY_MS,
+      starts_at_ms: NOW,
+      expires_at_ms: NOW + 30 * DAY_MS,
+      granted_duration_ms: 30 * DAY_MS,
+      refunded_duration_ms: 0,
     })
   })
 

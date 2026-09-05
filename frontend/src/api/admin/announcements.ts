@@ -31,28 +31,54 @@ export async function list(
   return data
 }
 
-export async function getById(id: number): Promise<Announcement> {
+type AnnouncementId = string | number
+
+function mutationHeaders(action: string, id?: AnnouncementId, version?: number) {
+  const suffix = id === undefined ? '' : `-${id}`
+  return {
+    'Idempotency-Key': `admin-announcement-${action}${suffix}-${crypto.randomUUID()}`,
+    ...(version === undefined ? {} : { 'If-Match': `"${version}"` })
+  }
+}
+
+export async function getById(id: AnnouncementId): Promise<Announcement> {
   const { data } = await apiClient.get<Announcement>(`/admin/announcements/${id}`)
   return data
 }
 
 export async function create(request: CreateAnnouncementRequest): Promise<Announcement> {
-  const { data } = await apiClient.post<Announcement>('/admin/announcements', request)
+  const { data } = await apiClient.post<Announcement>('/admin/announcements', request, {
+    headers: mutationHeaders('create')
+  })
   return data
 }
 
-export async function update(id: number, request: UpdateAnnouncementRequest): Promise<Announcement> {
-  const { data } = await apiClient.put<Announcement>(`/admin/announcements/${id}`, request)
+export async function update(
+  id: AnnouncementId,
+  request: UpdateAnnouncementRequest,
+  expectedControlVersion: number
+): Promise<Announcement> {
+  const { data } = await apiClient.put<Announcement>(`/admin/announcements/${id}`, {
+    ...request,
+    expected_control_version: expectedControlVersion
+  }, {
+    headers: mutationHeaders('update', id, expectedControlVersion)
+  })
   return data
 }
 
-export async function deleteAnnouncement(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/announcements/${id}`)
+export async function deleteAnnouncement(
+  id: AnnouncementId,
+  expectedControlVersion: number
+): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/announcements/${id}`, {
+    headers: mutationHeaders('delete', id, expectedControlVersion)
+  })
   return data
 }
 
 export async function getReadStatus(
-  id: number,
+  id: AnnouncementId,
   page: number = 1,
   pageSize: number = 20,
   filters?: {

@@ -112,7 +112,13 @@ describe('user profile HTTP contract', () => {
     const test = await fixture()
     expect((await createApp().request('/api/v1/user/profile', {}, test.env)).status).toBe(401)
     await expect(responseBody(await request(test, '/api/v1/user/profile'))).resolves.toMatchObject({
-      data: { id: 'alice', username: 'Alice', avatar_url: null },
+      data: {
+        id: 'alice',
+        username: 'Alice',
+        avatar_url: null,
+        has_password: true,
+        password_binding_required: false,
+      },
     })
 
     const renamed = await request(test, '/api/v1/user', {

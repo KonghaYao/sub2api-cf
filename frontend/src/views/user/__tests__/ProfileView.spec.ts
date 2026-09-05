@@ -98,4 +98,27 @@ describe('ProfileView', () => {
     expect(wrapper.get('[data-testid="profile-shell"]').html()).toContain('profile-totp-card')
     expect(wrapper.get('[data-testid="profile-shell"]').html()).toContain('profile-sessions-card')
   })
+
+  it('hides the old-password form for OAuth-only users while keeping the identity-binding entry point', async () => {
+    authState.user = { ...authState.user, has_password: false, password_binding_required: true }
+    const wrapper = mount(ProfileView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          ProfileInfoCard: { template: '<div data-testid="profile-info-card" />' },
+          ProfileBalanceNotifyCard: { template: '<div />' },
+          ProfilePasswordForm: { template: '<div data-testid="profile-password-form" />' },
+          ProfileTotpCard: { template: '<div />' },
+          ProfilePasskeyCard: { template: '<div />' },
+          ProfileSessionsCard: { template: '<div />' },
+          Icon: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="profile-info-card"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="profile-password-form"]').exists()).toBe(false)
+  })
 })

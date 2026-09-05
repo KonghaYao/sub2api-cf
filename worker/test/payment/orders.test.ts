@@ -216,6 +216,15 @@ describe('Stripe subscription order HTTP contract', () => {
       expires_at_ms: NOW + 30 * DAY_MS,
     })
     expect(test.raw.prepare(
+      `SELECT subscription_id, term_kind, granted_duration_ms, refunded_duration_ms
+         FROM payment_subscription_terms WHERE order_id = ?`,
+    ).get(orderId)).toMatchObject({
+      subscription_id: expect.any(String),
+      term_kind: 'initial',
+      granted_duration_ms: 30 * DAY_MS,
+      refunded_duration_ms: 0,
+    })
+    expect(test.raw.prepare(
       `SELECT COUNT(*) AS count FROM subscription_events
         WHERE source_type = 'payment' AND source_id = ?`,
     ).get(orderId)).toEqual({ count: 1 })
@@ -251,6 +260,89 @@ describe('Stripe subscription order HTTP contract', () => {
     const resolvedBody = await json(resolved)
     expect(resolvedBody.data).toMatchObject({ id: orderId, status: 'COMPLETED', paid: true })
     expect(resolvedBody.data).not.toHaveProperty('user_id')
+  })
+
+  it('renews the same subscription through user HTTP, signed webhooks, and Queue exactly once', async () => {
+    const test = await fixture()
+    const first = await createOrder(test, 'payment-renewal-first')
+    const firstOrderId = first.data.order_id as string
+    const firstBody = JSON.stringify(stripeCheckoutEvent(
+      firstOrderId,
+      'cs_order_test',
+      'pi_payment_renewal_first',
+    ))
+    const firstWebhook = await createApp().request('/api/v1/payment/webhook/stripe', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'stripe-signature': await stripeSignature(firstBody),
+      },
+      body: firstBody,
+    }, test.env)
+    expect(firstWebhook.status).toBe(200)
+    await consumeCapturedEvent(test, 0)
+    const initial = test.raw.prepare(
+      `SELECT id, starts_at_ms, expires_at_ms, control_version
+         FROM user_subscriptions WHERE user_id = 'alice' AND group_id = 'group-pro'`,
+    ).get() as { id: string; starts_at_ms: number; expires_at_ms: number; control_version: number }
+
+    const second = await createOrder(test, 'payment-renewal-second')
+    const secondOrderId = second.data.order_id as string
+    const secondBody = JSON.stringify(stripeCheckoutEvent(
+      secondOrderId,
+      'cs_order_test_1',
+      'pi_payment_renewal_second',
+    ))
+    const secondWebhook = await createApp().request('/api/v1/payment/webhook/stripe', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'stripe-signature': await stripeSignature(secondBody),
+      },
+      body: secondBody,
+    }, test.env)
+    expect(secondWebhook.status).toBe(200)
+    await consumeCapturedEvent(test, 1)
+    await consumeCapturedEvent(test, 1)
+
+    expect(test.raw.prepare(
+      `SELECT id, starts_at_ms, expires_at_ms, control_version
+         FROM user_subscriptions WHERE user_id = 'alice' AND group_id = 'group-pro'`,
+    ).get()).toEqual({
+      id: initial.id,
+      starts_at_ms: initial.starts_at_ms,
+      expires_at_ms: NOW + 60 * DAY_MS,
+      control_version: initial.control_version + 1,
+    })
+    expect(test.raw.prepare(
+      `SELECT order_id, subscription_id, term_kind, previous_expires_at_ms,
+              expires_at_ms, granted_duration_ms
+         FROM payment_subscription_terms
+        WHERE order_id IN (?, ?)
+        ORDER BY CASE term_kind WHEN 'initial' THEN 0 ELSE 1 END`,
+    ).all(firstOrderId, secondOrderId)).toEqual([
+      {
+        order_id: firstOrderId,
+        subscription_id: initial.id,
+        term_kind: 'initial',
+        previous_expires_at_ms: null,
+        expires_at_ms: NOW + 30 * DAY_MS,
+        granted_duration_ms: 30 * DAY_MS,
+      },
+      {
+        order_id: secondOrderId,
+        subscription_id: initial.id,
+        term_kind: 'extended',
+        previous_expires_at_ms: NOW + 30 * DAY_MS,
+        expires_at_ms: NOW + 60 * DAY_MS,
+        granted_duration_ms: 30 * DAY_MS,
+      },
+    ])
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM subscription_events
+        WHERE source_type = 'payment' AND source_id IN (?, ?)`,
+    ).get(firstOrderId, secondOrderId)).toEqual({ count: 2 })
+    expect(test.subscriptionState.calls).toHaveLength(2)
   })
 
   it('keeps a signed late payment recoverable without granting the subscription', async () => {
@@ -677,7 +769,11 @@ function stripeJson(value: unknown): Response {
   return Response.json(value, { status: 200 })
 }
 
-function stripeCheckoutEvent(orderId: string): Record<string, unknown> {
+function stripeCheckoutEvent(
+  orderId: string,
+  sessionId = 'cs_order_test',
+  paymentIntentId = 'pi_order_test',
+): Record<string, unknown> {
   return {
     id: `evt_checkout_${orderId}`,
     object: 'event',
@@ -685,7 +781,7 @@ function stripeCheckoutEvent(orderId: string): Record<string, unknown> {
     created: Math.floor(Date.now() / 1_000),
     data: {
       object: {
-        id: 'cs_order_test',
+        id: sessionId,
         object: 'checkout.session',
         client_reference_id: orderId,
         metadata: { order_id: orderId },
@@ -693,7 +789,7 @@ function stripeCheckoutEvent(orderId: string): Record<string, unknown> {
         status: 'complete',
         amount_total: 1250,
         currency: 'usd',
-        payment_intent: 'pi_order_test',
+        payment_intent: paymentIntentId,
       },
     },
   }

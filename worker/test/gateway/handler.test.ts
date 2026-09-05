@@ -774,7 +774,10 @@ describe('OpenAI-compatible gateway', () => {
       {
         method: 'POST',
         headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({
+          model: 'gpt-public', messages: [{ role: 'user', content: 'hi' }],
+          service_tier: ' FAST ',
+        }),
       },
       env,
     )
@@ -785,7 +788,9 @@ describe('OpenAI-compatible gateway', () => {
     const [url, init] = upstream.mock.calls[0]
     expect(String(url)).toBe('https://upstream.example/v1/chat/completions')
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer sk-upstream-secret')
-    expect(JSON.parse(String(init?.body))).toMatchObject({ model: 'gpt-upstream' })
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'gpt-upstream', service_tier: 'priority',
+    })
     expect(JSON.parse(String(init?.body))).toMatchObject({ max_tokens: 4_096 })
     expect(poolNames).toContain(
       'group:group-1:platform:openai:model:model-1:endpoint:chat_completions:shard:0',
@@ -793,12 +798,51 @@ describe('OpenAI-compatible gateway', () => {
     expect(JSON.stringify(database.bindings)).not.toContain('sk-customer')
 
     const settlement = user.calls.find((call) => call.path === '/settle')
-    expect(settlement?.body).toMatchObject({ amount_micros: 40 })
+    expect(settlement?.body).toMatchObject({ amount_micros: 80 })
     expect(settlement?.body.usage_event).toMatchObject({
       event_type: 'usage.settled.v1',
       payload: { input_tokens: 10, output_tokens: 5, account_id: accountId },
     })
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
+  it('passes scale to native Responses and rejects invalid tiers before reservations', async () => {
+    const { env, user } = await harness()
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'resp-scale',
+        object: 'response',
+        model: 'gpt-upstream',
+        status: 'completed',
+        service_tier: 'scale',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const accepted = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello', service_tier: ' SCALE ' }),
+    }, env)
+    expect(accepted.status).toBe(200)
+    expect(JSON.parse(String(upstream.mock.calls[0][1]?.body))).toMatchObject({
+      model: 'gpt-upstream', service_tier: 'scale',
+    })
+    const reservationsBeforeInvalid = user.calls.filter((call) => call.path === '/reserve').length
+
+    const rejected = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello', service_tier: 'turbo' }),
+    }, env)
+    expect(rejected.status).toBe(400)
+    await expect(rejected.json()).resolves.toMatchObject({ error: { code: 'invalid_service_tier' } })
+    expect(upstream).toHaveBeenCalledTimes(1)
+    expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(
+      reservationsBeforeInvalid,
+    )
   })
 
   it('bridges a Responses request through a Chat Completions-only account', async () => {
@@ -862,6 +906,120 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
+  it('restores custom and namespace tool identity through a buffered Chat-only fallback', async () => {
+    const { env, database } = await harness()
+    database.chatOnly = true
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'chatcmpl-tools-fallback',
+        object: 'chat.completion',
+        created: 1_700_000_001,
+        model: 'gpt-upstream',
+        service_tier: 'priority',
+        choices: [{
+          index: 0,
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_shell',
+                type: 'function',
+                function: { name: 'shell', arguments: '{"input":"pwd"}' },
+              },
+              {
+                id: 'call_team',
+                type: 'function',
+                function: { name: 'team__send', arguments: '{"message":"hi"}' },
+              },
+            ],
+          },
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 3, total_tokens: 9 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        input: 'run tools',
+        service_tier: '  FAST ',
+        tools: [
+          { type: 'custom', name: 'shell', format: { type: 'text' }, dangerous: 'drop-me' },
+          {
+            type: 'namespace',
+            name: 'team',
+            tools: [{ type: 'function', name: 'send', parameters: { type: 'object' } }],
+          },
+        ],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      object: 'response',
+      model: 'gpt-public',
+      service_tier: 'priority',
+      output: [
+        {
+          type: 'custom_tool_call',
+          call_id: 'call_shell',
+          name: 'shell',
+          input: 'pwd',
+        },
+        {
+          type: 'function_call',
+          call_id: 'call_team',
+          namespace: 'team',
+          name: 'send',
+          arguments: '{"message":"hi"}',
+        },
+      ],
+    })
+    const [, init] = upstream.mock.calls[0]
+    const upstreamBody = JSON.parse(String(init?.body))
+    expect(upstreamBody).toMatchObject({
+      service_tier: 'priority',
+      tools: [
+        { type: 'function', function: { name: 'shell' } },
+        { type: 'function', function: { name: 'team__send' } },
+      ],
+    })
+    expect(JSON.stringify(upstreamBody)).not.toContain('dangerous')
+  })
+
+  it('rejects ambiguous custom tool mappings before reserving funds or upstream capacity', async () => {
+    const { env, database, user, pool } = await harness()
+    database.chatOnly = true
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        input: 'run tool',
+        tools: [
+          { type: 'custom', name: 'shell' },
+          { type: 'function', name: 'shell', parameters: { type: 'object' } },
+        ],
+      }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { type: 'invalid_request_error' },
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expect(user.calls).toEqual([])
+    expect(pool.calls).toEqual([])
+  })
+
   it('bridges Chat Completions SSE into a terminal Responses event stream', async () => {
     const { env, database, user } = await harness()
     database.chatOnly = true
@@ -888,6 +1046,36 @@ describe('OpenAI-compatible gateway', () => {
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
       usage_event: { payload: { stream: true, input_tokens: 4, output_tokens: 2 } },
     })
+  })
+
+  it('restores custom tool identity through a streaming Chat-only fallback', async () => {
+    const { env, database } = await harness()
+    database.chatOnly = true
+    vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      'data: {"id":"chatcmpl-custom","service_tier":"flex","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"exec","arguments":"{\\"input\\":\\"pwd\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n',
+      'data: [DONE]\n\n',
+    ].join(''), { headers: { 'content-type': 'text/event-stream' } })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        input: 'run pwd',
+        stream: true,
+        tools: [{ type: 'custom', name: 'exec' }],
+      }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).toContain('event: response.custom_tool_call_input.done')
+    expect(text).toContain('"type":"custom_tool_call"')
+    expect(text).toContain('"call_id":"call_exec"')
+    expect(text).toContain('"input":"pwd"')
+    expect(text).toContain('"service_tier":"flex"')
+    expect(text).not.toContain('event: response.function_call_arguments')
   })
 
   it('charges an active subscription at the effective rate without touching balance state', async () => {

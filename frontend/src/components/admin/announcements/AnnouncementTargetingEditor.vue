@@ -41,13 +41,13 @@
         <div class="text-sm font-medium text-gray-900 dark:text-white">
           OR
           <span class="ml-1 text-xs font-normal text-gray-500 dark:text-dark-400">
-            ({{ anyOf.length }}/50)
+            ({{ anyOf.length }}/50 · {{ totalConditionCount }}/100)
           </span>
         </div>
         <button
           type="button"
           class="btn btn-secondary"
-          :disabled="anyOf.length >= 50"
+          :disabled="anyOf.length >= 50 || totalConditionCount >= 100"
           @click="addOrGroup"
         >
           <Icon name="plus" size="sm" class="mr-1" />
@@ -147,7 +147,7 @@
             <button
               type="button"
               class="btn btn-secondary"
-              :disabled="(group.all_of?.length || 0) >= 50"
+              :disabled="(group.all_of?.length || 0) >= 50 || totalConditionCount >= 100"
               @click="addAndCondition(groupIndex)"
             >
               <Icon name="plus" size="sm" class="mr-1" />
@@ -168,12 +168,13 @@
 import { computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type {
-  AdminGroup,
   AnnouncementTargeting,
   AnnouncementCondition,
   AnnouncementConditionGroup,
   AnnouncementConditionType,
-  AnnouncementOperator
+  AnnouncementOperator,
+  GroupId,
+  OpaqueAdminGroup
 } from '@/types'
 
 import Select from '@/components/common/Select.vue'
@@ -184,7 +185,7 @@ const { t } = useI18n()
 
 const props = defineProps<{
   modelValue: AnnouncementTargeting
-  groups: AdminGroup[]
+  groups: OpaqueAdminGroup[]
 }>()
 
 const emit = defineEmits<{
@@ -192,6 +193,10 @@ const emit = defineEmits<{
 }>()
 
 const anyOf = computed(() => props.modelValue?.any_of ?? [])
+const totalConditionCount = computed(() => anyOf.value.reduce(
+  (total, group) => total + (group.all_of?.length ?? 0),
+  0
+))
 
 type Mode = 'all' | 'custom'
 const mode = computed<Mode>(() => (anyOf.value.length === 0 ? 'all' : 'custom'))
@@ -248,7 +253,7 @@ function updateTargeting(mutator: (draft: TargetingDraft) => void) {
 
 function addOrGroup() {
   updateTargeting((draft) => {
-    if (draft.any_of.length >= 50) return
+    if (draft.any_of.length >= 50 || totalConditionCount.value >= 100) return
     draft.any_of.push({ all_of: [defaultSubscriptionCondition()] })
   })
 }
@@ -263,7 +268,7 @@ function addAndCondition(groupIndex: number) {
   updateTargeting((draft) => {
     const group = draft.any_of[groupIndex]
     if (!group.all_of) group.all_of = []
-    if (group.all_of.length >= 50) return
+    if (group.all_of.length >= 50 || totalConditionCount.value >= 100) return
     group.all_of.push(defaultSubscriptionCondition())
   })
 }
@@ -314,9 +319,9 @@ function setBalanceValue(groupIndex: number, condIndex: number, raw: string) {
   })
 }
 
-// We keep group_ids selection in a parallel reactive map because GroupSelector is numeric list.
-// Then we mirror it back to targeting.group_ids via a watcher.
-const subscriptionSelections = reactive<Record<number, Record<number, number[]>>>({})
+// Keep draft selections separate so the shared selector can preserve both legacy
+// numeric ids and Worker-owned opaque ids without coercion.
+const subscriptionSelections = reactive<Record<number, Record<number, GroupId[]>>>({})
 
 function ensureSelectionPath(groupIndex: number, condIndex: number) {
   if (!subscriptionSelections[groupIndex]) subscriptionSelections[groupIndex] = {}
@@ -337,7 +342,9 @@ watch(
           // Only update if different to avoid triggering unnecessary updates
           const newIds = (c.group_ids ?? []).slice()
           const currentIds = subscriptionSelections[gi]?.[ci] ?? []
-          if (JSON.stringify(newIds.sort()) !== JSON.stringify(currentIds.sort())) {
+          const sortedNewIds = [...newIds].sort((left, right) => String(left).localeCompare(String(right)))
+          const sortedCurrentIds = [...currentIds].sort((left, right) => String(left).localeCompare(String(right)))
+          if (JSON.stringify(sortedNewIds) !== JSON.stringify(sortedCurrentIds)) {
             subscriptionSelections[gi][ci] = newIds
           }
         }
@@ -390,6 +397,7 @@ const validationError = computed(() => {
   if (groups.length === 0) return t('admin.announcements.form.addOrGroup')
 
   if (groups.length > 50) return 'any_of > 50'
+  if (totalConditionCount.value > 100) return 'conditions > 100'
 
   for (const g of groups) {
     const allOf = g?.all_of ?? []

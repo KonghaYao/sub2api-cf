@@ -9,6 +9,7 @@ const MAX_SAFE_INTEGER = 9_007_199_254_740_991
 const FULFILLMENT_ACTION = 'subscription_entitlement'
 const LEASE_MS = 60_000
 const DEFAULT_RECOVERY_LIMIT = 10
+const MAX_RENEWAL_CAS_ATTEMPTS = 8
 
 export interface PaymentFulfillmentPayload {
   order_id: string
@@ -211,6 +212,29 @@ async function applySubscriptionEntitlement(
   leaseOwner: string,
   now: number,
 ): Promise<SubscriptionEventRow> {
+  let currentOrder = order
+  for (let attempt = 0; attempt < MAX_RENEWAL_CAS_ATTEMPTS; attempt += 1) {
+    const committed = await applySubscriptionEntitlementOnce(
+      env,
+      currentOrder,
+      fulfillmentId,
+      leaseOwner,
+      now,
+    )
+    if (committed !== null) return committed
+    currentOrder = await requireOrder(env, order.id)
+    assertFulfillableOrder(currentOrder)
+  }
+  throw new Error('Subscription entitlement CAS retry limit exceeded')
+}
+
+async function applySubscriptionEntitlementOnce(
+  env: Env,
+  order: PaymentOrderRow,
+  fulfillmentId: string,
+  leaseOwner: string,
+  now: number,
+): Promise<SubscriptionEventRow | null> {
   const snapshot = requireSubscriptionSnapshot(order)
   const existing = await env.DB.prepare(
     `SELECT id, status, starts_at_ms, expires_at_ms, control_version
@@ -238,6 +262,7 @@ async function applySubscriptionEntitlement(
   const targetControlVersion = existing === null ? 0 : checkedIncrement(existing.control_version)
   const targetOrderVersion = order.status === 'PAID' ? checkedIncrement(order.version) : order.version
   const eventType = extending ? 'extended' : 'assigned'
+  const termKind = existing === null ? 'initial' : extending ? 'extended' : 'restarted'
   const eventId = await deterministicUuid('payment.subscription.event.v1', order.id)
   const intentId = await deterministicUuid(
     'subscription.state.sync.v1',
@@ -390,6 +415,32 @@ async function applySubscriptionEntitlement(
         targetOrderVersion,
         leaseOwner,
       ),
+      env.DB.prepare(
+        `INSERT INTO payment_subscription_terms (
+           order_id, subscription_id, user_id, group_id, term_kind,
+           previous_status, previous_starts_at_ms, previous_expires_at_ms,
+           starts_at_ms, expires_at_ms, granted_duration_ms,
+           refunded_duration_ms, created_at_ms, updated_at_ms
+         )
+         SELECT ?, subscription.id, subscription.user_id, subscription.group_id, ?,
+                ?, ?, ?, ?, ?, ?, 0, ?, ?
+           FROM subscription_events event
+           JOIN user_subscriptions subscription ON subscription.id = event.subscription_id
+          WHERE event.id = ?
+         ON CONFLICT(order_id) DO NOTHING`,
+      ).bind(
+        order.id,
+        termKind,
+        existing?.status ?? null,
+        existing?.starts_at_ms ?? null,
+        existing?.expires_at_ms ?? null,
+        startsAtMs,
+        expiresAtMs,
+        durationMs,
+        now,
+        now,
+        eventId,
+      ),
       subscriptionStateSyncStatement(
         env,
         requestId,
@@ -414,8 +465,9 @@ async function applySubscriptionEntitlement(
   }
 
   const committed = await findPaymentSubscriptionEvent(env, order.id)
-  if (committed === null || committed.subscription_id !== subscriptionId) {
-    throw new Error('Subscription entitlement CAS did not commit')
+  if (committed === null) return null
+  if (committed.subscription_id !== subscriptionId) {
+    throw new Error('Subscription entitlement committed to an unexpected subscription')
   }
   return committed
 }

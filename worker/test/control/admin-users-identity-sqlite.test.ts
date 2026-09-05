@@ -95,6 +95,36 @@ describe('admin user Worker identity and admission contract', () => {
     )).resolves.toBe(true)
   })
 
+  it('maps canonical mailbox aliases to the public duplicate-email conflict', async () => {
+    const test = fixture()
+    const first = await test.app.request('/users', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'admin-create-canonical-user-0001',
+      },
+      body: JSON.stringify({
+        email: 'some.one+first@gmail.com', password: 'correct horse battery staple',
+      }),
+    }, test.env)
+    expect(first.status).toBe(201)
+
+    const duplicate = await test.app.request('/users', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'admin-create-canonical-user-0002',
+      },
+      body: JSON.stringify({
+        email: 'someone+second@googlemail.com.', password: 'correct horse battery staple',
+      }),
+    }, test.env)
+    expect(duplicate.status).toBe(409)
+    await expect(duplicate.json()).resolves.toMatchObject({
+      error: { code: 'email_already_exists' },
+    })
+  })
+
   it('updates admission limits and rotates the password while revoking sessions atomically', async () => {
     const test = fixture()
     const created = await test.app.request('/users', {

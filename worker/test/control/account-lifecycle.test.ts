@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   consumeAccountHealthProbe,
@@ -197,6 +197,11 @@ function job(test: Fixture, accountId: string): any {
 function account(test: Fixture, accountId: string): any {
   return test.raw.prepare(`SELECT * FROM accounts WHERE id = ?`).get(accountId)
 }
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(NOW)
+})
 
 afterEach(() => {
   vi.useRealTimers()

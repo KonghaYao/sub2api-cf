@@ -53,6 +53,7 @@ describe('worker app', () => {
       data: {
         site_name: 'Sub2API',
         registration_enabled: false,
+        registration_email_suffix_whitelist: [],
         email_verification_enabled: false,
         email_verify_enabled: false,
         turnstile_enabled: false,
@@ -98,6 +99,7 @@ describe('worker app', () => {
       data: {
         site_name: 'Edge Sub2API',
         registration_enabled: false,
+        registration_email_suffix_whitelist: [],
         email_verification_enabled: false,
         email_verify_enabled: false,
         turnstile_enabled: false,

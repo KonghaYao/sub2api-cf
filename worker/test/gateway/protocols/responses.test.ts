@@ -9,6 +9,18 @@ import {
 } from '../../../src/gateway/protocols/responses'
 
 describe('Responses request to Chat Completions', () => {
+  it('normalizes fast and accepts scale while keeping null as omission', () => {
+    expect(parseResponsesRequest({
+      model: 'public-model', input: 'hello', service_tier: '  FAST ',
+    }).service_tier).toBe('priority')
+    expect(parseResponsesRequest({
+      model: 'public-model', input: 'hello', service_tier: 'scale',
+    }).service_tier).toBe('scale')
+    expect(parseResponsesRequest({
+      model: 'public-model', input: 'hello', service_tier: null,
+    }).service_tier).toBeUndefined()
+  })
+
   it('maps public controls through an allow-listed request shape', () => {
     const request = parseResponsesRequest({
       model: 'public-model',

@@ -80,6 +80,8 @@ export interface User {
   }
   auth_bindings?: Partial<Record<UserAuthProvider, boolean | UserAuthBindingStatus>>
   identity_bindings?: Partial<Record<UserAuthProvider, boolean | UserAuthBindingStatus>>
+  has_password?: boolean
+  password_binding_required?: boolean
   email_bound?: boolean
   linuxdo_bound?: boolean
   oidc_bound?: boolean
@@ -350,7 +352,7 @@ export type AnnouncementOperator = 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'eq'
 export interface AnnouncementCondition {
   type: AnnouncementConditionType
   operator: AnnouncementOperator
-  group_ids?: number[]
+  group_ids?: Array<string | number>
   value?: number
 }
 
@@ -363,28 +365,29 @@ export interface AnnouncementTargeting {
 }
 
 export interface Announcement {
-  id: number
+  id: string | number
   title: string
   content: string
   status: AnnouncementStatus
   notify_mode: AnnouncementNotifyMode
   targeting: AnnouncementTargeting
-  starts_at?: string
-  ends_at?: string
-  created_by?: number
-  updated_by?: number
+  starts_at: string | null
+  ends_at: string | null
+  created_by?: string | number | null
+  updated_by?: string | number | null
+  control_version: number
   created_at: string
   updated_at: string
 }
 
 export interface UserAnnouncement {
-  id: number
+  id: string | number
   title: string
   content: string
   notify_mode: AnnouncementNotifyMode
-  starts_at?: string
-  ends_at?: string
-  read_at?: string
+  starts_at: string | null
+  ends_at: string | null
+  read_at: string | null
   created_at: string
   updated_at: string
 }
@@ -407,15 +410,16 @@ export interface UpdateAnnouncementRequest {
   targeting?: AnnouncementTargeting
   starts_at?: number
   ends_at?: number
+  expected_control_version?: number
 }
 
 export interface AnnouncementUserReadStatus {
-  user_id: number
+  user_id: string | number
   email: string
   username: string
   balance: number
   eligible: boolean
-  read_at?: string
+  read_at: string | null
 }
 
 // ==================== Proxy Node Types ====================
@@ -549,6 +553,7 @@ export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'codex' | 'antig
 export type VideoModelPrices = Record<string, Record<string, number>>
 
 export type SubscriptionType = 'standard' | 'subscription'
+export type GroupId = string | number
 
 export interface OpenAIMessagesDispatchModelConfig {
   opus_mapped_model?: string
@@ -661,6 +666,10 @@ export interface AdminGroup extends Group {
   // 分组排序
   sort_order: number
 }
+
+// Cloudflare-owned records use opaque text ids while the legacy admin API still
+// exposes numeric group ids. Components shared by both contracts use this view.
+export type OpaqueAdminGroup = Omit<AdminGroup, 'id'> & { id: GroupId }
 
 export interface ModelsListConfig {
   enabled: boolean
