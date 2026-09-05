@@ -439,6 +439,35 @@ async function executeCodexImages(input: ImageExecutionInput & {
     })
     const response = execution.response
     if (!response.ok) {
+      if (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+        const transformed = await readSyncImageSseResponse(
+          response,
+          input.manifest,
+          input.publicModel,
+          false,
+          input.leaseSignal,
+        )
+        const classified = classifySyncImageProviderOutcome(snapshotOutcome(response.status, transformed.snapshot))
+        if (classified.kind === 'failure') {
+          const decision = decideSyncImageFailover(classified.failure, {
+            upstreamStarted: true,
+            outputCommitted: false,
+            clientDisconnected: false,
+            sameAccountRetries,
+            accountSwitches: 0,
+            remainingAccounts: input.remainingAccounts,
+            retryWindowElapsedMs,
+          })
+          if (decision.action === 'retry_same_account') {
+            const delay = decision.retryDelayMs ?? 0
+            await waitForRetry(delay, input.leaseSignal)
+            retryWindowElapsedMs += delay
+            sameAccountRetries += 1
+            continue
+          }
+          throw gatewayErrorFromDecision(decision)
+        }
+      }
       try {
         await readSyncImageResponse(response)
         throw new GatewayError(502, 'IMAGE_RESPONSES_ERROR_MISSING', 'Image Responses provider returned an invalid error', 'server_error')
@@ -593,7 +622,9 @@ async function readSyncImageSseResponse(
       }
       frames.push(...transformer.push(next.value))
     }
-    if (transformer.snapshot().state !== 'open') await reader.cancel('image Responses terminal event received')
+    if (transformer.snapshot().state !== 'open') {
+      await bestEffort(() => reader.cancel('image Responses terminal event received'))
+    }
   }
   frames.push(...transformer.finish())
   return { body: joinBytes(frames), snapshot: transformer.snapshot() }

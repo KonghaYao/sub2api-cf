@@ -376,6 +376,30 @@ describe('synchronous image handler', () => {
     expect(test.settle).toHaveBeenCalledOnce()
   })
 
+  it('honors a bounded retry-after carried by a non-2xx Responses SSE error', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch
+      .mockResolvedValueOnce(new Response([
+        'event: response.failed',
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","retry_after":"0.001"}}}',
+        '',
+        '',
+      ].join('\n'), { status: 429, headers: { 'content-type': 'text/event-stream', 'retry-after': '0.001' } }))
+      .mockResolvedValueOnce(new Response([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_rate_retry","type":"image_generation_call","status":"completed","result":"aW1hZ2U=","output_format":"png"}]}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'rate retry' }),
+    }, test.env as never)
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.upstreamFetch).toHaveBeenCalledTimes(2)
+    expect(test.settle).toHaveBeenCalledOnce()
+  })
+
   it('still rejects direct-provider streaming before admission and billing', async () => {
     const test = await fixture()
     const response = await app().request('/v1/images/generations', {
