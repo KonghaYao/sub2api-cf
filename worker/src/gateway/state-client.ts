@@ -188,6 +188,24 @@ export async function settlePlatformQuotaReservation(
   return parsePlatformQuotaUsage(body.usage, reference.user_id, policy.platform)
 }
 
+export async function renewPlatformQuotaReservation(
+  env: Env,
+  reference: PlatformQuotaReference,
+  requestId: string,
+  renewalSequence: number,
+): Promise<void> {
+  const policy = reference.platform_quota
+  if (reference.billing.type !== 'balance' || policy == null) return
+  await requireStateOk(post(apiKeyLimitStub(env, reference.user_id), '/platform-quota/renew', {
+    schema_version: STATE_SCHEMA_VERSION,
+    request_id: requestId,
+    user_id: reference.user_id,
+    platform: policy.platform,
+    renewal_sequence: renewalSequence,
+    reservation_ttl_ms: RESERVATION_TTL_MS,
+  }))
+}
+
 export async function cancelPlatformQuotaReservation(
   env: Env,
   reference: PlatformQuotaReference,
@@ -582,12 +600,16 @@ export async function reservePoolAccount(
   stub: DurableObjectStub,
   leaseId: string,
   affinityKey?: string,
+  excludedAccountIds?: readonly string[],
 ): Promise<string> {
   const response = await requireStateOk(
     post(stub, '/reserve', {
       schema_version: STATE_SCHEMA_VERSION,
       request_id: leaseId,
       lease_ttl_ms: LEASE_TTL_MS,
+      ...(excludedAccountIds === undefined || excludedAccountIds.length === 0
+        ? {}
+        : { excluded_account_ids: excludedAccountIds }),
       ...(affinityKey === undefined
         ? {}
         : {

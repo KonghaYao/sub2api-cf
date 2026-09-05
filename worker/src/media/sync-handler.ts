@@ -19,6 +19,7 @@ import {
   renewApiKeyMonetaryReservation,
   renewApiKeyAdmission,
   renewBillingReservation,
+  renewPlatformQuotaReservation,
   renewPoolLease,
   reservePoolAccount,
   syncPoolAccounts,
@@ -128,12 +129,18 @@ export async function handleSyncImages(
       resolveSyncImagePricePolicy(context.env, principal),
       resolveGatewayRoute(context.env, principal.group_id, manifest.model, 'images', principal.user_id),
     ])
-    if (route.candidates.some((candidate) => candidate.platform !== 'openai' && candidate.platform !== 'codex')) {
+    const compatibleCandidates = route.candidates.filter((candidate) =>
+      (candidate.platform === 'openai' && candidate.image_adapter === 'direct_images' &&
+        candidate.credential_kind === 'api_key') ||
+      (candidate.platform === 'codex' && candidate.image_adapter === 'responses_image_tool' &&
+        (candidate.credential_kind === 'oauth' || candidate.credential_kind === 'setup_token')),
+    )
+    if (compatibleCandidates.length === 0) {
       throw new GatewayError(503, 'IMAGE_PROVIDER_NOT_SUPPORTED', 'No compatible Images account is configured', 'server_error')
     }
     const candidates = manifest.options.stream === true
-      ? route.candidates.filter((candidate) => candidate.image_adapter === 'responses_image_tool')
-      : route.candidates
+      ? compatibleCandidates.filter((candidate) => candidate.image_adapter === 'responses_image_tool')
+      : compatibleCandidates
     if (manifest.options.stream === true && candidates.length === 0) {
       throw new GatewayError(
         501,
@@ -171,6 +178,7 @@ export async function handleSyncImages(
     } | null = null
     let lastError: GatewayError | null = null
     const attempts = Math.min(4, candidates.length)
+    const attemptedAccountIds = new Set<string>()
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (context.req.raw.signal.aborted) {
         throw new GatewayError(499, 'client_cancelled', 'Client cancelled before image generation started')
@@ -180,7 +188,13 @@ export async function handleSyncImages(
       let renewal: ReturnType<typeof startLeaseRenewal> | null = null
       let upstreamStarted = false
       try {
-        accountId = await reservePoolAccount(activePool, activeLeaseId)
+        accountId = await reservePoolAccount(
+          activePool,
+          activeLeaseId,
+          undefined,
+          [...attemptedAccountIds],
+        )
+        attemptedAccountIds.add(accountId)
         renewal = startLeaseRenewal(
           context.env,
           principal,
@@ -260,7 +274,8 @@ export async function handleSyncImages(
                 FAILURE_COOLDOWN_MS,
               ))
             }
-            if (snapshot.completedImages.length === 0) {
+            const billableImageCount = Math.max(snapshot.completedImages.length, snapshot.paidOutputCount)
+            if (billableImageCount === 0) {
               await bestEffort(() => billing.cancel({
                 env: context.env,
                 principal: ownedPrincipal,
@@ -268,18 +283,23 @@ export async function handleSyncImages(
               }))
               return
             }
-            const actualTiers = outputBillingTiers(manifest, snapshot.completedImages.map((image) => ({
+            const billingOutputs: Array<{ bytes?: Uint8Array; size?: string }> = snapshot.completedImages.map((image) => ({
               bytes: image.bytes,
               ...(image.size === '' ? {} : { size: image.size }),
-            })))
+            }))
+            while (billingOutputs.length < billableImageCount) {
+              billingOutputs.push(snapshot.metadata.size === '' ? {} : { size: snapshot.metadata.size })
+            }
+            const outputBilling = resolveOutputBilling(manifest, billingOutputs)
             const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> = {
               requestId,
               accountId: ownedAccountId,
               priceId: route.model.price_id,
               requestedModel: manifest.model,
               upstreamModel: route.model.upstream_name,
-              amountMicros: calculateSyncImageActualCost(pricing, actualTiers),
+              amountMicros: calculateSyncImageActualCost(pricing, outputBilling.tiers),
               operation,
+              ...outputBilling.dimensions,
               startedAt,
               stream: true,
               outcome: clientDisconnected ? 'cancelled' : snapshot.state === 'completed' ? 'completed' : 'failed',
@@ -380,8 +400,8 @@ export async function handleSyncImages(
     if (completed === null) {
       throw lastError ?? new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
     }
-    const actualTiers = outputBillingTiers(manifest, completed.normalized.outputs)
-    const actualMicros = calculateSyncImageActualCost(pricing, actualTiers)
+    const outputBilling = resolveOutputBilling(manifest, completed.normalized.outputs)
+    const actualMicros = calculateSyncImageActualCost(pricing, outputBilling.tiers)
     const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> = {
       requestId,
       accountId: completed.accountId,
@@ -390,6 +410,7 @@ export async function handleSyncImages(
       upstreamModel: route.model.upstream_name,
       amountMicros: actualMicros,
       operation,
+      ...outputBilling.dimensions,
       startedAt,
     }
     // The provider has already completed billable work. From this point the
@@ -533,9 +554,21 @@ async function executeDirectImages(input: ImageExecutionInput & {
     throw new GatewayError(502, 'upstream_redirect_rejected', 'Upstream redirect was rejected', 'server_error')
   }
   const parsed = await readSyncImageResponse(response)
+  const normalized = normalizeNativeImageResponse(parsed, input.manifest.n)
+  const normalizedUsage = normalized.publicBody.usage
+  const publicUsage = normalizedUsage !== null && typeof normalizedUsage === 'object' && !Array.isArray(normalizedUsage)
+    ? { ...(normalizedUsage as Record<string, unknown>), images: normalized.outputs.length }
+    : normalizedUsage
+  const publicBody = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? {
+        ...(parsed as Record<string, unknown>),
+        ...normalized.publicBody,
+        ...(publicUsage === undefined ? {} : { usage: publicUsage }),
+      }
+    : normalized.publicBody
   return {
-    normalized: normalizeNativeImageResponse(parsed),
-    publicBody: parsed,
+    normalized,
+    publicBody,
     status: response.status,
     headers: imageResponseHeaders(response.headers, input.requestId),
   }
@@ -734,7 +767,7 @@ async function prepareCodexImageLiveAttempt(input: ImageExecutionInput & {
       leaseSignal: input.leaseSignal,
       maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-      maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
+      maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, input.manifest.n),
       maxResponseBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
       maxAggregateBytes: SYNC_IMAGE_SSE_AGGREGATE_LIMIT,
       waitUntil: input.waitUntil,
@@ -860,7 +893,7 @@ async function readSyncImageSseResponse(
     publicModel,
     maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
     maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-    maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
+    maxCompletedImages: Math.min(SYNC_IMAGE_MAX_COMPLETED_OUTPUTS, manifest.n),
   })
   if (!retainFrames) transformer.disconnectOutput()
   const reader = response.body?.getReader()
@@ -1106,20 +1139,76 @@ function providerBody(
   return body
 }
 
-function outputBillingTiers(
+function resolveOutputBilling(
   manifest: SyncImageManifest,
   outputs: Array<{ bytes?: Uint8Array; size?: string }>,
-): ImageBillingTier[] {
+): {
+  tiers: ImageBillingTier[]
+  dimensions: Pick<SyncImageUsageInput,
+    'imageCount' | 'imageSize' | 'imageInputSize' | 'imageOutputSize' |
+    'imageSizeSource' | 'imageSizeBreakdown'>
+} {
   const requestedSize = manifest.options.size ?? ''
-  return outputs.map((output) => {
-    if (output.bytes !== undefined) return resolveImageBilling(requestedSize, [output.bytes]).billingTier
-    if (output.size !== undefined) return classifyImageBillingTier(output.size) ?? fallbackTier(requestedSize)
+  let detectedOutputSize = ''
+  let firstObservedOutputSize = ''
+  let hasOutputEvidence = false
+  const tiers = outputs.map((output) => {
+    const declaredSize = output.size?.trim() ?? ''
+    if (firstObservedOutputSize === '' && declaredSize !== '') firstObservedOutputSize = declaredSize
+    if (output.bytes !== undefined) {
+      const resolved = resolveImageBilling(requestedSize, [output.bytes])
+      if (resolved.source === 'output') {
+        hasOutputEvidence = true
+        if (detectedOutputSize === '') detectedOutputSize = resolved.outputSize
+        return resolved.billingTier
+      }
+      const declaredTier = classifyImageBillingTier(declaredSize)
+      if (declaredTier !== null) {
+        hasOutputEvidence = true
+        return declaredTier
+      }
+      return resolved.billingTier
+    }
+    if (declaredSize !== '') {
+      const tier = classifyImageBillingTier(declaredSize)
+      if (tier !== null) {
+        hasOutputEvidence = true
+        return tier
+      }
+    }
     return fallbackTier(requestedSize)
   })
+  const breakdown: Partial<Record<ImageBillingTier, number>> = {}
+  for (const tier of tiers) breakdown[tier] = (breakdown[tier] ?? 0) + 1
+  const source = hasOutputEvidence
+    ? 'output'
+    : classifyImageBillingTier(requestedSize) === null ? 'default' : 'input'
+  return {
+    tiers,
+    dimensions: {
+      imageCount: outputs.length,
+      imageSize: highestTier(tiers),
+      imageInputSize: boundedUsageSize(requestedSize),
+      imageOutputSize: boundedUsageSize(firstObservedOutputSize || detectedOutputSize),
+      imageSizeSource: source,
+      imageSizeBreakdown: breakdown,
+    },
+  }
+}
+
+function highestTier(tiers: ImageBillingTier[]): ImageBillingTier {
+  if (tiers.includes('4K')) return '4K'
+  if (tiers.includes('2K')) return '2K'
+  return '1K'
 }
 
 function fallbackTier(requestedSize: string): ImageBillingTier {
   return classifyImageBillingTier(requestedSize) ?? '2K'
+}
+
+function boundedUsageSize(value: string): string | null {
+  const normalized = value.trim()
+  return normalized === '' ? null : normalized.slice(0, 32)
 }
 
 function isRetryable(error: GatewayError): boolean {
@@ -1201,26 +1290,40 @@ async function bestEffort(operation: () => Promise<unknown>): Promise<void> {
 }
 
 function registerExecutionTask(context: Context<SyncImageBindings>, task: Promise<unknown>): void {
-  const guarded = task.then(() => undefined, () => undefined)
   try {
-    context.executionCtx.waitUntil(guarded)
+    // Preserve rejection for Cloudflare invocation/error observability. The
+    // task itself owns idempotent recovery and must not fail silently.
+    context.executionCtx.waitUntil(task)
   } catch {
     // Unit/miniflare request helpers may not provide an ExecutionContext. The
-    // guarded promise is still deliberately observed to avoid an unhandled rejection.
-    void guarded
+    // promise is still deliberately observed to avoid an unhandled rejection.
+    void task.catch((error) => console.error('image background task failed', {
+      name: error instanceof Error ? error.name : 'unknown',
+    }))
   }
 }
 
 async function retrySettlement(operation: () => Promise<void>): Promise<void> {
+  let lastError: unknown = new Error('Image settlement failed')
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       await operation()
       return
-    } catch {
+    } catch (error) {
+      lastError = error
       // The request id is the idempotency key; bounded retries cannot generate
       // another image and durable recovery owns the obligation once persisted.
     }
+    if (attempt < 2) await delay(50 * 2 ** attempt)
   }
+  console.error('image settlement retries exhausted', {
+    name: lastError instanceof Error ? lastError.name : 'unknown',
+  })
+  throw lastError
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 function startLeaseRenewal(
@@ -1243,6 +1346,7 @@ function startLeaseRenewal(
         renewPoolLease(pool, leaseId, sequence),
         renewBillingReservation(env, principal, requestId, sequence),
         renewApiKeyMonetaryReservation(env, principal, requestId, sequence),
+        renewPlatformQuotaReservation(env, principal, requestId, sequence),
       ])
     }).catch((error: unknown) => {
       if (!controller.signal.aborted) controller.abort(error)

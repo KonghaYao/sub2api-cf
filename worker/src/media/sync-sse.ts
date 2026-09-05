@@ -56,6 +56,7 @@ export interface SyncImageStreamError {
 export interface SyncImageSseSnapshot {
   state: SyncImageSseState
   imageCount: number
+  paidOutputCount: number
   completedImages: readonly SyncImageCompletedImage[]
   usage: SyncImageStreamUsage
   outputSuppressed: boolean
@@ -123,12 +124,15 @@ export class SyncImageSseTransformer {
   private pendingImages: PendingImage[] = []
   private readonly seenPending = new Set<string>()
   private readonly seenCompleted = new Set<string>()
+  private readonly seenPublished = new Set<string>()
+  private readonly paidOutputs = new Set<string>()
   private completedImages: SyncImageCompletedImage[] = []
   private trackedImageBytes = 0
   private usage: SyncImageStreamUsage = emptyUsage()
   private state: SyncImageSseState = 'open'
   private outputSuppressed = false
   private imageOutputStartedValue = false
+  private failureFrameEmitted = false
   private responseStatus = ''
   private incompleteReason = ''
   private textOutput = ''
@@ -186,15 +190,21 @@ export class SyncImageSseTransformer {
   }
 
   failTransport(code: string, message: string, type = 'upstream_error', param?: string): Uint8Array[] {
-    return this.emitFailure({
+    const failure = this.state === 'error' && this.error !== null ? this.error : {
       type,
       code,
       message,
       param: param ?? '',
       status: 502,
       retryable: true,
-      classification: 'protocol',
-    })
+      classification: 'protocol' as const,
+    }
+    if (this.state === 'open') {
+      this.state = 'error'
+      this.responseStatus = 'failed'
+      this.error = failure
+    }
+    return this.failureFrame(failure)
   }
 
   disconnectOutput(): void {
@@ -205,6 +215,7 @@ export class SyncImageSseTransformer {
     return {
       state: this.state,
       imageCount: this.completedImages.length,
+      paidOutputCount: this.paidOutputs.size,
       completedImages: this.completedImages.map((image) => ({ ...image })),
       usage: { ...this.usage },
       outputSuppressed: this.outputSuppressed,
@@ -235,6 +246,37 @@ export class SyncImageSseTransformer {
 
   imageOutputStarted(): boolean {
     return this.imageOutputStartedValue
+  }
+
+  /**
+   * The provider has completed paid image work even when no public Images
+   * frame has been emitted yet. A transport failure after this point must not
+   * fail over to another account and generate the image twice.
+   */
+  providerOutputCompleted(): boolean {
+    return this.paidOutputs.size > 0
+  }
+
+  /** Retains a completed Responses output-item for billing without publishing it. */
+  retainCompletedProviderOutput(): Uint8Array[] {
+    try {
+      for (const image of this.pendingImages) {
+        const identity = imageIdentity(image)
+        if (this.seenCompleted.has(identity)) continue
+        const completed = this.trackImage(image)
+        this.seenCompleted.add(identity)
+      }
+    } catch (error) {
+      if (error instanceof SyncImageSseError) {
+        return this.emitFailure({
+          type: 'upstream_error', code: error.code, message: error.message, param: '',
+          status: 502, retryable: false, classification: 'protocol',
+        })
+      }
+      throw error
+    }
+    this.usage.images = Math.max(this.usage.images, this.completedImages.length)
+    return []
   }
 
   private drainLines(flush: boolean): Uint8Array[] {
@@ -403,8 +445,12 @@ export class SyncImageSseTransformer {
     if (image === null) return
     const identity = imageIdentity(image)
     if (this.seenPending.has(identity)) return
+    if (this.paidOutputs.size >= this.maxCompletedImages) return
     this.seenPending.add(identity)
+    this.paidOutputs.add(identity)
     this.pendingImages.push(image)
+    this.usage.images = Math.max(this.usage.images, this.pendingImages.length)
+    this.currentMeta = mergeMeta(this.currentMeta, image)
   }
 
   private responsesCompleted(payload: Record<string, unknown>): Uint8Array[] {
@@ -479,8 +525,15 @@ export class SyncImageSseTransformer {
     try {
       for (const image of images) {
         const identity = imageIdentity(image)
-        if (this.seenCompleted.has(identity)) continue
-        const completed = this.trackImage(image)
+        if (this.seenPublished.has(identity)) continue
+        if (!this.paidOutputs.has(identity)) {
+          if (this.paidOutputs.size >= this.maxCompletedImages) continue
+          this.paidOutputs.add(identity)
+        }
+        const completed = this.seenCompleted.has(identity)
+          ? this.completedImages.find((candidate) => imageIdentity(candidate) === identity)
+          : this.trackImage(image)
+        if (completed === undefined) continue
         this.seenCompleted.add(identity)
         completedBatch.push({ source: image, completed })
       }
@@ -514,6 +567,7 @@ export class SyncImageSseTransformer {
       addMeta(body, { ...image, size: completed.size })
       if (usage !== undefined) body.usage = usage
       frames.push(...this.frame(`${this.prefix}.completed`, body))
+      this.seenPublished.add(imageIdentity(image))
     }
     if (terminal) {
       this.state = 'completed'
@@ -615,7 +669,13 @@ export class SyncImageSseTransformer {
     if (this.state !== 'open') return []
     this.state = 'error'
     this.error = failure
-    return this.frame('error', {
+    return this.failureFrame(failure, publicError)
+  }
+
+  private failureFrame(failure: SyncImageStreamError, publicError?: Record<string, unknown>): Uint8Array[] {
+    if (this.failureFrameEmitted || this.outputSuppressed) return []
+    this.failureFrameEmitted = true
+    return [this.encoder.encode(`event: error\ndata: ${JSON.stringify({
       type: 'error',
       error: publicError ?? {
         type: failure.type,
@@ -623,7 +683,7 @@ export class SyncImageSseTransformer {
         message: failure.message,
         ...(failure.param === '' ? {} : { param: failure.param }),
       },
-    })
+    })}\n\n`)]
   }
 
   private frame(event: string, payload: Record<string, unknown>): Uint8Array[] {
@@ -739,7 +799,7 @@ function imageFrom(value: Record<string, unknown>, fallback: ImageMeta): Pending
   }
 }
 
-function imageIdentity(image: PendingImage): string {
+function imageIdentity(image: Pick<PendingImage, 'outputFormat' | 'b64'>): string {
   return `${image.outputFormat}|${image.b64}`
 }
 

@@ -87,13 +87,14 @@ async function readBoundedResponseBody(
   return output
 }
 
-export function normalizeNativeImageResponse(value: unknown): NormalizedSyncImageResult {
+export function normalizeNativeImageResponse(value: unknown, maxOutputs = 100): NormalizedSyncImageResult {
   const root = record(value)
   if (root === null || !Array.isArray(root.data)) return missingOutput()
   const data: Record<string, unknown>[] = []
   const outputs: NormalizedSyncImageOutput[] = []
   const seen = new Set<string>()
   for (const candidate of root.data) {
+    if (outputs.length >= maxOutputs) break
     const item = record(candidate)
     if (item === null) continue
     const normalized = normalizePublicImage(item)

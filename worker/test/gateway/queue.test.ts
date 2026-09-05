@@ -102,10 +102,32 @@ describe('usage queue projection', () => {
     expect(database.batches[0][0].query).toContain('INSERT INTO usage_projection')
     expect(database.batches[0][0].query).toContain('base_amount_micros')
     expect(database.batches[0][0].query).toContain('inbound_endpoint')
-    expect(database.batches[0][0].values.slice(-8)).toEqual([
+    expect(database.batches[0][0].values.slice(-14, -6)).toEqual([
       'openai', 'group-1', 1, '/v1/chat/completions', '/v1/responses', 'token', 0, 1,
     ])
     expect(database.batches[0][1].query).toContain('INSERT INTO inbox')
+  })
+
+  it('persists image billing audit dimensions from the immutable usage event', async () => {
+    const database = new QueueDatabase()
+    const item = message(createUsageEvent({
+      ...payload,
+      billing_mode: 'image',
+      image_count: 2,
+      image_size: '4K',
+      image_input_size: '2048x2048',
+      image_output_size: '3840x2160',
+      image_size_source: 'output',
+      image_size_breakdown: { '1K': 1, '4K': 1 },
+    }, 1_000))
+
+    await consumeEvents({ queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>, env(database))
+
+    const projection = database.batches[0][0]
+    expect(projection.query).toContain('image_size_breakdown')
+    expect(projection.values.slice(-6)).toEqual([
+      2, '4K', '2048x2048', '3840x2160', 'output', '{"1K":1,"4K":1}',
+    ])
   })
 
   it('normalizes a v0.5 usage event while accepting its pre-v0.20 inbox digest', async () => {
@@ -125,7 +147,7 @@ describe('usage queue projection', () => {
 
     expect(item.ack).toHaveBeenCalledOnce()
     expect(item.retry).not.toHaveBeenCalled()
-    expect(database.batches[0][0].values.slice(-10)).toEqual([
+    expect(database.batches[0][0].values.slice(-16, -6)).toEqual([
       'balance', null, '', 'group-1', 1, '', '', 'token', 0, 1,
     ])
     const normalizedDigest = database.batches[0][1].values[3]

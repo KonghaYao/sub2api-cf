@@ -160,10 +160,11 @@ export async function consumeEvents(
              base_amount_micros, outcome, stream, duration_ms
              , billing_type, subscription_id, platform, request_type,
              inbound_endpoint, upstream_endpoint, billing_mode, native_compaction_v2,
-             dimensions_version
+             dimensions_version, image_count, image_size, image_input_size,
+             image_output_size, image_size_source, image_size_breakdown
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
-             ?, ?, ?, ?, ?, ?)`,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -198,6 +199,12 @@ export async function consumeEvents(
           payload.billing_mode,
           payload.native_compaction_v2 ? 1 : 0,
           1,
+          payload.image_count,
+          payload.image_size,
+          payload.image_input_size,
+          payload.image_output_size,
+          payload.image_size_source,
+          payload.image_size_breakdown === null ? null : JSON.stringify(payload.image_size_breakdown),
         ),
         env.DB.prepare(
           `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
@@ -429,6 +436,12 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     upstream_endpoint: payload.upstream_endpoint ?? '',
     billing_mode: payload.billing_mode ?? 'token',
     native_compaction_v2: payload.native_compaction_v2 ?? false,
+    image_count: payload.image_count ?? 0,
+    image_size: payload.image_size ?? null,
+    image_input_size: payload.image_input_size ?? null,
+    image_output_size: payload.image_output_size ?? null,
+    image_size_source: payload.image_size_source ?? null,
+    image_size_breakdown: normalizeImageBreakdown(payload.image_size_breakdown ?? null),
   }
   event = { ...event, payload }
   if (event.aggregate_id !== payload.user_id) throw new Error('Usage aggregate does not match user')
@@ -488,6 +501,24 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     throw new Error('Invalid usage dimensions')
   }
   if (
+    !Number.isSafeInteger(payload.image_count) || payload.image_count! < 0 || payload.image_count! > 100 ||
+    (payload.image_size !== null && !['1K', '2K', '4K', 'mixed'].includes(payload.image_size ?? '')) ||
+    (payload.image_input_size !== null &&
+      (typeof payload.image_input_size !== 'string' || payload.image_input_size.length > 32)) ||
+    (payload.image_output_size !== null &&
+      (typeof payload.image_output_size !== 'string' || payload.image_output_size.length > 32)) ||
+    (payload.image_size_source !== null &&
+      !['output', 'input', 'default', 'legacy'].includes(payload.image_size_source ?? '')) ||
+    (payload.image_count! > 0 && (payload.image_size === null || payload.image_size_source === null))
+  ) {
+    throw new Error('Invalid usage image dimensions')
+  }
+  if (payload.image_size_breakdown != null) {
+    const total = Object.values(payload.image_size_breakdown)
+      .reduce<number>((sum, count) => sum + (count ?? 0), 0)
+    if (total !== payload.image_count) throw new Error('Image size breakdown does not match image count')
+  }
+  if (
     payload.amount_micros !==
     payload.input_amount_micros! +
       payload.output_amount_micros! +
@@ -497,6 +528,27 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     throw new Error('Usage amount does not match its cost components')
   }
   return event as PlatformEvent<UsageSettledPayload>
+}
+
+function normalizeImageBreakdown(
+  value: UsageSettledPayload['image_size_breakdown'],
+): Partial<Record<'1K' | '2K' | '4K', number>> | null {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid usage image size breakdown')
+  const source = value as Record<string, unknown>
+  if (Object.keys(source).some((key) => !['1K', '2K', '4K'].includes(key))) {
+    throw new Error('Invalid usage image size breakdown')
+  }
+  const result: Partial<Record<'1K' | '2K' | '4K', number>> = {}
+  for (const tier of ['1K', '2K', '4K'] as const) {
+    const count = source[tier]
+    if (count === undefined) continue
+    if (!Number.isSafeInteger(count) || (count as number) <= 0 || (count as number) > 100) {
+      throw new Error('Invalid usage image size breakdown')
+    }
+    result[tier] = count as number
+  }
+  return Object.keys(result).length === 0 ? null : result
 }
 
 function isSubscriptionStateEvent(

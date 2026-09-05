@@ -114,7 +114,11 @@ describe('admin provider account control plane on D1', () => {
       },
       body: JSON.stringify({
         name: 'responses-setup-token',
-        base_url: 'https://api.openai.test/v1',
+        platform: 'codex',
+        protocol: 'codex',
+        base_url: 'https://chatgpt.test',
+        auth_scheme: 'bearer',
+        provider_config: { account_id: 'workspace_123' },
         api_key: 'oauth-access-token',
         image_adapter: 'responses_image_tool',
         credential_kind: 'setup_token',
@@ -143,18 +147,56 @@ describe('admin provider account control plane on D1', () => {
         'if-match': '"0"',
       },
       body: JSON.stringify({
-        image_adapter: 'direct_images',
         credential_kind: 'oauth',
       }),
     }, test.env)
     const updated = await updateResponse.json() as any
     expect(updateResponse.status, JSON.stringify(updated)).toBe(200)
     expect(updated.data).toMatchObject({
-      image_adapter: 'direct_images',
+      image_adapter: 'responses_image_tool',
       credential_kind: 'oauth',
       config_version: 2,
       control_version: 1,
     })
+  })
+
+  it.each([
+    [{ image_adapter: 'responses_image_tool', credential_kind: 'setup_token' }],
+    [{ image_adapter: 'direct_images', credential_kind: 'oauth' }],
+    [{ platform: 'codex', protocol: 'codex', base_url: 'https://chatgpt.test',
+      provider_config: { account_id: 'workspace_123' }, image_adapter: 'direct_images', credential_kind: 'api_key' }],
+  ])('rejects an account execution tuple that no runtime executor can serve', async (execution) => {
+    const test = fixture()
+    const response = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `invalid-execution-${JSON.stringify(execution)}`,
+      },
+      body: JSON.stringify({
+        name: 'invalid-execution',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'not-persisted-secret',
+        ...execution,
+      }),
+    }, test.env)
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({ code: 'account_execution_mismatch' })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 0 })
+  })
+
+  it('validates a partial discriminator update against the persisted execution tuple', async () => {
+    const test = fixture()
+    const codex = await createProvider(test, 'codex')
+    const response = await test.app.request(`/accounts/${codex.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ credential_kind: 'api_key' }),
+    }, test.env)
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({ code: 'account_execution_mismatch' })
+    const persisted = await test.app.request(`/accounts/${codex.id}`, {}, test.env)
+    await expect(persisted.json()).resolves.toMatchObject({ data: { credential_kind: 'oauth' } })
   })
 
   it('creates, reads and updates an image-only model capability', async () => {

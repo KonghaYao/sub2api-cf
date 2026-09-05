@@ -743,6 +743,13 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   }
   const baseUrl = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
+  const imageAdapter = body.image_adapter === undefined
+    ? defaultImageAdapter(platform)
+    : requireAccountImageAdapter(body.image_adapter)
+  const credentialKind = body.credential_kind === undefined
+    ? defaultCredentialKind(platform)
+    : requireAccountCredentialKind(body.credential_kind)
+  validateAccountExecution(platform, imageAdapter, credentialKind)
   validateAccountType(body)
   return {
     name: requireString(body, 'name', 128),
@@ -751,12 +758,8 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     base_url: baseUrl,
     auth_scheme: authScheme,
     provider_config: parseProviderConfig(body.provider_config, platform),
-    image_adapter: body.image_adapter === undefined
-      ? defaultImageAdapter(platform)
-      : requireAccountImageAdapter(body.image_adapter),
-    credential_kind: body.credential_kind === undefined
-      ? defaultCredentialKind(platform)
-      : requireAccountCredentialKind(body.credential_kind),
+    image_adapter: imageAdapter,
+    credential_kind: credentialKind,
     api_key: requireProviderCredential(body, 'api_key'),
     enabled,
     max_concurrency: body.max_concurrency === undefined
@@ -791,6 +794,11 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.credential_kind !== undefined) {
     patch.credential_kind = requireAccountCredentialKind(body.credential_kind)
   }
+  validateAccountExecution(
+    account.platform,
+    patch.image_adapter ?? account.image_adapter,
+    patch.credential_kind ?? account.credential_kind,
+  )
   if (body.enabled !== undefined || body.status !== undefined) patch.enabled = parseEnabledBody(body, true)
   if (body.max_concurrency !== undefined) {
     patch.max_concurrency = requireSafeInteger(body, 'max_concurrency', 1, 1_000)
@@ -879,6 +887,24 @@ function defaultImageAdapter(platform: ProviderPlatform): AccountImageAdapter {
 
 function defaultCredentialKind(platform: ProviderPlatform): AccountCredentialKind {
   return platform === 'codex' ? 'oauth' : 'api_key'
+}
+
+function validateAccountExecution(
+  platform: ProviderPlatform,
+  imageAdapter: AccountImageAdapter,
+  credentialKind: AccountCredentialKind,
+): void {
+  const supported = platform === 'codex'
+    ? imageAdapter === 'responses_image_tool' &&
+      (credentialKind === 'oauth' || credentialKind === 'setup_token')
+    : imageAdapter === 'direct_images' && credentialKind === 'api_key'
+  if (!supported) {
+    throw new GatewayError(
+      409,
+      'account_execution_mismatch',
+      'platform, image_adapter, and credential_kind do not select a supported runtime executor',
+    )
+  }
 }
 
 function assertImmutableProviderField<T extends string>(
@@ -1116,8 +1142,9 @@ function requireSupportedAccount(account: AccountRow): void {
   }
   validateBaseUrl(account.base_url)
   parseProviderConfig(accountProviderConfig(account), platform)
-  requireAccountImageAdapter(account.image_adapter)
-  requireAccountCredentialKind(account.credential_kind)
+  const imageAdapter = requireAccountImageAdapter(account.image_adapter)
+  const credentialKind = requireAccountCredentialKind(account.credential_kind)
+  validateAccountExecution(platform, imageAdapter, credentialKind)
 }
 
 function providerAccount(row: AccountRow): ProviderAccount {

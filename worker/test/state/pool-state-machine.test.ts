@@ -39,6 +39,22 @@ function poolWithTwoAccounts() {
 }
 
 describe("pool state machine", () => {
+  it("omits accounts excluded by the caller from a reservation", () => {
+    const result = applyPoolCommand(
+      poolWithTwoAccounts(),
+      {
+        schema_version: 1,
+        type: "reserve",
+        request_id: "request-excluding-first-choice",
+        lease_ttl_ms: 5_000,
+        excluded_account_ids: ["account-2"],
+      },
+      1_100,
+    );
+
+    expect(result.lease?.account_id).toBe("account-1");
+  });
+
   it("atomically replaces configured accounts and rejects stale configuration revisions", () => {
     const revisionTwo = applyPoolCommand(
       createPoolMachineState(),

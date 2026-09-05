@@ -77,6 +77,8 @@ interface PlatformQuotaReservationRow {
   settled_micros: number | null
   reservation_expires_at_ms: number
   reservation_ttl_ms: number
+  renewal_sequence: number
+  last_renewal_ttl_ms: number | null
   created_at_ms: number
   updated_at_ms: number
 }
@@ -109,6 +111,7 @@ export class PlatformQuotaState {
   handle(pathname: string, body: Record<string, unknown>, now = Date.now()): Response {
     if (pathname === '/platform-quota/configure') return this.configure(body, now)
     if (pathname === '/platform-quota/reserve') return this.reserve(body, now)
+    if (pathname === '/platform-quota/renew') return this.renew(body, now)
     if (pathname === '/platform-quota/settle') return this.settle(body, now)
     if (pathname === '/platform-quota/cancel') return this.cancel(body, now)
     throw new StateApiError(404, 'route_not_found', 'Durable object route was not found')
@@ -423,6 +426,50 @@ export class PlatformQuotaState {
     })
   }
 
+  private renew(body: Record<string, unknown>, now: number): Response {
+    const requestId = requireString(body, 'request_id', 256)
+    const userId = requireString(body, 'user_id', 128)
+    const platform = requirePlatform(body.platform)
+    const renewalSequence = requireSafeInteger(body, 'renewal_sequence', { minimum: 1 })
+    const ttl = requireSafeInteger(body, 'reservation_ttl_ms', {
+      minimum: 1,
+      maximum: MAX_RESERVATION_TTL_MS,
+    })
+    this.assertOwner(userId, false)
+    this.expireReservations(now)
+    const reservation = this.readReservation(requestId)
+    if (reservation === null || reservation.user_id !== userId || reservation.platform !== platform) {
+      throw new StateApiError(404, 'platform_quota_reservation_not_found', 'Platform quota reservation was not found')
+    }
+    if (reservation.status !== 'reserved') {
+      throw new StateApiError(409, 'platform_quota_invalid_transition', 'Platform quota reservation is no longer active')
+    }
+    if (renewalSequence < reservation.renewal_sequence) {
+      return json({ schema_version: 1, idempotent: true, reservation })
+    }
+    if (renewalSequence === reservation.renewal_sequence) {
+      if (reservation.last_renewal_ttl_ms !== ttl) {
+        throw new StateApiError(409, 'platform_quota_renewal_conflict', 'Renewal sequence was replayed with different input')
+      }
+      return json({ schema_version: 1, idempotent: true, reservation })
+    }
+    if (renewalSequence !== reservation.renewal_sequence + 1) {
+      throw new StateApiError(409, 'platform_quota_renewal_out_of_order', 'Renewal sequence must increase by one')
+    }
+    this.storage.sql.exec(
+      `UPDATE platform_quota_reservations
+          SET reservation_expires_at_ms = ?, renewal_sequence = ?,
+              last_renewal_ttl_ms = ?, updated_at_ms = ?
+        WHERE request_id = ? AND status = 'reserved'`,
+      checkedSum(now, ttl),
+      renewalSequence,
+      ttl,
+      now,
+      requestId,
+    )
+    return json({ schema_version: 1, idempotent: false, reservation: this.readReservation(requestId) })
+  }
+
   private cancel(body: Record<string, unknown>, now: number): Response {
     const requestId = requireString(body, 'request_id', 256)
     const userId = requireString(body, 'user_id', 128)
@@ -596,10 +643,20 @@ export class PlatformQuotaState {
         settled_micros INTEGER CHECK (settled_micros IS NULL OR settled_micros >= 0),
         reservation_expires_at_ms INTEGER NOT NULL CHECK (reservation_expires_at_ms >= 0),
         reservation_ttl_ms INTEGER NOT NULL CHECK (reservation_ttl_ms > 0),
+        renewal_sequence INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0),
+        last_renewal_ttl_ms INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0),
         created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
       ) STRICT
     `)
+    this.ensureColumn(
+      'renewal_sequence',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (renewal_sequence >= 0)',
+    )
+    this.ensureColumn(
+      'last_renewal_ttl_ms',
+      'INTEGER CHECK (last_renewal_ttl_ms IS NULL OR last_renewal_ttl_ms > 0)',
+    )
     this.storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS idx_platform_quota_reservations_active
          ON platform_quota_reservations(platform, status, reservation_expires_at_ms)`,
@@ -608,6 +665,14 @@ export class PlatformQuotaState {
       `CREATE INDEX IF NOT EXISTS idx_platform_quota_reservations_cleanup
          ON platform_quota_reservations(status, updated_at_ms)`,
     )
+  }
+
+  private ensureColumn(column: string, definition: string): void {
+    const columns = Array.from(this.storage.sql.exec(
+      'PRAGMA table_info(platform_quota_reservations)',
+    )) as Array<{ name?: unknown }>
+    if (columns.some((entry) => entry.name === column)) return
+    this.storage.sql.exec(`ALTER TABLE platform_quota_reservations ADD COLUMN ${column} ${definition}`)
   }
 }
 
@@ -689,7 +754,8 @@ function reservationSelect(): string {
     daily_reset_epoch, weekly_reset_epoch, monthly_reset_epoch,
     daily_window_start_ms, weekly_window_start_ms, monthly_window_start_ms,
     status, reserved_micros, settled_micros,
-    reservation_expires_at_ms, reservation_ttl_ms, created_at_ms, updated_at_ms
+    reservation_expires_at_ms, reservation_ttl_ms, renewal_sequence,
+    last_renewal_ttl_ms, created_at_ms, updated_at_ms
     FROM platform_quota_reservations`
 }
 

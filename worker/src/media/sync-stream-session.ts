@@ -1,7 +1,8 @@
-import { GatewayError, asGatewayError } from '../gateway/errors'
+import { GatewayError } from '../gateway/errors'
 import {
   createSyncImageSseTransformer,
   type SyncImageOperation,
+  SyncImageSseError,
   type SyncImageSseSnapshot,
   type SyncImageSseTransformer,
 } from './sync-sse'
@@ -120,8 +121,12 @@ export async function prepareSyncImageLiveStream(
       }
       if (next.result.done) {
         const frames = state.transformer.finish()
+        frames.push(...retainPaidOutput(state))
         accountFrames(state, frames)
         if (state.transformer.currentState() === 'error' && !state.transformer.imageOutputStarted()) {
+          if (state.transformer.providerOutputCompleted()) {
+            return committedSession(state, frames)
+          }
           return precommitFailure(state)
         }
         return committedSession(state, frames)
@@ -129,15 +134,25 @@ export async function prepareSyncImageLiveStream(
       state.lastChunkAt = state.options.now?.() ?? Date.now()
       accountResponseChunk(state, next.result.value)
       const frames = state.transformer.push(next.result.value)
+      frames.push(...retainPaidOutput(state))
       accountFrames(state, frames)
       if (state.transformer.currentState() === 'error' && !state.transformer.imageOutputStarted()) {
+        if (state.transformer.providerOutputCompleted()) {
+          return committedSession(state, frames)
+        }
         return precommitFailure(state)
       }
       if (frames.length > 0) return committedSession(state, frames)
     }
   } catch (error) {
+    const mapped = streamFailure(error)
+    if (state.transformer.providerOutputCompleted()) {
+      const frames = retainPaidOutput(state)
+      frames.push(...state.transformer.failTransport(mapped.code, mapped.message, mapped.type, mapped.param))
+      return committedSession(state, frames)
+    }
     void state.reader.cancel(error)
-    throw error
+    throw mapped
   }
 }
 
@@ -196,6 +211,7 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
   ): void => {
     if (result.done) {
       const frames = state.transformer.finish()
+      frames.push(...retainPaidOutput(state))
       accountFrames(state, frames)
       if (controller !== null && !downstreamCancelled) pendingFrames.push(...frames)
       if (pendingFrames.length === 0 || controller === null || downstreamCancelled) finish(controller, null)
@@ -204,6 +220,7 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
     state.lastChunkAt = state.options.now?.() ?? Date.now()
     accountResponseChunk(state, result.value)
     const frames = state.transformer.push(result.value)
+    frames.push(...retainPaidOutput(state))
     accountFrames(state, frames)
     if (controller !== null && !downstreamCancelled) pendingFrames.push(...frames)
     if (state.transformer.currentState() !== 'open' && pendingFrames.length === 0) finish(controller, null)
@@ -213,14 +230,18 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
     error: unknown,
     controller: ReadableStreamDefaultController<Uint8Array> | null,
   ): void => {
-    const mapped = asGatewayError(error)
+    const mapped = streamFailure(error)
     void state.reader.cancel(mapped)
-    const frames = state.transformer.failTransport(mapped.code, mapped.message, mapped.type, mapped.param)
-    accountFrames(state, frames)
-    if (controller !== null && !downstreamCancelled) {
-      for (const frame of frames) controller.enqueue(frame)
+    try {
+      const frames = state.transformer.failTransport(mapped.code, mapped.message, mapped.type, mapped.param)
+      // A terminal diagnostic must never be subjected to the already-exceeded
+      // aggregate budget; completion owns settlement and resource release.
+      if (controller !== null && !downstreamCancelled) {
+        for (const frame of frames) controller.enqueue(frame)
+      }
+    } finally {
+      finish(controller, mapped)
     }
-    finish(controller, mapped)
   }
 
   const drainAfterCancellation = async (): Promise<void> => {
@@ -290,6 +311,12 @@ function committedSession(state: SessionState, initialFrames: Uint8Array[]): Syn
   })
 
   return { kind: 'committed', body, completion }
+}
+
+function retainPaidOutput(state: SessionState): Uint8Array[] {
+  return state.transformer.providerOutputCompleted()
+    ? state.transformer.retainCompletedProviderOutput()
+    : []
 }
 
 async function readNext(
@@ -393,4 +420,17 @@ function streamIdleTimeout(): GatewayError {
 
 function leaseFailure(): GatewayError {
   return new GatewayError(503, 'IMAGE_LEASE_RENEWAL_FAILED', 'Image concurrency lease could not be renewed', 'server_error')
+}
+
+function streamFailure(error: unknown): GatewayError {
+  if (error instanceof GatewayError) return error
+  if (error instanceof SyncImageSseError) {
+    return new GatewayError(502, error.code, error.message, 'server_error')
+  }
+  return new GatewayError(
+    502,
+    'IMAGE_UPSTREAM_STREAM_FAILED',
+    'Image provider stream failed before completion',
+    'server_error',
+  )
 }

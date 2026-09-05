@@ -85,4 +85,20 @@ describe('user usage HTTP contract',()=>{
   await expect((await app.request('/api/v1/usage/dashboard/stats',{headers:t.headers},t.env)).json())
     .resolves.toMatchObject({data:{by_platform:[{platform:'openai',total_requests:3}]}})
  })
+ it('returns persisted image billing dimensions instead of synthetic zero values',async()=>{
+  const t=await fixture(),app=createApp()
+  await t.env.DB.prepare(`INSERT INTO usage_projection(
+    event_id,request_id,user_id,api_key_id,group_id,model,input_tokens,output_tokens,
+    amount_micros,occurred_at_ms,projected_at_ms,billing_mode,image_count,image_size,
+    image_input_size,image_output_size,image_size_source,image_size_breakdown
+  ) VALUES('alice-image','alice-image','alice','alice-key','group-a','gpt-image-2',0,0,
+    500000,?,?,'image',2,'4K','2048x2048','3840x2160','output','{"1K":1,"4K":1}')`)
+    .bind(TEST_NOW+1,TEST_NOW+1).run()
+  const response=await app.request('/api/v1/usage?limit=1',{headers:t.headers},t.env)
+  await expect(response.json()).resolves.toMatchObject({data:{items:[{
+    id:'alice-image',billing_mode:'image',image_count:2,image_size:'4K',
+    image_input_size:'2048x2048',image_output_size:'3840x2160',image_size_source:'output',
+    image_size_breakdown:{'1K':1,'4K':1},
+  }]}})
+ })
 })

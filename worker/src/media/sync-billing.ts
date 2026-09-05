@@ -34,6 +34,12 @@ export interface SyncImageUsageInput {
   upstreamModel: string
   amountMicros: number
   operation: SyncImageOperation
+  imageCount?: number
+  imageSize?: '1K' | '2K' | '4K'
+  imageInputSize?: string | null
+  imageOutputSize?: string | null
+  imageSizeSource?: 'output' | 'input' | 'default'
+  imageSizeBreakdown?: Partial<Record<'1K' | '2K' | '4K', number>>
   stream?: boolean
   outcome?: 'completed' | 'failed' | 'cancelled'
   upstreamEndpoint?: string
@@ -161,6 +167,12 @@ export function buildSyncImageUsagePayload(input: SyncImageUsageInput): UsageSet
     upstream_endpoint: input.upstreamEndpoint ?? endpoint,
     billing_mode: 'image',
     native_compaction_v2: false,
+    image_count: input.imageCount ?? 0,
+    image_size: input.imageSize ?? null,
+    image_input_size: input.imageInputSize ?? null,
+    image_output_size: input.imageOutputSize ?? null,
+    image_size_source: input.imageSizeSource ?? null,
+    image_size_breakdown: input.imageSizeBreakdown ?? null,
     duration_ms: Math.max(0, input.occurredAt - input.startedAt),
     estimated: false,
   }

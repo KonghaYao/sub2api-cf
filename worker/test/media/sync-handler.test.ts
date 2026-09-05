@@ -137,6 +137,58 @@ describe('synchronous image handler', () => {
     expect(test.stateCalls).toContain('/release')
   })
 
+  it('ignores an incompatible execution tuple without poisoning a valid route', async () => {
+    const test = await fixture()
+    const encrypted = await encryptCredential(
+      { api_key: 'unused-responses-secret' }, MASTER_KEY, 'test/account-bad/secret-bad/1',
+    )
+    test.raw.prepare(`INSERT INTO accounts (
+      id,platform,name,credential_ref,enabled,max_concurrency,created_at_ms,updated_at_ms,
+      protocol,base_url,auth_scheme,health_status,image_adapter,credential_kind
+    ) VALUES ('account-bad','openai','Ignored','secret-bad',1,2,1,1,'openai',
+      'https://api.openai.test','bearer','healthy','responses_image_tool','oauth')`).run()
+    test.raw.prepare(`INSERT INTO account_secrets (
+      id,account_id,key_version,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms
+    ) VALUES ('secret-bad','account-bad',1,?,?,1,1)`).run(encrypted.nonce_b64, encrypted.ciphertext_b64)
+    test.raw.exec(`INSERT INTO account_groups (account_id,group_id,priority,weight,created_at_ms,updated_at_ms)
+      VALUES ('account-bad','group-1',2,1,1,1);
+    INSERT INTO account_models (
+      account_id,model_id,chat_completions,responses,embeddings,image_generation,created_at_ms,updated_at_ms
+    ) VALUES ('account-bad','model-1',0,0,0,1,1,1);`)
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+  })
+
+  it('uses declared output size when image bytes have no detectable dimensions', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      created: 1,
+      data: [{ b64_json: 'aGVsbG8=', size: '3840x2160' }],
+    }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'large cat', size: '1024x1024' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        amountMicros: 400_000,
+        imageInputSize: '1024x1024',
+        imageOutputSize: '3840x2160',
+        imageSizeSource: 'output',
+        imageSizeBreakdown: { '4K': 1 },
+      }),
+    }))
+  })
+
   it.each(['/v1/images/edits', '/images/edits'])('forwards safe JSON edits through %s', async (path) => {
     const test = await fixture()
     const response = await app().request(path, {
@@ -223,6 +275,24 @@ describe('synchronous image handler', () => {
     expect(test.cancel).not.toHaveBeenCalled()
   })
 
+  it('reports an exhausted background settlement obligation without retrying paid work', async () => {
+    const test = await fixture()
+    const error = new Error('settlement unavailable')
+    test.settle.mockRejectedValue(error)
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat' }),
+    }, test.env as never)
+    expect(response.status).toBe(200)
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledTimes(4))
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    expect(test.cancel).not.toHaveBeenCalled()
+    expect(reported).toHaveBeenCalledWith('image settlement retries exhausted', expect.objectContaining({
+      name: 'Error',
+    }))
+  })
+
   it('runs configured moderation before admission, billing, and upstream work', async () => {
     const test = await fixture()
     const check = vi.fn(async () => ({ allowed: false, message: 'blocked locally' }))
@@ -269,6 +339,12 @@ describe('synchronous image handler', () => {
 
   it('renews API-key and account leases while provider work is running', async () => {
     const test = await fixture()
+    const now = Date.now()
+    test.raw.prepare(`INSERT INTO user_platform_quotas (
+      user_id, platform, enabled, daily_limit_micros, weekly_limit_micros, monthly_limit_micros,
+      control_version, created_at_ms, updated_at_ms
+    ) VALUES ('user-1', 'openai', 1, 10000000, 10000000, 10000000, 1, ?, ?)`)
+      .run(now, now)
     ;(test.env as typeof test.env & { SYNC_IMAGE_RENEW_AFTER_MS?: number }).SYNC_IMAGE_RENEW_AFTER_MS = 1
     const originalFetch = test.upstreamFetch.getMockImplementation()
     test.upstreamFetch.mockImplementationOnce(async (...args) => {
@@ -282,6 +358,7 @@ describe('synchronous image handler', () => {
     }, test.env as never)
     expect(response.status).toBe(200)
     expect(test.stateCalls.filter((path) => path === '/renew').length).toBeGreaterThanOrEqual(2)
+    expect(test.stateCalls).toContain('/platform-quota/renew')
   })
 
   it('executes a Codex OAuth account through Responses and returns buffered Images JSON', async () => {
@@ -479,7 +556,7 @@ describe('synchronous image handler', () => {
       'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0}',
       '',
       'event: response.failed',
-      'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"server_error","code":"server_error","message":"failed after partial"}}}',
+      'data: {"type":"response.failed","response":{"status":"failed","usage":{"images":3},"error":{"type":"server_error","code":"server_error","message":"failed after partial"}}}',
       '',
       '',
     ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
@@ -496,7 +573,30 @@ describe('synchronous image handler', () => {
     await vi.waitFor(() => expect(test.cancel).toHaveBeenCalledOnce())
   })
 
-  it('returns and bills every unique actual Responses output even when it exceeds requested n', async () => {
+  it('settles declared paid output without retry when local image decoding fails', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"id":"paid-invalid","type":"image_generation_call","result":"%%%"}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true }),
+    }, test.env as never)
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('IMAGE_INVALID_PROVIDER_OUTPUT')
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ amountMicros: 200_000, imageCount: 1, outcome: 'failed' }),
+    })))
+    expect(test.cancel).not.toHaveBeenCalled()
+  })
+
+  it('caps anomalous provider outputs to requested n so settlement cannot exceed its hold', async () => {
     const test = await fixture('codex')
     test.upstreamFetch.mockResolvedValueOnce(new Response([
       'event: response.completed',
@@ -513,9 +613,9 @@ describe('synchronous image handler', () => {
     }, test.env as never)
 
     expect(response.status, await response.clone().text()).toBe(200)
-    expect((await response.json() as { data: unknown[] }).data).toHaveLength(2)
+    expect((await response.json() as { data: unknown[] }).data).toHaveLength(1)
     expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
-      usage: expect.objectContaining({ amountMicros: 400_000 }),
+      usage: expect.objectContaining({ amountMicros: 200_000, imageCount: 1 }),
     }))
   })
 
@@ -597,6 +697,70 @@ describe('synchronous image handler', () => {
     expect(unavailable.failureRequests).toEqual([
       expect.objectContaining({ account_id: 'account-1', cooldown_ms: 1_800_000 }),
     ])
+  })
+
+  it('excludes a text-fallback account when switching within the same request', async () => {
+    const test = await fixture('codex')
+    const encrypted = await encryptCredential(
+      { api_key: 'upstream-secret' },
+      MASTER_KEY,
+      'test/account-2/secret-2/1',
+    )
+    test.raw.prepare(`INSERT INTO accounts (
+      id,platform,name,credential_ref,enabled,max_concurrency,created_at_ms,updated_at_ms,
+      protocol,base_url,auth_scheme,health_status,image_adapter,credential_kind,provider_config_json
+    ) VALUES ('account-2','codex','Second image upstream','secret-2',1,2,1,1,'codex',
+      'https://chatgpt.example.test','bearer','healthy','responses_image_tool','oauth',?)`)
+      .run('{"account_id":"workspace-456"}')
+    test.raw.prepare(`INSERT INTO account_secrets (
+      id,account_id,key_version,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms
+    ) VALUES ('secret-2','account-2',1,?,?,1,1)`).run(encrypted.nonce_b64, encrypted.ciphertext_b64)
+    test.raw.exec(`INSERT INTO account_groups (
+      account_id,group_id,priority,weight,created_at_ms,updated_at_ms
+    ) VALUES ('account-2','group-1',2,1,1,1);
+    INSERT INTO account_models (
+      account_id,model_id,chat_completions,responses,embeddings,image_generation,created_at_ms,updated_at_ms
+    ) VALUES ('account-2','model-1',0,0,0,1,1,1);`)
+
+    const reserveBodies: Array<{ excluded_account_ids?: string[] }> = []
+    test.env.POOL_STATE = {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: () => ({ fetch: async (request: Request) => {
+        const path = new URL(request.url).pathname
+        if (path === '/reserve') {
+          const body = await request.json() as { excluded_account_ids?: string[] }
+          reserveBodies.push(body)
+          const accountId = body.excluded_account_ids?.includes('account-1') ? 'account-2' : 'account-1'
+          return Response.json({ lease: { account_id: accountId, status: 'active' } })
+        }
+        return Response.json({ ok: true })
+      } }),
+    } as unknown as DurableObjectNamespace
+
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    test.upstreamFetch
+      .mockResolvedValueOnce(new Response([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Try another prompt"}]}]}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+      .mockResolvedValueOnce(new Response([
+        'event: response.completed',
+        `data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_second","type":"image_generation_call","status":"completed","result":"${png}","output_format":"png"}]}}`,
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'fallback across accounts' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(reserveBodies).toHaveLength(2)
+    expect(reserveBodies[1]?.excluded_account_ids).toEqual(['account-1'])
+    expect(new Headers(test.upstreamFetch.mock.calls[1]?.[1]?.headers).get('chatgpt-account-id')).toBe('workspace-456')
   })
 
   it('applies the default cooldown to an ordinary upstream transport failure', async () => {

@@ -77,6 +77,12 @@ export interface UsageSettledPayload {
   upstream_endpoint: string
   billing_mode: 'token' | 'per_request' | 'image' | 'video'
   native_compaction_v2: boolean
+  image_count?: number
+  image_size?: '1K' | '2K' | '4K' | 'mixed' | null
+  image_input_size?: string | null
+  image_output_size?: string | null
+  image_size_source?: 'output' | 'input' | 'default' | 'legacy' | null
+  image_size_breakdown?: Partial<Record<'1K' | '2K' | '4K', number>> | null
   duration_ms: number
   estimated: boolean
 }

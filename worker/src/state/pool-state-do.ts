@@ -640,6 +640,9 @@ function parseCommand(
         ...(preferredAccountId === undefined
           ? {}
           : { preferred_account_id: preferredAccountId }),
+        ...(body.excluded_account_ids === undefined
+          ? {}
+          : { excluded_account_ids: parseAccountIds(body.excluded_account_ids) }),
         ...(affinityKey === undefined ? {} : { affinity_key: affinityKey }),
         ...(affinityTtlMs === undefined ? {} : { affinity_ttl_ms: affinityTtlMs }),
       };
@@ -672,6 +675,26 @@ function parseCommand(
         }),
       };
   }
+}
+
+function parseAccountIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 10_000) {
+    throw new StateApiError(
+      400,
+      "invalid_excluded_account_ids",
+      "excluded_account_ids must be an array with at most 10000 entries",
+    );
+  }
+  return value.map((accountId) => {
+    if (typeof accountId !== "string" || accountId.length === 0 || accountId.length > 256) {
+      throw new StateApiError(
+        400,
+        "invalid_excluded_account_ids",
+        "excluded_account_ids entries must be non-empty strings",
+      );
+    }
+    return accountId;
+  });
 }
 
 function parseConfiguredAccounts(value: unknown): Extract<PoolCommand, { type: "sync_accounts" }>["accounts"] {

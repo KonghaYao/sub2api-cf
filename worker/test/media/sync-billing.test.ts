@@ -16,6 +16,12 @@ describe('synchronous image billing', () => {
       upstreamModel: 'gpt-image-2-2026-01-01',
       amountMicros: 320_000,
       operation: 'generations',
+      imageCount: 2,
+      imageSize: '4K',
+      imageInputSize: '2048x2048',
+      imageOutputSize: '3840x2160',
+      imageSizeSource: 'output',
+      imageSizeBreakdown: { '1K': 1, '4K': 1 },
       startedAt: 1_000,
       occurredAt: 1_250,
     })).toEqual(expect.objectContaining({
@@ -30,6 +36,12 @@ describe('synchronous image billing', () => {
       cache_read_tokens: 0,
       duration_ms: 250,
       outcome: 'completed',
+      image_count: 2,
+      image_size: '4K',
+      image_input_size: '2048x2048',
+      image_output_size: '3840x2160',
+      image_size_source: 'output',
+      image_size_breakdown: { '1K': 1, '4K': 1 },
     }))
   })
 

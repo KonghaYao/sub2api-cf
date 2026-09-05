@@ -73,6 +73,7 @@ export type PoolCommand = PoolCommandEnvelope &
         request_id: string;
         lease_ttl_ms: number;
         preferred_account_id?: string;
+        excluded_account_ids?: string[];
         affinity_key?: string;
         affinity_ttl_ms?: number;
       }
@@ -359,9 +360,12 @@ function reserve(
   }
 
   const activeCounts = activeLeaseCounts(state);
+  const excludedAccountIds = new Set(command.excluded_account_ids ?? []);
+  for (const accountId of excludedAccountIds) assertIdentifier(accountId, "excluded_account_id");
   let candidates = Object.values(state.accounts).filter(
     (account) =>
       account.enabled &&
+      !excludedAccountIds.has(account.account_id) &&
       account.cooldown_until_ms <= nowMs &&
       (activeCounts[account.account_id] ?? 0) < account.max_concurrency,
   );

@@ -275,6 +275,32 @@ describe('synchronous Images SSE transformer', () => {
     })
   })
 
+  it('marks output-item.done as paid work before publishing a public image frame', () => {
+    const transformer = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
+    })
+    expect(transformer.push(encoder.encode(
+      'data: {"type":"response.output_item.done","item":{"id":"paid","type":"image_generation_call","result":"aW1hZ2U="}}\n\n',
+    ))).toEqual([])
+
+    expect(transformer.imageOutputStarted()).toBe(false)
+    expect(transformer.providerOutputCompleted()).toBe(true)
+    transformer.retainCompletedProviderOutput()
+    expect(transformer.snapshot()).toMatchObject({ imageCount: 1, paidOutputCount: 1, usage: { images: 1 } })
+  })
+
+  it('never treats provider usage telemetry as proof of a paid completed output', () => {
+    const transformer = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
+    })
+    transformer.push(encoder.encode(
+      'data: {"type":"response.failed","response":{"status":"failed","usage":{"images":9},"error":{"message":"failed"}}}\n\n',
+    ))
+    expect(transformer.snapshot()).toMatchObject({
+      state: 'error', paidOutputCount: 0, usage: { images: 9 },
+    })
+  })
+
   it('keeps safe generic usage when completed tool usage is malformed or hostile', () => {
     const transformer = createSyncImageSseTransformer({
       operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',

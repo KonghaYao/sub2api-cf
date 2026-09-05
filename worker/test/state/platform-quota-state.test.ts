@@ -40,7 +40,7 @@ function harness(storage = new TestSqlStorage()): { object: ApiKeyLimitDO; stora
 function post(
   object: ApiKeyLimitDO,
   path: '/platform-quota/configure' | '/platform-quota/reserve' |
-    '/platform-quota/settle' | '/platform-quota/cancel',
+    '/platform-quota/renew' | '/platform-quota/settle' | '/platform-quota/cancel',
   body: Record<string, unknown>,
 ): Promise<Response> {
   return object.fetch(new Request(`https://api-key-limit.test${path}`, {
@@ -216,5 +216,49 @@ describe('ApiKeyLimitDO platform quota contract', () => {
     expect(replay.status).toBe(200)
     await expect(replay.json()).resolves.toMatchObject({ idempotent: true })
     expect((await reserve(object, 'capacity-returned', 100)).status).toBe(200)
+  })
+
+  it('renews a reservation monotonically so long-running provider work keeps its hold', async () => {
+    const { object } = harness()
+    await post(object, '/platform-quota/configure', config())
+    await reserve(object, 'long-running', 100)
+    vi.advanceTimersByTime(30_000)
+    const renewed = await post(object, '/platform-quota/renew', {
+      request_id: 'long-running', user_id: 'user-1', platform: 'openai',
+      renewal_sequence: 1, reservation_ttl_ms: 60_000,
+    })
+    expect(renewed.status).toBe(200)
+    await expect(renewed.json()).resolves.toMatchObject({
+      idempotent: false,
+      reservation: { renewal_sequence: 1, reservation_expires_at_ms: Date.now() + 60_000 },
+    })
+    const replay = await post(object, '/platform-quota/renew', {
+      request_id: 'long-running', user_id: 'user-1', platform: 'openai',
+      renewal_sequence: 1, reservation_ttl_ms: 60_000,
+    })
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({ idempotent: true })
+    const next = await post(object, '/platform-quota/renew', {
+      request_id: 'long-running', user_id: 'user-1', platform: 'openai',
+      renewal_sequence: 2, reservation_ttl_ms: 60_000,
+    })
+    expect(next.status).toBe(200)
+    const delayedReplay = await post(object, '/platform-quota/renew', {
+      request_id: 'long-running', user_id: 'user-1', platform: 'openai',
+      renewal_sequence: 1, reservation_ttl_ms: 30_000,
+    })
+    expect(delayedReplay.status).toBe(200)
+    await expect(delayedReplay.json()).resolves.toMatchObject({
+      idempotent: true,
+      reservation: { renewal_sequence: 2 },
+    })
+    const skipped = await post(object, '/platform-quota/renew', {
+      request_id: 'long-running', user_id: 'user-1', platform: 'openai',
+      renewal_sequence: 4, reservation_ttl_ms: 60_000,
+    })
+    expect(skipped.status).toBe(409)
+    await expect(skipped.json()).resolves.toMatchObject({
+      error: { code: 'platform_quota_renewal_out_of_order' },
+    })
   })
 })
