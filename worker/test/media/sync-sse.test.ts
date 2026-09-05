@@ -178,6 +178,8 @@ describe('synchronous Images SSE transformer', () => {
         size: '1672x941',
       }],
       model: 'gpt-image-2',
+      output_format: 'png',
+      size: '1672x941',
       usage: {
         input_tokens: 5,
         output_tokens: 9,

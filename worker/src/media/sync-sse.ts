@@ -65,6 +65,12 @@ export interface SyncImageSseSnapshot {
   createdAt: number
   publicModel: string
   responseFormat: 'b64_json' | 'url'
+  metadata: {
+    outputFormat: string
+    size: string
+    background: string
+    quality: string
+  }
 }
 
 export class SyncImageSseError extends Error {
@@ -195,6 +201,12 @@ export class SyncImageSseTransformer {
       createdAt: this.resolvedCreatedAt(),
       publicModel: boundedString(this.options.publicModel, 200),
       responseFormat: this.options.responseFormat,
+      metadata: {
+        outputFormat: this.completedImages[0]?.outputFormat || this.currentMeta.outputFormat,
+        size: this.completedImages[0]?.size || this.currentMeta.size,
+        background: this.currentMeta.background,
+        quality: this.currentMeta.quality,
+      },
     }
   }
 
@@ -630,6 +642,10 @@ export function buildSyncImageBufferedResponse(snapshot: SyncImageSseSnapshot): 
     data,
     model: snapshot.publicModel,
   }
+  if (snapshot.metadata.background !== '') body.background = snapshot.metadata.background
+  if (snapshot.metadata.outputFormat !== '') body.output_format = snapshot.metadata.outputFormat
+  if (snapshot.metadata.quality !== '') body.quality = snapshot.metadata.quality
+  if (snapshot.metadata.size !== '') body.size = snapshot.metadata.size
   const usage = safeUsageObject(snapshot.usage)
   if (usage !== undefined) body.usage = usage
   return body

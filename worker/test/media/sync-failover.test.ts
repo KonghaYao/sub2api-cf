@@ -127,11 +127,20 @@ describe('synchronous image semantic failover policy', () => {
       input: {
         kind: 'response' as const, httpStatus: 200, imageCount: 0,
         responseStatus: 'failed' as const,
-        error: { type: 'image_generation_user_error', code: 'invalid_value' },
+        error: {
+          type: 'image_generation_user_error', code: 'invalid_value',
+          message: 'Invalid image size', param: 'size',
+        },
       },
       expected: {
         kind: 'failure',
-        failure: { kind: 'client_error', status: 400, code: 'IMAGE_UPSTREAM_CLIENT_ERROR' },
+        failure: {
+          kind: 'client_error', status: 400, code: 'invalid_value',
+          providerError: {
+            type: 'image_generation_user_error', code: 'invalid_value',
+            message: 'Invalid image size', param: 'size',
+          },
+        },
       },
     },
     {

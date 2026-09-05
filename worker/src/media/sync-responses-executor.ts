@@ -44,6 +44,15 @@ export async function executeSyncImageResponses(
       'server_error',
     )
   }
+  const responsesModel = input.responses_model.trim()
+  if (responsesModel === '' || responsesModel.length > 200 || /[\u0000-\u001f\u007f]/.test(responsesModel)) {
+    throw new GatewayError(
+      500,
+      'IMAGE_RESPONSES_MODEL_INVALID',
+      'Image Responses upstream model configuration is invalid',
+      'server_error',
+    )
+  }
   const credentialKind = syncImageResponsesCredentialKind(input.account, input.credential_kind)
   if (input.account.platform === 'codex' && credentialKind === 'api_key') {
     throw new GatewayError(
@@ -61,7 +70,7 @@ export async function executeSyncImageResponses(
   }
   const body = buildSyncImageResponsesRequest(
     { ...input.manifest, model: input.upstream_model },
-    input.responses_model,
+    responsesModel,
   )
   const plan = buildProviderRequest({
     account: input.account,

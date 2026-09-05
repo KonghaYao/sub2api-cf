@@ -10,6 +10,7 @@ export interface SyncImageResponseOutcome {
     type?: string
     code?: string
     message?: string
+    param?: string
   }
 }
 
@@ -34,6 +35,12 @@ export interface SyncImageFailure {
   status: number
   code: string
   retryAfter?: string
+  providerError?: {
+    type: string
+    code: string
+    message: string
+    param?: string
+  }
 }
 
 export type SyncImageProviderClassification =
@@ -67,10 +74,11 @@ export type SyncImageCooldown =
 
 export interface SyncImagePublicError {
   status: number
-  type: 'invalid_request_error' | 'rate_limit_error' | 'upstream_error'
+  type: string
   code: string
   message: string
   retryAfter?: string
+  param?: string
 }
 
 export type SyncImageFailoverDecision = {
@@ -138,7 +146,13 @@ export function classifySyncImageProviderOutcome(
   if (outcome.error !== undefined || outcome.responseStatus === 'failed' || outcome.httpStatus >= 400) {
     const clientStatus = semanticClientStatus(outcome.httpStatus, errorType, errorCode)
     if (clientStatus !== null) {
-      return failure('client_error', clientStatus, 'IMAGE_UPSTREAM_CLIENT_ERROR')
+      const providerError = {
+        type: outcome.error?.type?.trim() || 'invalid_request_error',
+        code: outcome.error?.code?.trim() || 'IMAGE_UPSTREAM_CLIENT_ERROR',
+        message: outcome.error?.message?.trim() || 'Image provider rejected the request',
+        ...(outcome.error?.param?.trim() ? { param: outcome.error.param.trim() } : {}),
+      }
+      return failure('client_error', clientStatus, providerError.code, undefined, providerError)
     }
     return failure('upstream_error', 502, 'IMAGE_UPSTREAM_ERROR')
   }
@@ -319,12 +333,14 @@ function publicErrorFor(failure: SyncImageFailure): SyncImagePublicError {
         ...(safeRetryAfter(failure.retryAfter) === undefined ? {} : { retryAfter: safeRetryAfter(failure.retryAfter) }),
       }
     case 'client_error':
-      return {
-        status: failure.status,
-        type: 'invalid_request_error',
-        code: 'IMAGE_UPSTREAM_CLIENT_ERROR',
-        message: 'Image provider rejected the request',
-      }
+      return failure.providerError === undefined
+        ? {
+            status: failure.status,
+            type: 'invalid_request_error',
+            code: 'IMAGE_UPSTREAM_CLIENT_ERROR',
+            message: 'Image provider rejected the request',
+          }
+        : { status: failure.status, ...failure.providerError }
     case 'transport_error':
       return {
         status: 502,
@@ -360,6 +376,7 @@ function failure(
   status: number,
   code: string,
   retryAfter?: string,
+  providerError?: SyncImageFailure['providerError'],
 ): SyncImageProviderClassification {
   return {
     kind: 'failure',
@@ -368,6 +385,7 @@ function failure(
       status,
       code,
       ...(retryAfter === undefined ? {} : { retryAfter }),
+      ...(providerError === undefined ? {} : { providerError }),
     },
   }
 }

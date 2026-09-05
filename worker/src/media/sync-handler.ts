@@ -46,6 +46,7 @@ import { executeSyncImageResponses } from './sync-responses-executor'
 import {
   classifySyncImageProviderOutcome,
   decideSyncImageFailover,
+  type SyncImageCooldown,
   type SyncImageFailoverDecision,
 } from './sync-failover'
 import {
@@ -59,6 +60,7 @@ interface SyncImageEnv extends Env {
   SYNC_IMAGE_UPSTREAM_FETCH?: typeof fetch
   SYNC_IMAGE_MODERATOR?: SyncImageModerator
   SYNC_IMAGE_RENEW_AFTER_MS?: number
+  SYNC_IMAGE_RESPONSES_MODEL?: string
 }
 
 export interface SyncImageModerator {
@@ -73,7 +75,8 @@ export interface SyncImageModerator {
 type SyncImageBindings = { Bindings: SyncImageEnv }
 const FAILURE_COOLDOWN_MS = 30_000
 const SYNC_IMAGE_RESPONSES_MODEL = 'gpt-5.4-mini'
-const SYNC_IMAGE_SSE_BODY_LIMIT = 64 * 1024 * 1024
+const SYNC_IMAGE_SSE_BODY_LIMIT = 24 * 1024 * 1024
+const SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT = 16 * 1024 * 1024
 const SYNC_IMAGE_SSE_BODY_TIMEOUT_MS = 120_000
 
 /**
@@ -207,6 +210,7 @@ export async function handleSyncImages(
               leaseSignal: renewal.signal,
               remainingAccounts: Math.max(0, attempts - attempt - 1),
               requestId,
+              responsesModel: context.env.SYNC_IMAGE_RESPONSES_MODEL ?? SYNC_IMAGE_RESPONSES_MODEL,
             })
           : await executeDirectImages({
               manifest,
@@ -236,13 +240,14 @@ export async function handleSyncImages(
         // Renewal failure may race a provider that has already accepted paid
         // work. Never switch accounts on this path and risk duplicate images.
         if (renewalError !== null && upstreamStarted) throw mapped
-        if (accountId !== null && isRetryable(mapped)) {
+        const decisionCooldown = error instanceof SyncImageDecisionError ? error.cooldown : null
+        if (accountId !== null && isRetryable(mapped) && decisionCooldown?.scope !== 'none') {
           const failedAccountId = accountId
           await bestEffort(() => recordPoolFailure(
             activePool as DurableObjectStub,
             failedAccountId,
             `${requestId}:image:${attempt}`,
-            FAILURE_COOLDOWN_MS,
+            decisionCooldown?.durationMs ?? FAILURE_COOLDOWN_MS,
           ))
         }
         if (!isRetryable(mapped) || attempt + 1 >= attempts) throw mapped
@@ -422,6 +427,7 @@ async function executeCodexImages(input: ImageExecutionInput & {
   publicModel: string
   remainingAccounts: number
   requestId: string
+  responsesModel: string
 }): Promise<ImageExecutionResult> {
   let sameAccountRetries = 0
   let retryWindowElapsedMs = 0
@@ -430,7 +436,7 @@ async function executeCodexImages(input: ImageExecutionInput & {
       manifest: input.manifest,
       public_model: input.publicModel,
       upstream_model: input.upstreamModel,
-      responses_model: SYNC_IMAGE_RESPONSES_MODEL,
+      responses_model: input.responsesModel,
       account: input.account,
       credential: input.credential,
       client_headers: input.clientHeaders,
@@ -447,7 +453,11 @@ async function executeCodexImages(input: ImageExecutionInput & {
           false,
           input.leaseSignal,
         )
-        const classified = classifySyncImageProviderOutcome(snapshotOutcome(response.status, transformed.snapshot))
+        const classified = classifySyncImageProviderOutcome(snapshotOutcome(
+          response.status,
+          transformed.snapshot,
+          response.headers.get('retry-after') ?? undefined,
+        ))
         if (classified.kind === 'failure') {
           const decision = decideSyncImageFailover(classified.failure, {
             upstreamStarted: true,
@@ -566,6 +576,9 @@ async function readSyncImageSseResponse(
     operation: manifest.operation === 'edits' ? 'edit' : 'generation',
     responseFormat: manifest.options.response_format === 'url' ? 'url' : 'b64_json',
     publicModel,
+    maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
+    maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
+    maxCompletedImages: manifest.n,
   })
   if (!retainFrames) transformer.disconnectOutput()
   const reader = response.body?.getReader()
@@ -630,7 +643,11 @@ async function readSyncImageSseResponse(
   return { body: joinBytes(frames), snapshot: transformer.snapshot() }
 }
 
-function snapshotOutcome(httpStatus: number, snapshot: SyncImageSseSnapshot): Parameters<typeof classifySyncImageProviderOutcome>[0] {
+function snapshotOutcome(
+  httpStatus: number,
+  snapshot: SyncImageSseSnapshot,
+  headerRetryAfter?: string,
+): Parameters<typeof classifySyncImageProviderOutcome>[0] {
   const responseStatus = snapshot.responseStatus === 'completed' || snapshot.responseStatus === 'incomplete' || snapshot.responseStatus === 'failed'
     ? snapshot.responseStatus
     : undefined
@@ -644,25 +661,39 @@ function snapshotOutcome(httpStatus: number, snapshot: SyncImageSseSnapshot): Pa
     ...(responseStatus === undefined ? {} : { responseStatus }),
     ...(snapshot.incompleteReason === '' ? {} : { incompleteReason: snapshot.incompleteReason }),
     ...(snapshot.textOutput === '' ? {} : { textOutput: snapshot.textOutput }),
-    ...(snapshot.retryAfter === '' ? {} : { retryAfter: snapshot.retryAfter }),
+    ...(snapshot.retryAfter === '' && headerRetryAfter === undefined
+      ? {}
+      : { retryAfter: snapshot.retryAfter || headerRetryAfter }),
     ...(!includeStructuredError ? {} : {
       error: {
         type: snapshot.error!.type,
         code: snapshot.error!.code,
         message: snapshot.error!.message,
+        ...(snapshot.error!.param === '' ? {} : { param: snapshot.error!.param }),
       },
     }),
   }
 }
 
+class SyncImageDecisionError extends GatewayError {
+  constructor(
+    decision: SyncImageFailoverDecision,
+    readonly cooldown: SyncImageCooldown,
+  ) {
+    super(
+      decision.error.status,
+      decision.error.code,
+      decision.error.message,
+      decision.error.type,
+      decision.error.retryAfter,
+      decision.error.param,
+    )
+    this.name = 'SyncImageDecisionError'
+  }
+}
+
 function gatewayErrorFromDecision(decision: SyncImageFailoverDecision): GatewayError {
-  return new GatewayError(
-    decision.error.status,
-    decision.error.code,
-    decision.error.message,
-    decision.error.type,
-    decision.error.retryAfter,
-  )
+  return new SyncImageDecisionError(decision, decision.cooldown)
 }
 
 async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {

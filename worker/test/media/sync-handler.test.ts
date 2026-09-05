@@ -53,6 +53,7 @@ async function fixture(platform: 'openai' | 'codex' = 'openai') {
   ) VALUES ('account-1','model-1',0,0,0,1,1,1);`)
 
   const stateCalls: string[] = []
+  const failureRequests: Array<Record<string, unknown>> = []
   const namespace = {
     idFromName: (name: string) => name as unknown as DurableObjectId,
     get: () => ({ fetch: async (request: Request) => {
@@ -63,6 +64,7 @@ async function fixture(platform: 'openai' | 'codex' = 'openai') {
         return Response.json({ admitted: true, lease: { request_id: body.request_id, status: 'active' } })
       }
       if (path === '/reserve') return Response.json({ lease: { account_id: 'account-1', status: 'active' } })
+      if (path === '/failure') failureRequests.push(await request.json() as Record<string, unknown>)
       return Response.json({ ok: true })
     } }),
   } as unknown as DurableObjectNamespace
@@ -96,7 +98,7 @@ async function fixture(platform: 'openai' | 'codex' = 'openai') {
     EVENTS_QUEUE: { send: vi.fn() } as unknown as Queue,
     ASSETS: {} as Fetcher, SYNC_IMAGE_BILLING: billing, SYNC_IMAGE_UPSTREAM_FETCH: upstreamFetch,
   }
-  return { raw, env, stateCalls, reserve, settle, cancel, upstreamFetch, upstreamBodies }
+  return { raw, env, stateCalls, failureRequests, reserve, settle, cancel, upstreamFetch, upstreamBodies }
 }
 
 function app() {
@@ -381,7 +383,7 @@ describe('synchronous image handler', () => {
     test.upstreamFetch
       .mockResolvedValueOnce(new Response([
         'event: response.failed',
-        'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","retry_after":"0.001"}}}',
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}}',
         '',
         '',
       ].join('\n'), { status: 429, headers: { 'content-type': 'text/event-stream', 'retry-after': '0.001' } }))
@@ -398,6 +400,60 @@ describe('synchronous image handler', () => {
     expect(response.status, await response.clone().text()).toBe(200)
     expect(test.upstreamFetch).toHaveBeenCalledTimes(2)
     expect(test.settle).toHaveBeenCalledOnce()
+  })
+
+  it('does not cool an account for a text fallback but applies the image-pool cooldown for tool unavailable', async () => {
+    const textFallback = await fixture('codex')
+    textFallback.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Here is a polished prompt"}]}]}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const textResponse = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'fallback' }),
+    }, textFallback.env as never)
+    expect(textResponse.status).toBe(502)
+    expect(textFallback.failureRequests).toEqual([])
+
+    const unavailable = await fixture('codex')
+    unavailable.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.failed',
+      'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"upstream_error","code":"image_generation_unavailable","message":"tool absent"}}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const unavailableResponse = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'unavailable' }),
+    }, unavailable.env as never)
+    expect(unavailableResponse.status).toBe(502)
+    expect(unavailable.failureRequests).toEqual([
+      expect.objectContaining({ account_id: 'account-1', cooldown_ms: 1_800_000 }),
+    ])
+  })
+
+  it('preserves a sanitized Responses client error contract including param', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.failed',
+      'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid image size","param":"size"}}}',
+      '',
+      '',
+    ].join('\n'), { status: 400, headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'bad size' }),
+    }, test.env as never)
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        type: 'invalid_request_error', code: 'invalid_value',
+        message: 'Invalid image size', param: 'size',
+      },
+    })
+    expect(test.failureRequests).toEqual([])
   })
 
   it('still rejects direct-provider streaming before admission and billing', async () => {
