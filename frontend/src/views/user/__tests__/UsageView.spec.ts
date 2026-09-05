@@ -164,7 +164,7 @@ describe('user UsageView', () => {
     showSuccess.mockReset()
     showInfo.mockReset()
 
-    query.mockResolvedValue({ items: [usageLog], total: 1, pages: 1 })
+    query.mockResolvedValue({ items: [usageLog], has_more: false, next_cursor: null })
     getStats.mockResolvedValue({
       total_requests: 1,
       total_input_tokens: 10,
@@ -211,14 +211,9 @@ describe('user UsageView', () => {
     expect(getAvailable).toHaveBeenCalled()
   })
 
-  it('propagates and resets the native compaction filter across page requests', async () => {
+  it('keeps legacy aggregate filters out of the Worker Explorer list contract', async () => {
     const wrapper = mountUsageView()
     await flushPromises()
-
-    expect((wrapper.vm as any).compactionOptions).toEqual([
-      { value: null, label: 'All Requests' },
-      { value: true, label: 'Compaction Only' },
-    ])
 
     query.mockClear()
     getStats.mockClear()
@@ -229,10 +224,7 @@ describe('user UsageView', () => {
     ;(wrapper.vm as any).applyFilters()
     await flushPromises()
 
-    expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({ native_compaction_v2: true }),
-      expect.anything()
-    )
+    expect(query.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getDashboardModels).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
@@ -246,116 +238,34 @@ describe('user UsageView', () => {
     await flushPromises()
 
     expect((wrapper.vm as any).filters.native_compaction_v2).toBeNull()
-    expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({ native_compaction_v2: null }),
-      expect.anything()
-    )
+    expect(query.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getDashboardModels).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
   })
 
-  it('exports csv with current filters and without admin-only fields', async () => {
+  it('uses the returned cursor for the next page and clears it when filters reset', async () => {
+    query.mockResolvedValueOnce({ items: [usageLog], has_more: true, next_cursor: 'usage-next' })
     const wrapper = mountUsageView()
     await flushPromises()
-    ;(wrapper.vm as any).filters.native_compaction_v2 = true
+    query.mockClear()
+    query.mockResolvedValueOnce({ items: [], has_more: false, next_cursor: null })
 
-    let exportedBlob: Blob | null = null
-    let csvContent = ''
-    const OriginalBlob = globalThis.Blob
-    vi.stubGlobal('Blob', vi.fn((parts: BlobPart[], options?: BlobPropertyBag) => {
-      csvContent = parts.map((part) => String(part)).join('')
-      return new OriginalBlob(parts, options)
-    }))
-    const originalCreateObjectURL = window.URL.createObjectURL
-    const originalRevokeObjectURL = window.URL.revokeObjectURL
-    window.URL.createObjectURL = vi.fn((blob: Blob | MediaSource) => {
-      exportedBlob = blob as Blob
-      return 'blob:usage-export'
-    }) as typeof window.URL.createObjectURL
-    window.URL.revokeObjectURL = vi.fn(() => {}) as typeof window.URL.revokeObjectURL
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-    await (wrapper.vm as any).exportToCSV()
-
-    expect(exportedBlob).not.toBeNull()
-    expect(query).toHaveBeenCalledWith(expect.objectContaining({
-      page_size: 100,
-      sort_by: 'created_at',
-      sort_order: 'desc',
-      native_compaction_v2: true,
-    }))
-    expect(clickSpy).toHaveBeenCalled()
-    expect(showSuccess).toHaveBeenCalled()
-    expect(csvContent.startsWith('\uFEFF')).toBe(true)
-    expect(csvContent.slice(1)).toBe([
-      'Time,API Key Name,Model,Reasoning Effort,Inbound Endpoint,IP Address,Type,Billing Mode,Input Tokens,Output Tokens,Cache Read Tokens,Cache Creation Tokens,Rate Multiplier,Billed Cost,Original Cost,First Token (ms),Duration (ms)',
-      '2026-03-08T00:00:00Z,demo-key,gpt-5.4,"\'-",,203.0.113.10,Sync,Token,4057,101,278272,4,1,0.09288300,0.09288300,12,345',
-    ].join('\n'))
-    expect(csvContent).toContain('IP Address')
-    expect(csvContent).toContain('203.0.113.10')
-    expect(csvContent).toContain('Billed Cost')
-    expect(csvContent).toContain('Original Cost')
-    expect(csvContent).not.toContain('Upstream Endpoint')
-    expect(csvContent).not.toContain('account_cost')
-    expect(csvContent).not.toContain('account_rate_multiplier')
-
-    window.URL.createObjectURL = originalCreateObjectURL
-    window.URL.revokeObjectURL = originalRevokeObjectURL
-    vi.unstubAllGlobals()
-    clickSpy.mockRestore()
-  })
-
-  it('exports historical image rows with image billing mode derived from image_count', async () => {
-    query.mockResolvedValue({
-      items: [
-        {
-          ...usageLog,
-          request_id: 'req-user-export-legacy-image',
-          actual_cost: 0.2,
-          total_cost: 0.2,
-          input_cost: 0,
-          output_cost: 0,
-          cache_creation_cost: 0,
-          cache_read_cost: 0,
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_creation_tokens: 0,
-          cache_read_tokens: 0,
-          image_count: 1,
-          model: 'gpt-image-2',
-          billing_mode: null,
-          ip_address: null,
-        },
-      ],
-      total: 1,
-      pages: 1,
-    })
-
-    const wrapper = mountUsageView()
+    ;(wrapper.vm as any).goToNextUsagePage()
     await flushPromises()
 
-    let csvContent = ''
-    const OriginalBlob = globalThis.Blob
-    vi.stubGlobal('Blob', vi.fn((parts: BlobPart[], options?: BlobPropertyBag) => {
-      csvContent = parts.map((part) => String(part)).join('')
-      return new OriginalBlob(parts, options)
-    }))
-    const originalCreateObjectURL = window.URL.createObjectURL
-    const originalRevokeObjectURL = window.URL.revokeObjectURL
-    window.URL.createObjectURL = vi.fn(() => 'blob:usage-export') as typeof window.URL.createObjectURL
-    window.URL.revokeObjectURL = vi.fn(() => {}) as typeof window.URL.revokeObjectURL
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 20, cursor: 'usage-next' }),
+      expect.anything(),
+    )
 
-    await (wrapper.vm as any).exportToCSV()
-
-    expect(csvContent).toContain('Billing Mode')
-    expect(csvContent).toContain('Image')
-    expect(csvContent).not.toContain(',Token,0,0,0,0,')
-
-    window.URL.createObjectURL = originalCreateObjectURL
-    window.URL.revokeObjectURL = originalRevokeObjectURL
-    vi.unstubAllGlobals()
-    clickSpy.mockRestore()
+    query.mockClear()
+    ;(wrapper.vm as any).resetFilters()
+    await flushPromises()
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 20, cursor: undefined }),
+      expect.anything(),
+    )
+    expect(wrapper.text()).not.toContain('Export CSV')
   })
 })

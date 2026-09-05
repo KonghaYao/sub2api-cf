@@ -1703,11 +1703,37 @@ export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
+/** Resource IDs returned by the Worker are opaque and must never be parsed. */
+export type OpaqueId = string
+
+/** Keyset page used by D1-backed Explorer lists. */
+export interface CursorPage<T> {
+  items: T[]
+  has_more: boolean
+  next_cursor: string | null
+}
+
+export type ExplorerPayloadState = 'available' | 'missing' | 'expired' | 'pending_recovery'
+
+/** On-demand R2 payload attached to detail responses only. */
+export type ExplorerPayload = {
+  state: 'available'
+  body: string
+  content_type: string | null
+  /** True means the stored representation was irreversibly redacted. */
+  redacted: boolean
+} | {
+  state: Exclude<ExplorerPayloadState, 'available'>
+  body: null
+  content_type: null
+  redacted: boolean
+}
+
 export interface UsageLog {
-  id: number
-  user_id: number
-  api_key_id: number
-  account_id: number | null
+  id: OpaqueId
+  user_id: OpaqueId
+  api_key_id: OpaqueId
+  account_id: OpaqueId | null
   request_id: string
   model: string
   service_tier?: string | null
@@ -1715,8 +1741,8 @@ export interface UsageLog {
   inbound_endpoint?: string | null
   upstream_endpoint?: string | null
 
-  group_id: number | null
-  subscription_id: number | null
+  group_id: OpaqueId | null
+  subscription_id: OpaqueId | null
 
   input_tokens: number
   output_tokens: number
@@ -1773,7 +1799,7 @@ export interface UsageLog {
 }
 
 export interface UsageLogAccountSummary {
-  id: number
+  id: OpaqueId
   name: string
 }
 
@@ -2131,7 +2157,7 @@ export interface ExtendSubscriptionRequest {
 // ==================== Query Parameters ====================
 
 export interface UserErrorRequest {
-  id: number
+  id: OpaqueId
   created_at: string
   model: string
   inbound_endpoint: string
@@ -2139,8 +2165,8 @@ export interface UserErrorRequest {
   category: string
   platform: string
   message: string
-  key_name: string
-  key_deleted: boolean
+  key_name?: string
+  key_deleted?: boolean
   client_ip?: string
   group_name?: string
   request_type?: number
@@ -2149,23 +2175,18 @@ export interface UserErrorRequest {
 }
 
 export interface UserErrorRequestDetail extends UserErrorRequest {
-  error_body: string
   upstream_status_code?: number
+  payload: ExplorerPayload
 }
 
 export interface UserErrorListParams {
-  page?: number
-  page_size?: number
+  limit?: number
+  cursor?: string
   start_date?: string
   end_date?: string
-  timezone?: string
   model?: string
   status_code?: number
-  category?: string
-  api_key_id?: number
-  // 服务端排序,列白名单见后端 opsErrorLogsOrderBy(created_at/model/status_code)
-  sort_by?: string
-  sort_order?: 'asc' | 'desc'
+  api_key_id?: OpaqueId
 }
 
 export interface UsageQueryParams {

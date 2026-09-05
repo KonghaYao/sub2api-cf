@@ -434,6 +434,18 @@ export default {
       detailCoordinates: '坐标',
     },
     tabs: { usage: '用量明细', errors: '错误请求', ranking: '用户排行' },
+    explorer: {
+      paginationLabel: '请求历史分页',
+      previous: '上一页',
+      next: '下一页',
+      page: '第 {page} 页',
+      payload: {
+        redacted: '敏感字段已在存储前不可逆脱敏。',
+        missing: '未存储诊断载荷。',
+        expired: '诊断载荷已过期。',
+        pending_recovery: '诊断载荷等待恢复。',
+      },
+    },
     errors: {
       time: '时间', model: '模型', endpoint: '端点', status: '状态码',
       category: '分类', platform: '平台', message: '错误信息',
@@ -450,6 +462,7 @@ export default {
         responseBody: '上游响应内容',
         upstreamStatus: '上游状态码',
         loadFailed: '加载详情失败，请稍后重试',
+        payloadUnavailable: '载荷不可用',
       },
     },
   },

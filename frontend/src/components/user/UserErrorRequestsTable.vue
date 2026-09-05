@@ -8,10 +8,6 @@
         :data="rows"
         :loading="loading"
         clickable-rows
-        server-side-sort
-        default-sort-key="created_at"
-        default-sort-order="desc"
-        @sort="onSort"
         @rowClick="(row) => openDetail(row.id)"
       >
         <template #cell-model="{ row }">
@@ -106,13 +102,13 @@
     </div>
 
     <div class="flex-shrink-0">
-      <Pagination
-        v-if="total > 0"
+      <CursorPagination
+        v-if="rows.length > 0 || page > 1"
         :page="page"
-        :page-size="pageSize"
-        :total="total"
-        @update:page="$emit('update:page', $event)"
-        @update:pageSize="$emit('update:pageSize', $event)"
+        :has-more="hasMore"
+        :loading="loading"
+        @previous="$emit('previous')"
+        @next="$emit('next')"
       />
     </div>
 
@@ -125,13 +121,12 @@ import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DataTable from '@/components/common/DataTable.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import Pagination from '@/components/common/Pagination.vue'
+import CursorPagination from '@/components/user/CursorPagination.vue'
 import UserErrorDetailModal from '@/components/user/UserErrorDetailModal.vue'
 import IpGeoCell from '@/components/common/IpGeoCell.vue'
 import IpGeoBatchToolbar from '@/components/common/IpGeoBatchToolbar.vue'
 import { formatDateTime } from '@/utils/format'
 import {
-  mapErrorSortKey,
   numericRequestTypeKind,
   requestTypeBadgeClass,
   requestTypeLabelKey,
@@ -142,24 +137,18 @@ import type { Column } from '@/components/common/types'
 
 const props = defineProps<{
   rows: UserErrorRequest[]
-  total: number
+  hasMore: boolean
   loading: boolean
   page: number
-  pageSize: number
   /** 列设置:仅显示这些 key 的列;不传则全显(key 须与 allColumns 一致) */
   visibleColumnKeys?: string[]
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:page', v: number): void
-  (e: 'update:pageSize', v: number): void
+  (e: 'previous'): void
+  (e: 'next'): void
   (e: 'ipGeoBatchFailed'): void
-  (e: 'sort', sortBy: string, sortOrder: 'asc' | 'desc'): void
 }>()
-
-function onSort(key: string, order: 'asc' | 'desc') {
-  emit('sort', mapErrorSortKey(key), order)
-}
 
 const { t } = useI18n()
 
@@ -167,16 +156,16 @@ const { t } = useI18n()
 // → 结果(状态→消息)→ 时间 → UA(用量明细 UA 同在时间之后的尾部)
 const allColumns = computed<Column[]>(() => [
   { key: 'key_name', label: t('usage.errors.keyName') },
-  { key: 'model', label: t('usage.errors.model'), sortable: true },
+  { key: 'model', label: t('usage.errors.model') },
   { key: 'endpoint', label: t('usage.errors.endpoint') },
   { key: 'client_ip', label: 'IP' },
   { key: 'group', label: t('admin.usage.group') },
   { key: 'type', label: t('usage.type') },
   { key: 'platform', label: t('usage.errors.platform') },
   { key: 'category', label: t('usage.errors.category') },
-  { key: 'status', label: t('usage.errors.status'), sortable: true },
+  { key: 'status', label: t('usage.errors.status') },
   { key: 'message', label: t('usage.errors.message') },
-  { key: 'created_at', label: t('usage.errors.time'), sortable: true },
+  { key: 'created_at', label: t('usage.errors.time') },
   { key: 'user_agent', label: t('usage.userAgent') },
 ])
 
@@ -193,9 +182,9 @@ function requestTypeBadge(row: UserErrorRequest): { label: string; className: st
 }
 
 const showDetail = ref(false)
-const selectedId = ref<number | null>(null)
+const selectedId = ref<string | null>(null)
 
-function openDetail(id: number) {
+function openDetail(id: string) {
   selectedId.value = id
   showDetail.value = true
 }

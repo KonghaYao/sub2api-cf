@@ -489,7 +489,7 @@ describe('OpenAI-compatible gateway', () => {
   })
 
   it('accepts the original gateway leniency for a UTF-8 BOM and raw control bytes inside strings', async () => {
-    const { env } = await harness()
+    const { env, database } = await harness()
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
       model: 'gpt-upstream',
       choices: [],
@@ -509,6 +509,10 @@ describe('OpenAI-compatible gateway', () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({
       messages: [{ role: 'user', content: 'hello\u0000world\u001b' }],
     })
+    expect(database.bindings.some(({ query }) =>
+      query.includes('INSERT INTO request_observations'))).toBe(true)
+    expect(database.bindings.some(({ query, values }) =>
+      query.includes('UPDATE request_observations') && values[0] === 'completed')).toBe(true)
   })
 
   it.each(['gzip', 'deflate'] as const)('accepts a bounded %s-compressed JSON request', async (encoding) => {
@@ -656,7 +660,7 @@ describe('OpenAI-compatible gateway', () => {
   })
 
   it('keeps malformed JSON with a control byte outside a string invalid', async () => {
-    const { env, user, pool } = await harness()
+    const { env, database, user, pool } = await harness()
 
     const response = await createApp().request('/v1/chat/completions', {
       method: 'POST',
@@ -670,6 +674,8 @@ describe('OpenAI-compatible gateway', () => {
     })
     expect(user.calls).toEqual([])
     expect(pool.calls).toEqual([])
+    expect(database.bindings.some(({ query }) => query.includes('INSERT INTO request_observations'))).toBe(true)
+    expect(database.bindings.some(({ query }) => query.includes("lifecycle = ?"))).toBe(true)
   })
 
   it('sanitizes request-stream read failures before any reservation or upstream call', async () => {
@@ -906,7 +912,7 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
-  it('restores custom and namespace tool identity through a buffered Chat-only fallback', async () => {
+  it('restores custom, namespace, and tool-search identity through a buffered Chat-only fallback', async () => {
     const { env, database } = await harness()
     database.chatOnly = true
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
@@ -933,6 +939,11 @@ describe('OpenAI-compatible gateway', () => {
                 type: 'function',
                 function: { name: 'team__send', arguments: '{"message":"hi"}' },
               },
+              {
+                id: 'call_search',
+                type: 'function',
+                function: { name: 'tool_search', arguments: '{"query":"deploy"}' },
+              },
             ],
           },
         }],
@@ -955,6 +966,7 @@ describe('OpenAI-compatible gateway', () => {
             name: 'team',
             tools: [{ type: 'function', name: 'send', parameters: { type: 'object' } }],
           },
+          { type: 'tool_search' },
         ],
       }),
     }, env)
@@ -978,6 +990,12 @@ describe('OpenAI-compatible gateway', () => {
           name: 'send',
           arguments: '{"message":"hi"}',
         },
+        {
+          type: 'tool_search_call',
+          call_id: 'call_search',
+          execution: 'client',
+          arguments: { query: 'deploy' },
+        },
       ],
     })
     const [, init] = upstream.mock.calls[0]
@@ -987,6 +1005,7 @@ describe('OpenAI-compatible gateway', () => {
       tools: [
         { type: 'function', function: { name: 'shell' } },
         { type: 'function', function: { name: 'team__send' } },
+        { type: 'function', function: { name: 'tool_search' } },
       ],
     })
     expect(JSON.stringify(upstreamBody)).not.toContain('dangerous')
@@ -1671,6 +1690,38 @@ describe('OpenAI-compatible gateway', () => {
     expect(text).not.toContain('secret upstream diagnostic')
     expect(user.calls.some((call) => call.path === '/cancel')).toBe(true)
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
+  it('classifies an upstream 429 as a provider-owned observation', async () => {
+    const { env, database } = await harness()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json(
+        { error: { message: 'rate limited' } },
+        { status: 429 },
+      )),
+    )
+
+    const response = await createApp().request(
+      '/v1/responses',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+      },
+      env,
+    )
+
+    expect(response.status).toBe(429)
+    const outcome = database.bindings.find(({ query }) =>
+      query.includes('UPDATE request_observations') && query.includes('error_owner = ?'))
+    expect(outcome?.values).toMatchObject({
+      0: 'failed',
+      2: 429,
+      11: 'upstream',
+      13: 'provider',
+      14: 'upstream',
+    })
   })
 
   it('marks a truncated SSE response failed and appends a protocol error event', async () => {

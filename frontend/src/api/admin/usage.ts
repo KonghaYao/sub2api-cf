@@ -4,7 +4,7 @@
  */
 
 import { apiClient } from '../client'
-import type { AdminUsageLog, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
+import type { CursorPage, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
 import type { EndpointStat } from '@/types'
 
 // ==================== Types ====================
@@ -80,17 +80,49 @@ export interface CreateUsageCleanupTaskRequest {
   timezone?: string
 }
 
-export interface AdminUsageQueryParams extends UsageQueryParams {
-  user_id?: number
-  exact_total?: boolean
+export interface AdminUsageQueryParams extends Omit<UsageQueryParams, 'page' | 'page_size' | 'sort_by' | 'sort_order'> {
+  limit?: number
+  cursor?: string
   billing_mode?: string
   upstream_model_mismatch?: boolean
-  sort_by?: string
-  sort_order?: 'asc' | 'desc'
-  // 错误请求 tab 专属筛选(仅传给错误列表接口;共用同一 filters 对象)
-  error_phase?: string | null
-  error_category?: string | null
+}
+
+export interface AdminUsageExplorerQuery {
+  limit?: number
+  cursor?: string
+  start_date?: string
+  end_date?: string
+  user_id?: string
+  api_key_id?: string
+  account_id?: string
+  group_id?: string
+  platform?: string
+  model?: string
+  status_code?: number
+  request_id?: string
+}
+
+/** Raw D1 projection returned by the Worker admin Explorer. */
+export interface WorkerAdminUsageItem {
+  id: string
+  created_at: string
+  request_id: string
+  user_id: string | null
+  api_key_id: string | null
+  account_id: string | null
+  group_id: string | null
+  model: string
+  requested_model?: string
+  upstream_model?: string
+  inbound_endpoint?: string
   status_code?: number | null
+  duration_ms?: number | null
+  request_type?: number | null
+  stream?: boolean
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  amount_micros?: number
 }
 
 // ==================== API Functions ====================
@@ -101,10 +133,10 @@ export interface AdminUsageQueryParams extends UsageQueryParams {
  * @returns Paginated list of usage logs
  */
 export async function list(
-  params: AdminUsageQueryParams,
+  params: AdminUsageExplorerQuery,
   options?: { signal?: AbortSignal }
-): Promise<PaginatedResponse<AdminUsageLog>> {
-  const { data } = await apiClient.get<PaginatedResponse<AdminUsageLog>>('/admin/usage', {
+): Promise<CursorPage<WorkerAdminUsageItem>> {
+  const { data } = await apiClient.get<CursorPage<WorkerAdminUsageItem>>('/admin/usage', {
     params,
     signal: options?.signal
   })

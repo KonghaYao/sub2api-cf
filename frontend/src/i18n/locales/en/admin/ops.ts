@@ -300,7 +300,7 @@ export default {
           internal: 'Internal'
         },
         total: 'Total:',
-        searchPlaceholder: 'Search request_id / client_request_id / message',
+        searchPlaceholder: 'Exact request ID',
       },
       // Error Detail Modal
       errorDetail: {
@@ -344,6 +344,7 @@ export default {
         message: 'Message',
         rootCause: 'Root Cause',
         diagnosticPayloads: 'Diagnostic Payloads',
+        payloadUnavailable: 'Payload unavailable',
         payloads: {
           client: 'Client Response',
           upstream_message: 'Upstream Message',

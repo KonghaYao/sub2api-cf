@@ -61,17 +61,25 @@
         <p class="mt-0.5 text-gray-900 dark:text-dark-100 break-all">{{ detail.message }}</p>
       </div>
 
-      <!-- Error Body -->
-      <div v-if="detail.error_body">
+      <div v-if="detail.payload.redacted" class="rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+        {{ t('usage.explorer.payload.redacted') }}
+      </div>
+
+      <!-- Payload is interpolated as text. Never render stored HTML. -->
+      <div v-if="detail.payload.state === 'available' && detail.payload.body">
         <span class="font-medium text-gray-500 dark:text-dark-400">{{ t('usage.errors.detail.responseBody') }}</span>
-        <pre class="mt-1 overflow-auto max-h-[40vh] whitespace-pre-wrap break-all rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-700 p-3 text-xs text-gray-800 dark:text-dark-200">{{ detail.error_body }}</pre>
+        <pre data-testid="error-payload" class="mt-1 overflow-auto max-h-[40vh] whitespace-pre-wrap break-all rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-700 p-3 text-xs text-gray-800 dark:text-dark-200">{{ safePayloadBody }}</pre>
+      </div>
+      <div v-else class="rounded-lg border border-dashed border-gray-300 p-3 text-gray-500 dark:border-dark-600 dark:text-gray-400">
+        <div class="font-medium">{{ t('usage.errors.detail.payloadUnavailable') }}</div>
+        <div class="mt-1 text-xs">{{ t(`usage.explorer.payload.${detail.payload.state}`) }}</div>
       </div>
     </div>
   </BaseDialog>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { getMyErrorDetail } from '@/api/usage'
@@ -80,7 +88,7 @@ import type { UserErrorRequestDetail } from '@/types'
 
 const props = defineProps<{
   show: boolean
-  errorId: number | null
+  errorId: string | null
 }>()
 
 const emit = defineEmits<{
@@ -92,6 +100,16 @@ const { t } = useI18n()
 const loading = ref(false)
 const loadError = ref(false)
 const detail = ref<UserErrorRequestDetail | null>(null)
+const safePayloadBody = computed(() => {
+  const body = detail.value?.payload.body
+  if (!body) return ''
+  if (!detail.value?.payload.content_type?.toLowerCase().includes('json')) return body
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2)
+  } catch {
+    return body
+  }
+})
 
 watch(
   () => [props.show, props.errorId] as const,
@@ -105,7 +123,7 @@ watch(
   }
 )
 
-async function fetchDetail(id: number) {
+async function fetchDetail(id: string) {
   loading.value = true
   loadError.value = false
   detail.value = null

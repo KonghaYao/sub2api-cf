@@ -31,12 +31,12 @@ describe('OpsErrorDetailModal', () => {
   beforeEach(() => {
     mocks.getRequestErrorDetail.mockReset()
     mocks.listRequestErrorUpstreamErrors.mockReset()
-    mocks.listRequestErrorUpstreamErrors.mockResolvedValue({ items: [] })
+    mocks.listRequestErrorUpstreamErrors.mockResolvedValue({ items: [], has_more: false, next_cursor: null })
   })
 
-  it('prioritizes upstream root cause and deduplicates diagnostic payloads', async () => {
+  it('uses only the redacted on-demand payload for diagnostic payloads', async () => {
     mocks.getRequestErrorDetail.mockResolvedValue({
-      id: 1,
+      id: 'err_opaque',
       created_at: '2026-08-19T00:00:00Z',
       phase: 'request',
       type: 'upstream_error',
@@ -50,17 +50,19 @@ describe('OpsErrorDetailModal', () => {
       resolved: false,
       request_id: 'rid-1',
       message: 'All available accounts exhausted',
-      error_body: '{"error":"same"}',
-      upstream_error_message: 'provider rate limit exhausted',
-      upstream_error_detail: '{"error":"same"}',
-      upstream_errors: '[]',
+      payload: {
+        state: 'available',
+        body: '{"error":"same"}',
+        content_type: 'application/json',
+        redacted: true,
+      },
       account_name: 'account',
       group_name: 'group',
       is_business_limited: false
     })
 
     const wrapper = shallowMount(OpsErrorDetailModal, {
-      props: { show: true, errorId: 1, errorType: 'request' },
+      props: { show: true, errorId: 'err_opaque', errorType: 'request' },
       global: {
         stubs: {
           BaseDialog: { template: '<div><slot /></div>' },
@@ -70,10 +72,9 @@ describe('OpsErrorDetailModal', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('provider rate limit exhausted')
+    expect(wrapper.text()).toContain('All available accounts exhausted')
     expect(wrapper.text()).toContain('admin.ops.errorDetail.upstreamStatus')
     expect(wrapper.text()).toContain('429')
-    expect(wrapper.findAll('pre')).toHaveLength(2)
-    expect(wrapper.text()).not.toContain('admin.ops.errorDetail.payloads.upstream_detail')
+    expect(wrapper.findAll('pre')).toHaveLength(1)
   })
 })

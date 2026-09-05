@@ -11,6 +11,9 @@ import type { Env } from '../../src/env'
 import { encryptCredential } from '../../src/gateway/crypto'
 import { commercialCodeDigest } from '../../src/commercial/registration'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
+import { getUserProfile } from '../../src/user/profile'
+import { getMyPlatformQuotas } from '../../src/user/platform-quotas'
+import { listUserSubscriptions } from '../../src/user/subscriptions'
 
 const PEPPER = 'oauth-identity-test-pepper-at-least-32-bytes'
 const MASTER_KEY = 'oauth-identity-test-master-key-at-least-32-bytes'
@@ -166,6 +169,130 @@ describe('OAuth identities SQLite HTTP contract', () => {
     expect(test.raw.prepare(
       `SELECT revoke_reason FROM user_sessions WHERE id = 'session-alice'`,
     ).get()).toEqual({ revoke_reason: 'oauth_identity_unlinked' })
+  })
+
+  it('grants OAuth first-bind defaults once, extends an existing subscription, and adjusts UserStateDO idempotently', async () => {
+    const test = await fixture()
+    await seedProvider(test, 'github')
+    const now = Date.now()
+    test.raw.prepare(
+      `INSERT INTO "groups" (
+         id, name, platform, group_type, daily_quota_micros,
+         weekly_quota_micros, monthly_quota_micros, created_at_ms, updated_at_ms
+       ) VALUES ('github-welcome', 'GitHub welcome', 'openai', 'subscription',
+                 1000000, 5000000, 9000000, ?, ?)`,
+    ).run(now, now)
+    test.raw.prepare(
+      `INSERT INTO user_subscriptions (
+         id, user_id, group_id, status, starts_at_ms, expires_at_ms,
+         daily_used_micros, weekly_used_micros, monthly_used_micros,
+         source_type, source_id, created_at_ms, updated_at_ms
+       ) VALUES ('existing-sub', 'alice', 'github-welcome', 'active', ?, ?,
+                 10, 20, 30, 'admin', 'seed', ?, ?)`,
+    ).run(now - DAY_MS, now + 5 * DAY_MS, now, now)
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 12500000, concurrency = 3, grant_on_first_bind = 1
+        WHERE source = 'github'`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_subscriptions (source, group_id, validity_days)
+       VALUES ('github', 'github-welcome', 30)`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_platform_quotas (
+         source, platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
+       ) VALUES ('github', 'openai', 2000000, NULL, 10000000)`,
+    ).run()
+    const userState = grantUserStateNamespace('alice', 0)
+    test.env.USER_STATE = userState.namespace
+    test.env.SUBSCRIPTION_STATE = successfulStateNamespace()
+
+    const first = await linkGithub(test, 'grant-subject-one', 'First Link')
+    expect(first.status).toBe(302)
+    expect(first.headers.get('location')).toBe('/profile?oauth_bound=github')
+
+    const profile = await test.app.request('/api/v1/user/profile', {
+      headers: { authorization: test.authorization },
+    }, test.env)
+    await expect(profile.json()).resolves.toMatchObject({
+      data: { balance: 12.5, concurrency: 8 },
+    })
+    const subscriptions = await test.app.request('/api/v1/subscriptions', {
+      headers: { authorization: test.authorization },
+    }, test.env)
+    await expect(subscriptions.json()).resolves.toMatchObject({
+      data: [{
+        id: 'existing-sub',
+        group_id: 'github-welcome',
+        status: 'active',
+      }],
+    })
+    const extended = test.raw.prepare(
+      "SELECT expires_at_ms, daily_used_micros FROM user_subscriptions WHERE id = 'existing-sub'",
+    ).get() as { expires_at_ms: number; daily_used_micros: number }
+    expect(extended.expires_at_ms).toBe(now + 35 * DAY_MS)
+    expect(extended.daily_used_micros).toBe(10)
+
+    const second = await linkGithub(test, 'grant-subject-two', 'Second Link')
+    expect(second.headers.get('location')).toBe('/profile?oauth_bound=github')
+    expect(userState.adjustments).toHaveLength(1)
+    expect(test.raw.prepare(
+      `SELECT balance_micros, concurrency FROM users WHERE id = 'alice'`,
+    ).get()).toEqual({ balance_micros: 12_500_000, concurrency: 8 })
+    expect(test.raw.prepare(
+      "SELECT expires_at_ms FROM user_subscriptions WHERE id = 'existing-sub'",
+    ).get()).toEqual({ expires_at_ms: now + 35 * DAY_MS })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM auth_source_entitlement_grants
+        WHERE user_id = 'alice' AND source = 'github' AND reason = 'first_bind'`,
+    ).get()).toEqual({ count: 1 })
+  })
+
+  it('arbitrates concurrent first binds for the same source without duplicating entitlements', async () => {
+    const test = await fixture()
+    await seedProvider(test, 'github')
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 1000000, concurrency = 2, grant_on_first_bind = 1
+        WHERE source = 'github'`,
+    ).run()
+    const userState = grantUserStateNamespace('alice', 0)
+    test.env.USER_STATE = userState.namespace
+    const firstStart = await startGithubLink(test)
+    const secondStart = await startGithubLink(test)
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(request)
+      if (url === 'https://github.test/token') {
+        const code = new URLSearchParams(String(init?.body)).get('code')!
+        return Response.json({ access_token: `access-${code}`, token_type: 'bearer' })
+      }
+      const authorization = new Headers(init?.headers).get('authorization') ?? ''
+      const suffix = authorization.endsWith('first') ? 'first' : 'second'
+      if (url === 'https://github.test/user') {
+        return Response.json({ id: `concurrent-${suffix}`, login: suffix, name: suffix })
+      }
+      if (url === 'https://github.test/emails') {
+        return Response.json([{ email: `${suffix}@example.test`, primary: true, verified: true }])
+      }
+      throw new Error(`unexpected external URL ${url}`)
+    }))
+
+    const responses = await Promise.all([
+      finishGithubLink(test, firstStart, 'first'),
+      finishGithubLink(test, secondStart, 'second'),
+    ])
+
+    expect(responses.map((response) => response.headers.get('location')))
+      .toEqual(['/profile?oauth_bound=github', '/profile?oauth_bound=github'])
+    expect(userState.adjustments).toHaveLength(1)
+    expect(test.raw.prepare(
+      `SELECT balance_micros, concurrency FROM users WHERE id = 'alice'`,
+    ).get()).toEqual({ balance_micros: 1_000_000, concurrency: 7 })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM auth_source_entitlement_grants
+        WHERE user_id = 'alice' AND source = 'github' AND reason = 'first_bind'`,
+    ).get()).toEqual({ count: 1 })
   })
 
   it('rejects unlinking an OAuth-only account\'s last sign-in method', async () => {
@@ -401,6 +528,11 @@ describe('OAuth identities SQLite HTTP contract', () => {
           SET public_json = json_set(public_json, '$.registration_enabled', json('true'))
         WHERE id = 'global'`,
     ).run()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 3500000, concurrency = 9, grant_on_signup = 1
+        WHERE source = 'github'`,
+    ).run()
     const started = await test.app.request('/api/v1/auth/oauth/github/start', { method: 'POST' }, test.env)
     const authorize = new URL((await started.json() as any).data.authorize_url)
     vi.stubGlobal('fetch', githubUpstream('new-registration-subject', 'New Person', 'new@example.test'))
@@ -412,6 +544,14 @@ describe('OAuth identities SQLite HTTP contract', () => {
     )
 
     expect(callback.headers.get('location')).toMatch(/^\/auth\/oauth\/callback#access_token=sat_v1_/)
+    const callbackLocation = new URL(callback.headers.get('location')!, 'https://worker.test')
+    const accessToken = new URLSearchParams(callbackLocation.hash.slice(1)).get('access_token')!
+    const profile = await test.app.request('/api/v1/user/profile', {
+      headers: { authorization: `Bearer ${accessToken}` },
+    }, test.env)
+    await expect(profile.json()).resolves.toMatchObject({
+      data: { balance: 3.5, concurrency: 9 },
+    })
     expect(test.raw.prepare(
       `SELECT u.email, u.password_credential, i.provider_subject,
               (SELECT COUNT(*) FROM user_sessions s WHERE s.user_id = u.id) AS sessions
@@ -905,7 +1045,87 @@ async function fixture(): Promise<Fixture> {
   }
   const app = new Hono<{ Bindings: Env }>()
   registerOAuthIdentityRoutes(app)
+  app.get('/api/v1/user/profile', getUserProfile)
+  app.get('/api/v1/subscriptions', listUserSubscriptions)
+  app.get('/api/v1/user/platform-quotas', getMyPlatformQuotas)
   return { app, raw, env, authorization: `Bearer ${access}` }
+}
+
+async function linkGithub(test: Fixture, subject: string, name: string): Promise<Response> {
+  const started = await startGithubLink(test)
+  vi.stubGlobal('fetch', githubUpstream(subject, name))
+  return finishGithubLink(test, started, 'link-code')
+}
+
+async function startGithubLink(test: Fixture): Promise<{ state: string; cookie: string }> {
+  const ticket = await test.app.request('/api/v1/auth/oauth/bind-token', {
+    method: 'POST', headers: { authorization: test.authorization },
+  }, test.env)
+  const started = await test.app.request(
+    '/api/v1/auth/oauth/github/bind/start?intent=bind_current_user&redirect=/profile',
+    { headers: { cookie: responseCookie(ticket, 'sub2api_oauth_bind') } },
+    test.env,
+  )
+  const authorize = new URL(started.headers.get('location')!)
+  return {
+    state: authorize.searchParams.get('state')!,
+    cookie: responseCookie(started, 'sub2api_oauth_browser'),
+  }
+}
+
+function finishGithubLink(
+  test: Fixture,
+  started: { state: string; cookie: string },
+  code: string,
+): Promise<Response> {
+  return Promise.resolve(test.app.request(
+    `/api/v1/auth/oauth/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(started.state)}`,
+    { headers: { cookie: started.cookie } },
+    test.env,
+  ))
+}
+
+function grantUserStateNamespace(userId: string, initialBalance: number): {
+  namespace: DurableObjectNamespace
+  adjustments: Array<Record<string, unknown>>
+} {
+  let balance = initialBalance
+  let version = 0
+  const seen = new Map<string, { balance: number; version: number }>()
+  const adjustments: Array<Record<string, unknown>> = []
+  const fetch = vi.fn(async (request: Request) => {
+    const path = new URL(request.url).pathname
+    if (path === '/configure') {
+      return Response.json({ error: { code: 'user_already_configured' } }, { status: 409 })
+    }
+    const body = await request.json() as { mutation_id: string; amount_delta_micros: number }
+    const prior = seen.get(body.mutation_id)
+    if (prior === undefined) {
+      balance += body.amount_delta_micros
+      version += 1
+      seen.set(body.mutation_id, { balance, version })
+      adjustments.push(body)
+    }
+    const state = seen.get(body.mutation_id)!
+    return Response.json({
+      profile: { user_id: userId, balance_micros: state.balance },
+      state_version: state.version,
+    })
+  })
+  return {
+    namespace: {
+      idFromName: vi.fn((name: string) => ({ toString: () => name })),
+      get: vi.fn(() => ({ fetch })),
+    } as unknown as DurableObjectNamespace,
+    adjustments,
+  }
+}
+
+function successfulStateNamespace(): DurableObjectNamespace {
+  return {
+    idFromName: vi.fn((name: string) => ({ toString: () => name })),
+    get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ ok: true })) })),
+  } as unknown as DurableObjectNamespace
 }
 
 async function seedProvider(

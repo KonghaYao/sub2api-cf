@@ -1,4 +1,67 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const {get,post}=vi.hoisted(()=>({get:vi.fn(),post:vi.fn()})); vi.mock('@/api/client',()=>({apiClient:{get,post}}))
-import { getById, getDashboardApiKeysUsage, getDashboardSnapshotV2, getDashboardStats, getDashboardTrend, getMyApiKeyDailyUsage, getMyErrorDetail, getStats, list } from '@/api/usage'
-describe('usage Worker contract',()=>{beforeEach(()=>{get.mockReset();post.mockReset()});it('uses authenticated Worker list/dashboard paths and opaque resource ids',async()=>{get.mockResolvedValue({data:{items:[],total:0,page:1,page_size:20,pages:0}});await list();expect(get).toHaveBeenCalledWith('/usage',{params:{page:1,page_size:20}});get.mockResolvedValue({data:{}});await getStats('today');await getDashboardStats();await getDashboardTrend({granularity:'day',api_key_id:'key-1',group_id:'group-1'});await getDashboardSnapshotV2({include_trend:true});await getById('usage-1');await getMyApiKeyDailyUsage('key-1');await getMyErrorDetail('error-1');expect(get).toHaveBeenCalledWith('/usage/dashboard/stats');expect(get).toHaveBeenCalledWith('/usage/dashboard/trend',{params:{granularity:'day',api_key_id:'key-1',group_id:'group-1'}});expect(get).toHaveBeenCalledWith('/user/api-keys/key-1/usage/daily',{params:{days:30}});expect(get).toHaveBeenCalledWith('/usage/errors/error-1')});it('posts key batches',async()=>{post.mockResolvedValue({data:{stats:{}}});await expect(getDashboardApiKeysUsage(["key-1"])).resolves.toEqual({stats:{}});expect(post).toHaveBeenCalledWith('/usage/dashboard/api-keys-usage',{api_key_ids:['key-1']},{signal:undefined})})})
+
+const { get, post } = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
+
+vi.mock('@/api/client', () => ({ apiClient: { get, post } }))
+
+import {
+  getById,
+  getDashboardApiKeysUsage,
+  getMyErrorDetail,
+  listMyErrorRequests,
+  query,
+} from '@/api/usage'
+
+describe('usage Explorer Worker contract', () => {
+  beforeEach(() => {
+    get.mockReset()
+    post.mockReset()
+  })
+
+  it('uses cursor pagination and opaque filters without legacy page or sort params', async () => {
+    const response = { items: [], has_more: true, next_cursor: 'next-opaque' }
+    get.mockResolvedValueOnce({ data: response })
+
+    await expect(query({
+      limit: 25,
+      cursor: 'cursor-opaque',
+      api_key_id: 'key_01HZZ',
+      group_id: 'group_01HZZ',
+      model: 'gpt-5',
+    })).resolves.toEqual(response)
+
+    expect(get).toHaveBeenCalledWith('/usage', {
+      params: {
+        limit: 25,
+        cursor: 'cursor-opaque',
+        api_key_id: 'key_01HZZ',
+        group_id: 'group_01HZZ',
+        model: 'gpt-5',
+      },
+    })
+  })
+
+  it('uses encoded opaque IDs for owner-scoped details and payload-aware errors', async () => {
+    get.mockResolvedValue({ data: {} })
+
+    await getById('usage/id 1')
+    await listMyErrorRequests({ limit: 10, cursor: 'err-cursor', api_key_id: 'key/1' })
+    await getMyErrorDetail('error/id 1')
+
+    expect(get).toHaveBeenCalledWith('/usage/usage%2Fid%201')
+    expect(get).toHaveBeenCalledWith('/usage/errors', {
+      params: { limit: 10, cursor: 'err-cursor', api_key_id: 'key/1' },
+    })
+    expect(get).toHaveBeenCalledWith('/usage/errors/error%2Fid%201')
+  })
+
+  it('posts opaque key batches', async () => {
+    post.mockResolvedValue({ data: { stats: {} } })
+    await expect(getDashboardApiKeysUsage(['key-1'])).resolves.toEqual({ stats: {} })
+    expect(post).toHaveBeenCalledWith(
+      '/usage/dashboard/api-keys-usage',
+      { api_key_ids: ['key-1'] },
+      { signal: undefined },
+    )
+  })
+})

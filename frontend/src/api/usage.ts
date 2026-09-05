@@ -8,7 +8,7 @@ import type {
   UsageLog,
   UsageQueryParams,
   UsageStatsResponse,
-  PaginatedResponse,
+  CursorPage,
   TrendDataPoint,
   ModelStat,
   GroupStat,
@@ -18,11 +18,16 @@ import type {
   UserErrorListParams
 } from '@/types'
 
-/** Worker resource identifiers are opaque strings; retain numeric inputs for
- * legacy callers without widening admin-only query contracts globally. */
-type WorkerUsageQueryParams = Omit<UsageQueryParams, 'api_key_id' | 'group_id'> & {
-  api_key_id?: string | number
-  group_id?: string | number
+export interface UsageExplorerQuery {
+  limit?: number
+  cursor?: string
+  start_date?: string
+  end_date?: string
+  api_key_id?: string
+  group_id?: string
+  model?: string
+  billing_type?: number | null
+  stream?: boolean
 }
 
 // ==================== Dashboard Types ====================
@@ -127,26 +132,23 @@ export interface UsageDashboardSnapshotV2Response {
 
 /**
  * List usage logs with optional filters
- * @param page - Page number (default: 1)
- * @param pageSize - Items per page (default: 20)
+ * @param limit - Bounded page size (default: 20)
+ * @param cursor - Opaque keyset cursor returned by the previous page
  * @param apiKeyId - Filter by API key ID
  * @returns Paginated list of usage logs
  */
 export async function list(
-  page: number = 1,
-  pageSize: number = 20,
+  limit: number = 20,
+  cursor?: string,
   apiKeyId?: string | number
-): Promise<PaginatedResponse<UsageLog>> {
-  const params: WorkerUsageQueryParams = {
-    page,
-    page_size: pageSize
-  }
+): Promise<CursorPage<UsageLog>> {
+  const params: UsageExplorerQuery = { limit, cursor }
 
   if (apiKeyId !== undefined) {
-    params.api_key_id = apiKeyId
+    params.api_key_id = String(apiKeyId)
   }
 
-  const { data } = await apiClient.get<PaginatedResponse<UsageLog>>('/usage', {
+  const { data } = await apiClient.get<CursorPage<UsageLog>>('/usage', {
     params
   })
   return data
@@ -158,10 +160,10 @@ export async function list(
  * @returns Paginated list of usage logs
  */
 export async function query(
-  params: UsageQueryParams & { sort_by?: string; sort_order?: 'asc' | 'desc' },
+  params: UsageExplorerQuery,
   config: { signal?: AbortSignal } = {}
-): Promise<PaginatedResponse<UsageLog>> {
-  const { data } = await apiClient.get<PaginatedResponse<UsageLog>>('/usage', {
+): Promise<CursorPage<UsageLog>> {
+  const { data } = await apiClient.get<CursorPage<UsageLog>>('/usage', {
     ...config,
     params
   })
@@ -183,7 +185,7 @@ export async function getStats(
     : { ...paramsOrPeriod }
 
   if (apiKeyId !== undefined) {
-    params.api_key_id = apiKeyId
+    params.api_key_id = String(apiKeyId)
   }
 
   const { data } = await apiClient.get<UsageStatsResponse>('/usage/stats', {
@@ -210,7 +212,7 @@ export async function getStatsByDateRange(
   }
 
   if (apiKeyId !== undefined) {
-    params.api_key_id = apiKeyId
+    params.api_key_id = String(apiKeyId)
   }
 
   const { data } = await apiClient.get<UsageStatsResponse>('/usage/stats', {
@@ -230,19 +232,18 @@ export async function getByDateRange(
   startDate: string,
   endDate: string,
   apiKeyId?: string | number
-): Promise<PaginatedResponse<UsageLog>> {
-  const params: WorkerUsageQueryParams = {
+): Promise<CursorPage<UsageLog>> {
+  const params: UsageExplorerQuery = {
     start_date: startDate,
     end_date: endDate,
-    page: 1,
-    page_size: 100
+    limit: 5,
   }
 
   if (apiKeyId !== undefined) {
-    params.api_key_id = apiKeyId
+    params.api_key_id = String(apiKeyId)
   }
 
-  const { data } = await apiClient.get<PaginatedResponse<UsageLog>>('/usage', {
+  const { data } = await apiClient.get<CursorPage<UsageLog>>('/usage', {
     params
   })
   return data
@@ -254,7 +255,7 @@ export async function getByDateRange(
  * @returns Usage log details
  */
 export async function getById(id: string | number): Promise<UsageLog> {
-  const { data } = await apiClient.get<UsageLog>(`/usage/${id}`)
+  const { data } = await apiClient.get<UsageLog>(`/usage/${encodeURIComponent(String(id))}`)
   return data
 }
 
@@ -365,15 +366,17 @@ export async function getDashboardApiKeysUsage(
 
 export async function listMyErrorRequests(
   params: UserErrorListParams
-): Promise<PaginatedResponse<UserErrorRequest>> {
-  const { data } = await apiClient.get<PaginatedResponse<UserErrorRequest>>('/usage/errors', {
+): Promise<CursorPage<UserErrorRequest>> {
+  const { data } = await apiClient.get<CursorPage<UserErrorRequest>>('/usage/errors', {
     params
   })
   return data
 }
 
 export async function getMyErrorDetail(id: string | number): Promise<UserErrorRequestDetail> {
-  const { data } = await apiClient.get<UserErrorRequestDetail>(`/usage/errors/${id}`)
+  const { data } = await apiClient.get<UserErrorRequestDetail>(
+    `/usage/errors/${encodeURIComponent(String(id))}`
+  )
   return data
 }
 

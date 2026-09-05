@@ -5,7 +5,7 @@
  */
 
 import { apiClient, buildGatewayUrl } from '../client'
-import type { PaginatedResponse } from '@/types'
+import type { CursorPage, ExplorerPayload, PaginatedResponse } from '@/types'
 
 export type OpsQueryMode = 'auto' | 'raw' | 'preagg'
 
@@ -107,8 +107,6 @@ export interface OpsThroughputTrendResponse {
 
 export type OpsRequestKind = 'success' | 'error'
 export type OpsRequestDetailsKind = OpsRequestKind | 'all'
-export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc'
-
 export interface OpsRequestDetail {
   kind: OpsRequestKind
   created_at: string
@@ -119,47 +117,39 @@ export interface OpsRequestDetail {
   duration_ms?: number | null
   status_code?: number | null
 
-  error_id?: number | null
+  error_id?: string | null
   phase?: string
   severity?: string
   message?: string
 
-  user_id?: number | null
-  api_key_id?: number | null
-  account_id?: number | null
-  group_id?: number | null
+  user_id?: string | null
+  api_key_id?: string | null
+  account_id?: string | null
+  group_id?: string | null
 
   stream?: boolean
 }
 
 export interface OpsRequestDetailsParams {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
   start_time?: string
   end_time?: string
 
-  kind?: OpsRequestDetailsKind
-
   platform?: string
-  group_id?: number | null
+  group_id?: string | null
 
-  user_id?: number
-  api_key_id?: number
-  account_id?: number
+  user_id?: string
+  api_key_id?: string
+  account_id?: string
 
   model?: string
   request_id?: string
-  q?: string
+  status_code?: number
 
-  min_duration_ms?: number
-  max_duration_ms?: number
-
-  sort?: OpsRequestDetailsSort
-
-  page?: number
-  page_size?: number
+  limit?: number
+  cursor?: string
 }
 
-export type OpsRequestDetailsResponse = PaginatedResponse<OpsRequestDetail>
+export type OpsRequestDetailsResponse = CursorPage<OpsRequestDetail>
 
 export interface OpsLatencyHistogramBucket {
   range: string
@@ -324,7 +314,7 @@ export interface OpsConcurrencyStatsResponse {
 
 export interface UserConcurrencyInfo {
   user_id: number
-  user_email: string
+  user_email?: string
   username: string
   current_in_use: number
   max_capacity: number
@@ -376,10 +366,10 @@ export interface GroupAvailability {
 
 export interface AccountAvailability {
   account_id: number
-  account_name: string
+  account_name?: string
   platform: string
   group_id: number
-  group_name: string
+  group_name?: string
   status: string
   is_available: boolean
   is_rate_limited: boolean
@@ -890,7 +880,7 @@ export interface OpsSystemLogSinkHealth {
 }
 
 export interface OpsErrorLog {
-  id: number
+  id: string
   created_at: string
 
   // Standardized classification
@@ -912,16 +902,16 @@ export interface OpsErrorLog {
   request_id: string
   message: string
 
-  user_id?: number | null
-  user_email: string
-  api_key_id?: number | null
+  user_id?: string | null
+  user_email?: string
+  api_key_id?: string | null
   // 关联 api_key 名称（后端 LEFT JOIN api_keys；软删保留 name，故已删 key 仍有原名）。
   api_key_name?: string
   api_key_deleted?: boolean
-  account_id?: number | null
-  account_name: string
-  group_id?: number | null
-  group_name: string
+  account_id?: string | null
+  account_name?: string
+  group_id?: string | null
+  group_name?: string
 
   client_ip?: string | null
   request_path?: string
@@ -938,27 +928,13 @@ export interface OpsErrorLog {
 }
 
 export interface OpsErrorDetail extends OpsErrorLog {
-  error_body: string
+  payload: ExplorerPayload
 
-  // Upstream context (optional; enriched by gateway services)
   upstream_status_code?: number | null
-  upstream_error_message?: string
-  upstream_error_detail?: string
-  upstream_errors?: string
-
-  auth_latency_ms?: number | null
-  routing_latency_ms?: number | null
-  upstream_latency_ms?: number | null
-  response_latency_ms?: number | null
-  time_to_first_token_ms?: number | null
-
-  is_business_limited: boolean
-
-  // Bound (non-deleted) key prefix, snapshotted at error time
-  api_key_prefix?: string | null
+  is_business_limited?: boolean
 }
 
-export type OpsErrorLogsResponse = PaginatedResponse<OpsErrorLog>
+export type OpsErrorLogsResponse = CursorPage<OpsErrorLog>
 
 export async function getDashboardOverview(
   params: {
@@ -1079,55 +1055,23 @@ export async function getOpenAITokenStats(
   return data
 }
 
-export type OpsErrorListView = 'errors' | 'excluded' | 'all'
-
 export type OpsErrorListQueryParams = {
-  page?: number
-  page_size?: number
-  time_range?: string
+  limit?: number
+  cursor?: string
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
-  account_id?: number | null
-  user_id?: number
-  api_key_id?: number
+  group_id?: string | null
+  account_id?: string | null
+  user_id?: string
+  api_key_id?: string
   // 模型过滤：后端以 COALESCE(requested_model, model) 精确匹配（admin 路径）。
   model?: string
 
-  phase?: string
-  // 分类(用户侧粗分类码,如 auth/rate_limit/upstream),后端反查为 phase/type ANY 条件
-  category?: string
-  error_owner?: string
-  error_source?: string
-  resolved?: string
-  view?: OpsErrorListView
-
-  q?: string
-  status_codes?: string
-  status_codes_other?: string
-
-  // 服务端排序,列白名单见后端 opsErrorLogsOrderBy(created_at/model/status_code)
-  sort_by?: string
-  sort_order?: 'asc' | 'desc'
+  request_id?: string
+  status_code?: number
 }
 
-// Legacy unified endpoints
-export async function listErrorLogs(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse> {
-  const { data } = await apiClient.get<OpsErrorLogsResponse>('/admin/ops/errors', { params })
-  return data
-}
-
-export async function getErrorLogDetail(id: number): Promise<OpsErrorDetail> {
-  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/errors/${id}`)
-  return data
-}
-
-export async function updateErrorResolved(errorId: number, resolved: boolean): Promise<void> {
-  await apiClient.put(`/admin/ops/errors/${errorId}/resolve`, { resolved })
-}
-
-// New split endpoints
 export async function listRequestErrors(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse> {
   const { data } = await apiClient.get<OpsErrorLogsResponse>('/admin/ops/request-errors', { params })
   return data
@@ -1138,32 +1082,23 @@ export async function listUpstreamErrors(params: OpsErrorListQueryParams): Promi
   return data
 }
 
-export async function getRequestErrorDetail(id: number): Promise<OpsErrorDetail> {
-  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/request-errors/${id}`)
+export async function getRequestErrorDetail(id: string | number): Promise<OpsErrorDetail> {
+  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/request-errors/${encodeURIComponent(String(id))}`)
   return data
 }
 
-export async function getUpstreamErrorDetail(id: number): Promise<OpsErrorDetail> {
-  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/upstream-errors/${id}`)
+export async function getUpstreamErrorDetail(id: string | number): Promise<OpsErrorDetail> {
+  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/upstream-errors/${encodeURIComponent(String(id))}`)
   return data
-}
-
-export async function updateRequestErrorResolved(errorId: number, resolved: boolean): Promise<void> {
-  await apiClient.put(`/admin/ops/request-errors/${errorId}/resolve`, { resolved })
-}
-
-export async function updateUpstreamErrorResolved(errorId: number, resolved: boolean): Promise<void> {
-  await apiClient.put(`/admin/ops/upstream-errors/${errorId}/resolve`, { resolved })
 }
 
 export async function listRequestErrorUpstreamErrors(
-  id: number,
-  params: OpsErrorListQueryParams = {},
-  options: { include_detail?: boolean } = {}
-): Promise<PaginatedResponse<OpsErrorDetail>> {
+  id: string | number,
+  params: OpsErrorListQueryParams = {}
+): Promise<CursorPage<OpsErrorLog>> {
   const query: Record<string, any> = { ...params }
-  if (options.include_detail) query.include_detail = '1'
-  const { data } = await apiClient.get<PaginatedResponse<OpsErrorDetail>>(`/admin/ops/request-errors/${id}/upstream-errors`, { params: query })
+  const encodedId = encodeURIComponent(String(id))
+  const { data } = await apiClient.get<CursorPage<OpsErrorLog>>(`/admin/ops/request-errors/${encodedId}/upstream-errors`, { params: query })
   return data
 }
 
@@ -1319,18 +1254,10 @@ export const opsAPI = {
   getRealtimeTrafficSummary,
   subscribeQPS,
 
-  // Legacy unified endpoints
-  listErrorLogs,
-  getErrorLogDetail,
-  updateErrorResolved,
-
-  // New split endpoints
   listRequestErrors,
   listUpstreamErrors,
   getRequestErrorDetail,
   getUpstreamErrorDetail,
-  updateRequestErrorResolved,
-  updateUpstreamErrorResolved,
   listRequestErrorUpstreamErrors,
 
   listRequestDetails,

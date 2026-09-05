@@ -7,6 +7,249 @@ import {
 } from '../../../src/gateway/protocols/responses'
 
 describe('Responses client-tool compatibility', () => {
+  it('lowers and restores the client tool-search proxy', () => {
+    const request = parseResponsesRequest({
+      model: 'public-model',
+      input: 'find a deployment tool',
+      tools: [{ type: 'tool_search' }, { type: 'tool_search' }],
+      tool_choice: { type: 'tool_search' },
+    })
+
+    const converted = responsesToChatCompletionsRequest(request, 'upstream-model')
+    expect(converted.tools).toEqual([{
+      type: 'function',
+      function: {
+        name: 'tool_search',
+        description: 'Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Search query for tools or connectors to load.',
+            },
+            limit: {
+              type: 'integer',
+              description: 'Maximum number of tool groups to return.',
+            },
+          },
+          required: ['query'],
+        },
+        strict: false,
+      },
+    }])
+    expect(converted.tool_choice).toEqual({
+      type: 'function',
+      function: { name: 'tool_search' },
+    })
+
+    const response = chatCompletionsResponseToResponses({
+      id: 'chatcmpl_tool_search',
+      choices: [{
+        index: 0,
+        finish_reason: 'tool_calls',
+        message: {
+          role: 'assistant',
+          tool_calls: [{
+            id: 'call_search',
+            type: 'function',
+            function: { name: 'tool_search', arguments: '{"query":"deploy"}' },
+          }],
+        },
+      }],
+    }, 'public-model', 123, request.tool_mapping)
+    expect(response.output).toEqual([{
+      type: 'tool_search_call',
+      id: expect.stringMatching(/^tsc_/),
+      call_id: 'call_search',
+      execution: 'client',
+      arguments: { query: 'deploy' },
+      status: 'completed',
+    }])
+  })
+
+  it('lowers tool-search history and promotes completed discoveries', () => {
+    const request = parseResponsesRequest({
+      model: 'public-model',
+      tools: [
+        { type: 'function', name: 'static_first', parameters: { type: 'object' } },
+        { type: 'tool_search' },
+      ],
+      input: [
+        {
+          type: 'tool_search_call',
+          id: 'tsc_history',
+          call_id: 'call_search',
+          execution: 'client',
+          arguments: { query: 'agents' },
+          status: 'completed',
+        },
+        {
+          type: 'tool_search_output',
+          id: 'tso_history',
+          call_id: 'call_search',
+          execution: 'client',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: 'collaboration',
+            tools: [{
+              type: 'function',
+              name: 'spawn_agent',
+              description: 'Spawn an agent',
+              parameters: { type: 'object' },
+            }],
+          }],
+        },
+      ],
+    })
+
+    const converted = responsesToChatCompletionsRequest(request, 'upstream-model')
+    expect(converted.tools?.map((tool) =>
+      (tool.function as { name: string }).name)).toEqual([
+      'static_first',
+      'tool_search',
+      'collaboration__spawn_agent',
+    ])
+    expect(converted.messages).toEqual([
+      {
+        role: 'assistant',
+        tool_calls: [{
+          id: 'call_search',
+          type: 'function',
+          function: { name: 'tool_search', arguments: '{"query":"agents"}' },
+        }],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_search',
+        content: JSON.stringify([{
+          type: 'namespace',
+          name: 'collaboration',
+          tools: [{
+            type: 'function',
+            name: 'spawn_agent',
+            description: 'Spawn an agent',
+            parameters: { type: 'object' },
+          }],
+        }]),
+      },
+    ])
+  })
+
+  it('emits the client tool-search SSE lifecycle without function argument events', () => {
+    const request = parseResponsesRequest({
+      model: 'public-model',
+      input: 'find tools',
+      tools: [{ type: 'tool_search' }],
+    })
+    const codec = new ChatCompletionsToResponsesEventCodec(
+      'public-model',
+      123,
+      request.tool_mapping,
+    )
+    const events = [
+      ...codec.push({
+        id: 'chatcmpl_search_stream',
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_search',
+              type: 'function',
+              function: { name: 'tool_search', arguments: '{"query":' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      }),
+      ...codec.push({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, function: { arguments: '"deploy"}' } }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      }),
+      ...codec.finish(),
+    ]
+
+    const toolEvents = events.filter((event) =>
+      event.item?.type === 'tool_search_call' ||
+      event.type.startsWith('response.function_call_arguments'))
+    expect(toolEvents.map((event) => event.type)).toEqual([
+      'response.output_item.added',
+      'response.output_item.done',
+    ])
+    expect(toolEvents[0]?.item).toMatchObject({
+      type: 'tool_search_call',
+      id: expect.stringMatching(/^tsc_/),
+      call_id: 'call_search',
+      execution: 'client',
+      status: 'in_progress',
+    })
+    expect(toolEvents[1]?.item).toMatchObject({
+      type: 'tool_search_call',
+      id: toolEvents[0]?.item?.id,
+      call_id: 'call_search',
+      execution: 'client',
+      arguments: { query: 'deploy' },
+      status: 'completed',
+    })
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.completed',
+      response: { output: [toolEvents[1]?.item] },
+    })
+  })
+
+  it('bounds discovery promotion and rejects executable identity conflicts', () => {
+    const request = parseResponsesRequest({
+      model: 'public-model',
+      tools: [{ type: 'tool_search' }],
+      input: [
+        {
+          type: 'tool_search_output',
+          call_id: 'search_in_progress',
+          status: 'in_progress',
+          tools: [{ type: 'function', name: 'not_ready' }],
+        },
+        {
+          type: 'tool_search_output',
+          call_id: 'search_malformed',
+          status: 'completed',
+          tools: [{ type: 'function' }],
+        },
+      ],
+    })
+    expect(responsesToChatCompletionsRequest(request, 'upstream-model').tools)
+      .toHaveLength(1)
+
+    expect(() => parseResponsesRequest({
+      model: 'public-model',
+      input: [],
+      tools: [
+        { type: 'tool_search' },
+        { type: 'function', name: 'tool_search', parameters: {} },
+      ],
+    })).toThrowError('tool_search')
+
+    expect(() => parseResponsesRequest({
+      model: 'public-model',
+      tools: [
+        { type: 'tool_search' },
+        { type: 'function', name: 'inspect', parameters: { type: 'object' } },
+      ],
+      input: [{
+        type: 'tool_search_output',
+        call_id: 'search_conflict',
+        status: 'completed',
+        tools: [{ type: 'function', name: 'inspect', parameters: { type: 'string' } }],
+      }],
+    })).toThrowError('inspect')
+  })
+
   it('lowers a custom declaration to an allow-listed Chat function', () => {
     const request = parseResponsesRequest({
       model: 'public-model',

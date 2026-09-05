@@ -387,7 +387,7 @@ describe('affiliate HTTP contract', () => {
     ).get()).toEqual({ available_micros: 500_000, history_micros: 1_500_000, debt_micros: 0 })
     expect(test.raw.prepare(
       `SELECT amount_micros, debt_after_micros FROM affiliate_debt_repayments
-        ORDER BY created_at_ms, id`,
+        ORDER BY debt_before_micros DESC, created_at_ms, id`,
     ).all()).toEqual([
       { amount_micros: 500_000, debt_after_micros: 500_000 },
       { amount_micros: 500_000, debt_after_micros: 0 },

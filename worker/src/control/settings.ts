@@ -26,6 +26,26 @@ type ControlBindings = { Bindings: Env }
 
 export const PUBLIC_SETTINGS_SCHEMA_VERSION = 1 as const
 
+export const AUTH_SOURCES = ['email', 'linuxdo', 'oidc', 'wechat', 'dingtalk', 'github', 'google'] as const
+export const AUTH_SOURCE_QUOTA_PLATFORMS = ['anthropic', 'openai', 'gemini', 'antigravity', 'grok'] as const
+export type AuthSource = typeof AUTH_SOURCES[number]
+export type AuthSourceQuotaPlatform = typeof AUTH_SOURCE_QUOTA_PLATFORMS[number]
+
+export interface AuthSourceDefaultSettings {
+  balance: number
+  concurrency: number
+  subscriptions: Array<{ group_id: string; validity_days: number }>
+  grant_on_signup: boolean
+  grant_on_first_bind: boolean
+  platform_quotas: Partial<Record<AuthSourceQuotaPlatform, {
+    daily: number | null
+    weekly: number | null
+    monthly: number | null
+  }>>
+}
+
+export type AuthSourceDefaults = Record<AuthSource, AuthSourceDefaultSettings>
+
 export interface PublicSystemSettings {
   site_name: string
   registration_enabled: boolean
@@ -53,6 +73,7 @@ export interface AdminSystemSettings {
     passkey_rp_origins: string[]
   }
   secrets: { turnstile_secret_key_configured: boolean }
+  auth_source_defaults: AuthSourceDefaults
   updated_at_ms: number
 }
 
@@ -84,6 +105,7 @@ interface SettingsPatch {
   public?: PublicSettingsPatch
   security?: SecuritySettingsPatch
   secrets?: SecretSettingsPatch
+  auth_source_defaults?: Partial<Record<AuthSource, AuthSourceDefaultSettings>>
 }
 
 interface AdminActor {
@@ -107,6 +129,30 @@ interface SettingsRow {
   turnstile_secret_key_version: number | null
 }
 
+interface AuthSourceDefaultRow {
+  source: AuthSource
+  balance_micros: number
+  concurrency: number
+  grant_on_signup: number
+  grant_on_first_bind: number
+}
+
+interface AuthSourceSubscriptionRow {
+  source: AuthSource
+  group_id: string
+  validity_days: number
+}
+
+interface AuthSourceQuotaRow {
+  source: AuthSource
+  platform: AuthSourceQuotaPlatform
+  daily_limit_micros: number | null
+  weekly_limit_micros: number | null
+  monthly_limit_micros: number | null
+}
+
+type AdminSettingsCore = Omit<AdminSystemSettings, 'auth_source_defaults'>
+
 export type SystemSettingSecretKey = 'turnstile_secret_key'
 
 export function publicSettingsKey(environment: string): string {
@@ -115,7 +161,7 @@ export function publicSettingsKey(environment: string): string {
 
 export async function getAdminSettings(context: Context<ControlBindings>): Promise<Response> {
   try {
-    const settings = publicAdminSettings(await requireSettingsRow(context.env), context.env)
+    const settings = await adminSettings(await requireSettingsRow(context.env), context.env)
     return settingsResponse(settings)
   } catch (error) {
     return controlError(asGatewayError(error))
@@ -140,13 +186,14 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
     }
 
     const currentRow = await requireSettingsRow(context.env)
-    const current = publicAdminSettings(currentRow, context.env)
+    const current = await adminSettings(currentRow, context.env)
     if (current.control_version !== expectedVersion) {
       throw settingsVersionConflict()
     }
     if (current.control_version >= Number.MAX_SAFE_INTEGER) {
       throw new GatewayError(409, 'settings_version_exhausted', 'System settings version is exhausted')
     }
+    await validateAuthSourceSubscriptionGroups(context.env, patch.auth_source_defaults)
     const actor = await requireAdminActor(context)
     const nextVersion = current.control_version + 1
     const nextPublic = applyPublicPatch(current.public, patch.public)
@@ -182,6 +229,10 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
             ? current.secrets.turnstile_secret_key_configured
             : patch.secrets.turnstile_secret_key !== null,
       },
+      auth_source_defaults: {
+        ...current.auth_source_defaults,
+        ...patch.auth_source_defaults,
+      },
       updated_at_ms: now,
     }
     const statements: D1PreparedStatement[] = [
@@ -207,6 +258,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
         now,
       ),
     ]
+    statements.push(...authSourceDefaultWriteStatements(context.env, patch.auth_source_defaults, now))
     const secretPatch = patch.secrets?.turnstile_secret_key
     if (secretPatch === null) {
       statements.push(context.env.DB.prepare(
@@ -317,7 +369,7 @@ async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   return row
 }
 
-function publicAdminSettings(row: SettingsRow, env: Env): AdminSystemSettings {
+function publicAdminSettings(row: SettingsRow, env: Env): AdminSettingsCore {
   if (
     row.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(row.control_version) ||
@@ -352,6 +404,62 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSystemSettings {
     secrets: { turnstile_secret_key_configured: row.turnstile_secret_key_configured === 1 },
     updated_at_ms: row.updated_at_ms,
   }
+}
+
+async function adminSettings(row: SettingsRow, env: Env): Promise<AdminSystemSettings> {
+  return {
+    ...publicAdminSettings(row, env),
+    auth_source_defaults: await readAuthSourceDefaults(env),
+  }
+}
+
+export async function readAuthSourceDefaults(env: Env): Promise<AuthSourceDefaults> {
+  const defaults = await env.DB.prepare(
+    `SELECT source, balance_micros, concurrency, grant_on_signup, grant_on_first_bind
+       FROM auth_source_defaults ORDER BY source`,
+  ).all<AuthSourceDefaultRow>()
+  const subscriptions = await env.DB.prepare(
+    `SELECT source, group_id, validity_days
+       FROM auth_source_default_subscriptions ORDER BY source, group_id`,
+  ).all<AuthSourceSubscriptionRow>()
+  const quotas = await env.DB.prepare(
+    `SELECT source, platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
+       FROM auth_source_default_platform_quotas ORDER BY source, platform`,
+  ).all<AuthSourceQuotaRow>()
+  if (defaults.results.length !== AUTH_SOURCES.length) {
+    throw new GatewayError(503, 'invalid_auth_source_defaults', 'Authentication source defaults are unavailable', 'server_error')
+  }
+  const result = {} as AuthSourceDefaults
+  for (const source of AUTH_SOURCES) {
+    const row = defaults.results.find((candidate) => candidate.source === source)
+    if (
+      row === undefined || !Number.isSafeInteger(row.balance_micros) || row.balance_micros < 0 ||
+      !Number.isSafeInteger(row.concurrency) || row.concurrency <= 0 ||
+      ![0, 1].includes(row.grant_on_signup) || ![0, 1].includes(row.grant_on_first_bind)
+    ) {
+      throw new GatewayError(503, 'invalid_auth_source_defaults', 'Authentication source defaults are invalid', 'server_error')
+    }
+    const sourceSubscriptions = subscriptions.results
+      .filter((item) => item.source === source)
+      .map((item) => ({ group_id: item.group_id, validity_days: item.validity_days }))
+    const platform_quotas: AuthSourceDefaultSettings['platform_quotas'] = {}
+    for (const quota of quotas.results.filter((item) => item.source === source)) {
+      platform_quotas[quota.platform] = {
+        daily: fromMicros(quota.daily_limit_micros),
+        weekly: fromMicros(quota.weekly_limit_micros),
+        monthly: fromMicros(quota.monthly_limit_micros),
+      }
+    }
+    result[source] = {
+      balance: row.balance_micros / 1_000_000,
+      concurrency: row.concurrency,
+      subscriptions: sourceSubscriptions,
+      grant_on_signup: row.grant_on_signup === 1,
+      grant_on_first_bind: row.grant_on_first_bind === 1,
+      platform_quotas,
+    }
+  }
+  return result
 }
 
 function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | null {
@@ -426,7 +534,7 @@ function requireSettingsVersion(request: Request): number {
 }
 
 function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
-  rejectUnknownKeys(body, ['public', 'security', 'secrets'])
+  rejectUnknownKeys(body, ['public', 'security', 'secrets', 'auth_source_defaults'])
   const patch: SettingsPatch = {}
   if (body.public !== undefined) {
     const value = requireObject(body.public, 'public')
@@ -528,10 +636,108 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (Object.keys(secretsPatch).length > 0) patch.secrets = secretsPatch
   }
-  if (patch.public === undefined && patch.security === undefined && patch.secrets === undefined) {
+  if (body.auth_source_defaults !== undefined) {
+    const value = requireObject(body.auth_source_defaults, 'auth_source_defaults')
+    rejectUnknownKeys(value, AUTH_SOURCES)
+    const authDefaults: Partial<Record<AuthSource, AuthSourceDefaultSettings>> = {}
+    for (const source of AUTH_SOURCES) {
+      if (value[source] === undefined) continue
+      authDefaults[source] = parseAuthSourceDefault(value[source], source)
+    }
+    if (Object.keys(authDefaults).length > 0) patch.auth_source_defaults = authDefaults
+  }
+  if (
+    patch.public === undefined && patch.security === undefined && patch.secrets === undefined &&
+    patch.auth_source_defaults === undefined
+  ) {
     throw new GatewayError(400, 'settings_patch_required', 'At least one system setting is required')
   }
   return patch
+}
+
+function parseAuthSourceDefault(value: unknown, source: AuthSource): AuthSourceDefaultSettings {
+  const settings = requireObject(value, `auth_source_defaults.${source}`)
+  rejectUnknownKeys(settings, [
+    'balance', 'concurrency', 'subscriptions', 'grant_on_signup', 'grant_on_first_bind', 'platform_quotas',
+  ])
+  for (const required of [
+    'balance', 'concurrency', 'subscriptions', 'grant_on_signup', 'grant_on_first_bind', 'platform_quotas',
+  ]) {
+    if (settings[required] === undefined) {
+      throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.${required} is required`)
+    }
+  }
+  const balanceMicros = settingMicros(settings.balance, `${source}.balance`)
+  if (!Number.isSafeInteger(settings.concurrency) || (settings.concurrency as number) <= 0) {
+    throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.concurrency must be a positive integer`)
+  }
+  if (!Array.isArray(settings.subscriptions)) {
+    throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.subscriptions must be an array`)
+  }
+  if (settings.subscriptions.length > 100) {
+    throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.subscriptions is too large`)
+  }
+  const seenGroups = new Set<string>()
+  const subscriptions = settings.subscriptions.map((item, index) => {
+    const subscription = requireObject(item, `${source}.subscriptions[${index}]`)
+    rejectUnknownKeys(subscription, ['group_id', 'validity_days'])
+    const groupId = settingString(subscription.group_id, `${source}.subscriptions[${index}].group_id`, 128, false)
+    if (seenGroups.has(groupId)) {
+      throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.subscriptions contains a duplicate group`)
+    }
+    seenGroups.add(groupId)
+    if (!Number.isSafeInteger(subscription.validity_days) || (subscription.validity_days as number) < 1 ||
+      (subscription.validity_days as number) > 36_500) {
+      throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.subscriptions validity_days is invalid`)
+    }
+    return { group_id: groupId, validity_days: subscription.validity_days as number }
+  })
+  const rawQuotas = requireObject(settings.platform_quotas, `${source}.platform_quotas`)
+  rejectUnknownKeys(rawQuotas, AUTH_SOURCE_QUOTA_PLATFORMS)
+  const platform_quotas: AuthSourceDefaultSettings['platform_quotas'] = {}
+  for (const platform of AUTH_SOURCE_QUOTA_PLATFORMS) {
+    if (rawQuotas[platform] === undefined) continue
+    const quota = requireObject(rawQuotas[platform], `${source}.platform_quotas.${platform}`)
+    rejectUnknownKeys(quota, ['daily', 'weekly', 'monthly'])
+    for (const window of ['daily', 'weekly', 'monthly'] as const) {
+      if (!(window in quota)) {
+        throw new GatewayError(400, 'invalid_auth_source_defaults', `${source}.${platform}.${window} is required`)
+      }
+    }
+    platform_quotas[platform] = {
+      daily: quotaMicrosValue(quota.daily, `${source}.${platform}.daily`),
+      weekly: quotaMicrosValue(quota.weekly, `${source}.${platform}.weekly`),
+      monthly: quotaMicrosValue(quota.monthly, `${source}.${platform}.monthly`),
+    }
+  }
+  return {
+    balance: balanceMicros / 1_000_000,
+    concurrency: settings.concurrency as number,
+    subscriptions,
+    grant_on_signup: settingBoolean(settings.grant_on_signup, `${source}.grant_on_signup`),
+    grant_on_first_bind: settingBoolean(settings.grant_on_first_bind, `${source}.grant_on_first_bind`),
+    platform_quotas,
+  }
+}
+
+function quotaMicrosValue(value: unknown, field: string): number | null {
+  if (value === null || value === undefined) return null
+  return settingMicros(value, field) / 1_000_000
+}
+
+function settingMicros(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new GatewayError(400, 'invalid_auth_source_defaults', `${field} must be a non-negative number`)
+  }
+  const micros = value * 1_000_000
+  if (!Number.isSafeInteger(micros)) {
+    throw new GatewayError(400, 'invalid_auth_source_defaults', `${field} must have at most six decimal places`)
+  }
+  return micros
+}
+
+function fromMicros(value: number | null): number | null {
+  return value === null ? null : value / 1_000_000
 }
 
 function rejectUnknownKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
@@ -573,11 +779,88 @@ function applyPublicPatch(
   return patch === undefined ? { ...current } : { ...current, ...patch }
 }
 
+async function validateAuthSourceSubscriptionGroups(
+  env: Env,
+  patch: SettingsPatch['auth_source_defaults'],
+): Promise<void> {
+  const groupIds = [...new Set(
+    Object.values(patch ?? {}).flatMap((settings) => settings?.subscriptions.map((item) => item.group_id) ?? []),
+  )]
+  for (const groupId of groupIds) {
+    const row = await env.DB.prepare(
+      `SELECT group_type FROM "groups" WHERE id = ? LIMIT 1`,
+    ).bind(groupId).first<{ group_type: string }>()
+    if (row?.group_type !== 'subscription') {
+      throw new GatewayError(
+        400,
+        'invalid_auth_source_subscription_group',
+        `Authentication source subscription group ${groupId} does not exist or is not a subscription group`,
+      )
+    }
+  }
+}
+
+function authSourceDefaultWriteStatements(
+  env: Env,
+  patch: SettingsPatch['auth_source_defaults'],
+  now: number,
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = []
+  for (const source of AUTH_SOURCES) {
+    const settings = patch?.[source]
+    if (settings === undefined) continue
+    statements.push(
+      env.DB.prepare(
+        `UPDATE auth_source_defaults
+            SET balance_micros = ?, concurrency = ?, grant_on_signup = ?,
+                grant_on_first_bind = ?, updated_at_ms = ?
+          WHERE source = ?`,
+      ).bind(
+        settingMicros(settings.balance, `${source}.balance`),
+        settings.concurrency,
+        settings.grant_on_signup ? 1 : 0,
+        settings.grant_on_first_bind ? 1 : 0,
+        now,
+        source,
+      ),
+      env.DB.prepare('DELETE FROM auth_source_default_subscriptions WHERE source = ?').bind(source),
+      env.DB.prepare('DELETE FROM auth_source_default_platform_quotas WHERE source = ?').bind(source),
+    )
+    for (const subscription of settings.subscriptions) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO auth_source_default_subscriptions (source, group_id, validity_days)
+         VALUES (?, ?, ?)`,
+      ).bind(source, subscription.group_id, subscription.validity_days))
+    }
+    for (const platform of AUTH_SOURCE_QUOTA_PLATFORMS) {
+      const quota = settings.platform_quotas[platform]
+      if (quota === undefined) continue
+      statements.push(env.DB.prepare(
+        `INSERT INTO auth_source_default_platform_quotas (
+           source, platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
+         ) VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        source,
+        platform,
+        quota.daily === null ? null : settingMicros(quota.daily, `${source}.${platform}.daily`),
+        quota.weekly === null ? null : settingMicros(quota.weekly, `${source}.${platform}.weekly`),
+        quota.monthly === null ? null : settingMicros(quota.monthly, `${source}.${platform}.monthly`),
+      ))
+    }
+  }
+  return statements
+}
+
 function changedFields(patch: SettingsPatch): string[] {
   const fields = Object.keys(patch.public ?? {}).map((key) => `public.${key}`).sort()
   fields.push(...Object.keys(patch.security ?? {}).map((key) => `security.${key}`).sort())
   if (patch.secrets?.turnstile_secret_key !== undefined) {
     fields.push(`secrets.turnstile_secret_key:${patch.secrets.turnstile_secret_key === null ? 'clear' : 'set'}`)
+  }
+  for (const source of AUTH_SOURCES) {
+    const settings = patch.auth_source_defaults?.[source]
+    if (settings === undefined) continue
+    fields.push(...Object.keys(settings).sort().map((key) => `auth_source_defaults.${source}.${key}`))
   }
   return fields
 }
@@ -639,7 +922,7 @@ async function publishLatestPublicSettings(env: Env): Promise<void> {
   }
 }
 
-function publicProjection(settings: AdminSystemSettings): PublicSystemSettings & {
+function publicProjection(settings: Pick<AdminSystemSettings, 'control_version' | 'public'>): PublicSystemSettings & {
   schema_version: typeof PUBLIC_SETTINGS_SCHEMA_VERSION
   control_version: number
 } {
@@ -662,7 +945,8 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
     value.updated_at_ms < 0 ||
     normalizedPublic === null ||
     typeof value.secrets?.turnstile_secret_key_configured !== 'boolean' ||
-    (value.security !== undefined && typeof value.security.step_up_enabled !== 'boolean')
+    (value.security !== undefined && typeof value.security.step_up_enabled !== 'boolean') ||
+    !isAuthSourceDefaults(value.auth_source_defaults)
   ) {
     throw new GatewayError(503, 'invalid_idempotency_record', 'Idempotency record is invalid', 'server_error')
   }
@@ -671,6 +955,19 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
     public: normalizedPublic,
     security: value.security ?? { step_up_enabled: false },
   }
+}
+
+function isAuthSourceDefaults(value: unknown): value is AuthSourceDefaults {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const defaults = value as Partial<Record<AuthSource, AuthSourceDefaultSettings>>
+  return AUTH_SOURCES.every((source) => {
+    const setting = defaults[source]
+    return setting !== undefined && Number.isFinite(setting.balance) && setting.balance >= 0 &&
+      Number.isSafeInteger(setting.concurrency) && setting.concurrency > 0 &&
+      Array.isArray(setting.subscriptions) && typeof setting.grant_on_signup === 'boolean' &&
+      typeof setting.grant_on_first_bind === 'boolean' && setting.platform_quotas !== null &&
+      typeof setting.platform_quotas === 'object'
+  })
 }
 
 function requireSettingsMasterKey(env: Env): string {

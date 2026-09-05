@@ -13,7 +13,10 @@ import {
 } from '../../src/auth/email-challenges'
 import { hashPassword, verifyPassword } from '../../src/auth/password'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
-import { registerWithPassword } from '../../src/auth/handler'
+import { loginWithPassword, registerWithPassword } from '../../src/auth/handler'
+import { getMyPlatformQuotas } from '../../src/user/platform-quotas'
+import { listUserSubscriptions } from '../../src/user/subscriptions'
+import { recoverPendingSubscriptionState } from '../../src/control/subscriptions'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'email-challenge-test-pepper-is-at-least-32-bytes'
@@ -150,6 +153,159 @@ describe('Worker-native email challenges', () => {
     })
     expect(replay.status).toBe(400)
     await expect(replay.json()).resolves.toMatchObject({ code: 'INVALID_VERIFY_CODE' })
+  })
+
+  it('applies email signup defaults exactly once and exposes every entitlement publicly', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    test.raw.prepare(
+      `INSERT INTO "groups" (
+         id, name, platform, group_type, daily_quota_micros,
+         weekly_quota_micros, monthly_quota_micros, created_at_ms, updated_at_ms
+       ) VALUES ('email-welcome', 'Email welcome', 'openai', 'subscription',
+                 1000000, 5000000, 9000000, ?, ?)`,
+    ).run(now, now)
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 12500000, concurrency = 7, grant_on_signup = 1
+        WHERE source = 'email'`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_subscriptions (source, group_id, validity_days)
+       VALUES ('email', 'email-welcome', 30)`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_platform_quotas (
+         source, platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
+       ) VALUES ('email', 'openai', 1250000, NULL, 8000000)`,
+    ).run()
+    test.env.SUBSCRIPTION_STATE = successfulStateNamespace()
+
+    await post(test, '/api/v1/auth/send-verify-code', { email: 'grant@example.com' })
+    const registered = await post(test, '/api/v1/auth/register', {
+      email: 'grant@example.com',
+      password: 'registered-correct-horse-password',
+      verify_code: test.events[0].payload.token,
+    })
+
+    expect(registered.status).toBe(201)
+    const payload = await registered.json() as any
+    expect(payload.data.user).toMatchObject({ balance: 12.5, concurrency: 7 })
+    const authorization = `Bearer ${payload.data.access_token}`
+
+    const subscriptions = await test.app.request('/api/v1/subscriptions', {
+      headers: { authorization },
+    }, test.env)
+    expect(subscriptions.status).toBe(200)
+    await expect(subscriptions.json()).resolves.toMatchObject({
+      data: [{ group_id: 'email-welcome', status: 'active' }],
+    })
+    const quotas = await test.app.request('/api/v1/user/platform-quotas', {
+      headers: { authorization },
+    }, test.env)
+    expect(quotas.status).toBe(200)
+    await expect(quotas.json()).resolves.toMatchObject({
+      data: {
+        platform_quotas: [{
+          platform: 'openai',
+          daily_limit_usd: 1.25,
+          weekly_limit_usd: null,
+          monthly_limit_usd: 8,
+        }],
+      },
+    })
+
+    const replay = await post(test, '/api/v1/auth/register', {
+      email: 'grant@example.com',
+      password: 'registered-correct-horse-password',
+      verify_code: test.events[0].payload.token,
+    })
+    expect(replay.status).not.toBe(201)
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM auth_source_entitlement_grants
+        WHERE source = 'email' AND reason = 'signup'`,
+    ).get()).toEqual({ count: 1 })
+  })
+
+  it('does not apply configured email defaults while the signup grant switch is off', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 99000000, concurrency = 99, grant_on_signup = 0
+        WHERE source = 'email'`,
+    ).run()
+    await post(test, '/api/v1/auth/send-verify-code', { email: 'off@example.com' })
+
+    const registered = await post(test, '/api/v1/auth/register', {
+      email: 'off@example.com',
+      password: 'registered-correct-horse-password',
+      verify_code: test.events[0].payload.token,
+    })
+
+    expect(registered.status).toBe(201)
+    await expect(registered.json()).resolves.toMatchObject({
+      data: { user: { balance: 0, concurrency: 5 } },
+    })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM auth_source_entitlement_grants
+        WHERE source = 'email' AND reason = 'signup'`,
+    ).get()).toEqual({ count: 0 })
+  })
+
+  it('leaves a durable signup subscription intent that the global recovery loop can replay', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    test.raw.prepare(
+      `INSERT INTO "groups" (id, name, platform, group_type, created_at_ms, updated_at_ms)
+       VALUES ('recover-welcome', 'Recover welcome', 'openai', 'subscription', ?, ?)`,
+    ).run(now, now)
+    test.raw.prepare(
+      `UPDATE auth_source_defaults SET grant_on_signup = 1 WHERE source = 'email'`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_subscriptions (source, group_id, validity_days)
+       VALUES ('email', 'recover-welcome', 7)`,
+    ).run()
+    let stateCalls = 0
+    test.env.SUBSCRIPTION_STATE = {
+      idFromName: vi.fn((name: string) => ({ toString: () => name })),
+      get: vi.fn(() => ({
+        fetch: vi.fn(async () => {
+          stateCalls += 1
+          return stateCalls === 1
+            ? Response.json({ error: { message: 'temporary outage' } }, { status: 503 })
+            : Response.json({ ok: true })
+        }),
+      })),
+    } as unknown as DurableObjectNamespace
+    await post(test, '/api/v1/auth/send-verify-code', { email: 'recover-signup@example.com' })
+
+    const interrupted = await post(test, '/api/v1/auth/register', {
+      email: 'recover-signup@example.com',
+      password: 'registered-correct-horse-password',
+      verify_code: test.events[0].payload.token,
+    })
+    expect(interrupted.status).toBe(503)
+    expect(test.raw.prepare(
+      `SELECT status, attempts FROM subscription_state_sync`,
+    ).get()).toEqual({ status: 'pending', attempts: 1 })
+
+    await recoverPendingSubscriptionState(test.env)
+    expect(test.raw.prepare(
+      `SELECT status, attempts FROM subscription_state_sync`,
+    ).get()).toEqual({ status: 'applied', attempts: 1 })
+    const login = await post(test, '/api/v1/auth/login', {
+      email: 'recover-signup@example.com',
+      password: 'registered-correct-horse-password',
+    })
+    expect(login.status).toBe(200)
+    const token = (await login.json() as any).data.access_token as string
+    const subscriptions = await test.app.request('/api/v1/subscriptions', {
+      headers: { authorization: `Bearer ${token}` },
+    }, test.env)
+    await expect(subscriptions.json()).resolves.toMatchObject({
+      data: [{ group_id: 'recover-welcome', status: 'active' }],
+    })
   })
 
   it('durably caps wrong pre-registration verification attempts', async () => {
@@ -529,11 +685,14 @@ async function fixture(siteName = 'Sub2API Test'): Promise<Harness> {
 
   const app = new Hono<{ Bindings: Env }>()
   app.post('/api/v1/auth/register', registerWithPassword)
+  app.post('/api/v1/auth/login', loginWithPassword)
   app.post('/api/v1/auth/forgot-password', requestPasswordReset)
   app.post('/api/v1/auth/reset-password', resetPasswordWithChallenge)
   app.post('/api/v1/auth/send-verify-code', requestRegistrationEmailVerification)
   app.post('/api/v1/auth/email-verification/request', requestEmailVerification)
   app.post('/api/v1/auth/email-verification/confirm', confirmEmailVerification)
+  app.get('/api/v1/subscriptions', listUserSubscriptions)
+  app.get('/api/v1/user/platform-quotas', getMyPlatformQuotas)
   return { raw, env, events, accessToken, app }
 }
 
@@ -564,6 +723,13 @@ function rateLimitNamespace(): DurableObjectNamespace {
   return {
     idFromName: vi.fn(() => ({ toString: () => 'rate-limit-id' })),
     get: vi.fn(() => ({ fetch: vi.fn(async (request: Request) => response(request)) })),
+  } as unknown as DurableObjectNamespace
+}
+
+function successfulStateNamespace(): DurableObjectNamespace {
+  return {
+    idFromName: vi.fn((name: string) => ({ toString: () => name })),
+    get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ ok: true })) })),
   } as unknown as DurableObjectNamespace
 }
 

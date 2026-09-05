@@ -300,7 +300,7 @@ export default {
           internal: '内部'
         },
         total: '总计：',
-        searchPlaceholder: '搜索 request_id / client_request_id / message'
+        searchPlaceholder: '精确请求 ID'
       },
       // Error Detail Modal
       errorDetail: {
@@ -344,6 +344,7 @@ export default {
         message: '消息',
         rootCause: '根因',
         diagnosticPayloads: '诊断载荷',
+        payloadUnavailable: '载荷不可用',
         payloads: {
           client: '客户端响应',
           upstream_message: '上游消息',

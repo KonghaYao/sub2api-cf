@@ -249,10 +249,20 @@ import {
   getUserApiKeyDailyUsage,
   getUsageDetail,
   listUsage,
-  listUsageErrors,
-  usageErrorDetail,
   usageStats,
 } from './user/usage'
+import {
+  getAdminErrorAggregation,
+  getAdminRequestErrorDetail,
+  getAdminUpstreamErrorDetail,
+  getOwnerErrorDetail,
+  listAdminRequestErrors,
+  listAdminRequests,
+  listAdminUpstreamErrors,
+  listAdminUsage,
+  listOwnerErrors,
+  listRelatedUpstreamErrors,
+} from './observability'
 import {
   createPaymentProvider,
   deletePaymentProvider,
@@ -451,8 +461,8 @@ export function createApp() {
   app.get('/api/v1/usage/dashboard/models', dashboardModels)
   app.get('/api/v1/usage/dashboard/snapshot-v2', dashboardSnapshot)
   app.post('/api/v1/usage/dashboard/api-keys-usage', dashboardApiKeysUsage)
-  app.get('/api/v1/usage/errors', listUsageErrors)
-  app.get('/api/v1/usage/errors/:id', usageErrorDetail)
+  app.get('/api/v1/usage/errors', listOwnerErrors)
+  app.get('/api/v1/usage/errors/:id', getOwnerErrorDetail)
   app.get('/api/v1/usage', listUsage)
   app.get('/api/v1/usage/:id', getUsageDetail)
 
@@ -466,6 +476,17 @@ export function createApp() {
   )
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  app.get('/api/v1/admin/usage', listAdminUsage)
+  app.get('/api/v1/admin/ops/requests', listAdminRequests)
+  app.get('/api/v1/admin/ops/request-errors', listAdminRequestErrors)
+  app.get('/api/v1/admin/ops/upstream-errors', listAdminUpstreamErrors)
+  app.get('/api/v1/admin/ops/error-aggregation', getAdminErrorAggregation)
+  app.get(
+    '/api/v1/admin/ops/request-errors/:id/upstream-errors',
+    listRelatedUpstreamErrors,
+  )
+  app.get('/api/v1/admin/ops/request-errors/:id', getAdminRequestErrorDetail)
+  app.get('/api/v1/admin/ops/upstream-errors/:id', getAdminUpstreamErrorDetail)
   app.get('/api/v1/admin/announcements', listAdminAnnouncements)
   app.post('/api/v1/admin/announcements', createAdminAnnouncement)
   app.get('/api/v1/admin/announcements/:id', getAdminAnnouncement)

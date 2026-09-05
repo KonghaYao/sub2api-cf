@@ -259,7 +259,7 @@ describe('usage reasoning effort page display', () => {
     expect(wrapper.text()).not.toContain('XHigh')
   })
 
-  it('admin usage page shows requested and mapped effort after the column is enabled', async () => {
+  it('admin Worker Explorer does not present unpersisted reasoning-effort fields', async () => {
     const wrapper = mount(AdminUsageView, {
       global: {
         stubs: {
@@ -279,44 +279,7 @@ describe('usage reasoning effort page display', () => {
     expect(wrapper.find('[data-testid="reasoning-effort-cell"]').exists()).toBe(false)
 
     await wrapper.get('[data-testid="usage-column-settings"]').trigger('click')
-    await wrapper.get('[data-testid="usage-column-toggle-reasoning_effort"]').trigger('click')
-    await flushPromises()
-
-    const cell = reasoningCellText(wrapper)
-    expect(cell).toContain('Max')
-    expect(cell).toContain('XHigh')
-    expect(cell).toContain('↳')
-  })
-
-  it('admin usage page shows a single value when reasoning effort was not mapped', async () => {
-    adminList.mockResolvedValue({
-      items: [{ ...adminMappedLog, request_id: 'req-admin-plain', reasoning_effort: 'high', upstream_reasoning_effort: null }],
-      total: 1,
-      pages: 1,
-    })
-
-    const wrapper = mount(AdminUsageView, {
-      global: {
-        stubs: {
-          ...sharedPageStubs,
-          UsageFilters: adminFiltersStub,
-          UsageExportProgress: true,
-          UsageCleanupDialog: true,
-          UserBalanceHistoryModal: true,
-          UserTokenRanking: true,
-          OpsErrorLogTable: true,
-          OpsErrorDetailModal: true,
-        },
-      },
-    })
-    await flushPromises()
-
-    await wrapper.get('[data-testid="usage-column-settings"]').trigger('click')
-    await wrapper.get('[data-testid="usage-column-toggle-reasoning_effort"]').trigger('click')
-    await flushPromises()
-
-    const cell = reasoningCellText(wrapper)
-    expect(cell).toContain('High')
-    expect(cell).not.toContain('↳')
+    expect(wrapper.find('[data-testid="usage-column-toggle-reasoning_effort"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('XHigh')
   })
 })

@@ -169,6 +169,19 @@ describe('admin system settings', () => {
           passkey_rp_origins: [],
         },
         secrets: { turnstile_secret_key_configured: false },
+        auth_source_defaults: Object.fromEntries(
+          ['email', 'linuxdo', 'oidc', 'wechat', 'dingtalk', 'github', 'google'].map((source) => [
+            source,
+            {
+              balance: 0,
+              concurrency: 5,
+              subscriptions: [],
+              grant_on_signup: false,
+              grant_on_first_bind: false,
+              platform_quotas: {},
+            },
+          ]),
+        ),
         updated_at_ms: expect.any(Number),
       },
     })
@@ -198,6 +211,156 @@ describe('admin system settings', () => {
         },
       },
     })
+  })
+
+  it('round-trips private typed auth-source defaults without projecting them to public KV', async () => {
+    const now = Date.now()
+    subject.raw.prepare(
+      `INSERT INTO "groups" (
+         id, name, platform, group_type, daily_quota_micros, weekly_quota_micros,
+         monthly_quota_micros, created_at_ms, updated_at_ms
+       ) VALUES ('welcome-sub', 'Welcome subscription', 'openai', 'subscription',
+                 1000000, 5000000, 10000000, ?, ?)`,
+    ).run(now, now)
+
+    const update = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-auth-source-defaults'),
+      body: JSON.stringify({
+        auth_source_defaults: {
+          email: {
+            balance: 12.5,
+            concurrency: 7,
+            subscriptions: [{ group_id: 'welcome-sub', validity_days: 30 }],
+            grant_on_signup: true,
+            grant_on_first_bind: true,
+            platform_quotas: {
+              openai: { daily: 1.25, weekly: null, monthly: 8 },
+            },
+          },
+        },
+      }),
+    }, subject.env)
+
+    expect(update.status).toBe(200)
+    await expect(responseJson(update)).resolves.toMatchObject({
+      data: {
+        control_version: 1,
+        auth_source_defaults: {
+          email: {
+            balance: 12.5,
+            concurrency: 7,
+            subscriptions: [{ group_id: 'welcome-sub', validity_days: 30 }],
+            grant_on_signup: true,
+            grant_on_first_bind: true,
+            platform_quotas: {
+              openai: { daily: 1.25, weekly: null, monthly: 8 },
+            },
+          },
+          github: expect.any(Object),
+          google: expect.any(Object),
+          linuxdo: expect.any(Object),
+          dingtalk: expect.any(Object),
+          wechat: expect.any(Object),
+          oidc: expect.any(Object),
+        },
+      },
+    })
+    expect(subject.raw.prepare(
+      "SELECT balance_micros, concurrency FROM auth_source_defaults WHERE source = 'email'",
+    ).get()).toEqual({ balance_micros: 12_500_000, concurrency: 7 })
+
+    const projected = subject.kv.values.get(publicSettingsKey('test')) ?? ''
+    expect(projected).not.toContain('auth_source_defaults')
+    expect(projected).not.toContain('welcome-sub')
+  })
+
+  it('rejects invalid auth-source groups and monetary precision without advancing settings', async () => {
+    const missingGroup = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-invalid-auth-source-group'),
+      body: JSON.stringify({
+        auth_source_defaults: {
+          github: {
+            balance: 1,
+            concurrency: 5,
+            subscriptions: [{ group_id: 'missing', validity_days: 30 }],
+            grant_on_signup: true,
+            grant_on_first_bind: false,
+            platform_quotas: {},
+          },
+        },
+      }),
+    }, subject.env)
+    expect(missingGroup.status).toBe(400)
+
+    const imprecise = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-invalid-auth-source-money'),
+      body: JSON.stringify({
+        auth_source_defaults: {
+          email: {
+            balance: 0.0000001,
+            concurrency: 5,
+            subscriptions: [],
+            grant_on_signup: true,
+            grant_on_first_bind: false,
+            platform_quotas: {},
+          },
+        },
+      }),
+    }, subject.env)
+    expect(imprecise.status).toBe(400)
+    const malformedQuota = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-invalid-auth-source-quota'),
+      body: JSON.stringify({
+        auth_source_defaults: {
+          email: {
+            balance: 0,
+            concurrency: 5,
+            subscriptions: [],
+            grant_on_signup: true,
+            grant_on_first_bind: false,
+            platform_quotas: { openai: { daily: 1 } },
+          },
+        },
+      }),
+    }, subject.env)
+    expect(malformedQuota.status).toBe(400)
+    expect(subject.raw.prepare(
+      "SELECT control_version FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ control_version: 0 })
+  })
+
+  it('maps all seven authentication sources to distinct private D1 defaults', async () => {
+    const sources = ['email', 'linuxdo', 'oidc', 'wechat', 'dingtalk', 'github', 'google'] as const
+    const authSourceDefaults = Object.fromEntries(sources.map((source, index) => [source, {
+      balance: index + 1,
+      concurrency: index + 2,
+      subscriptions: [],
+      grant_on_signup: index % 2 === 0,
+      grant_on_first_bind: index % 2 === 1,
+      platform_quotas: {},
+    }]))
+
+    const response = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-all-auth-source-mapping'),
+      body: JSON.stringify({ auth_source_defaults: authSourceDefaults }),
+    }, subject.env)
+
+    expect(response.status).toBe(200)
+    expect(subject.raw.prepare(
+      `SELECT source, balance_micros, concurrency, grant_on_signup, grant_on_first_bind
+         FROM auth_source_defaults ORDER BY balance_micros`,
+    ).all()).toEqual(sources.map((source, index) => ({
+      source,
+      balance_micros: (index + 1) * 1_000_000,
+      concurrency: index + 2,
+      grant_on_signup: index % 2 === 0 ? 1 : 0,
+      grant_on_first_bind: index % 2 === 1 ? 1 : 0,
+    })))
   })
 
   it('atomically updates public and encrypted secret settings, projects KV, and audits the administrator', async () => {

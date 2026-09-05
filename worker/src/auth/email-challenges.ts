@@ -4,10 +4,15 @@ import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { authenticateUserRequest, publicUser, type UserRow } from './handler'
+import { authenticateUserRequest, findUserById, publicUser, type UserRow } from './handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
 import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
 import { requireRegistrationEmailSuffixAllowed } from './email-policy'
+import {
+  prepareAuthSourceGrant,
+  settleAuthSourceGrant,
+  type PreparedAuthSourceGrant,
+} from './source-entitlements'
 
 type AuthBindings = { Bindings: Env }
 export type EmailChallengePurpose =
@@ -433,6 +438,16 @@ export async function bindEmailIdentity(context: Context<AuthBindings>): Promise
     }
     const credential = user.password_credential ?? await hashPassword(password)
     const consumeNonce = crypto.randomUUID()
+    const sourceGrant: PreparedAuthSourceGrant | null = user.password_credential === null
+      ? await prepareAuthSourceGrant(
+        context.env,
+        user.id,
+        'email',
+        'first_bind',
+        { kind: 'email_binding', value: consumeNonce },
+        now,
+      )
+      : null
     const condition = `auth_version = ? AND EXISTS (
       SELECT 1 FROM email_binding_challenges
        WHERE user_id = users.id AND consume_nonce = ? AND status = 'consumed'
@@ -498,6 +513,7 @@ export async function bindEmailIdentity(context: Context<AuthBindings>): Promise
         user.auth_version, consumeNonce, now,
         user.id,
       ),
+      ...(sourceGrant?.statements ?? []),
       context.env.DB.prepare(
         `UPDATE user_sessions
             SET revoked_at_ms = COALESCE(revoked_at_ms, ?),
@@ -530,7 +546,9 @@ export async function bindEmailIdentity(context: Context<AuthBindings>): Promise
     if (results[0].results.length !== 1 || results[1].results.length !== 1) {
       throw invalidChallenge('email_binding')
     }
-    const updated = results[1].results[0] as unknown as UserRow
+    await settleAuthSourceGrant(context.env, sourceGrant?.grantId ?? null)
+    const updated = await findUserById(context.env, user.id)
+    if (updated === null) throw new GatewayError(503, 'auth_source_entitlement_unavailable', 'Updated user is unavailable')
     const { projectOAuthIdentityBindings } = await import('./oauth-identities')
     return controlSuccess(await projectOAuthIdentityBindings(
       context.env,

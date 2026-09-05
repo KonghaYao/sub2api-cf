@@ -8,10 +8,6 @@
         :data="rows"
         :loading="loading"
         clickable-rows
-        server-side-sort
-        default-sort-key="created_at"
-        default-sort-order="desc"
-        @sort="onSort"
         @rowClick="(row) => emit('openErrorDetail', row.id)"
       >
         <template #cell-created_at="{ row }">
@@ -166,13 +162,13 @@
     </div>
 
     <div class="flex-shrink-0">
-      <Pagination
-        v-if="total > 0"
-        :total="total"
+      <CursorPagination
+        v-if="rows.length > 0 || page > 1"
         :page="page"
-        :page-size="pageSize"
-        @update:page="emit('update:page', $event)"
-        @update:pageSize="emit('update:pageSize', $event)"
+        :has-more="hasMore"
+        :loading="loading"
+        @previous="emit('previous')"
+        @next="emit('next')"
       />
     </div>
   </div>
@@ -183,14 +179,14 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DataTable from '@/components/common/DataTable.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import Pagination from '@/components/common/Pagination.vue'
+import CursorPagination from '@/components/user/CursorPagination.vue'
 import IpGeoCell from '@/components/common/IpGeoCell.vue'
 import IpGeoBatchToolbar from '@/components/common/IpGeoBatchToolbar.vue'
 import type { OpsErrorLog } from '@/api/admin/ops'
 import type { Column } from '@/components/common/types'
 import { getSeverityClass, formatDateTime } from '../utils/opsFormatters'
 import { mapErrorCategory } from '@/utils/errorCategory'
-import { mapErrorSortKey, statusCodeBadgeClass } from '@/utils/errorBadges'
+import { statusCodeBadgeClass } from '@/utils/errorBadges'
 
 const { t } = useI18n()
 
@@ -201,14 +197,14 @@ const allColumns = computed<Column[]>(() => [
   { key: 'api_key', label: t('admin.ops.errorLog.apiKey') },
   { key: 'account', label: t('admin.ops.errorLog.account') },
   { key: 'platform', label: t('admin.ops.errorLog.platform') },
-  { key: 'model', label: t('admin.ops.errorLog.model'), sortable: true },
+  { key: 'model', label: t('admin.ops.errorLog.model') },
   { key: 'endpoint', label: t('admin.ops.errorLog.endpoint') },
   { key: 'group', label: t('admin.ops.errorLog.group') },
   { key: 'type', label: t('admin.ops.errorLog.type') },
   { key: 'category', label: t('usage.errors.category') },
-  { key: 'status', label: t('admin.ops.errorLog.status'), sortable: true },
+  { key: 'status', label: t('admin.ops.errorLog.status') },
   { key: 'message', label: t('admin.ops.errorLog.message') },
-  { key: 'created_at', label: t('admin.ops.errorLog.time'), sortable: true },
+  { key: 'created_at', label: t('admin.ops.errorLog.time') },
   { key: 'user_agent', label: t('usage.userAgent') },
   { key: 'client_ip', label: t('admin.ops.errorLog.ip') },
   { key: 'actions', label: t('admin.ops.errorLog.action') },
@@ -280,10 +276,9 @@ function getTypeBadge(log: OpsErrorLog): { label: string; className: string } {
 
 interface Props {
   rows: OpsErrorLog[]
-  total: number
+  hasMore: boolean
   loading: boolean
   page: number
-  pageSize: number
   /** 用户邮箱可点击(emit userClick),仅在有弹窗承接的使用方开启 */
   userClickable?: boolean
   /** 列设置:仅显示这些 key 的列;不传则全量 */
@@ -293,20 +288,15 @@ interface Props {
 }
 
 interface Emits {
-  (e: 'openErrorDetail', id: number): void
-  (e: 'update:page', value: number): void
-  (e: 'update:pageSize', value: number): void
+  (e: 'openErrorDetail', id: string): void
+  (e: 'previous'): void
+  (e: 'next'): void
   (e: 'ipGeoBatchFailed'): void
-  (e: 'sort', sortBy: string, sortOrder: 'asc' | 'desc'): void
-  (e: 'userClick', userId: number, email?: string): void
+  (e: 'userClick', userId: string | number, email?: string): void
 }
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
-
-function onSort(key: string, order: 'asc' | 'desc') {
-  emit('sort', mapErrorSortKey(key), order)
-}
 
 const getStatusClass = statusCodeBadgeClass
 

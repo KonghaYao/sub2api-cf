@@ -12,6 +12,23 @@ const MAX_TOOLS = 256
 const MAX_TEXT_CHARS = 4_000_000
 const MAX_JSON_CHARS = 4_000_000
 const NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/
+const TOOL_SEARCH_PROXY_NAME = 'tool_search'
+const TOOL_SEARCH_PROXY_DESCRIPTION =
+  'Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.'
+const TOOL_SEARCH_PROXY_PARAMETERS: JsonObject = {
+  type: 'object',
+  properties: {
+    query: {
+      type: 'string',
+      description: 'Search query for tools or connectors to load.',
+    },
+    limit: {
+      type: 'integer',
+      description: 'Maximum number of tool groups to return.',
+    },
+  },
+  required: ['query'],
+}
 
 export class ResponsesBridgeError extends Error {
   readonly code = 'invalid_request_error'
@@ -73,7 +90,7 @@ export interface ResponsesFunctionTool {
   description?: string
   parameters: JsonObject
   strict: boolean
-  source_type?: 'custom' | 'namespace'
+  source_type?: 'custom' | 'namespace' | 'tool_search'
   namespace?: string
   source_name?: string
 }
@@ -87,6 +104,7 @@ export interface ResponsesToolMapping {
   custom_tools: Record<string, true>
   function_tools: Record<string, true>
   namespace_tools: Record<string, ResponsesNamespaceToolName>
+  tool_search: boolean
 }
 
 export interface ParsedResponsesRequest {
@@ -123,7 +141,7 @@ export interface ChatCompletionsRequest {
 }
 
 export interface ResponsesOutputItem extends JsonObject {
-  type: 'reasoning' | 'message' | 'function_call' | 'custom_tool_call'
+  type: 'reasoning' | 'message' | 'function_call' | 'custom_tool_call' | 'tool_search_call'
   id: string
   status: 'completed'
   role?: 'assistant'
@@ -134,9 +152,10 @@ export interface ResponsesOutputItem extends JsonObject {
   summary?: Array<{ type: 'summary_text'; text: string }>
   call_id?: string
   name?: string
-  arguments?: string
+  arguments?: string | JsonObject
   input?: string
   namespace?: string
+  execution?: 'client'
 }
 
 export interface ConvertedResponsesResponse extends JsonObject {
@@ -196,7 +215,7 @@ interface StreamTool {
   upstreamName?: string
   name?: string
   namespace?: string
-  kind?: 'function' | 'custom' | 'namespace'
+  kind?: 'function' | 'custom' | 'namespace' | 'tool_search'
   arguments: string
   announced: boolean
   outputIndex: number
@@ -269,7 +288,14 @@ export function parseResponsesRequest(value: unknown): ParsedResponsesRequest {
   const declaredTools = root.tools === undefined
     ? []
     : arrayAt(root.tools, '$.tools', MAX_TOOLS)
-  const effectiveTools = [...declaredTools, ...additionalResponsesTools(root.input, '$.input')]
+  const baseTools = [...declaredTools, ...additionalResponsesTools(root.input, '$.input')]
+  const discoveredTools = hasToolSearchDeclaration(baseTools)
+    ? discoveredResponsesTools(root.input, '$.input')
+    : []
+  const effectiveTools = [...baseTools, ...discoveredTools]
+  if (effectiveTools.length > MAX_TOOLS) {
+    fail('$.tools', `effective tools must contain at most ${MAX_TOOLS} items`)
+  }
   const tools = effectiveTools.length === 0 ? undefined : parseTools(effectiveTools, '$.tools')
   const toolMapping = tools === undefined ? undefined : responsesToolMapping(tools)
   const toolChoice = root.tool_choice === undefined
@@ -544,6 +570,7 @@ export class ChatCompletionsToResponsesEventCodec {
         } else if (
           tool.announced &&
           tool.kind !== 'custom' &&
+          tool.kind !== 'tool_search' &&
           delta.arguments !== undefined &&
           delta.arguments !== ''
         ) {
@@ -564,7 +591,7 @@ export class ChatCompletionsToResponsesEventCodec {
         fail('stream.tool_calls', 'tool call ended before its id and name were received')
       }
       const args = tool.arguments.trim() === '' ? '{}' : tool.arguments
-      if (tool.kind !== 'custom' && !isJsonObjectString(args)) {
+      if (tool.kind !== 'custom' && tool.kind !== 'tool_search' && !isJsonObjectString(args)) {
         fail('stream.tool_calls', `tool call '${tool.id}' arguments contain invalid JSON`)
       }
     }
@@ -801,6 +828,13 @@ export class ChatCompletionsToResponsesEventCodec {
         )
         continue
       }
+      if (tool.kind === 'tool_search') {
+        events.push(this.event('response.output_item.done', {
+          output_index: tool.outputIndex,
+          item: this.toolOutput(tool),
+        }))
+        continue
+      }
       events.push(
         this.event('response.function_call_arguments.done', {
           output_index: tool.outputIndex,
@@ -863,6 +897,16 @@ export class ChatCompletionsToResponsesEventCodec {
         status: 'completed',
       }
     }
+    if (tool.kind === 'tool_search') {
+      return {
+        type: 'tool_search_call',
+        id: tool.itemId!,
+        call_id: tool.id!,
+        execution: 'client',
+        arguments: toolSearchArguments(tool.arguments),
+        status: 'completed',
+      }
+    }
     return {
       type: 'function_call',
       id: tool.itemId!,
@@ -879,7 +923,9 @@ export class ChatCompletionsToResponsesEventCodec {
     tool.kind = identity.type
     tool.name = identity.name
     if (identity.type === 'namespace') tool.namespace = identity.namespace
-    tool.itemId = generatedId(identity.type === 'custom' ? 'ctc' : 'fc')
+    tool.itemId = generatedId(
+      identity.type === 'custom' ? 'ctc' : identity.type === 'tool_search' ? 'tsc' : 'fc',
+    )
     tool.announced = true
     const item = identity.type === 'custom'
       ? {
@@ -890,7 +936,15 @@ export class ChatCompletionsToResponsesEventCodec {
           input: '',
           status: 'in_progress',
         }
-      : {
+      : identity.type === 'tool_search'
+        ? {
+            type: 'tool_search_call',
+            id: tool.itemId,
+            call_id: tool.id,
+            execution: 'client',
+            status: 'in_progress',
+          }
+        : {
           type: 'function_call',
           id: tool.itemId,
           call_id: tool.id,
@@ -903,7 +957,7 @@ export class ChatCompletionsToResponsesEventCodec {
       output_index: tool.outputIndex,
       item,
     })]
-    if (identity.type !== 'custom' && tool.arguments !== '') {
+    if (identity.type !== 'custom' && identity.type !== 'tool_search' && tool.arguments !== '') {
       events.push(this.functionArgumentsDelta(tool, tool.arguments))
     }
     return events
@@ -1015,6 +1069,17 @@ function parseChatToolCalls(
     const name = validName(fn.name, `${itemPath}.function.name`)
     const argumentsValue = stringAt(fn.arguments, `${itemPath}.function.arguments`, MAX_JSON_CHARS)
     const identity = restoredToolIdentity(name, toolMapping)
+    if (identity.type === 'tool_search') {
+      output.push({
+        type: 'tool_search_call',
+        id: generatedId('tsc'),
+        call_id: callId,
+        execution: 'client',
+        arguments: toolSearchArguments(argumentsValue),
+        status: 'completed',
+      })
+      continue
+    }
     if (identity.type === 'custom') {
       output.push({
         type: 'custom_tool_call',
@@ -1412,6 +1477,26 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem | null
       output: toolOutputText(item.output, `${path}.output`),
     }
   }
+  if (type === 'tool_search_call') {
+    exactKeys(item, ['type', 'id', 'call_id', 'arguments', 'execution', 'status'], path)
+    const argumentsValue = objectAt(item.arguments, `${path}.arguments`)
+    assertJsonSize(argumentsValue, `${path}.arguments`)
+    return {
+      type: 'function_call',
+      call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
+      name: TOOL_SEARCH_PROXY_NAME,
+      arguments: JSON.stringify(argumentsValue),
+    }
+  }
+  if (type === 'tool_search_output') {
+    exactKeys(item, ['type', 'id', 'call_id', 'output', 'tools', 'execution', 'status'], path)
+    const output = item.output === undefined ? item.tools : item.output
+    return {
+      type: 'function_call_output',
+      call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
+      output: toolOutputText(output, `${path}.${item.output === undefined ? 'tools' : 'output'}`),
+    }
+  }
   if (
     type === 'web_search_call' ||
     type === 'file_search_call' ||
@@ -1440,6 +1525,29 @@ function additionalResponsesTools(value: unknown, path: string): unknown[] {
   return tools
 }
 
+function hasToolSearchDeclaration(tools: unknown[]): boolean {
+  return tools.some((raw) => isObject(raw) && raw.type === 'tool_search')
+}
+
+function discoveredResponsesTools(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) return []
+  const tools: unknown[] = []
+  for (const [index, raw] of value.entries()) {
+    if (!isObject(raw) || raw.type !== 'tool_search_output' || raw.status !== 'completed') continue
+    if (!Array.isArray(raw.tools)) continue
+    for (const [toolIndex, tool] of raw.tools.entries()) {
+      try {
+        parseTools([tool], `${path}[${index}].tools[${toolIndex}]`)
+        tools.push(tool)
+      } catch {
+        // A partially-loaded discovery result is history, not a reason to
+        // reject an otherwise usable request. Only valid declarations lift.
+      }
+    }
+  }
+  return tools
+}
+
 function parseMessageContent(value: unknown, path: string): string | ResponsesTextPart[] {
   if (typeof value === 'string') return stringAt(value, path, MAX_TEXT_CHARS)
   return arrayAt(value, path, MAX_CONTENT_PARTS).map((part, index) => {
@@ -1452,27 +1560,31 @@ function parseMessageContent(value: unknown, path: string): string | ResponsesTe
 
 function parseTools(value: unknown, path: string): ResponsesFunctionTool[] {
   const parsed: ResponsesFunctionTool[] = []
-  const owners = new Map<string, string>()
+  const owners = new Map<string, { owner: string; signature: string }>()
   const append = (tool: ResponsesFunctionTool, owner: string, itemPath: string): void => {
     const existing = owners.get(tool.name)
     if (existing !== undefined) {
-      if (existing === owner && owner.startsWith('namespace:')) return
+      if (existing.owner === owner && existing.signature === JSON.stringify(tool)) return
       fail(itemPath, `executable tool name '${tool.name}' cannot be disambiguated`)
     }
-    owners.set(tool.name, owner)
+    owners.set(tool.name, { owner, signature: JSON.stringify(tool) })
     parsed.push(tool)
   }
   for (const [index, raw] of arrayAt(value, path, MAX_TOOLS).entries()) {
     const itemPath = `${path}[${index}]`
     if (typeof raw === 'string') {
       const tool = customTool(raw, undefined, itemPath)
-      append(tool, `custom:${tool.name}:${index}`, itemPath)
+      append(tool, `custom:${tool.name}`, itemPath)
       continue
     }
     const tool = objectAt(raw, itemPath)
+    if (tool.type === 'tool_search') {
+      append(toolSearchProxy(), 'tool_search', itemPath)
+      continue
+    }
     if (tool.type === 'custom') {
       const parsedTool = customTool(tool.name, tool.description, itemPath)
-      append(parsedTool, `custom:${parsedTool.name}:${index}`, itemPath)
+      append(parsedTool, `custom:${parsedTool.name}`, itemPath)
       continue
     }
     if (tool.type === 'namespace') {
@@ -1495,10 +1607,10 @@ function parseTools(value: unknown, path: string): ResponsesFunctionTool[] {
       continue
     }
     if (tool.type !== 'function') {
-      fail(`${itemPath}.type`, 'only function, custom, and namespace tools are supported by this bridge')
+      fail(`${itemPath}.type`, 'only function, custom, namespace, and tool_search tools are supported by this bridge')
     }
     const parsedTool = parseFunctionTool(tool, itemPath)
-    append(parsedTool, `function:${parsedTool.name}:${index}`, itemPath)
+    append(parsedTool, `function:${parsedTool.name}`, itemPath)
   }
   if (parsed.length > MAX_TOOLS) fail(path, `must contain at most ${MAX_TOOLS} executable tools`)
   return parsed
@@ -1509,9 +1621,12 @@ function responsesToolMapping(tools: ResponsesFunctionTool[]): ResponsesToolMapp
     custom_tools: {},
     function_tools: {},
     namespace_tools: {},
+    tool_search: false,
   }
   for (const tool of tools) {
-    if (tool.source_type === 'custom') {
+    if (tool.source_type === 'tool_search') {
+      mapping.tool_search = true
+    } else if (tool.source_type === 'custom') {
       mapping.custom_tools[tool.name] = true
     } else if (tool.source_type === 'namespace' && tool.namespace !== undefined) {
       if (tool.source_name === undefined) fail('$.tools', `namespace mapping for '${tool.name}' is invalid`)
@@ -1525,7 +1640,8 @@ function responsesToolMapping(tools: ResponsesFunctionTool[]): ResponsesToolMapp
   }
   return Object.keys(mapping.custom_tools).length === 0 &&
     Object.keys(mapping.function_tools).length === 0 &&
-    Object.keys(mapping.namespace_tools).length === 0
+    Object.keys(mapping.namespace_tools).length === 0 &&
+    !mapping.tool_search
     ? undefined
     : mapping
 }
@@ -1536,7 +1652,11 @@ function restoredToolIdentity(
 ):
   | { type: 'function'; name: string }
   | { type: 'custom'; name: string }
-  | { type: 'namespace'; namespace: string; name: string } {
+  | { type: 'namespace'; namespace: string; name: string }
+  | { type: 'tool_search'; name: string } {
+  if (mapping?.tool_search && name === TOOL_SEARCH_PROXY_NAME) {
+    return { type: 'tool_search', name }
+  }
   if (mapping === undefined || mapping.function_tools[name]) return { type: 'function', name }
   const namespaced = mapping.namespace_tools[name]
   if (namespaced !== undefined) return { type: 'namespace', ...namespaced }
@@ -1568,6 +1688,16 @@ function customToolInput(argumentsValue: string): string {
     // A freeform custom tool input need not be valid JSON.
   }
   return argumentsValue
+}
+
+function toolSearchArguments(argumentsValue: string): JsonObject | string {
+  if (argumentsValue.trim() === '') return {}
+  try {
+    const decoded = JSON.parse(argumentsValue) as unknown
+    return isObject(decoded) ? decoded : argumentsValue
+  } catch {
+    return argumentsValue
+  }
 }
 
 function parseFunctionTool(tool: JsonObject, path: string): ResponsesFunctionTool {
@@ -1608,6 +1738,17 @@ function customTool(nameValue: unknown, descriptionValue: unknown, path: string)
   }
 }
 
+function toolSearchProxy(): ResponsesFunctionTool {
+  return {
+    type: 'function',
+    name: TOOL_SEARCH_PROXY_NAME,
+    description: TOOL_SEARCH_PROXY_DESCRIPTION,
+    parameters: TOOL_SEARCH_PROXY_PARAMETERS,
+    strict: false,
+    source_type: 'tool_search',
+  }
+}
+
 function parseToolChoice(
   value: unknown,
   path: string,
@@ -1619,8 +1760,11 @@ function parseToolChoice(
     validName(choice.name, `${path}.name`)
     return 'auto'
   }
+  if (choice.type === 'tool_search') {
+    return { type: 'function', name: TOOL_SEARCH_PROXY_NAME }
+  }
   if (choice.type !== 'function' && choice.type !== 'custom') {
-    fail(`${path}.type`, 'must be function, custom, or namespace')
+    fail(`${path}.type`, 'must be function, custom, namespace, or tool_search')
   }
   const name = validName(choice.name, `${path}.name`)
   const namespace = choice.namespace === undefined

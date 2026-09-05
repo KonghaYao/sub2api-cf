@@ -1,5 +1,11 @@
 import type { Context } from 'hono'
 import type { Env, UsageSettledPayload } from '../env'
+import {
+  recordRequestContext,
+  recordRequestOutcome,
+  recordRequestStart,
+} from '../observability/recorder'
+import type { RequestObservationHandle } from '../observability/types'
 import { bootstrapGateway } from './bootstrap'
 import { codexModelsResponse } from './codex-models'
 import { apiKeyDigest, decryptCredential } from './crypto'
@@ -1050,11 +1056,40 @@ async function dispatchGateway(
   const startedAt = Date.now()
   let admission: ApiKeyAdmissionLease | null = null
   let admissionHandedOff = false
+  let observation: RequestObservationHandle | null = null
+  let observationRequest: Record<string, unknown> | undefined
+  let observationContextRecorded = false
+  let observedUserId: string | null = null
+  let observedApiKeyId: string | null = null
+  let observedGroupId: string | null = null
+  let observedPlatform: string | undefined
+  let observedRequestedModel: string | undefined
+  let observedStream: boolean | undefined
+  let observedAccountId: string | null = null
   try {
+    observationRequest = {
+      method: context.req.method,
+      path: new URL(context.req.url).pathname,
+      headers: context.req.raw.headers,
+    }
+    observation = await recordRequestStart(context.env, {
+      requestId,
+      clientRequestId: context.req.header('x-client-request-id') ?? context.req.header('x-request-id'),
+      method: context.req.method,
+      requestPath: new URL(context.req.url).pathname,
+      inboundEndpoint: endpoint,
+      occurredAtMs: startedAt,
+    })
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
+    observedUserId = principal.user_id
+    observedApiKeyId = principal.api_key_id
+    observedGroupId = principal.group_id
     const parsed = await readGatewayJsonBody(context.req.raw)
+    observationRequest.body = parsed.body
     const prepared = prepare(parsed.body)
     const { requestedModel, stream } = prepared
+    observedRequestedModel = requestedModel
+    observedStream = stream
     const route = await resolveGatewayRoute(
       context.env,
       principal.group_id,
@@ -1070,6 +1105,7 @@ async function dispatchGateway(
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint
     const provider = providerForCandidates(route.candidates)
+    observedPlatform = provider
     const affinityKey = await gatewaySessionAffinityKey(
       context.req.raw.headers,
       parsed.body,
@@ -1083,6 +1119,16 @@ async function dispatchGateway(
     const serviceTier = typeof upstreamBody.service_tier === 'string'
       ? upstreamBody.service_tier
       : undefined
+    if (observation !== null) {
+      observationContextRecorded = await recordRequestContext(context.env, observation, {
+        userId: observedUserId,
+        apiKeyId: observedApiKeyId,
+        groupId: observedGroupId,
+        platform: observedPlatform,
+        requestedModel: observedRequestedModel,
+        stream: observedStream,
+      })
+    }
     const pricedReservationMicros = reservationForRequest(
       model,
       upstreamBody,
@@ -1132,6 +1178,7 @@ async function dispatchGateway(
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
     })
+    observedAccountId = acquired.accountId
 
     if (!acquired.response.ok) {
       if (acquired.retryableFailure) {
@@ -1175,6 +1222,8 @@ async function dispatchGateway(
         admission,
         providerPlatform: provider,
         serviceTier,
+        observation,
+        observationRequest,
       })
     }
     if (
@@ -1209,6 +1258,8 @@ async function dispatchGateway(
         includeUsage: providerDispatch.includeUsage,
         responsesToolMapping: providerDispatch.responsesToolMapping,
         waitUntil: optionalWaitUntil(context),
+        observation,
+        observationRequest,
       })
     }
 
@@ -1231,6 +1282,8 @@ async function dispatchGateway(
       admission,
       providerPlatform: provider,
       serviceTier,
+      observation,
+      observationRequest,
       transformResponse: providerDispatch.responseProtocol === 'responses_from_chat'
         ? (value) => chatCompletionsResponseToResponses(
             value,
@@ -1259,11 +1312,58 @@ async function dispatchGateway(
       : error instanceof GeminiCodecError
         ? new GatewayError(400, 'invalid_argument', error.message)
         : asGatewayError(error)
+    if (observation !== null) {
+      if (!observationContextRecorded) {
+        await recordRequestContext(context.env, observation, {
+          userId: observedUserId,
+          apiKeyId: observedApiKeyId,
+          groupId: observedGroupId,
+          platform: observedPlatform,
+          requestedModel: observedRequestedModel,
+          stream: observedStream,
+        })
+      }
+      await recordRequestOutcome(context.env, observation, {
+        lifecycle: normalized.status === 499 ? 'cancelled' : 'failed',
+        statusCode: normalized.status,
+        accountId: observedAccountId,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outcome: normalized.status === 499 ? 'cancelled' : 'failed',
+        error: observationError(normalized),
+        payload: {
+          request: observationRequest,
+          error: {
+            status: normalized.status,
+            code: normalized.code,
+            type: normalized.type,
+            message: normalized.message,
+          },
+        },
+      })
+    }
     return errorResponse(normalized, requestId)
   } finally {
     if (!admissionHandedOff) {
       await bestEffort(() => releaseApiKeyAdmission(admission))
     }
+  }
+}
+
+function observationError(error: GatewayError): NonNullable<Parameters<typeof recordRequestOutcome>[2]['error']> {
+  // `rate_limit_exceeded` is emitted only by mapUpstreamStatus for an upstream
+  // 429. Keep it provider-owned even though its legacy public error code lacks
+  // the `upstream_` prefix.
+  const upstream = error.code.startsWith('upstream_') || error.code === 'rate_limit_exceeded'
+  const auth = error.code.includes('api_key') || error.code.includes('auth') || error.status === 401
+  const routing = error.code.includes('model') || error.code.includes('capacity') || error.code.includes('provider')
+  return {
+    phase: upstream ? 'upstream' : auth ? 'auth' : routing ? 'routing' : 'gateway',
+    type: error.type,
+    owner: upstream ? 'provider' : 'gateway',
+    source: upstream ? 'upstream' : 'worker',
+    severity: error.status >= 500 ? 'error' : 'warning',
+    message: error.message,
+    isBusinessLimited: error.status === 429 || error.code.includes('quota') || error.code.includes('balance'),
   }
 }
 
@@ -1455,6 +1555,7 @@ async function acquireUpstream(
 
 interface FinalizeInput {
   env: Env
+  response: Response
   endpoint: GatewayEndpoint
   pool: DurableObjectStub
   leaseId: string
@@ -1469,6 +1570,8 @@ interface FinalizeInput {
   admission: ApiKeyAdmissionLease | null
   providerPlatform: ProviderPlatform
   serviceTier?: string
+  observation?: RequestObservationHandle | null
+  observationRequest?: Record<string, unknown>
 }
 
 async function createBufferedChatFromResponsesStream(
@@ -2715,20 +2818,68 @@ async function settleAndProject(
     )
   }
   let lastError: unknown
+  let settlementCompleted = false
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      if (await settleRecoveryRequest(input.env, input.requestId, true)) return
+      if (await settleRecoveryRequest(input.env, input.requestId, true)) {
+        settlementCompleted = true
+        break
+      }
       lastError = new Error('Settlement recovery did not complete every stage')
     } catch (error) {
       lastError = error
     }
     if (attempt < 2) await delay(50 * 2 ** attempt)
   }
-  await bestEffort(() => signalSettlementRecovery(input.env, input.requestId))
-  console.error('settlement deferred to recovery', {
-    request_id: input.requestId,
-    name: lastError instanceof Error ? lastError.name : 'unknown',
-  })
+  if (!settlementCompleted) {
+    await bestEffort(() => signalSettlementRecovery(input.env, input.requestId))
+    console.error('settlement deferred to recovery', {
+      request_id: input.requestId,
+      name: lastError instanceof Error ? lastError.name : 'unknown',
+    })
+  }
+  if (input.observation !== null && input.observation !== undefined) {
+    const statusCode = outcome === 'completed'
+      ? input.response.status
+      : outcome === 'cancelled'
+        ? 499
+        : input.response.status >= 400
+          ? input.response.status
+          : 502
+    await recordRequestOutcome(input.env, input.observation, {
+      lifecycle: outcome,
+      statusCode,
+      accountId: input.accountId,
+      upstreamModel: input.model.upstream_name,
+      durationMs: payload.duration_ms,
+      outcome,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_tokens,
+      amountMicros: cost.amount_micros,
+      ...(outcome === 'completed'
+        ? {}
+        : {
+            error: {
+              phase: 'upstream',
+              type: outcome === 'cancelled' ? 'client_cancelled' : 'upstream_stream_error',
+              owner: outcome === 'cancelled' ? 'client' : 'provider',
+              source: outcome === 'cancelled' ? 'client' : 'upstream',
+              severity: outcome === 'cancelled' ? 'info' : 'error',
+              message: outcome === 'cancelled'
+                ? 'Client cancelled the request'
+                : 'Upstream response did not complete successfully',
+            },
+            payload: {
+              request: input.observationRequest,
+              error: {
+                status: statusCode,
+                code: outcome === 'cancelled' ? 'client_cancelled' : 'upstream_stream_error',
+              },
+            },
+          }),
+    })
+  }
 }
 
 async function cancelGatewayReservations(

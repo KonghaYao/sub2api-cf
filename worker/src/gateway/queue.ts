@@ -24,6 +24,10 @@ import {
   consumeAccountHealthProbe,
   isAccountHealthProbeEvent,
 } from '../control/account-lifecycle'
+import {
+  consumeObservabilityPayloadRetry,
+  isObservabilityPayloadRetryMessage,
+} from '../observability/recorder'
 
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
@@ -87,6 +91,17 @@ export async function consumeEvents(
       if (isAccountHealthProbeEvent(message.body)) {
         await consumeAccountHealthProbe(message.body, env)
         message.ack()
+        continue
+      }
+      if (isObservabilityPayloadRetryMessage(message.body)) {
+        // A successful delayed requeue is safe to acknowledge. If enqueueing
+        // fails, Cloudflare retries this original payload and can send it to DLQ.
+        if (await consumeObservabilityPayloadRetry(
+          env,
+          message.body,
+          { requeueOnFailure: true },
+        )) message.ack()
+        else message.retry()
         continue
       }
       if (isSettlementRetryEvent(message.body)) {

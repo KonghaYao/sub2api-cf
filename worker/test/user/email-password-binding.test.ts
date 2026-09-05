@@ -3,6 +3,7 @@ import { createApp } from '../../src/app'
 import type { Env, PlatformEvent } from '../../src/env'
 import { consumeEmailChallengeDelivery } from '../../src/auth/email-challenges'
 import { hashPassword } from '../../src/auth/password'
+import { recoverPendingAuthSourceGrantEffects } from '../../src/auth/source-entitlements'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
@@ -166,6 +167,144 @@ describe('authenticated email/password binding', () => {
     }, loginBody.data.access_token)
     expect(replay.status).toBe(400)
     await expect(replay.json()).resolves.toMatchObject({ code: 'INVALID_VERIFY_CODE' })
+  })
+
+  it('applies email first-bind defaults through an idempotent UserState balance mutation', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 4000000, concurrency = 2, grant_on_first_bind = 1
+        WHERE source = 'email'`,
+    ).run()
+    test.raw.prepare(
+      `INSERT INTO auth_source_default_platform_quotas (
+         source, platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
+       ) VALUES ('email', 'openai', 2000000, NULL, 9000000)`,
+    ).run()
+    const userState = grantUserStateNamespace('oauth-user')
+    test.env.USER_STATE = userState.namespace
+    await post(test, '/api/v1/user/account-bindings/email/send-code', {
+      email: 'grant-bind@example.com',
+    })
+
+    const bound = await post(test, '/api/v1/user/account-bindings/email', {
+      email: 'grant-bind@example.com',
+      verify_code: test.events[0].payload.token,
+      password: 'new-correct-horse-password',
+    })
+
+    expect(bound.status).toBe(200)
+    await expect(bound.json()).resolves.toMatchObject({
+      data: { balance: 4, concurrency: 7, has_password: true },
+    })
+    expect(userState.adjustments).toHaveLength(1)
+    const login = await post(test, '/api/v1/auth/login', {
+      email: 'grant-bind@example.com',
+      password: 'new-correct-horse-password',
+    })
+    const token = (await login.json() as any).data.access_token as string
+    const quotas = await get(test, '/api/v1/user/platform-quotas', token)
+    await expect(quotas.json()).resolves.toMatchObject({
+      data: { platform_quotas: [{ platform: 'openai', daily_limit_usd: 2, monthly_limit_usd: 9 }] },
+    })
+  })
+
+  it('rolls the email/password binding back when the entitlement ledger cannot be written', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults SET grant_on_first_bind = 1 WHERE source = 'email'`,
+    ).run()
+    test.raw.exec(
+      `CREATE TRIGGER fail_test_auth_source_grant
+       BEFORE INSERT ON auth_source_entitlement_grants
+       BEGIN SELECT RAISE(ABORT, 'simulated_entitlement_failure'); END`,
+    )
+    await post(test, '/api/v1/user/account-bindings/email/send-code', {
+      email: 'rollback@example.com',
+    })
+
+    const failed = await post(test, '/api/v1/user/account-bindings/email', {
+      email: 'rollback@example.com',
+      verify_code: test.events[0].payload.token,
+      password: 'new-correct-horse-password',
+    })
+
+    expect(failed.status).toBe(500)
+    await expect((await get(test, '/api/v1/user/profile')).json()).resolves.toMatchObject({
+      data: { email: 'oauth-user@example.com', has_password: false },
+    })
+    expect(test.raw.prepare(
+      `SELECT status FROM email_binding_challenges WHERE user_id = 'oauth-user'`,
+    ).get()).toEqual({ status: 'pending' })
+  })
+
+  it('recovers an ambiguous first-bind UserState response on password login without double credit', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 4000000, concurrency = 2, grant_on_first_bind = 1
+        WHERE source = 'email'`,
+    ).run()
+    const userState = grantUserStateNamespace('oauth-user', true)
+    test.env.USER_STATE = userState.namespace
+    await post(test, '/api/v1/user/account-bindings/email/send-code', {
+      email: 'recover-bind@example.com',
+    })
+
+    const ambiguous = await post(test, '/api/v1/user/account-bindings/email', {
+      email: 'recover-bind@example.com',
+      verify_code: test.events[0].payload.token,
+      password: 'new-correct-horse-password',
+    })
+    expect(ambiguous.status).toBe(503)
+    // Simulate a newer Queue projection arriving before recovery. The older
+    // idempotent DO response must not roll this monotonic D1 projection back.
+    test.raw.prepare(
+      `UPDATE users SET balance_micros = 10000000, state_version = 9 WHERE id = 'oauth-user'`,
+    ).run()
+
+    const recovered = await post(test, '/api/v1/auth/login', {
+      email: 'recover-bind@example.com',
+      password: 'new-correct-horse-password',
+    })
+    expect(recovered.status).toBe(200)
+    await expect(recovered.json()).resolves.toMatchObject({
+      data: { user: { balance: 10, concurrency: 7 } },
+    })
+    expect(userState.adjustments).toHaveLength(1)
+    expect(test.raw.prepare(
+      `SELECT status, balance_after_micros FROM auth_source_entitlement_balance_effects`,
+    ).get()).toEqual({ status: 'applied', balance_after_micros: 4_000_000 })
+    expect(test.raw.prepare(
+      `SELECT balance_micros, state_version FROM users WHERE id = 'oauth-user'`,
+    ).get()).toEqual({ balance_micros: 10_000_000, state_version: 9 })
+  })
+
+  it('recovers pending first-bind effects globally without requiring another password login', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE auth_source_defaults
+          SET balance_micros = 4000000, concurrency = 2, grant_on_first_bind = 1
+        WHERE source = 'email'`,
+    ).run()
+    const userState = grantUserStateNamespace('oauth-user', true)
+    test.env.USER_STATE = userState.namespace
+    await post(test, '/api/v1/user/account-bindings/email/send-code', {
+      email: 'cron-recover-bind@example.com',
+    })
+
+    const ambiguous = await post(test, '/api/v1/user/account-bindings/email', {
+      email: 'cron-recover-bind@example.com',
+      verify_code: test.events[0].payload.token,
+      password: 'new-correct-horse-password',
+    })
+    expect(ambiguous.status).toBe(503)
+
+    await expect(recoverPendingAuthSourceGrantEffects(test.env)).resolves.toBe(1)
+    expect(userState.adjustments).toHaveLength(1)
+    expect(test.raw.prepare(
+      `SELECT status, balance_after_micros FROM auth_source_entitlement_balance_effects`,
+    ).get()).toEqual({ status: 'applied', balance_after_micros: 4_000_000 })
   })
 
   it('requires an existing password user to re-enter the current password and never treats it as a replacement', async () => {
@@ -558,6 +697,45 @@ async function post(
     },
     body: JSON.stringify(body),
   }, test.env)
+}
+
+function grantUserStateNamespace(userId: string, ambiguousFirstAdjustment = false): {
+  namespace: DurableObjectNamespace
+  adjustments: Array<Record<string, unknown>>
+} {
+  let balance = 0
+  let version = 0
+  const adjustments: Array<Record<string, unknown>> = []
+  const seen = new Map<string, { balance: number; version: number }>()
+  let failedAmbiguously = false
+  const fetch = vi.fn(async (request: Request) => {
+    if (new URL(request.url).pathname === '/configure') {
+      return Response.json({ error: { code: 'user_already_configured' } }, { status: 409 })
+    }
+    const body = await request.json() as { mutation_id: string; amount_delta_micros: number }
+    if (!seen.has(body.mutation_id)) {
+      balance += body.amount_delta_micros
+      version += 1
+      seen.set(body.mutation_id, { balance, version })
+      adjustments.push(body)
+    }
+    if (ambiguousFirstAdjustment && !failedAmbiguously) {
+      failedAmbiguously = true
+      return Response.json({ error: { code: 'transient_failure' } }, { status: 503 })
+    }
+    const state = seen.get(body.mutation_id)!
+    return Response.json({
+      profile: { user_id: userId, balance_micros: state.balance },
+      state_version: state.version,
+    })
+  })
+  return {
+    namespace: {
+      idFromName: vi.fn((name: string) => ({ toString: () => name })),
+      get: vi.fn(() => ({ fetch })),
+    } as unknown as DurableObjectNamespace,
+    adjustments,
+  }
 }
 
 async function get(test: Fixture, path: string, accessToken = test.accessToken): Promise<Response> {

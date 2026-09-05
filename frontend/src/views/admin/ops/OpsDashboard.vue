@@ -42,7 +42,7 @@
       <!-- Row: Concurrency + Throughput -->
       <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
         <div class="lg:col-span-1 min-h-[360px]">
-          <OpsConcurrencyCard :platform-filter="platform" :group-id-filter="groupId" :refresh-token="dashboardRefreshToken" />
+          <OpsConcurrencyCard :platform-filter="platform" :group-id-filter="legacyGroupId" :refresh-token="dashboardRefreshToken" />
         </div>
         <div class="lg:col-span-1 h-[360px]">
           <OpsSwitchRateTrendChart
@@ -88,7 +88,7 @@
       <div v-if="opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
         <OpsOpenAITokenStatsCard
           :platform-filter="platform"
-          :group-id-filter="groupId"
+          :group-id-filter="legacyGroupId"
           :refresh-token="dashboardRefreshToken"
         />
       </div>
@@ -129,6 +129,8 @@
         <OpsRequestDetailsModal
           v-model="showRequestDetails"
           :time-range="timeRange"
+          :custom-start-time="customStartTime"
+          :custom-end-time="customEndTime"
           :preset="requestDetailsPreset"
           :platform="platform"
           :group-id="groupId"
@@ -156,6 +158,7 @@ import {
   type OpsThroughputTrendResponse,
   type OpsMetricThresholds
 } from '@/api/admin/ops'
+import type { GroupId } from '@/types'
 import { useAdminSettingsStore, useAppStore } from '@/stores'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
 import OpsDashboardSkeleton from './components/OpsDashboardSkeleton.vue'
@@ -195,7 +198,8 @@ const lastUpdated = ref<Date | null>(new Date())
 
 const timeRange = ref<TimeRange>('1h')
 const platform = ref<string>('')
-const groupId = ref<number | null>(null)
+const groupId = ref<GroupId | null>(null)
+const legacyGroupId = computed(() => typeof groupId.value === 'number' ? groupId.value : null)
 const queryMode = ref<QueryMode>('auto')
 const customStartTime = ref<string | null>(null)
 const customEndTime = ref<string | null>(null)
@@ -284,8 +288,7 @@ const applyRouteQueryToState = () => {
 
   platform.value = readQueryString(QUERY_KEYS.platform) || ''
 
-  const groupIdRaw = readQueryNumber(QUERY_KEYS.groupId)
-  groupId.value = typeof groupIdRaw === 'number' && groupIdRaw > 0 ? groupIdRaw : null
+  groupId.value = readQueryString(QUERY_KEYS.groupId) || null
 
   const nextMode = readQueryString(QUERY_KEYS.queryMode)
   if (nextMode && allowedQueryModes.has(nextMode as QueryMode)) {
@@ -323,7 +326,7 @@ const buildQueryFromState = () => {
 
   if (timeRange.value !== '1h') next[QUERY_KEYS.timeRange] = timeRange.value
   if (platform.value) next[QUERY_KEYS.platform] = platform.value
-  if (typeof groupId.value === 'number' && groupId.value > 0) next[QUERY_KEYS.groupId] = String(groupId.value)
+  if (groupId.value != null && String(groupId.value).trim()) next[QUERY_KEYS.groupId] = String(groupId.value)
   if (queryMode.value !== 'auto') next[QUERY_KEYS.queryMode] = queryMode.value
 
   return next
@@ -366,7 +369,7 @@ const loadingErrorTrend = ref(false)
 const errorDistribution = ref<OpsErrorDistributionResponse | null>(null)
 const loadingErrorDistribution = ref(false)
 
-const selectedErrorId = ref<number | null>(null)
+const selectedErrorId = ref<string | null>(null)
 const showErrorModal = ref(false)
 
 const showErrorDetails = ref(false)
@@ -375,8 +378,6 @@ const errorDetailsType = ref<'request' | 'upstream'>('request')
 const showRequestDetails = ref(false)
 const requestDetailsPreset = ref<OpsRequestDetailsPreset>({
   title: '',
-  kind: 'all',
-  sort: 'created_at_desc'
 })
 
 // 记录单条错误详情来自哪个列表，便于"返回列表"时重新打开对应弹窗并保留状态。
@@ -445,16 +446,13 @@ function handleThroughputSelectPlatform(nextPlatform: string) {
   groupId.value = null
 }
 
-function handleThroughputSelectGroup(nextGroupId: number) {
-  const id = Number.isFinite(nextGroupId) && nextGroupId > 0 ? nextGroupId : null
-  groupId.value = id
+function handleThroughputSelectGroup(nextGroupId: string | number) {
+  groupId.value = String(nextGroupId).trim() ? nextGroupId : null
 }
 
 function handleOpenRequestDetails(preset?: OpsRequestDetailsPreset) {
   const basePreset: OpsRequestDetailsPreset = {
     title: t('admin.ops.requestDetails.title'),
-    kind: 'all',
-    sort: 'created_at_desc'
   }
 
   requestDetailsPreset.value = { ...basePreset, ...(preset ?? {}) }
@@ -495,18 +493,11 @@ function onPlatformChange(v: string | number | boolean | null) {
 }
 
 function onGroupChange(v: string | number | boolean | null) {
-  if (v === null) {
+  if (v === null || typeof v === 'boolean') {
     groupId.value = null
     return
   }
-  if (typeof v === 'number') {
-    groupId.value = v > 0 ? v : null
-    return
-  }
-  if (typeof v === 'string') {
-    const n = Number.parseInt(v, 10)
-    groupId.value = Number.isFinite(n) && n > 0 ? n : null
-  }
+  groupId.value = String(v).trim() ? v : null
 }
 
 function onQueryModeChange(v: string | number | boolean | null) {
@@ -515,7 +506,7 @@ function onQueryModeChange(v: string | number | boolean | null) {
   queryMode.value = v as QueryMode
 }
 
-function openError(id: number) {
+function openError(id: string) {
   selectedErrorId.value = id
   // 记录来源列表，便于详情页"返回列表"。
   detailReturnTarget.value = showRequestDetails.value ? 'requestList' : showErrorDetails.value ? 'errorList' : null
@@ -548,7 +539,7 @@ function handleBackToList() {
 function buildApiParams() {
   const params: any = {
     platform: platform.value || undefined,
-    group_id: groupId.value ?? undefined,
+    group_id: legacyGroupId.value ?? undefined,
     mode: queryMode.value
   }
 
@@ -570,7 +561,7 @@ function buildApiParams() {
 function buildSwitchTrendParams() {
   const params: any = {
     platform: platform.value || undefined,
-    group_id: groupId.value ?? undefined,
+    group_id: legacyGroupId.value ?? undefined,
     mode: queryMode.value
   }
   const endTime = new Date()

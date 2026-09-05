@@ -85,10 +85,6 @@
                 @change="applyErrorFilters"
               />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[200px]">
-              <label class="input-label">{{ t('usage.errors.category') }}</label>
-              <Select v-model="errorFilter.category" :options="errorCategoryOptions" @change="applyErrorFilters" />
-            </div>
             <div class="w-full sm:w-auto sm:min-w-[180px]">
               <label class="input-label">{{ t('usage.errors.status') }}</label>
               <Select v-model="errorFilter.status_code" :options="errorStatusOptions" @change="applyErrorFilters" />
@@ -111,17 +107,9 @@
               <label class="input-label">{{ t('usage.type') }}</label>
               <Select v-model="filters.request_type" :options="requestTypeOptions" @change="applyFilters" />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[180px]">
-              <label class="input-label">{{ t('usage.compactionFilter') }}</label>
-              <Select v-model="filters.native_compaction_v2" :options="compactionOptions" @change="applyFilters" />
-            </div>
             <div class="w-full sm:w-auto sm:min-w-[200px]">
               <label class="input-label">{{ t('admin.usage.billingType') }}</label>
               <Select v-model="filters.billing_type" :options="billingTypeOptions" @change="applyFilters" />
-            </div>
-            <div class="w-full sm:w-auto sm:min-w-[200px]">
-              <label class="input-label">{{ t('admin.usage.billingMode') }}</label>
-              <Select v-model="filters.billing_mode" :options="billingModeOptions" @change="applyFilters" />
             </div>
           </div>
 
@@ -160,9 +148,6 @@
                 </button>
               </div>
             </div>
-            <button v-if="activeTab !== 'errors'" type="button" @click="exportToCSV" :disabled="exporting" class="btn btn-primary">
-              {{ exporting ? t('usage.exporting') : t('usage.exportCsv') }}
-            </button>
           </div>
         </div>
       </div>
@@ -181,36 +166,33 @@
           :data="usageLogs"
           :loading="loading"
           :columns="visibleColumns"
-          :server-side-sort="true"
+          :server-side-sort="false"
           :show-account-billing="false"
           :show-upstream-endpoint="false"
           default-sort-key="created_at"
           default-sort-order="desc"
-          @sort="handleSort"
           @ipGeoBatchFailed="handleIpGeoBatchFailed"
         />
 
-        <Pagination
-          v-if="pagination.total > 0"
+        <CursorPagination
+          v-if="usageLogs.length > 0 || pagination.page > 1"
           :page="pagination.page"
-          :total="pagination.total"
-          :page-size="pagination.page_size"
-          @update:page="handlePageChange"
-          @update:pageSize="handlePageSizeChange"
+          :has-more="usageHasMore"
+          :loading="loading"
+          @previous="goToPreviousUsagePage"
+          @next="goToNextUsagePage"
         />
       </template>
 
       <UserErrorRequestsTable
         v-else-if="errorViewEnabled"
         :rows="errorRows"
-        :total="errorTotal"
+        :has-more="errorHasMore"
         :loading="errorLoading"
         :page="errorPage"
-        :page-size="errorPageSize"
         :visible-column-keys="errVisibleColumnKeys"
-        @sort="onErrorSort"
-        @update:page="onErrorPage"
-        @update:pageSize="onErrorPageSize"
+        @previous="goToPreviousErrorPage"
+        @next="goToNextErrorPage"
         @ipGeoBatchFailed="handleIpGeoBatchFailed"
       />
     </div>
@@ -224,7 +206,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { keysAPI, usageAPI, userGroupsAPI } from '@/api'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import Pagination from '@/components/common/Pagination.vue'
+import CursorPagination from '@/components/user/CursorPagination.vue'
 import Select, { type SelectOption } from '@/components/common/Select.vue'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import UsageStatsCards from '@/components/admin/usage/UsageStatsCards.vue'
@@ -236,9 +218,7 @@ import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import Icon from '@/components/icons/Icon.vue'
 import UserErrorRequestsTable from '@/components/user/UserErrorRequestsTable.vue'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
-import { formatReasoningEffort } from '@/utils/format'
-import { getBillingModeLabel, getDisplayBillingMode as resolveDisplayBillingMode } from '@/utils/billingMode'
-import { resolveUsageRequestType, requestTypeToLegacyStream } from '@/utils/usageRequestType'
+import { requestTypeToLegacyStream } from '@/utils/usageRequestType'
 import type {
   ApiKey,
   EndpointStat,
@@ -273,17 +253,15 @@ const loading = ref(false)
 const chartsLoading = ref(false)
 const modelStatsLoading = ref(false)
 const endpointStatsLoading = ref(false)
-const exporting = ref(false)
 const errorRows = ref<UserErrorRequest[]>([])
 const errorLoading = ref(false)
 const errorPage = ref(1)
 const errorPageSize = ref(20)
-const errorSortBy = ref('created_at')
-const errorSortOrder = ref<'asc' | 'desc'>('desc')
-const errorTotal = ref(0)
-const errorFilter = ref<{ model: string | null; category: string; api_key_id: number | null; status_code: number | null }>({
+const errorHasMore = ref(false)
+const errorNextCursor = ref<string | null>(null)
+const errorCursors = ref<Array<string | undefined>>([undefined])
+const errorFilter = ref<{ model: string | null; api_key_id: string | number | null; status_code: number | null }>({
   model: '',
-  category: '',
   api_key_id: null,
   status_code: null,
 })
@@ -293,7 +271,7 @@ const errorKeyOptions = computed<SelectOption[]>(() => [
   ...apiKeys.value.map((k) => ({ value: k.id, label: k.name })),
 ])
 
-// 模型候选取自当前已加载错误中出现过的模型；creatable 允许输入任意片段做后端模糊。
+// 模型候选取自当前已加载错误；creatable 允许输入后端执行精确匹配的完整模型名。
 const errorModelOptions = computed<SelectOption[]>(() => {
   const seen = new Set<string>()
   const opts: SelectOption[] = []
@@ -306,13 +284,6 @@ const errorModelOptions = computed<SelectOption[]>(() => {
   return opts
 })
 
-const errorCategoryCodes = ['auth', 'rate_limit', 'quota', 'invalid_request', 'service_unavailable', 'upstream', 'internal', 'cyber']
-
-const errorCategoryOptions = computed<SelectOption[]>(() => [
-  { value: '', label: t('usage.errors.allCategories') },
-  ...errorCategoryCodes.map((c) => ({ value: c, label: t('usage.errors.categories.' + c) })),
-])
-
 // 状态码候选用固定常用列表(与管理端 UsageFilters 共用常量),不受当前页数据限制:
 // 后端 status_code 过滤对全量生效,若只列当前页出现过的码,用户就选不到仅在后续页的码。
 const errorStatusOptions = computed<SelectOption[]>(() => [
@@ -321,7 +292,7 @@ const errorStatusOptions = computed<SelectOption[]>(() => [
 ])
 
 const applyErrorFilters = () => {
-  errorPage.value = 1
+  resetErrorCursor()
   void loadErrors()
 }
 
@@ -369,12 +340,10 @@ const filters = ref<UsageQueryParams>({
 const pagination = reactive({
   page: 1,
   page_size: getPersistedPageSize(),
-  total: 0,
 })
-const sortState = reactive({
-  sort_by: 'created_at',
-  sort_order: 'desc' as 'asc' | 'desc',
-})
+const usageHasMore = ref(false)
+const usageNextCursor = ref<string | null>(null)
+const usageCursors = ref<Array<string | undefined>>([undefined])
 
 const granularityOptions = computed<SelectOption[]>(() => [
   { value: 'day', label: t('admin.dashboard.day') },
@@ -387,23 +356,11 @@ const requestTypeOptions = computed<SelectOption[]>(() => [
   { value: 'stream', label: t('usage.stream') },
   { value: 'sync', label: t('usage.sync') },
 ])
-const compactionOptions = computed<SelectOption[]>(() => [
-  { value: null, label: t('usage.allCompactionTypes') },
-  { value: true, label: t('usage.compactionOnly') },
-])
 const billingTypeOptions = computed<SelectOption[]>(() => [
   { value: null, label: t('admin.usage.allBillingTypes') },
   { value: 0, label: t('admin.usage.billingTypeBalance') },
   { value: 1, label: t('admin.usage.billingTypeSubscription') },
 ])
-const billingModeOptions = computed<SelectOption[]>(() => [
-  { value: null, label: t('admin.usage.allBillingModes') },
-  { value: 'token', label: t('admin.usage.billingModeToken') },
-  { value: 'per_request', label: t('admin.usage.billingModePerRequest') },
-  { value: 'image', label: t('admin.usage.billingModeImage') },
-  { value: 'video', label: t('admin.usage.billingModeVideo') },
-])
-
 const apiKeys = ref<ApiKey[]>([])
 const groups = ref<AvailableUserGroup[]>([])
 const modelOptionValues = ref<string[]>([])
@@ -432,12 +389,16 @@ const normalizedFilters = computed<UsageQueryParams>(() => {
   }
 })
 
-const buildUsageListParams = (page: number, pageSize: number): UsageQueryParams => ({
-  page,
-  page_size: pageSize,
-  ...normalizedFilters.value,
-  sort_by: sortState.sort_by,
-  sort_order: sortState.sort_order,
+const buildUsageListParams = () => ({
+  limit: pagination.page_size,
+  cursor: usageCursors.value[pagination.page - 1],
+  start_date: startDate.value,
+  end_date: endDate.value,
+  api_key_id: filters.value.api_key_id == null ? undefined : String(filters.value.api_key_id),
+  group_id: filters.value.group_id == null ? undefined : String(filters.value.group_id),
+  model: filters.value.model,
+  billing_type: filters.value.billing_type,
+  stream: normalizedFilters.value.stream,
 })
 
 const loadLogs = async () => {
@@ -446,12 +407,13 @@ const loadLogs = async () => {
   abortController = controller
   loading.value = true
   try {
-    const res = await usageAPI.query(buildUsageListParams(pagination.page, pagination.page_size), {
+    const res = await usageAPI.query(buildUsageListParams(), {
       signal: controller.signal,
     })
     if (!controller.signal.aborted) {
       usageLogs.value = res.items
-      pagination.total = res.total
+      usageHasMore.value = res.has_more
+      usageNextCursor.value = res.next_cursor
     }
   } catch (error: any) {
     if (error?.name !== 'AbortError' && error?.code !== 'ERR_CANCELED') {
@@ -538,7 +500,7 @@ const refreshModelOptions = (models: ModelStat[]) => {
 }
 
 const applyFilters = () => {
-  pagination.page = 1
+  resetUsageCursor()
   void loadLogs()
   void loadStats()
   void loadModelStats()
@@ -569,7 +531,7 @@ const resetFilters = () => {
   granularity.value = getGranularityForRange(range.start, range.end)
   applyFilters()
   if (activeTab.value === 'errors') {
-    errorFilter.value = { model: '', category: '', api_key_id: null, status_code: null }
+    errorFilter.value = { model: '', api_key_id: null, status_code: null }
     applyErrorFilters()
   }
 }
@@ -583,126 +545,28 @@ const onDateRangeChange = (range: { startDate: string; endDate: string; preset: 
   applyFilters()
 }
 
-const handlePageChange = (page: number) => {
-  pagination.page = page
+const resetUsageCursor = () => {
+  pagination.page = 1
+  usageCursors.value = [undefined]
+  usageHasMore.value = false
+  usageNextCursor.value = null
+}
+
+const goToPreviousUsagePage = () => {
+  if (pagination.page <= 1) return
+  pagination.page -= 1
   void loadLogs()
 }
 
-const handlePageSizeChange = (pageSize: number) => {
-  pagination.page_size = pageSize
-  pagination.page = 1
-  void loadLogs()
-}
-
-const handleSort = (key: string, order: 'asc' | 'desc') => {
-  sortState.sort_by = key
-  sortState.sort_order = order
-  pagination.page = 1
+const goToNextUsagePage = () => {
+  if (!usageHasMore.value || !usageNextCursor.value) return
+  usageCursors.value[pagination.page] = usageNextCursor.value
+  pagination.page += 1
   void loadLogs()
 }
 
 const handleIpGeoBatchFailed = () => {
   appStore.showError(t('usage.ipGeo.batchFailed'))
-}
-
-const getRequestTypeExportText = (log: UsageLog): string => {
-  const requestType = resolveUsageRequestType(log)
-  if (requestType === 'cyber') return 'Cyber'
-  if (requestType === 'live') return 'Live'
-  if (requestType === 'ws_v2') return 'WS'
-  if (requestType === 'stream') return 'Stream'
-  if (requestType === 'sync') return 'Sync'
-  return 'Unknown'
-}
-
-const getDisplayBillingMode = (
-  row: Pick<UsageLog, 'billing_mode' | 'image_count'> | null | undefined
-): string | null | undefined => resolveDisplayBillingMode(row)
-
-const escapeCSVValue = (value: unknown): string => {
-  if (value == null) return ''
-  const str = String(value)
-  const escaped = str.replace(/"/g, '""')
-  if (/^[=+\-@\t\r]/.test(str)) return `"\'${escaped}"`
-  if (/[,"\n\r]/.test(str)) return `"${escaped}"`
-  return str
-}
-
-const exportToCSV = async () => {
-  if (pagination.total === 0) {
-    appStore.showWarning(t('usage.noDataToExport'))
-    return
-  }
-  exporting.value = true
-  appStore.showInfo(t('usage.preparingExport'))
-  try {
-    const allLogs: UsageLog[] = []
-    const pageSize = 100
-    const totalPages = Math.ceil(pagination.total / pageSize)
-    for (let page = 1; page <= totalPages; page++) {
-      const response = await usageAPI.query(buildUsageListParams(page, pageSize))
-      allLogs.push(...response.items)
-    }
-    if (allLogs.length === 0) {
-      appStore.showWarning(t('usage.noDataToExport'))
-      return
-    }
-    const headers = [
-      'Time',
-      'API Key Name',
-      'Model',
-      'Reasoning Effort',
-      'Inbound Endpoint',
-      'IP Address',
-      'Type',
-      'Billing Mode',
-      'Input Tokens',
-      'Output Tokens',
-      'Cache Read Tokens',
-      'Cache Creation Tokens',
-      'Rate Multiplier',
-      'Billed Cost',
-      'Original Cost',
-      'First Token (ms)',
-      'Duration (ms)',
-    ]
-    const rows = allLogs.map((log) => [
-      log.created_at,
-      log.api_key?.name || '',
-      log.model,
-      formatReasoningEffort(log.reasoning_effort),
-      log.inbound_endpoint || '',
-      log.ip_address || '',
-      getRequestTypeExportText(log),
-      getBillingModeLabel(getDisplayBillingMode(log), t),
-      log.input_tokens,
-      log.output_tokens,
-      log.cache_read_tokens,
-      log.cache_creation_tokens,
-      log.rate_multiplier,
-      log.actual_cost.toFixed(8),
-      log.total_cost.toFixed(8),
-      log.first_token_ms ?? '',
-      log.duration_ms ?? '',
-    ].map(escapeCSVValue))
-    const csvContent = [
-      headers.map(escapeCSVValue).join(','),
-      ...rows.map((row) => row.join(',')),
-    ].join('\n')
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `usage_${startDate.value}_to_${endDate.value}.csv`
-    link.click()
-    window.URL.revokeObjectURL(url)
-    appStore.showSuccess(t('usage.exportSuccess'))
-  } catch (error) {
-    console.error('CSV Export failed:', error)
-    appStore.showError(t('usage.exportFailed'))
-  } finally {
-    exporting.value = false
-  }
 }
 
 const ALWAYS_VISIBLE = ['created_at']
@@ -711,7 +575,7 @@ const HIDDEN_COLUMNS_KEY = 'user-usage-hidden-columns'
 
 const allColumns = computed<Column[]>(() => [
   { key: 'api_key', label: t('usage.apiKeyFilter'), sortable: false },
-  { key: 'model', label: t('usage.model'), sortable: true },
+  { key: 'model', label: t('usage.model'), sortable: false },
   { key: 'reasoning_effort', label: t('usage.reasoningEffort'), sortable: false },
   { key: 'endpoint', label: t('usage.endpoint'), sortable: false },
   { key: 'ip_address', label: 'IP', sortable: false },
@@ -721,7 +585,7 @@ const allColumns = computed<Column[]>(() => [
   { key: 'tokens', label: t('usage.tokens'), sortable: false },
   { key: 'cost', label: t('usage.cost'), sortable: false },
   { key: 'latency', label: t('usage.latency'), sortable: false },
-  { key: 'created_at', label: t('usage.time'), sortable: true },
+  { key: 'created_at', label: t('usage.time'), sortable: false },
   { key: 'user_agent', label: t('usage.userAgent'), sortable: false },
 ])
 
@@ -825,32 +689,38 @@ const loadFilterOptions = async () => {
 }
 
 const resetErrorRows = () => {
-  errorPage.value = 1
+  resetErrorCursor()
   if (activeTab.value === 'errors') {
     void loadErrors()
   } else {
     errorRows.value = []
-    errorTotal.value = 0
   }
+}
+
+const resetErrorCursor = () => {
+  errorPage.value = 1
+  errorCursors.value = [undefined]
+  errorHasMore.value = false
+  errorNextCursor.value = null
 }
 
 const loadErrors = async () => {
   errorLoading.value = true
   try {
     const resp = await usageAPI.listMyErrorRequests({
-      page: errorPage.value,
-      page_size: errorPageSize.value,
+      limit: errorPageSize.value,
+      cursor: errorCursors.value[errorPage.value - 1],
       start_date: startDate.value,
       end_date: endDate.value,
       model: (errorFilter.value.model ?? '').trim() || undefined,
-      category: errorFilter.value.category || undefined,
-      api_key_id: errorFilter.value.api_key_id ?? undefined,
+      api_key_id: errorFilter.value.api_key_id == null
+        ? undefined
+        : String(errorFilter.value.api_key_id),
       status_code: errorFilter.value.status_code ?? undefined,
-      sort_by: errorSortBy.value,
-      sort_order: errorSortOrder.value,
     })
     errorRows.value = resp.items
-    errorTotal.value = resp.total
+    errorHasMore.value = resp.has_more
+    errorNextCursor.value = resp.next_cursor
   } catch (error) {
     console.error('[UsageView] loadErrors failed:', error)
     appStore.showError(t('usage.errors.failedToLoad'))
@@ -859,21 +729,16 @@ const loadErrors = async () => {
   }
 }
 
-const onErrorSort = (sortBy: string, sortOrder: 'asc' | 'desc') => {
-  errorSortBy.value = sortBy
-  errorSortOrder.value = sortOrder
-  errorPage.value = 1
+const goToPreviousErrorPage = () => {
+  if (errorPage.value <= 1) return
+  errorPage.value -= 1
   void loadErrors()
 }
 
-const onErrorPage = (page: number) => {
-  errorPage.value = page
-  void loadErrors()
-}
-
-const onErrorPageSize = (pageSize: number) => {
-  errorPageSize.value = pageSize
-  errorPage.value = 1
+const goToNextErrorPage = () => {
+  if (!errorHasMore.value || !errorNextCursor.value) return
+  errorCursors.value[errorPage.value] = errorNextCursor.value
+  errorPage.value += 1
   void loadErrors()
 }
 

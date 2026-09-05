@@ -46,6 +46,11 @@ import {
 } from '../commercial/registration'
 import { initialPlatformQuotaStatements } from '../user/platform-quotas'
 import { requireRegistrationEmailSuffixAllowed } from './email-policy'
+import {
+  prepareAuthSourceGrant,
+  recoverPendingAuthSourceGrants,
+  settleAuthSourceGrant,
+} from './source-entitlements'
 
 type AuthBindings = { Bindings: Env }
 
@@ -170,6 +175,14 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       updated_at_ms: now,
     }
     const issued = await issueSession(context.env, user, now)
+    const sourceGrant = await prepareAuthSourceGrant(
+      context.env,
+      user.id,
+      'email',
+      'signup',
+      { kind: 'user', value: user.id },
+      now,
+    )
     const emailHash = await sha256Hex(email)
     try {
       const statements: D1PreparedStatement[] = []
@@ -193,6 +206,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
         ),
       )
       statements.push(...initialPlatformQuotaStatements(context.env, user.id, now))
+      statements.push(...sourceGrant.statements)
       if (registrationChallenge !== null) statements.push(registrationChallenge.claimStatement)
       statements.push(...commercial.afterUserStatements)
       statements.push(
@@ -220,7 +234,13 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       if (commercialError !== null) throw commercialError
       throw error
     }
-    return controlSuccess(authPayload(user, issued), 201)
+    await settleAuthSourceGrant(context.env, sourceGrant.grantId)
+    const grantedUser = sourceGrant.enabled ? {
+      ...user,
+      balance_micros: user.balance_micros + sourceGrant.balanceMicros,
+      concurrency: sourceGrant.concurrency,
+    } : user
+    return controlSuccess(authPayload(grantedUser, issued), 201)
   } catch (error) {
     return authControlError(normalizeAuthError(error))
   }
@@ -242,7 +262,7 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
     const settings = await publicAuthSettings(context.env)
     await verifyTurnstile(context, settings, body.turnstile_token)
     await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
-    const user = await findUserByEmail(context.env, email)
+    let user = await findUserByEmail(context.env, email)
     if (user === null || user.password_credential === null) {
       // Spend one password-derivation operation for missing identities so the
       // endpoint does not expose an obvious fast account-enumeration path.
@@ -257,6 +277,12 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
       throw invalidCredentials()
     }
     if (user.status !== 'active') {
+      throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
+    }
+
+    await recoverPendingAuthSourceGrants(context.env, user.id)
+    user = await findUserById(context.env, user.id)
+    if (user === null || user.status !== 'active') {
       throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
     }
 
@@ -732,7 +758,7 @@ async function findUserByEmail(env: Env, email: string): Promise<UserRow | null>
   ).bind(email).first<UserRow>()
 }
 
-async function findUserById(env: Env, id: string): Promise<UserRow | null> {
+export async function findUserById(env: Env, id: string): Promise<UserRow | null> {
   return env.DB.prepare(
     `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, auth_version, password_credential,

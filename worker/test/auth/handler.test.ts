@@ -92,9 +92,21 @@ class AuthDatabase {
     this.events?.push('db:read')
     this.reads.push({ query, values })
     if (query.includes('FROM system_settings')) return null
+    if (query.includes('FROM auth_source_defaults')) {
+      return {
+        balance_micros: 0,
+        concurrency: 5,
+        grant_on_signup: 0,
+        grant_on_first_bind: 0,
+      }
+    }
     if (query.includes('FROM users') && query.includes('WHERE email = ?')) {
       const email = String(values[0])
       const user = Array.from(this.users.values()).find((value) => value.email === email)
+      return user === undefined ? null : { ...user }
+    }
+    if (query.includes('FROM users') && query.includes('WHERE id = ?')) {
+      const user = this.users.get(String(values[0]))
       return user === undefined ? null : { ...user }
     }
     if (query.includes('FROM user_sessions s') && query.includes('s.access_token_hash = ?')) {
@@ -119,7 +131,10 @@ class AuthDatabase {
 
   all(query: string): Record<string, unknown>[] {
     this.reads.push({ query, values: [] })
-    if (query.includes('FROM auth_identities') || query.includes('FROM oauth_providers')) return []
+    if (
+      query.includes('FROM auth_identities') || query.includes('FROM oauth_providers') ||
+      query.includes('FROM auth_source_entitlement_grants')
+    ) return []
     throw new Error(`Unexpected all query: ${query}`)
   }
 

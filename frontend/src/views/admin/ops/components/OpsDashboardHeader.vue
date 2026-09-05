@@ -9,6 +9,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { adminAPI } from '@/api'
 import { opsAPI, type OpsDashboardOverview, type OpsMetricThresholds, type OpsRealtimeTrafficSummary } from '@/api/admin/ops'
 import type { OpsRequestDetailsPreset } from './OpsRequestDetailsModal.vue'
+import type { GroupId } from '@/types'
 import { useAdminSettingsStore } from '@/stores'
 import { formatNumber } from '@/utils/format'
 import { formatMemorySizeMB } from '../utils/opsFormatters'
@@ -18,7 +19,7 @@ type RealtimeWindow = '1min' | '5min' | '30min' | '1h'
 interface Props {
   overview?: OpsDashboardOverview | null
   platform: string
-  groupId: number | null
+  groupId: GroupId | null
   timeRange: string
   queryMode: string
   loading: boolean
@@ -33,7 +34,7 @@ interface Props {
 
 interface Emits {
   (e: 'update:platform', value: string): void
-  (e: 'update:group', value: number | null): void
+  (e: 'update:group', value: GroupId | null): void
   (e: 'update:timeRange', value: string): void
   (e: 'update:queryMode', value: string): void
   (e: 'update:customTimeRange', startTime: string, endTime: string): void
@@ -106,7 +107,7 @@ function formatCustomTimeRangeLabel(startTime: string, endTime: string): string 
   return `${formatDate(start)} ~ ${formatDate(end)}`
 }
 
-const groups = ref<Array<{ id: number; name: string; platform: string }>>([])
+const groups = ref<Array<{ id: GroupId; name: string; platform: string }>>([])
 
 const platformOptions = computed(() => [
   { value: '', label: t('common.all') },
@@ -168,8 +169,7 @@ function handleGroupChange(val: string | number | boolean | null) {
     emit('update:group', null)
     return
   }
-  const id = typeof val === 'number' ? val : Number.parseInt(String(val), 10)
-  emit('update:group', Number.isFinite(id) && id > 0 ? id : null)
+  emit('update:group', String(val).trim() ? val : null)
 }
 
 function handleTimeRangeChange(val: string | number | boolean | null) {
@@ -286,7 +286,7 @@ function makeZeroRealtimeTrafficSummary(): OpsRealtimeTrafficSummary {
     start_time: now,
     end_time: now,
     platform: props.platform,
-    group_id: props.groupId,
+    group_id: typeof props.groupId === 'number' ? props.groupId : undefined,
     qps: { current: 0, peak: 0, avg: 0 },
     tps: { current: 0, peak: 0, avg: 0 }
   }
@@ -300,7 +300,11 @@ async function loadRealtimeTrafficSummary() {
   }
   realtimeTrafficLoading.value = true
   try {
-    const res = await opsAPI.getRealtimeTrafficSummary(realtimeWindow.value, props.platform, props.groupId)
+    const res = await opsAPI.getRealtimeTrafficSummary(
+      realtimeWindow.value,
+      props.platform,
+      typeof props.groupId === 'number' ? props.groupId : null,
+    )
     if (res && res.enabled === false) {
       adminSettingsStore.setOpsRealtimeMonitoringEnabledLocal(false)
     }
@@ -1256,7 +1260,7 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
-              @click="openDetails({ title: t('admin.ops.requestDetails.title'), kind: 'error' })"
+              @click="openErrorDetails('request')"
             >
               {{ t('admin.ops.requestDetails.details') }}
             </button>
@@ -1282,14 +1286,6 @@ function handleToolbarRefresh() {
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.latencyDuration') }}</span>
               <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.latency')" />
             </div>
-            <button
-              v-if="!props.fullscreen"
-              class="text-[10px] font-bold text-blue-500 hover:underline"
-              type="button"
-              @click="openDetails({ title: t('admin.ops.latencyDuration'), sort: 'duration_desc' })"
-            >
-              {{ t('admin.ops.requestDetails.details') }}
-            </button>
           </div>
           <div class="mt-2 flex items-baseline gap-2">
             <div class="text-3xl font-black text-gray-900 dark:text-white">
@@ -1333,14 +1329,6 @@ function handleToolbarRefresh() {
               <span class="text-[10px] font-bold uppercase text-gray-400">TTFT</span>
               <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.ttft')" />
             </div>
-            <button
-              v-if="!props.fullscreen"
-              class="text-[10px] font-bold text-blue-500 hover:underline"
-              type="button"
-              @click="openDetails({ title: t('admin.ops.ttftLabel'), sort: 'duration_desc' })"
-            >
-              {{ t('admin.ops.requestDetails.details') }}
-            </button>
           </div>
           <div class="mt-2 flex items-baseline gap-2">
             <div class="text-3xl font-black" :class="getThresholdColorClass(getTTFTThresholdLevel(ttftP99Ms))">

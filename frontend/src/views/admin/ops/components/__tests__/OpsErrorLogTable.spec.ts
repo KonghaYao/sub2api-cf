@@ -14,11 +14,11 @@ vi.mock('vue-i18n', async (importOriginal) => {
 })
 
 const TooltipStub = { template: '<div><slot /></div>' }
-const PaginationStub = { template: '<div class="pagination-stub" />' }
+const CursorPaginationStub = { template: '<div class="pagination-stub" />' }
 
 function mountTable(row: Partial<OpsErrorLog>) {
   const base = {
-    id: 1,
+    id: 'err_opaque',
     created_at: '2026-06-05T23:59:50Z',
     phase: 'upstream',
     type: '',
@@ -39,8 +39,8 @@ function mountTable(row: Partial<OpsErrorLog>) {
   } as OpsErrorLog
 
   return mount(OpsErrorLogTable, {
-    props: { rows: [base], total: 1, loading: false, page: 1, pageSize: 20 },
-    global: { stubs: { 'el-tooltip': TooltipStub, Pagination: PaginationStub } },
+    props: { rows: [base], hasMore: false, loading: false, page: 1 },
+    global: { stubs: { 'el-tooltip': TooltipStub, CursorPagination: CursorPaginationStub } },
   })
 }
 

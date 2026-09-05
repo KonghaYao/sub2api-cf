@@ -429,6 +429,18 @@ export default {
       detailCoordinates: 'Coordinates',
     },
     tabs: { usage: 'Usage', errors: 'Error Requests', ranking: 'User Ranking' },
+    explorer: {
+      paginationLabel: 'Request history pages',
+      previous: 'Previous',
+      next: 'Next',
+      page: 'Page {page}',
+      payload: {
+        redacted: 'Sensitive fields were irreversibly redacted before storage.',
+        missing: 'The diagnostic payload was not stored.',
+        expired: 'The diagnostic payload has expired.',
+        pending_recovery: 'The diagnostic payload is pending recovery.',
+      },
+    },
     errors: {
       time: 'Time', model: 'Model', endpoint: 'Endpoint', status: 'Status',
       category: 'Category', platform: 'Platform', message: 'Message',
@@ -445,6 +457,7 @@ export default {
         responseBody: 'Response Body',
         upstreamStatus: 'Upstream Status',
         loadFailed: 'Failed to load detail, please try again',
+        payloadUnavailable: 'Payload unavailable',
       },
     },
   },

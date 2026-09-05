@@ -19,6 +19,12 @@ import {
   publicUser,
   type UserRow,
 } from './handler'
+import {
+  findAuthSourceGrantId,
+  prepareAuthSourceGrant,
+  recoverPendingAuthSourceGrants,
+  settleAuthSourceGrant,
+} from './source-entitlements'
 
 type OAuthBindings = { Bindings: Env }
 type OAuthContext = Context<OAuthBindings>
@@ -968,7 +974,12 @@ async function completeIdentityLogin(
   if (identity === null) {
     return registerIdentityLogin(context, config, flow, profile, providerKey)
   }
-  const user = await findUser(context.env, identity.user_id)
+  let user = await findUser(context.env, identity.user_id)
+  if (user === null || user.status !== 'active') {
+    throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
+  }
+  await recoverPendingAuthSourceGrants(context.env, user.id)
+  user = await findUser(context.env, identity.user_id)
   if (user === null || user.status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
@@ -1055,6 +1066,14 @@ async function registerIdentityLogin(
     user,
     context.req.header('user-agent') ?? '',
   )
+  const sourceGrant = await prepareAuthSourceGrant(
+    context.env,
+    user.id,
+    config.provider,
+    'signup',
+    { kind: 'user', value: user.id },
+    now,
+  )
   try {
     await context.env.DB.batch([
       ...(commercial.claimStatement === undefined ? [] : [commercial.claimStatement]),
@@ -1090,6 +1109,7 @@ async function registerIdentityLogin(
         now,
       ),
       ...initialPlatformQuotaStatements(context.env, user.id, now),
+      ...sourceGrant.statements,
       ...commercial.afterUserStatements,
       ...prepared.statements,
       auditInsert(context.env, user.id, prepared.sessionId, 'auth.identity.register', config.provider, now),
@@ -1106,6 +1126,7 @@ async function registerIdentityLogin(
     if (commercialError !== null) throw commercialError
     throw error
   }
+  await settleAuthSourceGrant(context.env, sourceGrant.grantId)
   return oauthLoginRedirect(config.frontend_callback_path, flow.redirect_to, prepared.payload)
 }
 
@@ -1125,6 +1146,14 @@ async function completeIdentityLink(
   const now = Date.now()
   if (existing === null) {
     const identityId = crypto.randomUUID()
+    const sourceGrant = await prepareAuthSourceGrant(
+      context.env,
+      userId,
+      config.provider,
+      'first_bind',
+      { kind: 'identity', value: identityId },
+      now,
+    )
     try {
       const results = await context.env.DB.batch([
         context.env.DB.prepare(
@@ -1157,6 +1186,7 @@ async function completeIdentityLink(
           now,
           flow.target_auth_version,
         ),
+        ...sourceGrant.statements,
         auditInsertIfIdentityExists(
           context.env,
           identityId,
@@ -1181,6 +1211,12 @@ async function completeIdentityLink(
       }
       throw error
     }
+    await settleAuthSourceGrant(context.env, sourceGrant.grantId)
+  } else {
+    await settleAuthSourceGrant(
+      context.env,
+      await findAuthSourceGrantId(context.env, userId, config.provider, 'first_bind'),
+    )
   }
   const separator = flow.redirect_to.includes('?') ? '&' : '?'
   return new Response(null, {
