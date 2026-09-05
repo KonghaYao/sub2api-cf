@@ -1,9 +1,14 @@
 import { env, exports } from 'cloudflare:workers'
 import { describe, expect, it, vi } from 'vitest'
 
-async function request(path: string, body: Record<string, unknown>, headers: Record<string, string>): Promise<Response> {
+async function request(
+  path: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  method = 'POST',
+): Promise<Response> {
   return exports.default.fetch(new Request(`https://worker.e2e.invalid${path}`, {
-    method: 'POST',
+    method,
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   }))
@@ -27,7 +32,7 @@ describe('Synchronous Images Cloudflare binding E2E', () => {
     }, { authorization: `Bearer ${env.ADMIN_TOKEN}` })
     expect(bootstrap.status, await bootstrap.clone().text()).toBe(201)
     const result = await bootstrap.json() as { data: {
-      user_id: string; group_id: string; account_id: string; api_key_id: string; api_key: string
+      user_id: string; group_id: string; account_id: string; api_key_id: string; api_key: string; admin_session: string
     } }
     const setup = result.data
     const now = Date.now()
@@ -63,5 +68,67 @@ describe('Synchronous Images Cloudflare binding E2E', () => {
         upstream_endpoint: '/v1/images/generations',
       })
     }, { timeout: 10_000, interval: 25 })
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO admin_user_roles (
+         user_id, role_id, active, control_version, assigned_by_user_id, assigned_at_ms
+       ) VALUES (?, 'admin', 1, 1, NULL, ?)`,
+    ).bind(setup.user_id, Date.now()).run()
+    const adminHeaders = {
+      authorization: `Bearer ${setup.admin_session}`,
+      'idempotency-key': 'sync-images-codex-binding-e2e',
+    }
+    const groupResponse = await request('/api/v1/admin/groups', {
+      name: 'Codex Images Binding Group', platform: 'codex', allow_image_generation: true,
+      image_rate_independent: true, image_rate_multiplier_ppm: 1_000_000,
+      image_price_1k_micros: 100_000, image_price_2k_micros: 200_000, image_price_4k_micros: 400_000,
+    }, adminHeaders)
+    expect(groupResponse.status, await groupResponse.clone().text()).toBe(201)
+    const codexGroup = await groupResponse.json() as { data: { id: string } }
+    const modelResponse = await request('/api/v1/admin/models', {
+      public_name: 'gpt-image-codex-binding', upstream_name: 'gpt-image-codex-upstream',
+      platform: 'codex', endpoint: 'responses', image_generation: true,
+    }, { ...adminHeaders, 'idempotency-key': 'sync-images-codex-model-binding-e2e' })
+    expect(modelResponse.status, await modelResponse.clone().text()).toBe(201)
+    const codexModel = await modelResponse.json() as { data: { id: string } }
+    const linkResponse = await request(
+      `/api/v1/admin/groups/${codexGroup.data.id}/models/${codexModel.data.id}`,
+      { expected_control_version: 0 },
+      { ...adminHeaders, 'idempotency-key': 'sync-images-codex-link-binding-e2e' },
+      'PUT',
+    )
+    expect(linkResponse.status, await linkResponse.clone().text()).toBe(201)
+    const priceResponse = await request(
+      `/api/v1/admin/groups/${codexGroup.data.id}/models/${codexModel.data.id}/prices`,
+      {
+        expected_control_version: 0, input_micros_per_million: 0, output_micros_per_million: 0,
+        per_request_micros: 0, minimum_reservation_micros: 1,
+      },
+      { ...adminHeaders, 'idempotency-key': 'sync-images-codex-price-binding-e2e' },
+    )
+    expect(priceResponse.status, await priceResponse.clone().text()).toBe(201)
+    const accountResponse = await request('/api/v1/admin/accounts', {
+      name: 'Codex Images Binding Account', platform: 'codex', protocol: 'codex',
+      base_url: 'https://upstream.e2e.invalid', auth_scheme: 'bearer',
+      provider_config: { account_id: 'workspace-binding' }, api_key: 'codex-binding-secret',
+      enabled: true, max_concurrency: 2,
+      group_links: [{ group_id: codexGroup.data.id, priority: 0, weight: 1 }],
+      model_capabilities: [{
+        model_id: codexModel.data.id, chat_completions: false, responses: true, image_generation: true,
+      }],
+    }, { ...adminHeaders, 'idempotency-key': 'sync-images-codex-account-binding-e2e' })
+    expect(accountResponse.status, await accountResponse.clone().text()).toBe(201)
+    await env.DB.prepare('UPDATE api_keys SET group_id = ?, updated_at_ms = ? WHERE id = ?')
+      .bind(codexGroup.data.id, Date.now(), setup.api_key_id).run()
+
+    const oauthGenerated = await request('/v1/images/generations', {
+      model: 'gpt-image-codex-binding', prompt: 'binding oauth image', response_format: 'url',
+    }, { authorization: `Bearer ${setup.api_key}` })
+    expect(oauthGenerated.status, await oauthGenerated.clone().text()).toBe(200)
+    await expect(oauthGenerated.json()).resolves.toMatchObject({
+      created: 1_710_000_010,
+      model: 'gpt-image-codex-binding',
+      data: [{ url: expect.stringMatching(/^data:image\/png;base64,iVBOR/) }],
+    })
   })
 })

@@ -32,6 +32,22 @@ export default defineConfig(async () => {
                 }],
               })
             }
+            if (url.pathname === '/backend-api/codex/responses') {
+              const body = await request.json() as Record<string, unknown>
+              const tool = Array.isArray(body.tools) ? body.tools[0] as Record<string, unknown> : null
+              if (
+                body.model !== 'gpt-5.4-mini' || body.stream !== true || body.store !== false ||
+                tool?.type !== 'image_generation' || tool.action !== 'generate' ||
+                tool.model !== 'gpt-image-codex-upstream'
+              ) return Response.json({ error: 'unexpected Codex image request', body }, { status: 422 })
+              const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+              return new Response([
+                'event: response.completed',
+                `data: {"type":"response.completed","response":{"created_at":1710000010,"status":"completed","output":[{"id":"ig_codex_binding","type":"image_generation_call","status":"completed","result":"${png}","output_format":"png"}]}}`,
+                '',
+                '',
+              ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
+            }
             if (url.pathname === '/v1/responses') {
               const body = await request.json() as Record<string, unknown>
               if (body.model === 'gpt-bridge-failover-upstream') {

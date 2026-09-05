@@ -1,10 +1,10 @@
-# Synchronous OpenAI Images migration contract (v0.22)
+# Synchronous OpenAI Images migration contract (v0.23)
 
 This document is the source-backed contract for migrating the synchronous OpenAI-compatible Images endpoints to Cloudflare Workers without a Container. The Go handler/service and their tests define the behavioral baseline; committed Worker v0.21 gateway/media code defines the implementation constraints. “External” below means behavior visible to callers or required to preserve correct routing/accounting.
 
 ## Current Worker boundary
 
-At the v0.21 baseline, synchronous Images is **not implemented and must not be advertised as compatible**:
+The historical v0.21 baseline below explains the gaps this contract was written against. v0.22 shipped direct API-key synchronous Images; v0.23 adds Codex OAuth-like Responses execution, bounded Responses-SSE conversion, buffered Images JSON, protocol-compatible collected Images SSE, and semantic retry/failover decisions. Live incremental forwarding, persisted setup-token identity, adapter-specific account-model capability, and direct-provider streaming are still not complete compatibility.
 
 - `app.ts` registers only the batch `/v1/images/batches` family, not synchronous generations/edits ([worker/src/app.ts:735](../src/app.ts#L735)).
 - The generic gateway endpoint union contains only Chat Completions, Responses, and Embeddings ([worker/src/gateway/types.ts:7](../src/gateway/types.ts#L7)); provider operations have no OpenAI Images operation ([worker/src/gateway/providers/index.ts:10](../src/gateway/providers/index.ts#L10)).

@@ -9,7 +9,7 @@ const RAW_KEY = 'sk-sync-image-test'
 const PEPPER = 'sync-image-pepper-value-at-least-32-bytes'
 const MASTER_KEY = 'sync-image-master-key-value-at-least-32-bytes'
 
-async function fixture() {
+async function fixture(platform: 'openai' | 'codex' = 'openai') {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
   const now = Date.now()
@@ -20,7 +20,7 @@ async function fixture() {
     id,name,platform,enabled,rate_multiplier_ppm,group_type,is_exclusive,
     allow_image_generation,image_rate_independent,image_rate_multiplier_ppm,
     image_price_1k_micros,image_price_2k_micros,image_price_4k_micros,created_at_ms,updated_at_ms
-  ) VALUES ('group-1','Images','openai',1,1000000,'standard',0,1,1,1000000,
+  ) VALUES ('group-1','Images','${platform}',1,1000000,'standard',0,1,1,1000000,
     100000,200000,400000,?,?)`).run(now, now)
   raw.prepare(`INSERT INTO api_keys (
     id,user_id,key_hash,name,enabled,group_id,key_prefix,created_at_ms,updated_at_ms
@@ -29,7 +29,7 @@ async function fixture() {
   const encrypted = await encryptCredential({ api_key: 'upstream-secret' }, MASTER_KEY, 'test/account-1/secret-1/1')
   raw.exec(`INSERT INTO models (
     id,platform,public_name,upstream_name,endpoint,image_generation,enabled,created_at_ms,updated_at_ms
-  ) VALUES ('model-1','openai','gpt-image-2','gpt-image-upstream','responses',1,1,1,1);
+  ) VALUES ('model-1','${platform}','gpt-image-2','gpt-image-upstream','responses',1,1,1,1);
   INSERT INTO group_models (group_id,model_id,enabled,catalog_visible,created_at_ms,updated_at_ms)
     VALUES ('group-1','model-1',1,1,1,1);
   INSERT INTO model_prices (
@@ -39,7 +39,10 @@ async function fixture() {
   INSERT INTO accounts (
     id,platform,name,credential_ref,enabled,max_concurrency,created_at_ms,updated_at_ms,
     protocol,base_url,auth_scheme,health_status
-  ) VALUES ('account-1','openai','Image upstream','secret-1',1,2,1,1,'openai','https://api.openai.com','bearer','healthy');
+  ) VALUES ('account-1','${platform}','Image upstream','secret-1',1,2,1,1,'${platform}',
+    '${platform === 'codex' ? 'https://chatgpt.example.test' : 'https://api.openai.com'}','bearer','healthy');
+  UPDATE accounts SET provider_config_json = '${platform === 'codex' ? '{"account_id":"workspace-123"}' : '{}'}'
+    WHERE id = 'account-1';
   INSERT INTO account_secrets (
     id,account_id,key_version,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms
   ) VALUES ('secret-1','account-1',1,'${encrypted.nonce_b64}','${encrypted.ciphertext_b64}',1,1);
@@ -93,7 +96,7 @@ async function fixture() {
     EVENTS_QUEUE: { send: vi.fn() } as unknown as Queue,
     ASSETS: {} as Fetcher, SYNC_IMAGE_BILLING: billing, SYNC_IMAGE_UPSTREAM_FETCH: upstreamFetch,
   }
-  return { env, stateCalls, reserve, settle, cancel, upstreamFetch, upstreamBodies }
+  return { raw, env, stateCalls, reserve, settle, cancel, upstreamFetch, upstreamBodies }
 }
 
 function app() {
@@ -277,7 +280,103 @@ describe('synchronous image handler', () => {
     expect(test.stateCalls.filter((path) => path === '/renew').length).toBeGreaterThanOrEqual(2)
   })
 
-  it('rejects streaming before reserving or calling upstream', async () => {
+  it('executes a Codex OAuth account through Responses and returns buffered Images JSON', async () => {
+    const test = await fixture('codex')
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.output_item.done',
+      `data: {"type":"response.output_item.done","item":{"id":"ig_worker","type":"image_generation_call","status":"completed","result":"${png}","output_format":"png"}}`,
+      '',
+      'event: response.completed',
+      `data: {"type":"response.completed","response":{"created_at":1710000000,"status":"completed","output":[{"id":"ig_worker","type":"image_generation_call","status":"completed","result":"${png}","output_format":"png"}],"tool_usage":{"image_gen":{"input_tokens":12,"output_tokens":99,"output_tokens_details":{"image_tokens":99},"images":1}}}}`,
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${RAW_KEY}`,
+        'content-type': 'application/json',
+        'accept-language': 'zh-CN',
+      },
+      body: JSON.stringify({ prompt: '画一个杯子', response_format: 'url' }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      created: 1_710_000_000,
+      model: 'gpt-image-2',
+      data: [{ url: `data:image/png;base64,${png}` }],
+    })
+    const call = test.upstreamFetch.mock.calls[0]
+    expect(call?.[0]).toBe('https://chatgpt.example.test/backend-api/codex/responses')
+    const headers = new Headers(call?.[1]?.headers)
+    expect(headers.get('authorization')).toBe('Bearer upstream-secret')
+    expect(headers.get('chatgpt-account-id')).toBe('workspace-123')
+    expect(headers.get('accept-language')).toBe('zh-CN')
+    expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
+      model: 'gpt-5.4-mini',
+      stream: true,
+      store: false,
+      tools: [{ type: 'image_generation', action: 'generate', model: 'gpt-image-upstream' }],
+    })
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ accountId: 'account-1', amountMicros: 100_000 }),
+    }))
+  })
+
+  it('returns transformed Images SSE for a Codex OAuth streaming request and settles it', async () => {
+    const test = await fixture('codex')
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.image_generation_call.partial_image',
+      'data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA==","partial_image_index":0,"output_format":"png"}',
+      '',
+      'event: response.completed',
+      `data: {"type":"response.completed","response":{"created_at":1710000002,"status":"completed","output":[{"id":"ig_stream","type":"image_generation_call","status":"completed","result":"${png}","output_format":"png"}]}}`,
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat', stream: true, response_format: 'b64_json' }),
+    }, test.env as never)
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const body = await response.text()
+    expect(body).toContain('event: image_generation.partial_image')
+    expect(body).toContain('event: image_generation.completed')
+    expect(body).toContain(png)
+    expect(test.reserve).toHaveBeenCalledOnce()
+    expect(test.settle).toHaveBeenCalledOnce()
+  })
+
+  it('retries a completed-without-image Responses result on the same account before switching', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch
+      .mockResolvedValueOnce(new Response([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+      .mockResolvedValueOnce(new Response([
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_retry","type":"image_generation_call","status":"completed","result":"aW1hZ2U=","output_format":"png"}]}}',
+        '',
+        '',
+      ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'retry me' }),
+    }, test.env as never)
+    expect(test.upstreamFetch).toHaveBeenCalledTimes(2)
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.settle).toHaveBeenCalledOnce()
+  })
+
+  it('still rejects direct-provider streaming before admission and billing', async () => {
     const test = await fixture()
     const response = await app().request('/v1/images/generations', {
       method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
