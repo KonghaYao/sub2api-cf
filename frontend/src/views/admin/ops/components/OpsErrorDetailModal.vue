@@ -124,6 +124,56 @@
       </div>
 
       <div
+        data-testid="error-resolution-panel"
+        class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-800"
+      >
+        <div>
+          <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
+            {{ t('admin.ops.errorDetail.resolution') }}
+          </div>
+          <div class="mt-1 text-sm font-semibold text-gray-900 dark:text-white">
+            {{ detail.resolved ? t('admin.ops.errorDetails.resolved') : t('admin.ops.errorDetails.unresolved') }}
+          </div>
+          <div v-if="detail.resolved" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ detail.resolved_by_user_id || '—' }} · {{ detail.resolved_at ? formatDateTime(detail.resolved_at) : '—' }}
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn"
+          :class="detail.resolved ? 'btn-secondary' : 'btn-primary'"
+          data-testid="error-resolution-action"
+          :disabled="resolutionLoading"
+          @click="performResolutionAction"
+        >
+          {{ detail.resolved ? t('admin.ops.errorDetail.markUnresolved') : t('admin.ops.errorDetail.markResolved') }}
+        </button>
+      </div>
+
+      <div
+        v-if="detail.resolution_audit?.length"
+        data-testid="error-resolution-audit"
+        class="rounded-xl bg-gray-50 p-4 dark:bg-dark-900"
+      >
+        <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
+          {{ t('admin.ops.errorDetail.resolutionAudit') }}
+        </div>
+        <div class="mt-3 space-y-2">
+          <div
+            v-for="event in detail.resolution_audit"
+            :key="event.id"
+            class="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600 dark:text-gray-300"
+          >
+            <span>{{ event.resolved ? t('admin.ops.errorDetails.resolved') : t('admin.ops.errorDetails.unresolved') }}</span>
+            <span>{{ event.actor_user_id }} · {{ formatDateTime(event.occurred_at) }}</span>
+          </div>
+        </div>
+        <div v-if="detail.resolution_audit_truncated" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+          {{ t('admin.ops.errorDetail.resolutionAuditTruncated') }}
+        </div>
+      </div>
+
+      <div
         v-if="detail.payload.redacted"
         class="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200"
       >
@@ -227,6 +277,7 @@ interface Props {
 interface Emits {
   (e: 'update:show', value: boolean): void
   (e: 'back'): void
+  (e: 'changed'): void
 }
 
 const props = defineProps<Props>()
@@ -236,9 +287,14 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const loading = ref(false)
+const resolutionLoading = ref(false)
 const detail = ref<OpsErrorDetail | null>(null)
 
 const showUpstreamList = computed(() => props.errorType === 'request')
+const effectiveErrorKind = computed<'request' | 'upstream'>(() => {
+  if (props.errorType !== undefined) return props.errorType
+  return isUpstreamError(detail.value) ? 'upstream' : 'request'
+})
 
 const requestId = computed(() => detail.value?.request_id || detail.value?.client_request_id || '')
 
@@ -354,17 +410,46 @@ function prettyJSON(raw?: string): string {
   }
 }
 
-async function fetchDetail(id: string) {
+async function fetchDetail(id: string): Promise<boolean> {
   loading.value = true
   try {
-    const kind = props.errorType || (detail.value?.phase === 'upstream' ? 'upstream' : 'request')
-    const d = kind === 'upstream' ? await opsAPI.getUpstreamErrorDetail(id) : await opsAPI.getRequestErrorDetail(id)
+    const d = await opsAPI.getErrorDetail(effectiveErrorKind.value, id)
     detail.value = d
+    return true
   } catch (err: any) {
     detail.value = null
     appStore.showError(err?.message || t('admin.ops.failedToLoadErrorDetail'))
+    return false
   } finally {
     loading.value = false
+  }
+}
+
+async function performResolutionAction(): Promise<void> {
+  const current = detail.value
+  if (!current || resolutionLoading.value) return
+  resolutionLoading.value = true
+  const action = current.resolved ? 'reopen' : 'resolve'
+  try {
+    await opsAPI.updateErrorResolution(
+      effectiveErrorKind.value,
+      current.id,
+      action,
+      current.control_version,
+    )
+    if (await fetchDetail(current.id)) {
+      emit('changed')
+      appStore.showSuccess(t(
+        action === 'resolve'
+          ? 'admin.ops.errorDetail.resolvedSuccess'
+          : 'admin.ops.errorDetail.reopenedSuccess',
+      ))
+    }
+  } catch (err: any) {
+    appStore.showError(err?.message || t('admin.ops.errorDetail.failedToUpdateResolvedStatus'))
+    if (err?.status === 409) await fetchDetail(current.id)
+  } finally {
+    resolutionLoading.value = false
   }
 }
 

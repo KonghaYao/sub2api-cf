@@ -100,11 +100,19 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
   const url = operationUrl(input.account, input.operation, input.model)
   const stream = input.operation === 'stream_generate_content' || bodyStreams(input.body)
   const headers = providerHeaders(input.account, credential, true, stream)
+  const providerRequestBody = input.body === undefined
+    ? undefined
+    : providerBody(input.account, input.operation, input.body)
+  const nativeCompactionV2 = input.operation === 'responses' &&
+    isNativeCompactionV2Body(providerRequestBody)
+  if (nativeCompactionV2) headers.set('x-codex-beta-features', 'remote_compaction_v2')
   return {
     url,
     method: input.operation === 'models' ? 'GET' : 'POST',
     headers,
-    ...(input.body === undefined ? {} : { body: providerBody(input.account, input.operation, input.body) }),
+    ...(providerRequestBody === undefined
+      ? {}
+      : { body: nativeCompactionV2 ? normalizeCompactionTriggerInput(providerRequestBody) : providerRequestBody }),
     timeout_ms: HEADER_TIMEOUT_MS,
   }
 }
@@ -231,6 +239,24 @@ function bodyStreams(body: unknown): boolean {
     typeof body === 'object' &&
     !Array.isArray(body) &&
     (body as Record<string, unknown>).stream === true
+}
+
+function isNativeCompactionV2Body(body: unknown): body is Record<string, unknown> {
+  const record = objectRecord(body)
+  return record?.stream === true &&
+    Array.isArray(record.input) &&
+    record.input.some((item) => objectRecord(item)?.type === 'compaction_trigger')
+}
+
+function normalizeCompactionTriggerInput(body: Record<string, unknown>): Record<string, unknown> {
+  const input = body.input as unknown[]
+  return {
+    ...body,
+    input: [
+      ...input.filter((item) => objectRecord(item)?.type !== 'compaction_trigger'),
+      { type: 'compaction_trigger' },
+    ],
+  }
 }
 
 function providerPath(

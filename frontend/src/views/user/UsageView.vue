@@ -399,6 +399,9 @@ const buildUsageListParams = () => ({
   model: filters.value.model,
   billing_type: filters.value.billing_type,
   stream: normalizedFilters.value.stream,
+  request_type: filters.value.request_type,
+  native_compaction_v2: filters.value.native_compaction_v2,
+  billing_mode: filters.value.billing_mode,
 })
 
 const loadLogs = async () => {

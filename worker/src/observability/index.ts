@@ -1,4 +1,5 @@
 export * from './handlers'
+export * from './resolution'
 export * from './recorder'
 export * from './redaction'
 export * from './retention'

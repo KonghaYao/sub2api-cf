@@ -211,7 +211,7 @@ describe('user UsageView', () => {
     expect(getAvailable).toHaveBeenCalled()
   })
 
-  it('keeps legacy aggregate filters out of the Worker Explorer list contract', async () => {
+  it('passes the retained usage dimensions through the Worker Explorer list contract', async () => {
     const wrapper = mountUsageView()
     await flushPromises()
 
@@ -224,7 +224,7 @@ describe('user UsageView', () => {
     ;(wrapper.vm as any).applyFilters()
     await flushPromises()
 
-    expect(query.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ native_compaction_v2: true })
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getDashboardModels).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
@@ -238,7 +238,7 @@ describe('user UsageView', () => {
     await flushPromises()
 
     expect((wrapper.vm as any).filters.native_compaction_v2).toBeNull()
-    expect(query.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ native_compaction_v2: null })
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getDashboardModels).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))

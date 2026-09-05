@@ -71,6 +71,12 @@ export interface UsageSettledPayload {
   amount_micros: number
   outcome: 'completed' | 'failed' | 'cancelled'
   stream: boolean
+  platform: string
+  request_type: 0 | 1 | 2 | 3 | 4 | 5
+  inbound_endpoint: string
+  upstream_endpoint: string
+  billing_mode: 'token' | 'per_request' | 'image' | 'video'
+  native_compaction_v2: boolean
   duration_ms: number
   estimated: boolean
 }

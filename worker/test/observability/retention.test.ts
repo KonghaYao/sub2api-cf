@@ -51,6 +51,33 @@ describe('observability retention', () => {
     test.raw.close()
   })
 
+  it('removes immutable resolution audit rows only after their retained observation expires', async () => {
+    const test = fixture()
+    const old = Date.now() - 10_000
+    const handle = await recordRequestStart(test.env, {
+      requestId: 'resolved-old-request', method: 'POST', requestPath: '/v1/responses',
+      occurredAtMs: old,
+    })
+    await recordRequestOutcome(test.env, handle!, {
+      lifecycle: 'failed', statusCode: 502, completedAtMs: old + 1,
+    })
+    test.raw.prepare(`
+      INSERT INTO request_observation_resolution_audit (
+        id, observation_id, actor_user_id, resolved, occurred_at_ms
+      ) VALUES ('resolution-old', ?, 'admin', 1, ?)
+    `).run(handle!.id, old + 2)
+    expect(() => test.raw.prepare(
+      `DELETE FROM request_observation_resolution_audit WHERE id = 'resolution-old'`,
+    ).run()).toThrow(/request_observation_resolution_audit_immutable/)
+
+    await expect(runObservabilityRetention(test.env, { beforeMs: old + 100, limit: 1 }))
+      .resolves.toMatchObject({ deleted: 1, resolution_audit_deleted: 1 })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS count FROM request_observation_resolution_audit`,
+    ).get()).toEqual({ count: 0 })
+    test.raw.close()
+  })
+
   it('removes only old R2 objects that have no D1 authority row', async () => {
     const test = fixture()
     test.objects.set('observability/v1/orphan.json', { body: '{}', uploaded: new Date(1) })

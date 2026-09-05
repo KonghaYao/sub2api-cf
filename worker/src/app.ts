@@ -252,6 +252,8 @@ import {
   usageStats,
 } from './user/usage'
 import {
+  actOnAdminRequestError,
+  actOnAdminUpstreamError,
   getAdminErrorAggregation,
   getAdminRequestErrorDetail,
   getAdminUpstreamErrorDetail,
@@ -485,6 +487,8 @@ export function createApp() {
     '/api/v1/admin/ops/request-errors/:id/upstream-errors',
     listRelatedUpstreamErrors,
   )
+  app.post('/api/v1/admin/ops/request-errors/:id/:action', actOnAdminRequestError)
+  app.post('/api/v1/admin/ops/upstream-errors/:id/:action', actOnAdminUpstreamError)
   app.get('/api/v1/admin/ops/request-errors/:id', getAdminRequestErrorDetail)
   app.get('/api/v1/admin/ops/upstream-errors/:id', getAdminUpstreamErrorDetail)
   app.get('/api/v1/admin/announcements', listAdminAnnouncements)

@@ -74,6 +74,92 @@ describe('admin settings Cloudflare Worker contract', () => {
     }))
   })
 
+  it('round-trips the Worker auth source defaults as the supported nested patch', async () => {
+    const authSourceDefaults = Object.fromEntries(
+      ['email', 'linuxdo', 'oidc', 'wechat', 'dingtalk', 'github', 'google'].map((source) => [
+        source,
+        {
+          balance: source === 'email' ? 12.5 : 0,
+          concurrency: source === 'email' ? 8 : 5,
+          subscriptions: source === 'email'
+            ? [{ group_id: 'subscription-pro', validity_days: 30 }]
+            : [],
+          grant_on_signup: source === 'email',
+          grant_on_first_bind: source === 'github',
+          platform_quotas: source === 'email'
+            ? { openai: { daily: 3, weekly: null, monthly: 50 } }
+            : {},
+        },
+      ]),
+    )
+    const response = (controlVersion: number) => ({
+      schema_version: 1,
+      control_version: controlVersion,
+      public: {
+        site_name: 'Sub2API',
+        registration_enabled: true,
+        email_verification_enabled: true,
+        turnstile_enabled: false,
+        turnstile_site_key: '',
+        passkey_enabled: false,
+        model_plaza_enabled: false,
+        model_plaza_require_auth: false,
+        model_plaza_description: '',
+        promo_code_enabled: false,
+        invitation_code_enabled: false,
+        affiliate_enabled: false,
+      },
+      security: { step_up_enabled: false },
+      secrets: { turnstile_secret_key_configured: false },
+      auth_source_defaults: authSourceDefaults,
+      updated_at_ms: controlVersion,
+    })
+    get.mockResolvedValueOnce({ data: response(4), headers: { etag: '"4"' } })
+    put.mockResolvedValueOnce({ data: response(5), headers: { etag: '"5"' } })
+    const { getSettings, updateSettings } = await import('@/api/admin/settings')
+
+    const loaded = await getSettings()
+    expect(loaded.auth_source_defaults?.email).toEqual({
+      balance: 12.5,
+      concurrency: 8,
+      subscriptions: [{ group_id: 'subscription-pro', validity_days: 30 }],
+      grant_on_signup: true,
+      grant_on_first_bind: false,
+      platform_quotas: { openai: { daily: 3, weekly: null, monthly: 50 } },
+    })
+
+    await updateSettings({
+      auth_source_defaults: {
+        email: {
+          balance: 15,
+          concurrency: 10,
+          subscriptions: [{ group_id: 'subscription-pro', validity_days: 60 }],
+          grant_on_signup: true,
+          grant_on_first_bind: true,
+          platform_quotas: { openai: { daily: 4, weekly: 20, monthly: null } },
+        },
+      },
+    })
+
+    expect(put).toHaveBeenCalledWith('/admin/settings', {
+      auth_source_defaults: {
+        email: {
+          balance: 15,
+          concurrency: 10,
+          subscriptions: [{ group_id: 'subscription-pro', validity_days: 60 }],
+          grant_on_signup: true,
+          grant_on_first_bind: true,
+          platform_quotas: { openai: { daily: 4, weekly: 20, monthly: null } },
+        },
+      },
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-settings-update-22222222-2222-4222-8222-222222222222',
+        'If-Match': '"4"',
+      },
+    })
+  })
+
   it('sends only the supported nested patch with concurrency and idempotency headers', async () => {
     get.mockResolvedValueOnce({
       data: {

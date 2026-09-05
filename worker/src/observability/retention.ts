@@ -6,6 +6,7 @@ const MAX_BATCH = 100
 export interface RetentionResult {
   scanned: number
   deleted: number
+  resolution_audit_deleted: number
   r2_failures: number
   has_more: boolean
 }
@@ -45,12 +46,33 @@ export async function runObservabilityRetention(
     ).bind(row.id, row.occurred_at_ms, input.beforeMs).run()
     deleted += removed.meta.changes
   }
+  const resolutionAuditDeleted = await deleteOrphanedResolutionAudit(env, limit)
   return {
     scanned: rows.length,
     deleted,
+    resolution_audit_deleted: resolutionAuditDeleted,
     r2_failures: failures,
-    has_more: result.results.length > limit,
+    has_more: result.results.length > limit || resolutionAuditDeleted === limit,
   }
+}
+
+async function deleteOrphanedResolutionAudit(
+  env: ObservabilityEnv,
+  limit: number,
+): Promise<number> {
+  const result = await env.DB.prepare(
+    `DELETE FROM request_observation_resolution_audit
+      WHERE id IN (
+        SELECT audit.id
+          FROM request_observation_resolution_audit AS audit
+          LEFT JOIN request_observations AS observation
+            ON observation.id = audit.observation_id
+         WHERE observation.id IS NULL
+         ORDER BY audit.occurred_at_ms ASC, audit.id ASC
+         LIMIT ?
+      )`,
+  ).bind(limit).run()
+  return result.meta.changes
 }
 
 /**

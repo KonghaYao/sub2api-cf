@@ -5,6 +5,7 @@ import { createApp } from '../../src/app'
 import type { Env } from '../../src/env'
 import {
   getAdminErrorAggregation,
+  getAdminRequestDetail,
   getAdminRequestErrorDetail,
   getAdminUpstreamErrorDetail,
   getOwnerErrorDetail,
@@ -18,6 +19,10 @@ import {
   listRelatedUpstreamErrors,
 } from '../../src/observability/handlers'
 import { recordRequestOutcome, recordRequestStart } from '../../src/observability/recorder'
+import {
+  actOnAdminRequestError,
+  actOnAdminUpstreamError,
+} from '../../src/observability/resolution'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'observability-handler-pepper-32-bytes'
@@ -78,11 +83,14 @@ function app() {
   api.get('/usage/:id', getOwnerRequestDetail)
   api.get('/admin/usage', listAdminUsage)
   api.get('/admin/ops/requests', listAdminRequests)
+  api.get('/admin/ops/requests/:id', getAdminRequestDetail)
   api.get('/admin/ops/request-errors', listAdminRequestErrors)
   api.get('/admin/ops/upstream-errors', listAdminUpstreamErrors)
   api.get('/admin/ops/request-errors/:id/upstream-errors', listRelatedUpstreamErrors)
   api.get('/admin/ops/request-errors/:id', getAdminRequestErrorDetail)
   api.get('/admin/ops/upstream-errors/:id', getAdminUpstreamErrorDetail)
+  api.post('/admin/ops/request-errors/:id/:action', actOnAdminRequestError)
+  api.post('/admin/ops/upstream-errors/:id/:action', actOnAdminUpstreamError)
   api.get('/admin/ops/error-aggregation', getAdminErrorAggregation)
   return api
 }
@@ -109,6 +117,256 @@ async function seed(test: Awaited<ReturnType<typeof fixture>>, input: {
 }
 
 describe('request explorer HTTP contracts', () => {
+  it('resolves a failed observation using an explicit version and server-derived actor', async () => {
+    const test = await fixture()
+    const failed = await seed(test, {
+      requestId: 'req-resolution', userId: 'alice', at: Date.now() - 1_000, status: 502,
+      owner: 'provider',
+    })
+    const api = app()
+    const before = await api.request(`/admin/ops/request-errors/${failed.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(before.status).toBe(200)
+    const beforeBody = await before.json() as any
+    expect(beforeBody.data).toMatchObject({ resolved: false, control_version: 0 })
+    expect(before.headers.get('etag')).toBe(`"${beforeBody.data.control_version}"`)
+
+    const resolved = await api.request(`/admin/ops/request-errors/${failed.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'resolve-observation-0001',
+        'if-match': `"${beforeBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+
+    expect(resolved.status).toBe(200)
+    const resolvedBody = await resolved.json() as any
+    expect(resolvedBody.data).toMatchObject({
+      id: failed.id,
+      resolved: true,
+      resolved_by_user_id: 'admin',
+      resolved_at: expect.any(String),
+      control_version: 1,
+    })
+    expect(resolvedBody.data.control_version).toBeGreaterThan(beforeBody.data.control_version)
+    expect(resolved.headers.get('etag')).toBe(`"${resolvedBody.data.control_version}"`)
+
+    const replay = await api.request(`/admin/ops/request-errors/${failed.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'resolve-observation-0001',
+        'if-match': `"${beforeBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toEqual(resolvedBody)
+
+    const conflictingReplay = await api.request(`/admin/ops/request-errors/${failed.id}/reopen`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'resolve-observation-0001',
+        'if-match': `"${resolvedBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(conflictingReplay.status).toBe(409)
+    await expect(conflictingReplay.json()).resolves.toMatchObject({ code: 'idempotency_conflict' })
+
+    const stale = await api.request(`/admin/ops/request-errors/${failed.id}/reopen`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'reopen-observation-stale-0001',
+        'if-match': `"${beforeBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(stale.status).toBe(409)
+    await expect(stale.json()).resolves.toMatchObject({ code: 'request_observation_changed' })
+
+    const forgedActor = await api.request(`/admin/ops/request-errors/${failed.id}/reopen`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'reopen-observation-forged-0001',
+        'if-match': `"${resolvedBody.data.control_version}"`,
+      },
+      body: JSON.stringify({ actor_user_id: 'bob' }),
+    }, test.env)
+    expect(forgedActor.status).toBe(400)
+    await expect(forgedActor.json()).resolves.toMatchObject({
+      code: 'invalid_observation_resolution_body',
+    })
+
+    const reopened = await api.request(`/admin/ops/upstream-errors/${failed.id}/reopen`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': 'reopen-observation-0001',
+        'if-match': `"${resolvedBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(reopened.status).toBe(200)
+    const reopenedBody = await reopened.json() as any
+    expect(reopenedBody.data).toMatchObject({
+      id: failed.id,
+      resolved: false,
+      resolved_at: null,
+      resolved_by_user_id: null,
+      control_version: 2,
+    })
+
+    const detail = await api.request(`/admin/ops/request-errors/${failed.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    await expect(detail.json()).resolves.toMatchObject({
+      data: {
+        resolved: false,
+        resolution_audit: [
+          { resolved: false, actor_user_id: 'admin' },
+          { resolved: true, actor_user_id: 'admin' },
+        ],
+      },
+    })
+    expect(() => test.raw.prepare(
+      `UPDATE request_observation_resolution_audit SET actor_user_id = 'bob'`,
+    ).run()).toThrow(/request_observation_resolution_audit_immutable/)
+    expect(() => test.raw.prepare(
+      `DELETE FROM request_observation_resolution_audit`,
+    ).run()).toThrow(/request_observation_resolution_audit_immutable/)
+
+    const notAdmin = await api.request(`/admin/ops/request-errors/${failed.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.alice!,
+        'content-type': 'application/json',
+        'idempotency-key': 'resolve-observation-user-0001',
+        'if-match': `"${reopenedBody.data.control_version}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(notAdmin.status).toBe(403)
+
+    const productionResolve = await createApp().request(
+      `/api/v1/admin/ops/request-errors/${failed.id}/resolve`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: test.auth.admin!,
+          'content-type': 'application/json',
+          'idempotency-key': 'resolve-observation-production-0001',
+          'if-match': `"${reopenedBody.data.control_version}"`,
+        },
+        body: '{}',
+      },
+      test.env,
+    )
+    expect(productionResolve.status).toBe(200)
+
+    const completed = await seed(test, {
+      requestId: 'req-completed-resolution', userId: 'alice', at: Date.now(), status: 200,
+    })
+    const completedDetail = await api.request(`/admin/ops/requests/${completed.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    const completedBody = await completedDetail.json() as any
+    const cannotResolveSuccess = await api.request(
+      `/admin/ops/request-errors/${completed.id}/resolve`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: test.auth.admin!,
+          'content-type': 'application/json',
+          'idempotency-key': 'resolve-completed-observation-0001',
+          'if-match': `"${completedBody.data.control_version}"`,
+        },
+        body: '{}',
+      },
+      test.env,
+    )
+    expect(cannotResolveSuccess.status).toBe(409)
+    await expect(cannotResolveSuccess.json()).resolves.toMatchObject({ code: 'observation_not_failed' })
+
+    const requestOnly = await seed(test, {
+      requestId: 'req-family-boundary', userId: 'alice', at: Date.now() - 2_000, status: 400,
+    })
+    const requestOnlyDetail = await api.request(`/admin/ops/request-errors/${requestOnly.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    const requestOnlyVersion = ((await requestOnlyDetail.json()) as any).data.control_version
+    const requestOnlyKey = 'resolve-request-family-0001'
+    const requestOnlyResolve = await api.request(`/admin/ops/request-errors/${requestOnly.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': requestOnlyKey,
+        'if-match': `"${requestOnlyVersion}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(requestOnlyResolve.status).toBe(200)
+    const wrongFamilyReplay = await api.request(`/admin/ops/upstream-errors/${requestOnly.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': requestOnlyKey,
+        'if-match': `"${requestOnlyVersion}"`,
+      },
+      body: '{}',
+    }, test.env)
+    expect(wrongFamilyReplay.status).not.toBe(200)
+    test.raw.close()
+  })
+
+  it('lets exactly one concurrent resolution win an observation version', async () => {
+    const test = await fixture()
+    const failed = await seed(test, {
+      requestId: 'req-resolution-race', userId: 'alice', at: Date.now() - 1_000, status: 502,
+    })
+    const api = app()
+    const detail = await api.request(`/admin/ops/request-errors/${failed.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    const version = ((await detail.json()) as any).data.control_version
+    const resolve = (key: string) => api.request(`/admin/ops/request-errors/${failed.id}/resolve`, {
+      method: 'POST',
+      headers: {
+        authorization: test.auth.admin!,
+        'content-type': 'application/json',
+        'idempotency-key': key,
+        'if-match': `"${version}"`,
+      },
+      body: '{}',
+    }, test.env)
+
+    const responses = await Promise.all([
+      resolve('resolve-observation-race-0001'),
+      resolve('resolve-observation-race-0002'),
+    ])
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409])
+    const finalDetail = await api.request(`/admin/ops/request-errors/${failed.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    const finalBody = await finalDetail.json() as any
+    expect(finalBody.data.resolution_audit).toHaveLength(1)
+    test.raw.close()
+  })
+
   it('keeps owner lists/details isolated and exposes the stable payload projection', async () => {
     const test = await fixture()
     const now = Date.now()

@@ -1,7 +1,12 @@
 import type { Context } from 'hono'
 import { authenticateUserRequest } from '../auth/handler'
 import { authenticateAdminSession } from '../control/admin-auth'
-import { controlError, controlSuccess, queryInteger, requireResourceId } from '../control/http'
+import {
+  controlError,
+  controlSuccess,
+  queryInteger,
+  requireResourceId,
+} from '../control/http'
 import { apiKeyDigest, constantTimeEqual, sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { observabilityBucket } from './recorder'
@@ -19,7 +24,9 @@ const COLUMNS = `id, request_id, client_request_id, bucket_day, occurred_at_ms, 
   error_message, upstream_status_code, is_business_limited, resolved, resolved_at_ms,
   resolved_by_user_id, payload_state, payload_object_key, payload_sha256, payload_bytes,
   payload_content_type, payload_attempts, payload_retry_after_ms, payload_lease_id,
-  payload_lease_expires_at_ms, payload_last_error, updated_at_ms`
+  payload_lease_expires_at_ms, payload_last_error, updated_at_ms,
+  (SELECT COUNT(*) FROM request_observation_resolution_audit AS resolution_event
+    WHERE resolution_event.observation_id = request_observations.id) AS resolution_version`
 
 interface ListFilters {
   limit: number
@@ -43,6 +50,13 @@ interface Cursor {
   filter_hash: string
   start_ms?: number
   end_ms?: number
+}
+
+interface ResolutionAuditRow {
+  id: string
+  actor_user_id: string
+  resolved: number
+  occurred_at_ms: number
 }
 
 export const listOwnerRequests = (context: Context<Bindings>) => listFor(context, 'owner', 'all', 'usage')
@@ -74,7 +88,21 @@ async function adminDetail(context: Context<Bindings>, family: Family): Promise<
     await authenticateAdminSession(context.req.raw, context.env)
     const row = await findObservation(context.env, requireResourceId(context.req.param('id'), 'observation'))
     if (row === null || !rowMatchesFamily(row, family)) throw notFound()
-    return controlSuccess({ ...projectRow(row, 'admin'), payload: await projectPayload(context.env, row) })
+    const audit = await context.env.DB.prepare(
+      `SELECT id, actor_user_id, resolved, occurred_at_ms
+         FROM request_observation_resolution_audit
+        WHERE observation_id = ?
+        ORDER BY occurred_at_ms DESC, id DESC
+        LIMIT 101`,
+    ).bind(row.id).all<ResolutionAuditRow>()
+    const response = controlSuccess({
+      ...projectRow(row, 'admin'),
+      payload: await projectPayload(context.env, row),
+      resolution_audit: audit.results.slice(0, 100).map(projectResolutionAudit),
+      resolution_audit_truncated: audit.results.length > 100,
+    })
+    response.headers.set('etag', `"${row.resolution_version}"`)
+    return response
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -356,8 +384,20 @@ function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
     upstream_status_code: row.upstream_status_code,
     is_business_limited: row.is_business_limited === 1,
     payload_state: row.payload_state,
+    resolved_at: row.resolved_at_ms === null ? null : new Date(row.resolved_at_ms).toISOString(),
+    resolved_by_user_id: row.resolved_by_user_id,
+    control_version: row.resolution_version,
   })
   return base
+}
+
+function projectResolutionAudit(row: ResolutionAuditRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    resolved: row.resolved === 1,
+    actor_user_id: row.actor_user_id,
+    occurred_at: new Date(row.occurred_at_ms).toISOString(),
+  }
 }
 
 function errorCategory(phase: string, type: string): string {

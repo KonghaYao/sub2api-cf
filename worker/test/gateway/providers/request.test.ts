@@ -58,6 +58,47 @@ describe('provider request adapters', () => {
     })
   })
 
+  it.each(['openai', 'codex'] as const)(
+    'restores the %s native compaction v2 wire contract',
+    (platform) => {
+      const plan = buildProviderRequest({
+        account: account(platform),
+        credential,
+        operation: 'responses',
+        body: {
+          model: 'gpt-5',
+          stream: true,
+          input: [
+            { type: 'compaction_trigger', ignored: true },
+            { type: 'message', role: 'user', content: 'retain me' },
+            { type: 'compaction_trigger' },
+          ],
+        },
+      })
+
+      expect(plan.headers.get('x-codex-beta-features')).toBe('remote_compaction_v2')
+      expect((plan.body as { input: unknown[] }).input).toEqual([
+        { type: 'message', role: 'user', content: 'retain me' },
+        { type: 'compaction_trigger' },
+      ])
+    },
+  )
+
+  it('does not advertise native compaction for unary or trigger-free Responses requests', () => {
+    for (const body of [
+      { model: 'gpt-5', stream: false, input: [{ type: 'compaction_trigger' }] },
+      { model: 'gpt-5', stream: true, input: [{ type: 'message', role: 'user', content: 'hi' }] },
+    ]) {
+      const plan = buildProviderRequest({
+        account: account('openai'),
+        credential,
+        operation: 'responses',
+        body,
+      })
+      expect(plan.headers.has('x-codex-beta-features')).toBe(false)
+    }
+  })
+
   it('uses Anthropic native URL and authentication contract', () => {
     const plan = buildProviderRequest({
       account: account('anthropic', { base_url: 'https://api.anthropic.test/v1/' }),

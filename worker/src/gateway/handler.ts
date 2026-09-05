@@ -68,6 +68,7 @@ import {
 } from './repository'
 import { buildProviderRequest, type ProviderOperation } from './providers'
 import type { ProviderPlatform } from './providers'
+import { stringifyJsonPreservingIntegers } from './lossless-json'
 import { readGatewayJsonBody } from './request-body'
 import {
   acquireApiKeyAdmission,
@@ -169,6 +170,7 @@ export async function handleGateway(
     endpoint,
     (body) => prepareOpenAiRequest(body, endpoint),
     gatewayErrorResponse,
+    endpoint === 'responses',
   )
 }
 
@@ -497,6 +499,7 @@ export async function handleResponsesCompact(
       }
     },
     gatewayErrorResponse,
+    true,
   )
 }
 
@@ -624,7 +627,7 @@ export async function handleResponsesInputTokens(
   let reservationsPrepared = false
   try {
     principal = await authenticateGatewayRequest(context.req.raw, context.env)
-    const parsed = await readGatewayJsonBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw, { preserveUnsafeIntegers: true })
     validateClientControls(parsed.body)
     const requestedModel = requiredModel(parsed.body)
     const allowed = new Set(['model', 'instructions', 'input', 'tools', 'tool_choice'])
@@ -825,7 +828,7 @@ function readInputTokenCount(bytes: Uint8Array, platform: ProviderPlatform = 'op
 function estimateInputTokens(body: unknown): number {
   // A conservative fallback for relays that do not expose
   // /responses/input_tokens. Exact counting remains the preferred path.
-  const bytes = encoder.encode(JSON.stringify(body)).byteLength
+  const bytes = encoder.encode(stringifyJsonPreservingIntegers(body) ?? '').byteLength
   return Math.max(1, Math.ceil(bytes / 4))
 }
 
@@ -934,6 +937,7 @@ function providerForCandidates(candidates: Array<{ platform: ProviderPlatform }>
 interface PreparedGatewayRequest {
   requestedModel: string
   stream: boolean
+  nativeCompactionV2?: boolean
   resolveUpstream: (
     model: ModelRoute,
     upstreamEndpoint: GatewayEndpoint,
@@ -975,6 +979,7 @@ function prepareOpenAiRequest(
   return {
     requestedModel,
     stream,
+    nativeCompactionV2: endpoint === 'responses' && stream && hasCompactionTrigger(normalizedBody),
     resolveUpstream: (model, upstreamEndpoint, platform) => {
       const operation = upstreamEndpoint
       if (platform !== 'openai' && !(platform === 'codex' && operation === 'responses')) {
@@ -1051,6 +1056,7 @@ async function dispatchGateway(
   endpoint: GatewayEndpoint,
   prepare: PrepareGatewayRequest,
   errorResponse: GatewayErrorResponder,
+  preserveUnsafeIntegers = false,
 ): Promise<Response> {
   const requestId = crypto.randomUUID()
   const startedAt = Date.now()
@@ -1084,7 +1090,7 @@ async function dispatchGateway(
     observedUserId = principal.user_id
     observedApiKeyId = principal.api_key_id
     observedGroupId = principal.group_id
-    const parsed = await readGatewayJsonBody(context.req.raw)
+    const parsed = await readGatewayJsonBody(context.req.raw, { preserveUnsafeIntegers })
     observationRequest.body = parsed.body
     const prepared = prepare(parsed.body)
     const { requestedModel, stream } = prepared
@@ -1207,6 +1213,7 @@ async function dispatchGateway(
       return await createBufferedChatFromResponsesStream({
         env: context.env,
         endpoint,
+        upstreamEndpoint,
         response: acquired.response,
         pool,
         leaseId: acquired.leaseId,
@@ -1221,6 +1228,9 @@ async function dispatchGateway(
         startedAt,
         admission,
         providerPlatform: provider,
+        nativeCompactionV2: prepared.nativeCompactionV2 === true,
+        inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
+        upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
         serviceTier,
         observation,
         observationRequest,
@@ -1240,6 +1250,7 @@ async function dispatchGateway(
       return createStreamingResponse({
         env: context.env,
         endpoint,
+        upstreamEndpoint,
         response: acquired.response,
         pool,
         leaseId: acquired.leaseId,
@@ -1253,6 +1264,9 @@ async function dispatchGateway(
         startedAt,
         admission,
         providerPlatform: provider,
+        nativeCompactionV2: prepared.nativeCompactionV2 === true,
+        inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
+        upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
         serviceTier,
         responseProtocol: providerDispatch.responseProtocol,
         includeUsage: providerDispatch.includeUsage,
@@ -1268,6 +1282,7 @@ async function dispatchGateway(
       env: context.env,
       response: acquired.response,
       endpoint,
+      upstreamEndpoint,
       pool,
       leaseId: acquired.leaseId,
       accountId: acquired.accountId,
@@ -1281,6 +1296,9 @@ async function dispatchGateway(
       startedAt,
       admission,
       providerPlatform: provider,
+      nativeCompactionV2: prepared.nativeCompactionV2 === true,
+      inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
+      upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
       serviceTier,
       observation,
       observationRequest,
@@ -1482,7 +1500,7 @@ async function acquireUpstream(
       let response = await fetchWithHeaderTimeout(new URL(plan.url), {
         method: plan.method,
         headers: plan.headers,
-        body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
+        body: plan.body === undefined ? undefined : stringifyJsonPreservingIntegers(plan.body),
         redirect: 'manual',
       }, clientSignal, plan.timeout_ms)
       if (response.status >= 300 && response.status < 400) {
@@ -1557,6 +1575,7 @@ interface FinalizeInput {
   env: Env
   response: Response
   endpoint: GatewayEndpoint
+  upstreamEndpoint: GatewayEndpoint
   pool: DurableObjectStub
   leaseId: string
   accountId: string
@@ -1569,6 +1588,9 @@ interface FinalizeInput {
   startedAt: number
   admission: ApiKeyAdmissionLease | null
   providerPlatform: ProviderPlatform
+  nativeCompactionV2: boolean
+  inboundEndpointPath: string
+  upstreamEndpointPath: string
   serviceTier?: string
   observation?: RequestObservationHandle | null
   observationRequest?: Record<string, unknown>
@@ -2789,6 +2811,15 @@ async function settleAndProject(
     ...cost,
     outcome,
     stream: input.stream,
+    // Match the legacy "effective platform" contract: usage belongs to the
+    // API key's group platform. The selected account provider is an upstream
+    // routing detail and can differ for compatibility adapters.
+    platform: input.principal.platform,
+    request_type: zeroCost ? 4 : input.stream ? 2 : 1,
+    inbound_endpoint: input.inboundEndpointPath,
+    upstream_endpoint: input.upstreamEndpointPath,
+    billing_mode: 'token',
+    native_compaction_v2: input.nativeCompactionV2,
     duration_ms: Math.max(0, Date.now() - input.startedAt),
     estimated: usage.estimated,
   }
@@ -2880,6 +2911,47 @@ async function settleAndProject(
           }),
     })
   }
+}
+
+function gatewayEndpointPath(endpoint: GatewayEndpoint): string {
+  if (endpoint === 'chat_completions') return '/v1/chat/completions'
+  if (endpoint === 'responses') return '/v1/responses'
+  return '/v1/embeddings'
+}
+
+function canonicalGatewayInboundPath(path: string, fallback: GatewayEndpoint): string {
+  const normalized = path.trim().replace(/\/+$/, '')
+  if (
+    normalized === '/v1/responses/compact' ||
+    normalized === '/responses/compact' ||
+    normalized === '/backend-api/codex/responses/compact'
+  ) return '/v1/responses/compact'
+  if (normalized === '/v1/messages') return '/v1/messages'
+  if (normalized.startsWith('/v1beta/models/')) return '/v1beta/models'
+  return gatewayEndpointPath(fallback)
+}
+
+function providerOperationPath(
+  operation: ProviderOperation,
+  platform: ProviderPlatform,
+): string {
+  if (operation === 'chat_completions') return '/v1/chat/completions'
+  if (operation === 'responses') return '/v1/responses'
+  if (operation === 'responses_compact') return '/v1/responses/compact'
+  if (operation === 'messages') return '/v1/messages'
+  if (operation === 'generate_content' || operation === 'stream_generate_content') {
+    return '/v1beta/models'
+  }
+  if (operation === 'embeddings') {
+    return platform === 'gemini' ? '/v1beta/models' : '/v1/embeddings'
+  }
+  return gatewayEndpointPath('responses')
+}
+
+function hasCompactionTrigger(body: Record<string, unknown>): boolean {
+  return Array.isArray(body.input) && body.input.some((item) =>
+    item !== null && typeof item === 'object' && !Array.isArray(item) &&
+    (item as Record<string, unknown>).type === 'compaction_trigger')
 }
 
 async function cancelGatewayReservations(

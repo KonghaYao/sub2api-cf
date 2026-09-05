@@ -41,15 +41,25 @@ export interface AnthropicToolUseBlock {
   input: JsonObject
 }
 
+export interface AnthropicImageBlock {
+  type: 'image'
+  source: {
+    type: 'base64'
+    media_type: string
+    data: string
+  }
+}
+
 export interface AnthropicToolResultBlock {
   type: 'tool_result'
   tool_use_id: string
-  content: string | AnthropicTextBlock[]
+  content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
   is_error: boolean
 }
 
 export type AnthropicContentBlock =
   | AnthropicTextBlock
+  | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
 
@@ -942,6 +952,8 @@ function parseContentBlock(value: unknown, path: string): AnthropicContentBlock 
   switch (block.type) {
     case 'text':
       return parseTextBlock(block, path)
+    case 'image':
+      return parseImageBlock(block, path)
     case 'tool_use': {
       exactKeys(block, ['type', 'id', 'name', 'input'], path)
       return {
@@ -966,9 +978,38 @@ function parseContentBlock(value: unknown, path: string): AnthropicContentBlock 
   }
 }
 
-function parseToolResultContent(value: unknown, path: string): string | AnthropicTextBlock[] {
+function parseToolResultContent(
+  value: unknown,
+  path: string,
+): string | Array<AnthropicTextBlock | AnthropicImageBlock> {
   if (typeof value === 'string') return boundedString(value, path, MAX_TEXT_CHARS)
-  return arrayAt(value, path, MAX_CONTENT_BLOCKS).map((block, index) => parseTextBlock(block, `${path}[${index}]`))
+  return arrayAt(value, path, MAX_CONTENT_BLOCKS).map((block, index) => {
+    const blockPath = `${path}[${index}]`
+    const object = objectAt(block, blockPath)
+    if (object.type === 'text') return parseTextBlock(object, blockPath)
+    if (object.type === 'image') return parseImageBlock(object, blockPath)
+    fail(`${blockPath}.type`, 'unsupported tool result content block type')
+  })
+}
+
+function parseImageBlock(value: unknown, path: string): AnthropicImageBlock {
+  const block = objectAt(value, path)
+  exactKeys(block, ['type', 'source'], path)
+  const source = objectAt(block.source, `${path}.source`)
+  exactKeys(source, ['type', 'media_type', 'data'], `${path}.source`)
+  if (source.type !== 'base64') fail(`${path}.source.type`, 'must be "base64"')
+  const mediaType = boundedString(source.media_type, `${path}.source.media_type`, 256)
+  if (mediaType !== '' && !/^image\/[A-Za-z0-9.+-]+$/.test(mediaType)) {
+    fail(`${path}.source.media_type`, 'must be an image media type')
+  }
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: mediaType,
+      data: boundedString(source.data, `${path}.source.data`, MAX_TEXT_CHARS),
+    },
+  }
 }
 
 function parseTool(value: unknown, path: string): AnthropicTool {
@@ -1028,23 +1069,35 @@ function messageToResponsesItems(message: AnthropicMessage): Array<Record<string
   }
 
   const result: Array<Record<string, unknown>> = []
+  const liftedImages: Array<Record<string, unknown>> = []
   for (const block of message.content) {
-    if (block.type !== 'tool_result') continue
-    result.push({
-      type: 'function_call_output',
-      call_id: block.tool_use_id,
-      output: toolResultText(block.content),
-    })
+    if (block.type === 'tool_result') {
+      result.push({
+        type: 'function_call_output',
+        call_id: block.tool_use_id,
+        output: toolResultText(block.content),
+      })
+      liftedImages.push(...toolResultImages(block.content).map((imageUrl) => ({
+        type: 'input_image',
+        image_url: imageUrl,
+      })))
+    }
   }
-  const textParts = message.content
-    .filter((block): block is AnthropicTextBlock => block.type === 'text')
-    .map((block) => block.text)
-    .filter(Boolean)
-  if (textParts.length > 0) {
+  const userParts: Array<Record<string, unknown>> = []
+  for (const block of message.content) {
+    if (block.type === 'text' && block.text !== '') {
+      userParts.push({ type: 'input_text', text: block.text })
+    } else if (block.type === 'image') {
+      const imageUrl = anthropicImageDataUrl(block)
+      if (imageUrl !== undefined) userParts.push({ type: 'input_image', image_url: imageUrl })
+    }
+  }
+  userParts.push(...liftedImages)
+  if (userParts.length > 0) {
     result.push({
       type: 'message',
       role: 'user',
-      content: textParts.map((text) => ({ type: 'input_text', text })),
+      content: userParts,
     })
   }
   return result
@@ -1072,24 +1125,62 @@ function messageToChatMessages(message: AnthropicMessage): Array<Record<string, 
     }]
   }
   const result: Array<Record<string, unknown>> = []
+  const liftedImages: Array<Record<string, unknown>> = []
   for (const block of message.content) {
     if (block.type === 'tool_result') {
       result.push({ role: 'tool', content: toolResultText(block.content), tool_call_id: block.tool_use_id })
+      liftedImages.push(...toolResultImages(block.content).map((url) => ({
+        type: 'image_url',
+        image_url: { url },
+      })))
     }
   }
-  const text = message.content
+  const userParts: Array<Record<string, unknown>> = []
+  for (const block of message.content) {
+    if (block.type === 'text' && block.text !== '') {
+      userParts.push({ type: 'text', text: block.text })
+    } else if (block.type === 'image') {
+      const url = anthropicImageDataUrl(block)
+      if (url !== undefined) userParts.push({ type: 'image_url', image_url: { url } })
+    }
+  }
+  userParts.push(...liftedImages)
+  if (userParts.some((part) => part.type === 'image_url')) {
+    result.push({ role: 'user', content: userParts })
+  } else {
+    const text = userParts
+      .map((part) => typeof part.text === 'string' ? part.text : '')
+      .filter(Boolean)
+      .join('\n\n')
+    if (text !== '') result.push({ role: 'user', content: text })
+  }
+  return result
+}
+
+function toolResultText(content: string | Array<AnthropicTextBlock | AnthropicImageBlock>): string {
+  if (typeof content === 'string') return content === '' ? '(empty)' : content
+  const text = content
     .filter((block): block is AnthropicTextBlock => block.type === 'text')
     .map((block) => block.text)
     .filter(Boolean)
     .join('\n\n')
-  if (text !== '') result.push({ role: 'user', content: text })
-  return result
+  return text === '' ? '(empty)' : text
 }
 
-function toolResultText(content: string | AnthropicTextBlock[]): string {
-  if (typeof content === 'string') return content === '' ? '(empty)' : content
-  const text = content.map((block) => block.text).filter(Boolean).join('\n\n')
-  return text === '' ? '(empty)' : text
+function toolResultImages(
+  content: string | Array<AnthropicTextBlock | AnthropicImageBlock>,
+): string[] {
+  if (typeof content === 'string') return []
+  return content
+    .filter((block): block is AnthropicImageBlock => block.type === 'image')
+    .map(anthropicImageDataUrl)
+    .filter((value): value is string => value !== undefined)
+}
+
+function anthropicImageDataUrl(block: AnthropicImageBlock): string | undefined {
+  if (block.source.data === '') return undefined
+  const mediaType = block.source.media_type === '' ? 'image/png' : block.source.media_type
+  return `data:${mediaType};base64,${block.source.data}`
 }
 
 function responsesToolChoice(

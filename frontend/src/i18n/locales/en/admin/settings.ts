@@ -1156,6 +1156,42 @@ export default {
       authSourceDefaults: {
         title: 'Auth Source Defaults',
         description: 'Configure per-source default balance, concurrency, subscriptions, and grant rules.',
+        workerTitle: 'Auth Source Default Entitlements',
+        workerDescription: 'Configure Worker entitlements granted on signup or first bind for each of the seven auth sources. Only the selected source is saved; all amounts are in USD.',
+        reload: 'Reload',
+        loading: 'Loading auth source defaults…',
+        sourceLabel: 'Auth source',
+        grantOnSignupLabel: 'Grant on signup',
+        grantOnSignupHint: 'Grant the entitlements below when this source creates a user for the first time.',
+        balanceUsdLabel: 'Balance (USD)',
+        usdPrecisionHint: 'Up to six decimal places. Set to 0 to grant no balance.',
+        concurrencyLabel: 'Concurrency allowance',
+        addSubscription: 'Add subscription',
+        subscriptionGroupLabel: 'Subscription group',
+        subscriptionGroupPlaceholder: 'Select a subscription group',
+        validityDaysLabel: 'Validity (days)',
+        removeSubscription: 'Remove subscription',
+        unavailableGroup: 'Unavailable existing group',
+        platformQuotasTitle: 'Platform window quotas (USD)',
+        platformQuotasWorkerHint: 'Blank means unlimited for that window; 0 means a zero quota. Amounts support up to six decimal places.',
+        platform: 'Platform',
+        dailyUsd: 'Daily (USD)',
+        weeklyUsd: 'Weekly (USD)',
+        monthlyUsd: 'Monthly (USD)',
+        unlimitedPlaceholder: 'Unlimited',
+        invalidResponse: 'The Worker returned incomplete auth source defaults. Reload and try again.',
+        loadFailed: 'Failed to load auth source defaults',
+        saveFailed: 'Failed to save auth source defaults',
+        saving: 'Saving…',
+        saveSource: 'Save selected source',
+        saved: '{source} defaults saved',
+        validation: {
+          balance: '{source} balance must be non-negative with at most six decimal places.',
+          concurrency: '{source} concurrency must be a positive integer.',
+          subscriptionCount: '{source} supports at most 100 default subscriptions.',
+          subscription: '{source} subscription groups must be present and unique, with validity from 1 to 36500 days.',
+          quota: '{source} {platform} quotas must be blank or non-negative USD amounts with at most six decimal places.'
+        },
         requireEmailLabel: 'Require email on third-party signup',
         requireEmailHint: 'When enabled, Linux DO, OIDC, and WeChat signups must provide an email before account creation.',
         enabledHint: 'These defaults apply when a new user registers through this source. Grant on first bind only applies when an existing user binds this source.',
@@ -1175,6 +1211,18 @@ export default {
           wechat: {
             title: 'WeChat signup',
             description: 'Default quota grants for WeChat signups.'
+          },
+          dingtalk: {
+            title: 'DingTalk sign-in',
+            description: 'Default entitlements for DingTalk signups or first binds.'
+          },
+          github: {
+            title: 'GitHub sign-in',
+            description: 'Default entitlements for GitHub signups or first binds.'
+          },
+          google: {
+            title: 'Google sign-in',
+            description: 'Default entitlements for Google signups or first binds.'
           }
         },
         grantOnFirstBindLabel: 'Grant on first bind',

@@ -171,6 +171,113 @@ describe('Anthropic Messages request codec', () => {
       tool_choice: { type: 'function', function: { name: 'get_weather' } },
     })
   })
+
+  it('lifts tool-result images into a following multimodal user message', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: 'Read the screenshot.' },
+        {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_1',
+            name: 'view_image',
+            input: { path: '/tmp/screen.png' },
+          }],
+        },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'toolu_1',
+            content: [
+              { type: 'text', text: 'render complete' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+              },
+            ],
+          }],
+        },
+      ],
+    })
+
+    expect(toOpenAIResponsesRequest(anthropic, 'gpt-upstream').input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Read the screenshot.' }],
+      },
+      {
+        type: 'function_call',
+        call_id: 'toolu_1',
+        name: 'view_image',
+        arguments: '{"path":"/tmp/screen.png"}',
+      },
+      { type: 'function_call_output', call_id: 'toolu_1', output: 'render complete' },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' }],
+      },
+    ])
+
+    expect(toOpenAIChatCompletionsRequest(anthropic, 'chat-upstream').messages).toEqual([
+      { role: 'user', content: 'Read the screenshot.' },
+      {
+        role: 'assistant',
+        tool_calls: [{
+          id: 'toolu_1',
+          type: 'function',
+          function: { name: 'view_image', arguments: '{"path":"/tmp/screen.png"}' },
+        }],
+      },
+      { role: 'tool', content: 'render complete', tool_call_id: 'toolu_1' },
+      {
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,aGVsbG8=' },
+        }],
+      },
+    ])
+  })
+
+  it('keeps an image-only tool result paired with an empty textual output', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 128,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_2', name: 'view_image', input: {} }],
+        },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'toolu_2',
+            content: [{
+              type: 'image',
+              source: { type: 'base64', media_type: '', data: 'iVBOR' },
+            }],
+          }],
+        },
+      ],
+    })
+
+    expect(toOpenAIResponsesRequest(anthropic, 'gpt-upstream').input).toEqual([
+      { type: 'function_call', call_id: 'toolu_2', name: 'view_image', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'toolu_2', output: '(empty)' },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/png;base64,iVBOR' }],
+      },
+    ])
+  })
 })
 
 describe('Responses SSE to Anthropic Messages codec', () => {

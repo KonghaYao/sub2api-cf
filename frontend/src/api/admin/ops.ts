@@ -895,8 +895,9 @@ export interface OpsErrorLog {
   model: string
 
   resolved: boolean
-  resolved_at?: string | null
-  resolved_by_user_id?: number | null
+  resolved_at: string | null
+  resolved_by_user_id: string | null
+  control_version: number
 
   client_request_id: string
   request_id: string
@@ -929,9 +930,40 @@ export interface OpsErrorLog {
 
 export interface OpsErrorDetail extends OpsErrorLog {
   payload: ExplorerPayload
+  resolution_audit: OpsErrorResolutionAuditEvent[]
+  resolution_audit_truncated: boolean
 
   upstream_status_code?: number | null
   is_business_limited?: boolean
+}
+
+export interface OpsErrorResolutionAuditEvent {
+  id: string
+  resolved: boolean
+  actor_user_id: string
+  occurred_at: string
+}
+
+export type OpsErrorResolutionAction = 'resolve' | 'reopen'
+export type OpsErrorKind = 'request' | 'upstream'
+
+const OPS_ERROR_FAMILY: Record<OpsErrorKind, 'request-errors' | 'upstream-errors'> = {
+  request: 'request-errors',
+  upstream: 'upstream-errors',
+}
+
+const ERROR_RESOLUTION_RETRY_TTL_MS = 5 * 60 * 1_000
+const pendingErrorResolutionOperations = new Map<string, {
+  key: string
+  expiresAt: number
+}>()
+
+export interface OpsErrorResolutionResult {
+  id: string
+  resolved: boolean
+  resolved_at: string | null
+  resolved_by_user_id: string | null
+  control_version: number
 }
 
 export type OpsErrorLogsResponse = CursorPage<OpsErrorLog>
@@ -1083,12 +1115,20 @@ export async function listUpstreamErrors(params: OpsErrorListQueryParams): Promi
 }
 
 export async function getRequestErrorDetail(id: string | number): Promise<OpsErrorDetail> {
-  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/request-errors/${encodeURIComponent(String(id))}`)
-  return data
+  return getErrorDetail('request', id)
 }
 
 export async function getUpstreamErrorDetail(id: string | number): Promise<OpsErrorDetail> {
-  const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/upstream-errors/${encodeURIComponent(String(id))}`)
+  return getErrorDetail('upstream', id)
+}
+
+export async function getErrorDetail(
+  kind: OpsErrorKind,
+  id: string | number,
+): Promise<OpsErrorDetail> {
+  const { data } = await apiClient.get<OpsErrorDetail>(
+    `/admin/ops/${OPS_ERROR_FAMILY[kind]}/${encodeURIComponent(String(id))}`,
+  )
   return data
 }
 
@@ -1100,6 +1140,63 @@ export async function listRequestErrorUpstreamErrors(
   const encodedId = encodeURIComponent(String(id))
   const { data } = await apiClient.get<CursorPage<OpsErrorLog>>(`/admin/ops/request-errors/${encodedId}/upstream-errors`, { params: query })
   return data
+}
+
+export async function updateErrorResolution(
+  kind: OpsErrorKind,
+  id: string | number,
+  action: OpsErrorResolutionAction,
+  expectedControlVersion: number,
+): Promise<OpsErrorResolutionResult> {
+  const encodedId = encodeURIComponent(String(id))
+  const fingerprint = JSON.stringify([kind, String(id), action, expectedControlVersion])
+  const idempotencyKey = errorResolutionOperationKey(fingerprint, action)
+  try {
+    const { data } = await apiClient.post<OpsErrorResolutionResult>(
+      `/admin/ops/${OPS_ERROR_FAMILY[kind]}/${encodedId}/${action}`,
+      { expected_control_version: expectedControlVersion },
+      {
+        headers: {
+          'If-Match': `"${expectedControlVersion}"`,
+          'Idempotency-Key': idempotencyKey,
+        },
+      },
+    )
+    pendingErrorResolutionOperations.delete(fingerprint)
+    return data
+  } catch (error) {
+    if (hasDeterministicClientError(error)) pendingErrorResolutionOperations.delete(fingerprint)
+    throw error
+  }
+}
+
+function errorResolutionOperationKey(
+  fingerprint: string,
+  action: OpsErrorResolutionAction,
+): string {
+  const now = Date.now()
+  for (const [candidateFingerprint, operation] of pendingErrorResolutionOperations) {
+    if (operation.expiresAt <= now) pendingErrorResolutionOperations.delete(candidateFingerprint)
+  }
+  const pending = pendingErrorResolutionOperations.get(fingerprint)
+  if (pending !== undefined) return pending.key
+  const requestId = globalThis.crypto?.randomUUID?.()
+    ?? `${now}-${Math.random().toString(36).slice(2)}`
+  const key = `admin-ops-error-${action}-${requestId}`
+  pendingErrorResolutionOperations.set(fingerprint, {
+    key,
+    expiresAt: now + ERROR_RESOLUTION_RETRY_TTL_MS,
+  })
+  return key
+}
+
+function hasDeterministicClientError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const candidate = error as { response?: { status?: unknown }; status?: unknown }
+  const status = typeof candidate.status === 'number'
+    ? candidate.status
+    : candidate.response?.status
+  return typeof status === 'number' && status >= 400 && status < 500
 }
 
 export async function listRequestDetails(params: OpsRequestDetailsParams): Promise<OpsRequestDetailsResponse> {
@@ -1258,7 +1355,9 @@ export const opsAPI = {
   listUpstreamErrors,
   getRequestErrorDetail,
   getUpstreamErrorDetail,
+  getErrorDetail,
   listRequestErrorUpstreamErrors,
+  updateErrorResolution,
 
   listRequestDetails,
   listAlertRules,

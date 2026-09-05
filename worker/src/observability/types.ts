@@ -138,4 +138,5 @@ export interface ObservationRow {
   payload_lease_expires_at_ms: number | null
   payload_last_error: string | null
   updated_at_ms: number
+  resolution_version: number
 }

@@ -1,4 +1,5 @@
 import { GatewayError } from './errors'
+import { parseJsonPreservingIntegers } from './lossless-json'
 
 const JSON_UTF8_BOM = new Uint8Array([0xef, 0xbb, 0xbf])
 const HEX = '0123456789abcdef'
@@ -10,6 +11,10 @@ export interface GatewayJsonBody {
   bytes: Uint8Array
 }
 
+export interface GatewayJsonBodyOptions {
+  preserveUnsafeIntegers?: boolean
+}
+
 type SupportedContentEncoding = 'identity' | 'gzip' | 'deflate'
 
 /**
@@ -18,7 +23,10 @@ type SupportedContentEncoding = 'identity' | 'gzip' | 'deflate'
  * a leading UTF-8 BOM is ignored and raw control bytes inside JSON strings are
  * escaped before strict JSON parsing.
  */
-export async function readGatewayJsonBody(request: Request): Promise<GatewayJsonBody> {
+export async function readGatewayJsonBody(
+  request: Request,
+  options: GatewayJsonBodyOptions = {},
+): Promise<GatewayJsonBody> {
   const bytes = await readEncodedBodyLimited(request, MAX_GATEWAY_REQUEST_BYTES)
   if (bytes.byteLength === 0) {
     throw new GatewayError(400, 'empty_body', 'Request body is required')
@@ -27,7 +35,10 @@ export async function readGatewayJsonBody(request: Request): Promise<GatewayJson
   const normalized = normalizeLenientJson(bytes, MAX_GATEWAY_REQUEST_BYTES)
   let value: unknown
   try {
-    value = JSON.parse(new TextDecoder().decode(normalized))
+    const source = new TextDecoder().decode(normalized)
+    value = options.preserveUnsafeIntegers === true
+      ? parseJsonPreservingIntegers(source)
+      : JSON.parse(source)
   } catch {
     throw new GatewayError(400, 'invalid_json', 'Request body must be valid JSON')
   }

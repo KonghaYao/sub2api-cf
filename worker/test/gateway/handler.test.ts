@@ -912,6 +912,40 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
+  it('preserves unsafe tool-output integers from the raw Responses body during Chat fallback', async () => {
+    const { env, database } = await harness()
+    database.chatOnly = true
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        id: 'chatcmpl-lossless-tool-output',
+        object: 'chat.completion',
+        created: 1_700_000_000,
+        model: 'gpt-upstream',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 1, total_tokens: 7 },
+      }),
+    )
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: '{"model":"gpt-public","input":[{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},{"type":"function_call_output","call_id":"call_image","output":{"status":"ok","content":[{"type":"input_image","image_url":"data:image/png;base64,AQID"}],"unknown":{"large":9007199254740993}}}]}',
+    }, env)
+
+    expect(response.status).toBe(200)
+    const forwarded = JSON.parse(String(upstream.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: unknown }>
+    }
+    const tool = forwarded.messages.find((message) => message.role === 'tool')
+    expect(String(tool?.content)).toContain('"large":9007199254740993')
+    expect(String(tool?.content)).not.toContain('9007199254740992')
+  })
+
   it('restores custom, namespace, and tool-search identity through a buffered Chat-only fallback', async () => {
     const { env, database } = await harness()
     database.chatOnly = true
@@ -1994,6 +2028,8 @@ describe('OpenAI-compatible gateway', () => {
           output_tokens: 4,
           cache_read_tokens: 3,
           outcome: 'completed',
+          inbound_endpoint: '/v1/messages',
+          upstream_endpoint: '/v1/messages',
         },
       },
       amount_micros: 50,
@@ -2446,12 +2482,60 @@ describe('OpenAI-compatible gateway', () => {
             output_tokens: 1,
             amount_micros: 10,
             stream: false,
+            request_type: 1,
+            native_compaction_v2: false,
+            inbound_endpoint: '/v1/responses/compact',
+            upstream_endpoint: '/v1/responses/compact',
           },
         },
       })
       expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
     },
   )
+
+  it('classifies streamed compaction-trigger requests as native v2 on the root Responses endpoint', async () => {
+    const { env, user } = await harness()
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      id: 'resp_native_compact',
+      model: 'gpt-upstream',
+      status: 'completed',
+      output: [{ type: 'compaction', encrypted_content: 'opaque' }],
+      usage: { input_tokens: 3, output_tokens: 1 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        stream: true,
+        input: [
+          { type: 'compaction_trigger', ignored: true },
+          { type: 'message', role: 'user', content: 'retain me' },
+          { type: 'compaction_trigger' },
+        ],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    const init = upstream.mock.calls[0]?.[1]
+    expect(new Headers(init?.headers).get('x-codex-beta-features')).toBe('remote_compaction_v2')
+    expect(JSON.parse(String(init?.body)).input).toEqual([
+      { type: 'message', role: 'user', content: 'retain me' },
+      { type: 'compaction_trigger' },
+    ])
+    expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
+      usage_event: {
+        payload: {
+          request_type: 2,
+          native_compaction_v2: true,
+          inbound_endpoint: '/v1/responses',
+          upstream_endpoint: '/v1/responses',
+        },
+      },
+    })
+  })
 
   it('routes Codex Responses through the provider planner with Codex-owned authentication', async () => {
     const { env, database, user, pool } = await harness()
@@ -2605,6 +2689,7 @@ describe('OpenAI-compatible gateway', () => {
             input_tokens: 0,
             output_tokens: 0,
             outcome: 'failed',
+            request_type: 4,
           },
         },
       })
@@ -2979,6 +3064,7 @@ describe('OpenAI-compatible gateway', () => {
             output_tokens: 0,
             base_amount_micros: 0,
             outcome: 'failed',
+            request_type: 4,
           },
         },
       })
@@ -3606,6 +3692,8 @@ describe('OpenAI-compatible gateway', () => {
           output_tokens: 4,
           cache_read_tokens: 2,
           outcome: 'completed',
+          inbound_endpoint: '/v1beta/models',
+          upstream_endpoint: '/v1beta/models',
         },
       },
     })

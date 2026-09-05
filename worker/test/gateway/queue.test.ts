@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Env, UsageSettledPayload } from '../../src/env'
 import { consumeEvents, createUsageEvent, createUserStateEvent } from '../../src/gateway/queue'
+import { sha256Hex } from '../../src/gateway/crypto'
 
 class QueueStatement {
   values: unknown[] = []
@@ -63,6 +64,12 @@ const payload: UsageSettledPayload = {
   amount_micros: 40,
   outcome: 'completed',
   stream: false,
+  platform: 'openai',
+  request_type: 1,
+  inbound_endpoint: '/v1/chat/completions',
+  upstream_endpoint: '/v1/responses',
+  billing_mode: 'token',
+  native_compaction_v2: false,
   duration_ms: 123,
   estimated: false,
 }
@@ -94,13 +101,23 @@ describe('usage queue projection', () => {
     expect(database.batches).toHaveLength(1)
     expect(database.batches[0][0].query).toContain('INSERT INTO usage_projection')
     expect(database.batches[0][0].query).toContain('base_amount_micros')
+    expect(database.batches[0][0].query).toContain('inbound_endpoint')
+    expect(database.batches[0][0].values.slice(-8)).toEqual([
+      'openai', 'group-1', 1, '/v1/chat/completions', '/v1/responses', 'token', 0, 1,
+    ])
     expect(database.batches[0][1].query).toContain('INSERT INTO inbox')
   })
 
-  it('normalizes a v0.5 usage event to balance billing before projection and digesting', async () => {
+  it('normalizes a v0.5 usage event while accepting its pre-v0.20 inbox digest', async () => {
     const legacyEvent = createUsageEvent({ ...payload }, 1_000)
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).billing_type
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).subscription_id
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).platform
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).request_type
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).inbound_endpoint
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).upstream_endpoint
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).billing_mode
+    delete (legacyEvent.payload as Partial<UsageSettledPayload>).native_compaction_v2
     const database = new QueueDatabase()
     const item = message(legacyEvent)
 
@@ -108,12 +125,14 @@ describe('usage queue projection', () => {
 
     expect(item.ack).toHaveBeenCalledOnce()
     expect(item.retry).not.toHaveBeenCalled()
-    expect(database.batches[0][0].values.slice(-2)).toEqual(['balance', null])
+    expect(database.batches[0][0].values.slice(-10)).toEqual([
+      'balance', null, '', 'group-1', 1, '', '', 'token', 0, 1,
+    ])
     const normalizedDigest = database.batches[0][1].values[3]
     expect(typeof normalizedDigest).toBe('string')
 
     const replayDatabase = new QueueDatabase({ result_digest: normalizedDigest as string })
-    const replay = message(createUsageEvent(payload, 1_000))
+    const replay = message(legacyEvent)
     await consumeEvents(
       { queue: 'events', messages: [replay] } as unknown as MessageBatch<unknown>,
       env(replayDatabase),
@@ -122,6 +141,36 @@ describe('usage queue projection', () => {
     expect(replay.ack).toHaveBeenCalledOnce()
     expect(replay.retry).not.toHaveBeenCalled()
     expect(replayDatabase.batches).toHaveLength(0)
+
+    const {
+      request_id,
+      user_id,
+      api_key_id,
+      group_id,
+      ...legacyFields
+    } = legacyEvent.payload as Partial<UsageSettledPayload>
+    const v019Digest = await sha256Hex(JSON.stringify({
+      ...legacyEvent,
+      payload: {
+        request_id,
+        user_id,
+        api_key_id,
+        group_id,
+        billing_type: 'balance',
+        subscription_id: null,
+        ...legacyFields,
+      },
+    }))
+    const deployedReplayDatabase = new QueueDatabase({ result_digest: v019Digest })
+    const deployedReplay = message(legacyEvent)
+    await consumeEvents(
+      { queue: 'events', messages: [deployedReplay] } as unknown as MessageBatch<unknown>,
+      env(deployedReplayDatabase),
+    )
+
+    expect(deployedReplay.ack).toHaveBeenCalledOnce()
+    expect(deployedReplay.retry).not.toHaveBeenCalled()
+    expect(deployedReplayDatabase.batches).toHaveLength(0)
   })
 
   it('rejects partially missing or explicitly contradictory billing references', async () => {

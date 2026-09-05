@@ -121,6 +121,25 @@ describe('production admin route permission matrix', () => {
     })
   })
 
+  it('requires operations write permission for request observation resolution actions', async () => {
+    grantRole('operations-reader', ['admin.operations.read'])
+
+    const read = await request('/api/v1/admin/ops/request-errors')
+    const resolve = await request(
+      '/api/v1/admin/ops/request-errors/observation-1/resolve',
+      'POST',
+    )
+
+    expect(read.status).not.toBe(403)
+    expect(resolve.status).toBe(403)
+    await expect(resolve.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
+    })
+  })
+
   it('classifies promotions and affiliates as commerce while guarding manual accrual as operations', async () => {
     grantRole('commerce-operator', ['admin.commerce.read', 'admin.commerce.write'])
 

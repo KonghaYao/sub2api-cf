@@ -28,6 +28,9 @@ describe('usage Explorer Worker contract', () => {
       api_key_id: 'key_01HZZ',
       group_id: 'group_01HZZ',
       model: 'gpt-5',
+      request_type: 'stream',
+      native_compaction_v2: false,
+      billing_mode: 'token',
     })).resolves.toEqual(response)
 
     expect(get).toHaveBeenCalledWith('/usage', {
@@ -37,6 +40,9 @@ describe('usage Explorer Worker contract', () => {
         api_key_id: 'key_01HZZ',
         group_id: 'group_01HZZ',
         model: 'gpt-5',
+        request_type: 'stream',
+        native_compaction_v2: false,
+        billing_mode: 'token',
       },
     })
   })

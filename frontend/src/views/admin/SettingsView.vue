@@ -278,6 +278,7 @@
           </div>
         </div>
 
+        <WorkerAuthSourceDefaultsCard v-if="cloudflareWorkerSettings" />
         <WorkerOAuthProvidersCard v-if="cloudflareWorkerSettings" />
 
         <!-- Tab Navigation -->
@@ -9076,6 +9077,7 @@ import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import PaymentProviderList from "@/components/payment/PaymentProviderList.vue";
 import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vue";
 import WorkerOAuthProvidersCard from "@/components/admin/settings/WorkerOAuthProvidersCard.vue";
+import WorkerAuthSourceDefaultsCard from "@/components/admin/settings/WorkerAuthSourceDefaultsCard.vue";
 import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
 import Toggle from "@/components/common/Toggle.vue";

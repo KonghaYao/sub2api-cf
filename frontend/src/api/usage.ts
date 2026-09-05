@@ -28,6 +28,9 @@ export interface UsageExplorerQuery {
   model?: string
   billing_type?: number | null
   stream?: boolean
+  request_type?: UsageRequestType
+  native_compaction_v2?: boolean | null
+  billing_mode?: string | null
 }
 
 // ==================== Dashboard Types ====================

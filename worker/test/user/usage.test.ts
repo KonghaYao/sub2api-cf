@@ -46,4 +46,43 @@ describe('user usage HTTP contract',()=>{
   expect((await app.request('/api/v1/usage?limit=1&cursor=not-a-cursor',{headers:t.headers},t.env)).status).toBe(400)
   expect((await app.request('/api/v1/usage?page=101&page_size=20',{headers:t.headers},t.env)).status).toBe(400)
  })
+ it('ports request-type, billing-mode, compaction, endpoint, and platform usage dimensions',async()=>{
+  const t=await fixture(),app=createApp()
+  await t.env.DB.prepare(`INSERT INTO usage_projection(
+    event_id,request_id,user_id,api_key_id,group_id,model,input_tokens,output_tokens,
+    amount_micros,occurred_at_ms,projected_at_ms,stream,platform,request_type,
+    inbound_endpoint,upstream_endpoint,billing_mode,native_compaction_v2
+  ) VALUES('alice-stream','alice-stream','alice','alice-key','group-a','gpt-stream',3,4,
+    250000,?,?,1,'openai',2,'/v1/responses','/v1/chat/completions','token',0)`)
+    .bind(TEST_NOW-1,TEST_NOW).run()
+  await t.env.DB.prepare(`INSERT INTO usage_projection(
+    event_id,request_id,user_id,api_key_id,group_id,model,input_tokens,output_tokens,
+    amount_micros,occurred_at_ms,projected_at_ms,stream,platform,request_type,
+    inbound_endpoint,upstream_endpoint,billing_mode,native_compaction_v2,dimensions_version
+  ) VALUES('alice-unknown','alice-unknown','alice','alice-key','group-a','gpt-unknown',1,1,
+    10000,?,?,0,'openai',0,'/v1/responses','/v1/responses','token',0,1)`)
+    .bind(TEST_NOW-2,TEST_NOW).run()
+
+  const filtered=await app.request('/api/v1/usage?limit=20&request_type=stream&stream=bad&billing_mode=token&native_compaction_v2=false',{headers:t.headers},t.env)
+  expect(filtered.status).toBe(200)
+  await expect(filtered.json()).resolves.toMatchObject({data:{items:[{
+    id:'alice-stream',request_type:'stream',stream:true,billing_mode:'token',
+    native_compaction_v2:false,inbound_endpoint:'/v1/responses',
+  }]}})
+  expect((await app.request('/api/v1/usage?request_type=invalid',{headers:t.headers},t.env)).status).toBe(400)
+  expect((await app.request('/api/v1/usage?request_type=constructor',{headers:t.headers},t.env)).status).toBe(400)
+  expect((await app.request('/api/v1/usage?native_compaction_v2=invalid',{headers:t.headers},t.env)).status).toBe(400)
+  await expect((await app.request('/api/v1/usage?limit=20&billing_mode=video',{headers:t.headers},t.env)).json())
+    .resolves.toMatchObject({data:{items:[]}})
+  expect((await app.request('/api/v1/usage/dashboard/models?model_source=upstream',{headers:t.headers},t.env)).status).toBe(400)
+
+  await expect((await app.request('/api/v1/usage/stats?request_type=stream',{headers:t.headers},t.env)).json())
+    .resolves.toMatchObject({data:{total_requests:1,endpoints:[{endpoint:'/v1/responses',requests:1}]}})
+  await expect((await app.request('/api/v1/usage?limit=20&request_type=sync',{headers:t.headers},t.env)).json())
+    .resolves.toMatchObject({data:{items:[{id:'alice-event',request_type:'sync'}]}})
+  const unknown = await (await app.request('/api/v1/usage?limit=20&request_type=unknown',{headers:t.headers},t.env)).json() as any
+  expect(unknown.data.items).toEqual([expect.objectContaining({id:'alice-unknown',request_type:'unknown'})])
+  await expect((await app.request('/api/v1/usage/dashboard/stats',{headers:t.headers},t.env)).json())
+    .resolves.toMatchObject({data:{by_platform:[{platform:'openai',total_requests:3}]}})
+ })
 })

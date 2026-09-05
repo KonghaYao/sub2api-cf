@@ -88,7 +88,7 @@ The following classifications apply test-by-test by behavioral family in
 | `chatcompletions_responses_stream_lifecycle_test.go` | Retain | Balanced text/reasoning/tool lifecycle and idempotent terminal behavior are represented |
 | `chatcompletions_responses_bridge_custom_tools_test.go` | Retain + Pending | Codex-native function/custom/tool-search call-ID family normalization is retained; custom/freeform, namespace and client `tool_search` lowering/restoration remains incomplete |
 | `chatcompletions_responses_reasoning_cache_test.go` | Replace + Pending | Stateless wire reasoning is retained; cross-request reasoning cache must be a DO/KV design and is not complete |
-| `chatcompletions_responses_tool_output_media_test.go` | Pending | Tool-output media extraction/reinjection is not complete |
+| `chatcompletions_responses_tool_output_media_test.go` | Retain | `test/gateway/protocols/responses.test.ts` covers nested/JSON/data-URL images, ordered multimodal reinjection, duplicate call IDs and preservation of structured siblings |
 | `chatcompletions_x_search_test.go` | Pending | `x_search` request projection exists in Chat→Responses, but full round-trip and billing are not proven |
 | `responses_to_chatcompletions_tool_name_test.go` | Retain | First tool delta requires a name; subsequent empty names are not emitted |
 | `responses_to_chatcompletions_codex_events_test.go` | Pending | Custom tool and Codex-specific reasoning event families are not complete |
@@ -98,7 +98,7 @@ The following classifications apply test-by-test by behavioral family in
 | `responses_client_tools*.go` | Pending | Client tool manifest/item-id restoration is not implemented |
 | `service_tier_passthrough_test.go` | Retain | Standard Chat↔Responses buffered and streaming paths represented |
 | `streaming_stop_reason_test.go` | Retain | Max tokens, content filter and completed terminal mapping represented |
-| `chatcompletions_anthropic_bridge_test.go` | Retain + Pending | Text/function tools and streams retained; image-bearing tool-result parity is Pending |
+| `chatcompletions_anthropic_bridge_test.go` | Retain + Pending | Text/function tools and streams retained; `test/gateway/protocols/anthropic.test.ts` covers base64 image-bearing tool results for Responses and Chat upstreams. URL/file media and remaining bridge variants are Pending |
 | `chatcompletions_anthropic_reasoning_passback_test.go` | Pending | Signed Anthropic thinking round-trip cannot be claimed from plain Chat reasoning text |
 | `anthropic_responses_test.go` | Retain + Pending | Core request/response/SSE/tools/errors retained; native image, cache-control and all output-config variants are not complete |
 | `anthropic_to_responses_stream_test.go` | Pending | Worker currently implements Responses→Anthropic and Chat→Anthropic, not a native Anthropic→Responses event codec |

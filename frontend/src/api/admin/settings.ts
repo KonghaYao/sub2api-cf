@@ -104,6 +104,30 @@ export type AuthSourceType =
   | "google"
   | "dingtalk";
 
+/** Exact Cloudflare Worker `/api/v1/admin/settings` auth-source contract. */
+export interface WorkerAuthSourceSubscription {
+  group_id: string;
+  validity_days: number;
+}
+
+export interface WorkerAuthSourceDefaultSettings {
+  /** USD, represented to at most six decimal places by the Worker. */
+  balance: number;
+  concurrency: number;
+  subscriptions: WorkerAuthSourceSubscription[];
+  grant_on_signup: boolean;
+  grant_on_first_bind: boolean;
+  /** USD limits; null means unlimited for that window. */
+  platform_quotas: Partial<Record<PlatformType, PlatformQuotaLimits>>;
+}
+
+export type WorkerAuthSourceDefaults = Record<
+  AuthSourceType,
+  WorkerAuthSourceDefaultSettings
+>;
+
+export type WorkerAuthSourceDefaultsPatch = Partial<WorkerAuthSourceDefaults>;
+
 export interface AuthSourceDefaultsValue {
   balance: number;
   concurrency: number;
@@ -399,6 +423,7 @@ export interface SystemSettings {
   control_version?: number;
   schema_version?: number;
   updated_at_ms?: number;
+  auth_source_defaults?: WorkerAuthSourceDefaults;
   // Registration settings
   registration_enabled: boolean;
   email_verify_enabled: boolean;
@@ -746,6 +771,7 @@ export interface SystemSettings {
 }
 
 export interface UpdateSettingsRequest {
+  auth_source_defaults?: WorkerAuthSourceDefaultsPatch;
   registration_enabled?: boolean;
   email_verify_enabled?: boolean;
   registration_email_suffix_whitelist?: string[];
@@ -1073,6 +1099,7 @@ interface WorkerAdminSettings {
     passkey_rp_origins?: string[];
   };
   secrets: { turnstile_secret_key_configured: boolean };
+  auth_source_defaults: WorkerAuthSourceDefaults;
   updated_at_ms: number;
 }
 
@@ -1080,6 +1107,7 @@ interface WorkerSettingsPatch {
   public?: Partial<WorkerAdminSettings["public"]>;
   security?: { step_up_enabled: boolean };
   secrets?: { turnstile_secret_key: string | null };
+  auth_source_defaults?: WorkerAuthSourceDefaultsPatch;
 }
 
 export interface WorkerCommercialConfig {
@@ -1144,6 +1172,7 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     passkey_rp_origins: settings.security?.passkey_rp_origins ?? [],
     step_up_enabled: settings.security?.step_up_enabled ?? false,
     turnstile_secret_key_configured: settings.secrets.turnstile_secret_key_configured,
+    auth_source_defaults: settings.auth_source_defaults,
   } as SystemSettings;
 }
 
@@ -1230,7 +1259,15 @@ export async function updateSettings(
   if (settings.turnstile_secret_key !== undefined && settings.turnstile_secret_key !== "") {
     patch.secrets = { turnstile_secret_key: settings.turnstile_secret_key };
   }
-  if (patch.public === undefined && patch.security === undefined && patch.secrets === undefined) {
+  if (settings.auth_source_defaults !== undefined) {
+    patch.auth_source_defaults = settings.auth_source_defaults;
+  }
+  if (
+    patch.public === undefined &&
+    patch.security === undefined &&
+    patch.secrets === undefined &&
+    patch.auth_source_defaults === undefined
+  ) {
     throw settingsContractError(
       "worker_feature_not_supported",
       "None of these settings are supported by the Cloudflare Worker version",

@@ -165,6 +165,340 @@ describe('Responses request to Chat Completions', () => {
     ])
   })
 
+  it('moves image tool output into a following multimodal user message', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        {
+          type: 'function_call',
+          call_id: 'call_image',
+          name: 'view_image',
+          arguments: '{}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_image',
+          output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+        },
+      ],
+    })
+
+    expect(responsesToChatCompletionsRequest(request, 'upstream-model').messages).toEqual([
+      {
+        role: 'assistant',
+        tool_calls: [{
+          id: 'call_image',
+          type: 'function',
+          function: { name: 'view_image', arguments: '{}' },
+        }],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_image',
+        content: '[{"type":"input_text","text":"[Tool output media moved to the following user message]"}]',
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '[Tool output media for call call_image]' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        ],
+      },
+    ])
+  })
+
+  it.each([
+    {
+      name: 'nested image URL',
+      call: { type: 'function_call', call_id: 'call_image', name: 'view_image', arguments: '{}' },
+      outputType: 'function_call_output',
+      output: [
+        { type: 'input_text', text: 'render complete' },
+        { type: 'image_url', image_url: { url: 'https://example.com/tool-output.png' } },
+      ],
+      expectedUrl: 'https://example.com/tool-output.png',
+    },
+    {
+      name: 'JSON string output',
+      call: { type: 'function_call', call_id: 'call_image', name: 'view_image', arguments: '{}' },
+      outputType: 'function_call_output',
+      output: '[{"type":"input_image","image_url":"data:image/png;base64,AQID"}]',
+      expectedUrl: 'data:image/png;base64,AQID',
+    },
+    {
+      name: 'bare image data URL',
+      call: { type: 'custom_tool_call', call_id: 'call_image', name: 'view_image', input: '{}' },
+      outputType: 'custom_tool_call_output',
+      output: 'data:image/jpeg;base64,BAUG',
+      expectedUrl: 'data:image/jpeg;base64,BAUG',
+    },
+    {
+      name: 'tool search output',
+      call: { type: 'tool_search_call', call_id: 'call_image', arguments: { query: 'image' } },
+      outputType: 'tool_search_output',
+      output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+      expectedUrl: 'data:image/png;base64,AQID',
+    },
+  ])('extracts supported $name without leaking its URL into tool content', ({
+    call,
+    outputType,
+    output,
+    expectedUrl,
+  }) => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [call, { type: outputType, call_id: 'call_image', output }],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    expect(messages.map((message) => message.role)).toEqual(['assistant', 'tool', 'user'])
+    expect(messages[1]?.content).not.toContain(expectedUrl)
+    expect(messages[2]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: '[Tool output media for call call_image]' },
+        { type: 'image_url', image_url: { url: expectedUrl } },
+      ],
+    })
+  })
+
+  it('orders parallel tool replies and media by call order rather than output arrival order', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_A', name: 'view_image', arguments: '{}' },
+        { type: 'function_call', call_id: 'call_B', name: 'view_image', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_B',
+          output: [{ type: 'input_image', image_url: { url: 'https://example.com/b.png' } }],
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_A',
+          output: [{ type: 'input_image', image_url: { url: 'https://example.com/a.png' } }],
+        },
+      ],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    expect(messages[0]?.tool_calls).toEqual([
+      expect.objectContaining({ id: 'call_A' }),
+      expect.objectContaining({ id: 'call_B' }),
+    ])
+    expect(messages.slice(1, 3).map((message) => message.tool_call_id)).toEqual(['call_A', 'call_B'])
+    expect(messages[3]?.content).toEqual([
+      { type: 'text', text: '[Tool output media for call call_A]' },
+      { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+      { type: 'text', text: '[Tool output media for call call_B]' },
+      { type: 'image_url', image_url: { url: 'https://example.com/b.png' } },
+    ])
+  })
+
+  it('places extracted media before interleaved developer and user messages', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_A', name: 'view_image', arguments: '{}' },
+        { type: 'message', role: 'developer', content: 'approval saved' },
+        { type: 'message', role: 'user', content: 'continue' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_A',
+          output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+        },
+      ],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    expect(messages.map((message) => message.role)).toEqual([
+      'assistant', 'tool', 'user', 'system', 'user',
+    ])
+    expect(messages[2]?.content).toEqual([
+      { type: 'text', text: '[Tool output media for call call_A]' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+    ])
+    expect(messages[3]?.content).toBe('approval saved')
+    expect(messages[4]?.content).toBe('continue')
+  })
+
+  it('drops orphan output media and media for unanswered parallel calls', () => {
+    const orphan = parseResponsesRequest({
+      model: 'vision-model',
+      input: [{
+        type: 'function_call_output',
+        call_id: 'call_ghost',
+        output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+      }],
+    })
+    expect(responsesToChatCompletionsRequest(orphan, 'upstream-model').messages).toEqual([])
+
+    const unanswered = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_A', name: 'view_image', arguments: '{}' },
+        { type: 'function_call', call_id: 'call_B', name: 'view_image', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_A',
+          output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+        },
+      ],
+    })
+    const messages = responsesToChatCompletionsRequest(unanswered, 'upstream-model').messages
+    expect(messages[0]?.tool_calls).toEqual([
+      expect.objectContaining({ id: 'call_A' }),
+    ])
+    expect(JSON.stringify(messages)).not.toContain('call_B')
+  })
+
+  it.each([
+    '{"type":"result","url":"https://example.com/result","extra":{"count":2}}',
+    '[ { "type": "input_text", "text": "ok" }, {"unknown":true} ]',
+    'plain output',
+    '{ "ok": true }',
+    'prefix data:image/png;base64,AQID suffix',
+  ])('preserves media-free tool output bytes: %s', (mediaFreeOutput) => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_text', name: 'exec', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_text', output: mediaFreeOutput },
+      ],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    expect(messages).toHaveLength(2)
+    expect(messages[1]?.content).toBe(mediaFreeOutput)
+  })
+
+  it('removes extracted media URLs from every tool output family in one batch', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_function', name: 'view_image', arguments: '{}' },
+        { type: 'custom_tool_call', call_id: 'call_custom', name: 'custom_image', input: '{}' },
+        { type: 'tool_search_call', call_id: 'call_search', arguments: { query: 'image' } },
+        {
+          type: 'function_call_output',
+          call_id: 'call_function',
+          output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+        },
+        {
+          type: 'custom_tool_call_output',
+          call_id: 'call_custom',
+          output: { content: [{ type: 'image_url', image_url: { url: 'https://example.com/custom.png' } }] },
+        },
+        {
+          type: 'tool_search_output',
+          call_id: 'call_search',
+          output: 'data:image/jpeg;base64,BAUG',
+        },
+      ],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    const toolMessages = messages.filter((message) => message.role === 'tool')
+    expect(toolMessages).toHaveLength(3)
+    for (const message of toolMessages) {
+      expect(String(message.content)).not.toContain('data:image/')
+      expect(String(message.content)).not.toContain('https://example.com/custom.png')
+    }
+    expect(messages.map((message) => message.role)).toEqual([
+      'assistant', 'tool', 'tool', 'tool', 'user',
+    ])
+  })
+
+  it('rewrites only image nodes while preserving rich sibling tool output', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_image', name: 'view_image', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_image',
+          output: {
+            status: 'ok',
+            content: [
+              {
+                type: 'result',
+                url: 'https://example.com/result',
+                score: 0.9,
+                text: 'complete',
+                extra: { count: 2 },
+              },
+              { type: 'input_image', image_url: 'data:image/png;base64,AQID' },
+            ],
+            unknown: { large: 9_007_199_254_740_991 },
+          },
+        },
+      ],
+    })
+
+    const messages = responsesToChatCompletionsRequest(request, 'upstream-model').messages
+    expect(JSON.parse(String(messages[1]?.content))).toEqual({
+      status: 'ok',
+      content: [
+        {
+          type: 'result',
+          url: 'https://example.com/result',
+          score: 0.9,
+          text: 'complete',
+          extra: { count: 2 },
+        },
+        { type: 'input_text', text: '[Tool output media moved to the following user message]' },
+      ],
+      unknown: { large: 9_007_199_254_740_991 },
+    })
+  })
+
+  it('preserves unsafe integer lexemes while extracting nested tool media', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_image', name: 'view_image', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_image',
+          output: '{"status":"ok","content":[{"type":"input_image","image_url":"data:image/png;base64,AQID"}],"unknown":{"large":9007199254740993}}',
+        },
+      ],
+    })
+
+    const toolContent = String(
+      responsesToChatCompletionsRequest(request, 'upstream-model').messages[1]?.content,
+    )
+    expect(toolContent).toContain('"large":9007199254740993')
+    expect(toolContent).not.toContain('9007199254740992')
+  })
+
+  it('uses the latest duplicate tool output and clears stale media', () => {
+    const request = parseResponsesRequest({
+      model: 'vision-model',
+      input: [
+        { type: 'function_call', call_id: 'call_image', name: 'view_image', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_image',
+          output: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
+        },
+        { type: 'function_call_output', call_id: 'call_image', output: 'latest text' },
+      ],
+    })
+
+    expect(responsesToChatCompletionsRequest(request, 'upstream-model').messages).toEqual([
+      {
+        role: 'assistant',
+        tool_calls: [{
+          id: 'call_image',
+          type: 'function',
+          function: { name: 'view_image', arguments: '{}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_image', content: 'latest text' },
+    ])
+  })
+
   it('rejects truncated historical tool arguments before they poison the upstream turn', () => {
     expect(() => parseResponsesRequest({
       model: 'public-model',

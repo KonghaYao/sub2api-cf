@@ -1,3 +1,8 @@
+import {
+  parseJsonPreservingIntegers,
+  stringifyJsonPreservingIntegers,
+} from '../lossless-json'
+
 /**
  * Strict, dependency-free codec for routing an OpenAI Responses request to a
  * Chat Completions-only upstream. It deliberately projects an allow-listed
@@ -15,6 +20,7 @@ const NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/
 const TOOL_SEARCH_PROXY_NAME = 'tool_search'
 const TOOL_SEARCH_PROXY_DESCRIPTION =
   'Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.'
+const TOOL_OUTPUT_MEDIA_MARKER = '[Tool output media moved to the following user message]'
 const TOOL_SEARCH_PROXY_PARAMETERS: JsonObject = {
   type: 'object',
   properties: {
@@ -71,6 +77,7 @@ export interface ResponsesFunctionCallOutputItem {
   type: 'function_call_output'
   call_id: string
   output: string
+  media?: ChatImageContentPart[]
 }
 
 export interface ResponsesIgnoredServerItem {
@@ -223,11 +230,23 @@ interface StreamTool {
 
 interface ChatMessage extends JsonObject {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string
+  content?: string | ChatContentPart[]
   reasoning_content?: string
   tool_calls?: ChatToolCall[]
   tool_call_id?: string
 }
+
+interface ChatTextContentPart extends JsonObject {
+  type: 'text'
+  text: string
+}
+
+interface ChatImageContentPart extends JsonObject {
+  type: 'image_url'
+  image_url: { url: string }
+}
+
+type ChatContentPart = ChatTextContentPart | ChatImageContentPart
 
 interface ChatToolCall {
   id: string
@@ -1286,6 +1305,7 @@ function responsesInputToChatMessages(
   input: string | ResponsesInputItem[],
 ): ChatMessage[] {
   const built: ChatMessage[] = []
+  const mediaByCallId = new Map<string, ChatImageContentPart[]>()
   if (instructions !== undefined && instructions.trim() !== '') {
     built.push({ role: 'system', content: instructions })
   }
@@ -1332,6 +1352,8 @@ function responsesInputToChatMessages(
     }
     if (item.type === 'function_call_output') {
       built.push({ role: 'tool', tool_call_id: item.call_id, content: item.output })
+      if (item.media === undefined || item.media.length === 0) mediaByCallId.delete(item.call_id)
+      else mediaByCallId.set(item.call_id, item.media)
       pendingReasoning = ''
       continue
     }
@@ -1355,10 +1377,13 @@ function responsesInputToChatMessages(
     built.push(message)
   }
 
-  return normalizeChatToolHistory(built)
+  return normalizeChatToolHistory(built, mediaByCallId)
 }
 
-function normalizeChatToolHistory(messages: ChatMessage[]): ChatMessage[] {
+function normalizeChatToolHistory(
+  messages: ChatMessage[],
+  mediaByCallId: ReadonlyMap<string, ChatImageContentPart[]> = new Map(),
+): ChatMessage[] {
   const replies = new Map<string, ChatMessage>()
   for (const message of messages) {
     if (message.role === 'tool' && message.tool_call_id !== undefined) {
@@ -1375,7 +1400,7 @@ function normalizeChatToolHistory(messages: ChatMessage[]): ChatMessage[] {
     }
     const answered = original.tool_calls.filter((call) => replies.has(call.id))
     if (answered.length === 0) {
-      if ((original.content ?? '').trim() !== '') {
+      if (typeof original.content === 'string' && original.content.trim() !== '') {
         const { tool_calls: _discarded, ...plain } = original
         normalized.push(plain as ChatMessage)
       }
@@ -1383,6 +1408,13 @@ function normalizeChatToolHistory(messages: ChatMessage[]): ChatMessage[] {
     }
     normalized.push({ ...original, tool_calls: answered })
     for (const call of answered) normalized.push(replies.get(call.id)!)
+    const media: ChatContentPart[] = []
+    for (const call of answered) {
+      const callMedia = mediaByCallId.get(call.id)
+      if (callMedia === undefined || callMedia.length === 0) continue
+      media.push({ type: 'text', text: `[Tool output media for call ${call.id}]` }, ...callMedia)
+    }
+    if (media.length > 0) normalized.push({ role: 'user', content: media })
   }
   return normalized
 }
@@ -1455,10 +1487,12 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem | null
   }
   if (type === 'function_call_output') {
     exactKeys(item, ['type', 'id', 'call_id', 'output', 'status'], path)
+    const output = parseToolOutput(item.output, `${path}.output`)
     return {
       type,
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
-      output: toolOutputText(item.output, `${path}.output`),
+      output: output.text,
+      ...(output.media.length === 0 ? {} : { media: output.media }),
     }
   }
   if (type === 'custom_tool_call') {
@@ -1471,10 +1505,12 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem | null
     }
   }
   if (type === 'custom_tool_call_output') {
+    const output = parseToolOutput(item.output, `${path}.output`)
     return {
       type: 'function_call_output',
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
-      output: toolOutputText(item.output, `${path}.output`),
+      output: output.text,
+      ...(output.media.length === 0 ? {} : { media: output.media }),
     }
   }
   if (type === 'tool_search_call') {
@@ -1485,16 +1521,18 @@ function parseInputItem(value: unknown, path: string): ResponsesInputItem | null
       type: 'function_call',
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
       name: TOOL_SEARCH_PROXY_NAME,
-      arguments: JSON.stringify(argumentsValue),
+      arguments: stringifyJsonPreservingIntegers(argumentsValue)!,
     }
   }
   if (type === 'tool_search_output') {
     exactKeys(item, ['type', 'id', 'call_id', 'output', 'tools', 'execution', 'status'], path)
-    const output = item.output === undefined ? item.tools : item.output
+    const outputPath = `${path}.${item.output === undefined ? 'tools' : 'output'}`
+    const output = parseToolOutput(item.output === undefined ? item.tools : item.output, outputPath)
     return {
       type: 'function_call_output',
       call_id: nonEmptyString(item.call_id, `${path}.call_id`, 256),
-      output: toolOutputText(output, `${path}.${item.output === undefined ? 'tools' : 'output'}`),
+      output: output.text,
+      ...(output.media.length === 0 ? {} : { media: output.media }),
     }
   }
   if (
@@ -1564,10 +1602,10 @@ function parseTools(value: unknown, path: string): ResponsesFunctionTool[] {
   const append = (tool: ResponsesFunctionTool, owner: string, itemPath: string): void => {
     const existing = owners.get(tool.name)
     if (existing !== undefined) {
-      if (existing.owner === owner && existing.signature === JSON.stringify(tool)) return
+      if (existing.owner === owner && existing.signature === stringifyJsonPreservingIntegers(tool)) return
       fail(itemPath, `executable tool name '${tool.name}' cannot be disambiguated`)
     }
-    owners.set(tool.name, { owner, signature: JSON.stringify(tool) })
+    owners.set(tool.name, { owner, signature: stringifyJsonPreservingIntegers(tool)! })
     parsed.push(tool)
   }
   for (const [index, raw] of arrayAt(value, path, MAX_TOOLS).entries()) {
@@ -1679,7 +1717,7 @@ function restoredToolIdentity(
 function customToolInput(argumentsValue: string): string {
   if (argumentsValue === '') return ''
   try {
-    const decoded = JSON.parse(argumentsValue) as unknown
+    const decoded = parseJsonPreservingIntegers(argumentsValue)
     if (isObject(decoded)) {
       if (typeof decoded.input === 'string') return decoded.input
       if (Object.keys(decoded).length === 0) return ''
@@ -1693,7 +1731,7 @@ function customToolInput(argumentsValue: string): string {
 function toolSearchArguments(argumentsValue: string): JsonObject | string {
   if (argumentsValue.trim() === '') return {}
   try {
-    const decoded = JSON.parse(argumentsValue) as unknown
+    const decoded = parseJsonPreservingIntegers(argumentsValue)
     return isObject(decoded) ? decoded : argumentsValue
   } catch {
     return argumentsValue
@@ -1836,17 +1874,87 @@ function responsesTextContent(content: string | ResponsesTextPart[]): string {
   return content.map((part) => part.text).join('')
 }
 
-function toolOutputText(value: unknown, path: string): string {
-  if (typeof value === 'string') return stringAt(value, path, MAX_JSON_CHARS)
+function parseToolOutput(
+  value: unknown,
+  path: string,
+): { text: string; media: ChatImageContentPart[] } {
+  if (typeof value === 'string') {
+    const text = stringAt(value, path, MAX_JSON_CHARS)
+    if (isImageDataUrl(text)) {
+      return { text: TOOL_OUTPUT_MEDIA_MARKER, media: [chatImagePart(text)] }
+    }
+    let nested: unknown
+    try {
+      nested = parseJsonPreservingIntegers(text)
+    } catch {
+      return { text, media: [] }
+    }
+    const rewritten = rewriteToolOutputMedia(nested)
+    return rewritten.changed
+      ? { text: stringifyJsonPreservingIntegers(rewritten.value)!, media: rewritten.media }
+      : { text, media: [] }
+  }
   if (value === undefined) fail(path, 'is required')
   assertJsonSize(value, path)
   try {
-    const serialized = JSON.stringify(value)
+    const rewritten = rewriteToolOutputMedia(value)
+    const serialized = stringifyJsonPreservingIntegers(rewritten.value)
     if (serialized === undefined) fail(path, 'must be JSON serializable')
-    return serialized
+    return { text: serialized, media: rewritten.media }
   } catch {
     fail(path, 'must be JSON serializable')
   }
+}
+
+function rewriteToolOutputMedia(
+  value: unknown,
+): { value: unknown; media: ChatImageContentPart[]; changed: boolean } {
+  if (Array.isArray(value)) {
+    const media: ChatImageContentPart[] = []
+    let changed = false
+    const rewritten = value.map((item) => {
+      const result = rewriteToolOutputMedia(item)
+      media.push(...result.media)
+      changed ||= result.changed
+      return result.value
+    })
+    return { value: rewritten, media, changed }
+  }
+  if (!isObject(value)) return { value, media: [], changed: false }
+
+  const imageUrl = recognizedToolOutputImageUrl(value)
+  if (imageUrl !== undefined) {
+    return {
+      value: { type: 'input_text', text: TOOL_OUTPUT_MEDIA_MARKER },
+      media: [chatImagePart(imageUrl)],
+      changed: true,
+    }
+  }
+  if (!Object.hasOwn(value, 'content')) return { value, media: [], changed: false }
+
+  const content = rewriteToolOutputMedia(value.content)
+  return content.changed
+    ? { value: { ...value, content: content.value }, media: content.media, changed: true }
+    : { value, media: [], changed: false }
+}
+
+function recognizedToolOutputImageUrl(value: JsonObject): string | undefined {
+  if (value.type !== 'input_image' && value.type !== 'image_url') return undefined
+  const raw = value.image_url
+  const url = typeof raw === 'string'
+    ? raw
+    : isObject(raw) && typeof raw.url === 'string'
+      ? raw.url
+      : undefined
+  return url === undefined || url.trim() === '' ? undefined : url
+}
+
+function isImageDataUrl(value: string): boolean {
+  return /^data:image\/[^;,]+;base64,.+$/s.test(value)
+}
+
+function chatImagePart(url: string): ChatImageContentPart {
+  return { type: 'image_url', image_url: { url } }
 }
 
 function requireJsonObjectString(value: string, path: string): void {
@@ -1855,7 +1963,7 @@ function requireJsonObjectString(value: string, path: string): void {
 
 function isJsonObjectString(value: string): boolean {
   try {
-    return isObject(JSON.parse(value))
+    return isObject(parseJsonPreservingIntegers(value))
   } catch {
     return false
   }
@@ -1864,7 +1972,7 @@ function isJsonObjectString(value: string): boolean {
 function assertJsonSize(value: unknown, path: string): void {
   let serialized: string
   try {
-    const encoded = JSON.stringify(value)
+    const encoded = stringifyJsonPreservingIntegers(value)
     if (encoded === undefined) fail(path, 'must be JSON serializable')
     serialized = encoded
   } catch {

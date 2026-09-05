@@ -1150,6 +1150,42 @@ export default {
       authSourceDefaults: {
         title: '认证来源默认值',
         description: '按注册来源配置新用户默认余额、并发、订阅与授权策略。',
+        workerTitle: '认证来源默认权益',
+        workerDescription: '分别配置七种认证来源在注册或首次绑定时发放的 Worker 权益。只保存当前选中的来源，金额单位均为美元。',
+        reload: '重新加载',
+        loading: '正在加载认证来源默认权益…',
+        sourceLabel: '认证来源',
+        grantOnSignupLabel: '注册时发放',
+        grantOnSignupHint: '通过此来源首次创建用户时发放以下权益。',
+        balanceUsdLabel: '余额（USD）',
+        usdPrecisionHint: '最多支持六位小数；0 表示不发放余额。',
+        concurrencyLabel: '并发额度',
+        addSubscription: '添加订阅',
+        subscriptionGroupLabel: '订阅分组',
+        subscriptionGroupPlaceholder: '选择订阅分组',
+        validityDaysLabel: '有效期（天）',
+        removeSubscription: '移除订阅',
+        unavailableGroup: '不可用的现有分组',
+        platformQuotasTitle: '平台周期额度（USD）',
+        platformQuotasWorkerHint: '空值表示该周期不限额；0 表示该周期额度为零。所有金额最多六位小数。',
+        platform: '平台',
+        dailyUsd: '每日（USD）',
+        weeklyUsd: '每周（USD）',
+        monthlyUsd: '每月（USD）',
+        unlimitedPlaceholder: '不限额',
+        invalidResponse: 'Worker 返回的认证来源默认权益不完整，请重新加载。',
+        loadFailed: '加载认证来源默认权益失败',
+        saveFailed: '保存认证来源默认权益失败',
+        saving: '保存中…',
+        saveSource: '保存当前来源',
+        saved: '{source} 的默认权益已保存',
+        validation: {
+          balance: '{source} 的余额必须是非负数且最多六位小数。',
+          concurrency: '{source} 的并发额度必须是大于零的整数。',
+          subscriptionCount: '{source} 最多只能配置 100 个默认订阅。',
+          subscription: '{source} 的订阅分组不可为空或重复，有效期必须为 1 至 36500 天。',
+          quota: '{source} 的 {platform} 额度必须留空或填写非负且最多六位小数的美元金额。'
+        },
         requireEmailLabel: '第三方注册强制补充邮箱',
         requireEmailHint: '启用后，Linux DO、OIDC、微信注册缺少邮箱时必须先补充邮箱地址。',
         enabledHint: '以下默认值会在该来源注册新用户时发放；首次绑定时授权仅作用于已有账号绑定该来源。',
@@ -1169,6 +1205,18 @@ export default {
           wechat: {
             title: '微信登录',
             description: '适用于微信第三方注册的新用户默认配额。'
+          },
+          dingtalk: {
+            title: '钉钉登录',
+            description: '适用于钉钉注册或首次绑定的默认权益。'
+          },
+          github: {
+            title: 'GitHub 登录',
+            description: '适用于 GitHub 注册或首次绑定的默认权益。'
+          },
+          google: {
+            title: 'Google 登录',
+            description: '适用于 Google 注册或首次绑定的默认权益。'
           }
         },
         grantOnFirstBindLabel: '首次绑定时授权',

@@ -555,6 +555,22 @@ const baseSettingsResponse = {
   },
 };
 
+const workerAuthSourceDefaults = Object.fromEntries(
+  ["email", "linuxdo", "oidc", "wechat", "dingtalk", "github", "google"].map(
+    (source) => [
+      source,
+      {
+        balance: 0,
+        concurrency: 5,
+        subscriptions: [],
+        grant_on_signup: source === "email",
+        grant_on_first_bind: false,
+        platform_quotas: {},
+      },
+    ],
+  ),
+);
+
 function mountView() {
   return mount(SettingsView, {
     global: {
@@ -836,6 +852,21 @@ describe("admin SettingsView payment visible method controls", () => {
       balance_disabled: true,
       recharge_fee_rate: 1.5,
     }));
+  });
+
+  it("renders the Worker auth-source entitlement editor on the settings page", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+      auth_source_defaults: workerAuthSourceDefaults,
+    });
+    getGroups.mockResolvedValue([]);
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="worker-auth-source-defaults-card"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-select"]').findAll("option")).toHaveLength(7);
   });
 
   it("shows the Worker Passkey projection and persists its sign-in toggle", async () => {
