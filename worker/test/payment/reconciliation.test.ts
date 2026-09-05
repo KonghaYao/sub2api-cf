@@ -28,8 +28,10 @@ interface Fixture {
 
 class EvidenceBucket {
   readonly objects = new Map<string, Uint8Array>()
+  readonly putKeys: string[] = []
 
   async put(key: string, value: string | ArrayBuffer | ArrayBufferView | Blob): Promise<any> {
+    this.putKeys.push(key)
     const bytes = typeof value === 'string'
       ? new TextEncoder().encode(value)
       : value instanceof Blob
@@ -119,6 +121,81 @@ describe('payment reconciliation scanner and admin HTTP contract', () => {
       order_id: 'recon-order-refund-failed',
       evidence: { available: true, content_sha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
     })
+  })
+
+  it('bounds each invocation by raw source rows and advances past non-anomalous history', async () => {
+    const test = await fixture()
+    for (const id of ['normal-order-a', 'normal-order-b', 'normal-order-c', 'normal-order-d', 'normal-order-e']) {
+      insertOrder(test.raw, id, 'PENDING', { paidAmountMicros: 0, paidAt: null })
+    }
+
+    const first = await scanPaymentReconciliationIssues(test.env, 2)
+    expect(first).toMatchObject({ scanned: 2, issues_created: 0, issues_seen: 0 })
+    expect(JSON.parse(first.next_cursor)).toMatchObject({
+      phase: 'order',
+      updated_at_ms: NOW - DAY_MS,
+      id: 'normal-order-b',
+    })
+
+    const second = await scanPaymentReconciliationIssues(test.env, 2)
+    expect(second).toMatchObject({ scanned: 2, issues_created: 0, issues_seen: 0 })
+    expect(JSON.parse(second.next_cursor)).toMatchObject({
+      phase: 'order',
+      updated_at_ms: NOW - DAY_MS,
+      id: 'normal-order-d',
+    })
+
+    const third = await scanPaymentReconciliationIssues(test.env, 2)
+    expect(third).toMatchObject({ scanned: 1, issues_created: 0, issues_seen: 0 })
+    expect(JSON.parse(third.next_cursor)).toMatchObject({ phase: 'webhook' })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS total FROM payment_reconciliation_issues`,
+    ).get()).toEqual({ total: 0 })
+  })
+
+  it('reuses one bounded evidence object and skips R2 writes while anomaly facts are unchanged', async () => {
+    const test = await fixture()
+    insertOrder(test.raw, 'recon-order-stable-evidence', 'REFUND_REQUESTED', {
+      paidAmountMicros: 12_500_000,
+      lastError: 'late_payment_requires_refund',
+    })
+
+    await scanToEnd(test.env)
+    const first = test.raw.prepare(
+      `SELECT evidence_r2_key, evidence_sha256
+         FROM payment_reconciliation_issues
+        WHERE source_id = 'recon-order-stable-evidence'`,
+    ).get() as { evidence_r2_key: string; evidence_sha256: string }
+    expect(test.bucket.putKeys).toEqual([first.evidence_r2_key])
+    expect(test.bucket.objects.size).toBe(1)
+
+    vi.setSystemTime(NOW + 60_000)
+    await scanToEnd(test.env)
+    const unchanged = test.raw.prepare(
+      `SELECT evidence_r2_key, evidence_sha256
+         FROM payment_reconciliation_issues
+        WHERE source_id = 'recon-order-stable-evidence'`,
+    ).get()
+    expect(unchanged).toEqual(first)
+    expect(test.bucket.putKeys).toHaveLength(1)
+    expect(test.bucket.objects.size).toBe(1)
+
+    test.raw.prepare(
+      `UPDATE payment_orders
+          SET paid_amount_micros = 13000000, updated_at_ms = ?
+        WHERE id = 'recon-order-stable-evidence'`,
+    ).run(NOW + 120_000)
+    vi.setSystemTime(NOW + 120_000)
+    await scanToEnd(test.env)
+    const changed = test.raw.prepare(
+      `SELECT evidence_r2_key, evidence_sha256
+         FROM payment_reconciliation_issues
+        WHERE source_id = 'recon-order-stable-evidence'`,
+    ).get() as { evidence_r2_key: string; evidence_sha256: string }
+    expect(changed.evidence_r2_key).toBe(first.evidence_r2_key)
+    expect(changed.evidence_sha256).not.toBe(first.evidence_sha256)
+    expect(test.bucket.putKeys).toEqual([first.evidence_r2_key, first.evidence_r2_key])
+    expect(test.bucket.objects.size).toBe(1)
   })
 
   it('requires admin access and serves only safe immutable evidence through the guarded route', async () => {

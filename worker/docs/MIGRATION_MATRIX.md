@@ -67,8 +67,8 @@ Status meanings:
 | Subscription plans | Plans, user subscriptions, renewals and usage windows | Partial | Public/admin plan CRUD, user list/progress, redeem assignment/extension and gateway quota enforcement pass; payment renewal remains |
 | Redemption/invitations | Atomic redeem, administrative lifecycle, invitation rewards, exhaustion and expiry | Partial | Balance/subscription redemption plus hashed one-time admin generation, CAS batch lifecycle, idempotency, expiry and race tests pass. Migration 0032 adds normalized/HMAC invitation codes, encrypted admin display, validation, ETag/idempotent CRUD, atomic password/OAuth registration consumption, last-slot concurrency protection and immutable affiliate attribution. A separate registration-time invitation reward, if retained beyond promo credit and purchase commission, remains to be specified and tested. |
 | Promotions | Promo validation, applicability and one-time consumption | Done | Migration 0032 and Worker handlers cover normalized/HMAC lookup, encrypted code storage, disabled/expired/exhausted validation, atomic registration credit and per-user/last-slot protection. Admin create/update/delete require Idempotency-Key, updates/deletes require a control version, detail/create/update return ETag, and guarded D1 batches prevent CAS losers from emitting audit rows; promotion and registration tests pass locally. |
-| Payments | D1 orders/provider config, Stripe signed webhooks, R2 receipts/evidence, Queue/DO subscription fulfillment, refunds and reconciliation | Partial | Worker order/config/currency/Stripe/webhook/fulfillment/refund/admin suites pass. D1 atomically admits pending/daily limits, Stripe and D1 share a >=30m expiry, Cron expires sessions, and late payments enter refund reconciliation. Owner-scoped immutable JSON receipts are materialized to R2 with retry/concurrency tests. Migration 0033 and admin handlers provide a bounded cursor scanner, safe R2 evidence, filters/detail and idempotent acknowledge/resolve/reopen actions for nine tested anomaly classes. Subscription entitlement and affiliate rebate clawback/recovery are exactly-once locally. Payment renewal, retained non-Stripe providers and authenticated production E2E remain. |
-| Affiliate | Referral attribution, commission ledger and payout views | Done | Migration 0032 makes attribution and earning/transfer/adjustment ledgers immutable, with private rate/freeze/duration/per-invitee-cap policy. Password and OAuth registration attribution, payment-fulfillment accrual, owner/admin summaries, invitee/rebate/transfer views and idempotent UserStateDO transfer-to-balance are covered locally. Partial/full refunds create exactly-once compensating entries across frozen, available and already-transferred commission; duplicate/concurrent refunds and lost DO responses converge through the existing refund recovery job. Legacy cash payout is intentionally replaced by internal balance transfer. |
+| Payments | D1 orders/provider config, Stripe signed webhooks, R2 receipts/evidence, Queue/DO subscription fulfillment, refunds and reconciliation | Partial | Worker order/config/currency/Stripe/webhook/fulfillment/refund/admin suites pass. D1 atomically admits pending/daily limits, Stripe and D1 share a >=30m expiry, Cron expires sessions, and late payments enter refund reconciliation. Owner-scoped immutable JSON receipts are materialized to R2 with retry/concurrency tests. Migrations 0033/0034 and admin handlers provide a bounded tuple-seek scanner, stable overwrite-in-place R2 evidence, filters/detail and idempotent acknowledge/resolve/reopen actions for nine tested anomaly classes. Subscription entitlement and affiliate rebate clawback/recovery are exactly-once locally; ancillary clawback failures never overwrite a committed provider/D1 refund result. Payment renewal, retained non-Stripe providers and authenticated production E2E remain. |
+| Affiliate | Referral attribution, commission ledger and payout views | Done | Migrations 0032/0035 make attribution and earning/transfer/adjustment/debt-repayment ledgers immutable, with private rate/freeze/duration/per-invitee-cap policy. Password and OAuth registration attribution, payment-fulfillment accrual, owner/admin summaries, net invitee/rebate records, timezone-aware record filters and idempotent UserStateDO transfer-to-balance are covered locally. Partial/full refunds create exactly-once compensating entries across frozen, available and already-transferred commission; unavailable transferred balance becomes visible debt that later commissions repay first. Duplicate/concurrent refunds and lost or unavailable DO responses converge through the existing refund recovery job. Legacy cash payout is intentionally replaced by internal balance transfer. |
 | Announcements | Published audience-aware announcements and acknowledgement | Planned | Visibility and acknowledgement tests |
 
 Password admission deliberately uses one environment-scoped `AuthRateLimitDO` coordinator so the
@@ -90,7 +90,8 @@ Commercial storage rules:
   refund request and never creates fulfillment work.
 - KV contains disposable public/config caches only; it is never financial truth.
 - Queue consumers lease and retry email delivery and subscription fulfilment; bounded Cron recovery
-  resumes missed affiliate accruals, refund entitlement rollback and affiliate refund clawback.
+  resumes missed affiliate accruals, refund entitlement rollback and affiliate refund clawback;
+  migration 0035 persists unrecoverable transferred commission as debt instead of failing a settled refund.
   The compatibility email adapter receives a stable idempotency key, while native email retries
   retain the same event ID for reconciliation after ambiguous send outcomes.
 - R2 stores exports, receipts, avatars, and long-lived audit artifacts where appropriate.
@@ -179,8 +180,8 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
 
 1. **Payment closure**: the Stripe slice now has server-priced hosted checkout, encrypted
    provider configuration, signed webhook ingestion, R2 evidence and owner receipts, idempotent
-   subscription fulfilment, refund state recovery, subscription/affiliate clawback, a cursorized
-   reconciliation scanner and guarded admin actions. Remaining work is payment renewal, the
+   subscription fulfilment, refund state recovery, subscription/affiliate clawback, a tuple-seek
+   reconciliation scanner with bounded R2 evidence and guarded admin actions. Remaining work is payment renewal, the
    retained non-Stripe providers, authenticated production E2E and deployed recovery drills. The
    order state machine and webhook verification are production implementations, not stubs.
 2. **Gateway fidelity**: normalized OpenAI, Anthropic, Gemini, and Codex provider adapters;
@@ -203,4 +204,4 @@ of tests, asset build, target D1 migrations, Worker deployment, and production s
 6. **Secondary product features**: v0.17 now has the model plaza, platform quotas, promotions,
    invitation admission and affiliate transfer/refund-clawback slices. Remaining work is any retained
    standalone registration-time invitation reward, announcements, search extensions, prompt audit,
-   the currently red usage snapshot aggregate, and deployed browser/production E2E for these paths.
+   broader usage aggregate parity, and deployed browser/production E2E for these paths.

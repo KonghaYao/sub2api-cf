@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import {
   accrueAdminAffiliateRebate,
+  accrueAffiliateRebate,
   accrueAffiliateRebateForPaymentOrder,
   batchUpdateAdminAffiliateRates,
   clawbackAffiliateRebateForRefund,
@@ -271,6 +272,40 @@ describe('affiliate HTTP contract', () => {
       `SELECT COUNT(*) AS total FROM affiliate_ledger
         WHERE entry_type IN ('rebate_clawback_reserved', 'rebate_clawback_completed')`,
     ).get()).toEqual({ total: 2 })
+
+    const owner = await app.request('/user/aff', { headers: test.inviterHeaders }, test.env)
+    await expect(owner.json()).resolves.toMatchObject({
+      data: {
+        invitees: [{
+          user_id: 'invitee',
+          total_rebate: 1,
+          total_rebate_micros: 1_000_000,
+          gross_rebate_micros: 2_000_000,
+          adjustment_micros: 1_000_000,
+          adjustment_status: 'completed',
+        }],
+      },
+    })
+    const adminInvites = await app.request('/admin/invites', { headers: test.adminHeaders }, test.env)
+    await expect(adminInvites.json()).resolves.toMatchObject({
+      data: { items: [{
+        invitee_id: 'invitee',
+        total_rebate_micros: 1_000_000,
+        gross_rebate_micros: 2_000_000,
+        adjustment_micros: 1_000_000,
+        adjustment_status: 'completed',
+      }] },
+    })
+    const adminRebates = await app.request('/admin/rebates', { headers: test.adminHeaders }, test.env)
+    await expect(adminRebates.json()).resolves.toMatchObject({
+      data: { items: [{
+        order_id: 'order-partial-refund',
+        rebate_micros: 1_000_000,
+        gross_rebate_micros: 2_000_000,
+        adjustment_micros: 1_000_000,
+        adjustment_status: 'completed',
+      }] },
+    })
     const replacement = await accrue(app, test, 'order-after-partial-refund', 10_000_000)
     await expect(replacement.json()).resolves.toMatchObject({
       data: { applied: true, rebate_micros: 1_000_000 },
@@ -315,6 +350,106 @@ describe('affiliate HTTP contract', () => {
     ).get()).toEqual({ total: 1 })
   })
 
+  it('settles transferred-rebate debt from later commissions before exposing new quota', async () => {
+    const state = new RecoveringUserState(false)
+    const test = await fixture(state)
+    const app = routes()
+    await bindReferral(test, Date.now())
+    seedCompletedPaymentOrder(test, 'order-debt-origin')
+    await accrueAffiliateRebateForPaymentOrder(test.env, 'order-debt-origin')
+    const transfer = await app.request('/user/aff/transfer', {
+      method: 'POST',
+      headers: { ...test.inviterHeaders, 'idempotency-key': 'transfer-before-debt-0001' },
+    }, test.env)
+    expect(transfer.status).toBe(200)
+    state.reservedMicros = 1_000_000
+    seedSettledRefund(test, 'order-debt-origin', 'refund-debt-origin', 10_000_000)
+
+    await expect(clawbackAffiliateRebateForRefund(test.env, 'refund-debt-origin'))
+      .resolves.toMatchObject({
+        status: 'completed', balance_recovered_micros: 1_000_000,
+        debt_incurred_micros: 1_000_000,
+      })
+    expect(test.raw.prepare(
+      `SELECT available_micros, history_micros, debt_micros
+         FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 0, history_micros: 0, debt_micros: 1_000_000 })
+
+    await accrue(app, test, 'order-debt-partial-repay', 2_500_000)
+    expect(test.raw.prepare(
+      `SELECT available_micros, history_micros, debt_micros
+         FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 0, history_micros: 500_000, debt_micros: 500_000 })
+    await accrue(app, test, 'order-debt-final-repay', 5_000_000)
+    expect(test.raw.prepare(
+      `SELECT available_micros, history_micros, debt_micros
+         FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 500_000, history_micros: 1_500_000, debt_micros: 0 })
+    expect(test.raw.prepare(
+      `SELECT amount_micros, debt_after_micros FROM affiliate_debt_repayments
+        ORDER BY created_at_ms, id`,
+    ).all()).toEqual([
+      { amount_micros: 500_000, debt_after_micros: 500_000 },
+      { amount_micros: 500_000, debt_after_micros: 0 },
+    ])
+
+    const owner = await app.request('/user/aff', { headers: test.inviterHeaders }, test.env)
+    await expect(owner.json()).resolves.toMatchObject({
+      data: { aff_debt_micros: 0, aff_quota_micros: 500_000 },
+    })
+    const overview = await app.request('/admin/users/inviter/overview', {
+      headers: test.adminHeaders,
+    }, test.env)
+    await expect(overview.json()).resolves.toMatchObject({ data: { debt_micros: 0 } })
+  })
+
+  it('claws back released quota before reopening debt when a repayment rebate is refunded', async () => {
+    const state = new RecoveringUserState(false)
+    const test = await fixture(state)
+    const app = routes()
+    await bindReferral(test, Date.now())
+    seedCompletedPaymentOrder(test, 'order-debt-sequence-origin')
+    await accrueAffiliateRebateForPaymentOrder(test.env, 'order-debt-sequence-origin')
+    const transfer = await app.request('/user/aff/transfer', {
+      method: 'POST',
+      headers: { ...test.inviterHeaders, 'idempotency-key': 'transfer-debt-sequence-0001' },
+    }, test.env)
+    expect(transfer.status).toBe(200)
+    state.reservedMicros = state.balanceMicros
+    seedSettledRefund(test, 'order-debt-sequence-origin', 'refund-debt-sequence-origin', 5_000_000)
+    await clawbackAffiliateRebateForRefund(test.env, 'refund-debt-sequence-origin')
+
+    seedCompletedPaymentOrder(test, 'order-debt-repayment-refunded')
+    await accrueAffiliateRebateForPaymentOrder(test.env, 'order-debt-repayment-refunded')
+    expect(test.raw.prepare(
+      `SELECT available_micros, debt_micros FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 1_000_000, debt_micros: 0 })
+
+    seedSettledRefund(test, 'order-debt-repayment-refunded', 'refund-repayment-first', 2_500_000)
+    await clawbackAffiliateRebateForRefund(test.env, 'refund-repayment-first')
+    expect(test.raw.prepare(
+      `SELECT available_micros, debt_micros FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 500_000, debt_micros: 0 })
+
+    seedSettledRefund(test, 'order-debt-repayment-refunded', 'refund-repayment-second', 7_500_000)
+    await clawbackAffiliateRebateForRefund(test.env, 'refund-repayment-second')
+    expect(test.raw.prepare(
+      `SELECT available_micros, history_micros, debt_micros
+         FROM affiliate_profiles WHERE user_id = 'inviter'`,
+    ).get()).toEqual({ available_micros: 0, history_micros: 1_500_000, debt_micros: 500_000 })
+    expect(test.raw.prepare(
+      `SELECT adjustment_micros, quota_clawback_micros, balance_clawback_micros,
+              debt_reopened_micros, debt_incurred_micros
+         FROM affiliate_rebate_adjustments WHERE refund_id = 'refund-repayment-second'`,
+    ).get()).toEqual({
+      adjustment_micros: 1_000_000,
+      quota_clawback_micros: 500_000,
+      balance_clawback_micros: 0,
+      debt_reopened_micros: 500_000,
+      debt_incurred_micros: 0,
+    })
+  })
+
   it('isolates user summaries while admin records require an administrator', async () => {
     const test = await fixture()
     const app = routes()
@@ -343,6 +478,84 @@ describe('affiliate HTTP contract', () => {
     })
     const transfers = await app.request('/admin/transfers', { headers: test.adminHeaders }, test.env)
     await expect(transfers.json()).resolves.toMatchObject({ data: { total: 0, items: [] } })
+  })
+
+  it('filters and sorts admin records using strict timezone-aware query contracts', async () => {
+    const test = await fixture()
+    const app = routes()
+    const localDayStart = Date.UTC(2030, 8, 4, 16, 0, 0)
+    await addUser(test, 'invitee-a', 'a@example.test')
+    await addUser(test, 'invitee-b', 'b@example.test')
+    await addUser(test, 'invitee-outside', 'outside@example.test')
+    for (const [id, at] of [
+      ['invitee-outside', localDayStart - 1],
+      ['invitee-b', localDayStart + 1],
+      ['invitee-a', localDayStart + 2],
+    ] as const) {
+      test.raw.prepare(
+        `INSERT INTO affiliate_referrals (
+           invitee_user_id, inviter_user_id, affiliate_code_prefix, attributed_at_ms
+         ) VALUES (?, 'inviter', 'AFFTEST', ?)`,
+      ).run(id, at)
+    }
+    await accrueAffiliateRebate(test.env, {
+      source_order_id: 'dated-rebate-b', invitee_user_id: 'invitee-b',
+      order_amount_micros: 10_000_000, pay_amount_micros: 10_000_000,
+    }, localDayStart + 10)
+    await accrueAffiliateRebate(test.env, {
+      source_order_id: 'dated-rebate-a', invitee_user_id: 'invitee-a',
+      order_amount_micros: 5_000_000, pay_amount_micros: 5_000_000,
+    }, localDayStart + 20)
+    await accrueAffiliateRebate(test.env, {
+      source_order_id: 'dated-rebate-outside', invitee_user_id: 'invitee-outside',
+      order_amount_micros: 20_000_000, pay_amount_micros: 20_000_000,
+    }, localDayStart - 1)
+    for (const [id, amount, at] of [
+      ['transfer-outside', 3_000_000, localDayStart - 1],
+      ['transfer-b', 2_000_000, localDayStart + 30],
+      ['transfer-a', 1_000_000, localDayStart + 40],
+    ] as const) {
+      test.raw.prepare(
+        `INSERT INTO affiliate_transfer_operations (
+           id, user_id, idempotency_key_hash, request_hash, status, amount_micros,
+           balance_after_micros, state_version, created_at_ms, completed_at_ms, updated_at_ms
+         ) VALUES (?, 'inviter', ?, ?, 'completed', ?, 0, 1, ?, ?, ?)`,
+      ).run(id, id.padEnd(64, 'a'), id.padEnd(64, 'b'), amount, at, at, at)
+    }
+
+    const suffix = 'start_at=2030-09-05&end_at=2030-09-05&timezone=Asia%2FShanghai'
+    const invites = await app.request(
+      `/admin/invites?${suffix}&sort_by=invitee&sort_order=asc`,
+      { headers: test.adminHeaders }, test.env,
+    )
+    expect(invites.status).toBe(200)
+    expect(((await invites.json()) as any).data.items.map((row: any) => row.invitee_id))
+      .toEqual(['invitee-a', 'invitee-b'])
+
+    const rebates = await app.request(
+      `/admin/rebates?${suffix}&sort_by=pay_amount&sort_order=asc`,
+      { headers: test.adminHeaders }, test.env,
+    )
+    expect(rebates.status).toBe(200)
+    expect(((await rebates.json()) as any).data.items.map((row: any) => row.order_id))
+      .toEqual(['dated-rebate-a', 'dated-rebate-b'])
+
+    const transfers = await app.request(
+      `/admin/transfers?${suffix}&sort_by=amount&sort_order=asc`,
+      { headers: test.adminHeaders }, test.env,
+    )
+    expect(transfers.status).toBe(200)
+    expect(((await transfers.json()) as any).data.items.map((row: any) => row.ledger_id))
+      .toEqual(['transfer-a', 'transfer-b'])
+
+    for (const path of [
+      '/admin/invites?sort_by=sql_expression',
+      '/admin/rebates?sort_order=sideways',
+      '/admin/transfers?start_at=2030-09-05&timezone=Mars%2FOlympus',
+    ]) {
+      const invalid = await app.request(path, { headers: test.adminHeaders }, test.env)
+      expect(invalid.status).toBe(400)
+    }
   })
 
   it('manages custom affiliate codes and rates through administrator-only endpoints', async () => {
@@ -789,6 +1002,7 @@ async function accrue(
 
 class RecoveringUserState {
   balanceMicros = 0
+  reservedMicros = 0
   stateVersion = 0
   configured = false
   adjustApplications = 0
@@ -804,8 +1018,9 @@ class RecoveringUserState {
   }
 
   private async fetch(request: Request): Promise<Response> {
-    const body = await request.json() as any
     const path = new URL(request.url).pathname
+    if (request.method === 'GET' && path === '/snapshot') return this.state(false)
+    const body = await request.json() as any
     if (path === '/configure') {
       if (this.configured) {
         return Response.json({ schema_version: 1, error: { code: 'user_already_configured' } }, { status: 409 })
@@ -818,6 +1033,11 @@ class RecoveringUserState {
     if (path === '/balance/adjust') {
       const existing = this.mutations.get(body.mutation_id)
       if (existing === undefined) {
+        if (this.balanceMicros + body.amount_delta_micros < this.reservedMicros) {
+          return Response.json({
+            error: { code: 'balance_below_reservations', message: 'active reservations consume this balance' },
+          }, { status: 409 })
+        }
         this.balanceMicros += body.amount_delta_micros
         this.stateVersion += 1
         this.mutations.set(body.mutation_id, body.amount_delta_micros)
@@ -841,9 +1061,9 @@ class RecoveringUserState {
       state_version: this.stateVersion,
       profile: {
         user_id: 'inviter', enabled: true, balance_micros: this.balanceMicros,
-        reserved_micros: 0, settled_micros: 0,
+        reserved_micros: this.reservedMicros, settled_micros: 0,
       },
-      available_micros: this.balanceMicros,
+      available_micros: this.balanceMicros - this.reservedMicros,
     })
   }
 }

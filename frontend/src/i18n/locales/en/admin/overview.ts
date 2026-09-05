@@ -427,7 +427,8 @@ export default {
         invitedCount: 'Invited Users',
         rebatedInviteeCount: 'Rebated Invitees',
         availableQuota: 'Available Quota',
-        historyQuota: 'Historical Rebate'
+        historyQuota: 'Historical Rebate',
+        debt: 'Outstanding Debt'
       }
     },
 

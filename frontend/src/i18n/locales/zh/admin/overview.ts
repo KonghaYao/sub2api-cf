@@ -427,7 +427,8 @@ export default {
         invitedCount: '邀请人数',
         rebatedInviteeCount: '已产生返利人数',
         availableQuota: '可提余额',
-        historyQuota: '历史返利'
+        historyQuota: '历史返利',
+        debt: '待抵扣欠款'
       }
     },
 

@@ -48,6 +48,7 @@ interface AffiliateProfileRow {
   available_micros: number
   frozen_micros: number
   history_micros: number
+  debt_micros: number
   control_version: number
   created_at_ms: number
   updated_at_ms: number
@@ -125,6 +126,8 @@ export interface AffiliateRefundAdjustmentResult {
   adjustment_micros: number
   quota_clawback_micros: number
   balance_clawback_micros: number
+  balance_recovered_micros: number
+  debt_incurred_micros: number
   status: 'processing' | 'completed' | null
 }
 
@@ -137,6 +140,10 @@ interface AffiliateRefundAdjustmentRow {
   adjustment_micros: number
   quota_clawback_micros: number
   balance_clawback_micros: number
+  balance_recovery_target_micros: number | null
+  balance_recovered_micros: number
+  debt_incurred_micros: number
+  debt_reopened_micros: number
   status: 'processing' | 'completed'
   balance_after_micros: number | null
   state_version: number | null
@@ -153,6 +160,8 @@ interface AffiliateRefundSourceRow {
   available_micros: number
   frozen_micros: number
   previously_adjusted_micros: number
+  debt_repayment_micros: number
+  previously_debt_reopened_micros: number
 }
 
 interface AffiliatePaymentOrderRow {
@@ -212,12 +221,25 @@ export async function getUserAffiliate(context: Context<CommercialBindings>): Pr
       `SELECT user.id AS user_id, user.email, user.display_name,
               user.created_at_ms,
               COALESCE(SUM(CASE WHEN rebate.status <> 'void' THEN rebate.rebate_micros ELSE 0 END), 0)
-                AS total_rebate_micros
+                AS gross_rebate_micros,
+              COALESCE(SUM(CASE WHEN rebate.status <> 'void'
+                THEN COALESCE(adjustment.adjustment_micros, 0) ELSE 0 END), 0)
+                AS adjustment_micros,
+              CASE
+                WHEN COALESCE(MAX(adjustment.has_processing), 0) = 1 THEN 'processing'
+                WHEN COALESCE(SUM(adjustment.adjustment_micros), 0) > 0 THEN 'completed'
+                ELSE 'none'
+              END AS adjustment_status
          FROM affiliate_referrals referral
          JOIN users user ON user.id = referral.invitee_user_id
          LEFT JOIN affiliate_rebates rebate
            ON rebate.inviter_user_id = referral.inviter_user_id
           AND rebate.invitee_user_id = referral.invitee_user_id
+         LEFT JOIN (
+           SELECT rebate_id, SUM(adjustment_micros) AS adjustment_micros,
+                  MAX(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS has_processing
+             FROM affiliate_rebate_adjustments GROUP BY rebate_id
+         ) adjustment ON adjustment.rebate_id = rebate.id
         WHERE referral.inviter_user_id = ?
         GROUP BY user.id, user.email, user.display_name, user.created_at_ms, referral.attributed_at_ms
         ORDER BY referral.attributed_at_ms DESC, user.id DESC LIMIT 100`,
@@ -226,7 +248,9 @@ export async function getUserAffiliate(context: Context<CommercialBindings>): Pr
       email: string
       display_name: string
       created_at_ms: number
-      total_rebate_micros: number
+      gross_rebate_micros: number
+      adjustment_micros: number
+      adjustment_status: 'none' | 'processing' | 'completed'
     }>()
     const ratePpm = profile.rebate_rate_ppm ?? config.affiliate_rebate_rate_ppm
     return controlSuccess({
@@ -240,14 +264,20 @@ export async function getUserAffiliate(context: Context<CommercialBindings>): Pr
       aff_frozen_quota_micros: profile.frozen_micros,
       aff_history_quota: microsToUsd(profile.history_micros),
       aff_history_quota_micros: profile.history_micros,
+      aff_debt: microsToUsd(profile.debt_micros),
+      aff_debt_micros: profile.debt_micros,
       effective_rebate_rate_percent: ratePpm / 10_000,
       invitees: invitees.results.map((invitee) => ({
         user_id: invitee.user_id,
         email: maskEmail(invitee.email),
         username: invitee.display_name,
         created_at: iso(invitee.created_at_ms),
-        total_rebate: microsToUsd(invitee.total_rebate_micros),
-        total_rebate_micros: invitee.total_rebate_micros,
+        total_rebate: microsToUsd(invitee.gross_rebate_micros - invitee.adjustment_micros),
+        total_rebate_micros: invitee.gross_rebate_micros - invitee.adjustment_micros,
+        gross_rebate: microsToUsd(invitee.gross_rebate_micros),
+        gross_rebate_micros: invitee.gross_rebate_micros,
+        adjustment_micros: invitee.adjustment_micros,
+        adjustment_status: invitee.adjustment_status,
       })),
     })
   } catch (error) {
@@ -511,11 +541,18 @@ export async function clawbackAffiliateRebateForRefund(
       source.order_amount_micros,
     )
     const adjustmentMicros = Math.max(0, target - source.previously_adjusted_micros)
+    const releasedRebateMicros = source.rebate_micros - source.debt_repayment_micros
+    const cumulativeDebtReopened = Math.max(0, target - releasedRebateMicros)
+    const debtReopenedMicros = Math.max(
+      0,
+      cumulativeDebtReopened - source.previously_debt_reopened_micros,
+    )
+    const collectibleMicros = adjustmentMicros - debtReopenedMicros
     const candidate = source.rebate_status === 'frozen'
       ? source.frozen_micros
       : source.available_micros
-    const quotaClawbackMicros = Math.min(adjustmentMicros, candidate)
-    const balanceClawbackMicros = adjustmentMicros - quotaClawbackMicros
+    const quotaClawbackMicros = Math.min(collectibleMicros, candidate)
+    const balanceClawbackMicros = collectibleMicros - quotaClawbackMicros
     const adjustmentId = await deterministicUuid('affiliate.rebate.refund-adjustment.v1', refundId)
     const now = Date.now()
     try {
@@ -523,9 +560,9 @@ export async function clawbackAffiliateRebateForRefund(
         `INSERT INTO affiliate_rebate_adjustments (
            id, rebate_id, refund_id, adjustment_kind, quota_bucket,
            refund_amount_micros, cumulative_refunded_micros, adjustment_micros,
-           quota_clawback_micros, balance_clawback_micros,
+           quota_clawback_micros, balance_clawback_micros, debt_reopened_micros,
            created_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         adjustmentId,
         source.rebate_id,
@@ -539,6 +576,7 @@ export async function clawbackAffiliateRebateForRefund(
         adjustmentMicros,
         quotaClawbackMicros,
         balanceClawbackMicros,
+        debtReopenedMicros,
         now,
         now,
       ).run()
@@ -555,20 +593,49 @@ export async function clawbackAffiliateRebateForRefund(
   }
 
   let state: { balance_micros: number; state_version: number } | null = null
-  if (adjustment.balance_clawback_micros > 0) {
-    const user = await env.DB.prepare(
-      `SELECT id, balance_micros, state_version, status FROM users WHERE id = ? LIMIT 1`,
-    ).bind(adjustment.inviter_user_id).first<UserBalanceRow>()
-    if (user === null) throw commercialUnavailable()
-    await ensureUserState(env, user)
-    const adjusted = await userStatePost(env, user.id, '/balance/adjust', {
+  let balanceRecoveredMicros = 0
+  const reclaimableBalanceMicros = adjustment.balance_clawback_micros
+  if (adjustment.balance_recovery_target_micros === null) {
+    let recoveryTarget = 0
+    if (reclaimableBalanceMicros > 0) {
+      const user = await env.DB.prepare(
+        `SELECT id, balance_micros, state_version, status FROM users WHERE id = ? LIMIT 1`,
+      ).bind(adjustment.inviter_user_id).first<UserBalanceRow>()
+      if (user === null) throw commercialUnavailable()
+      await ensureUserState(env, user)
+      const snapshotResponse = await userStateGet(env, user.id, '/snapshot')
+      if (!snapshotResponse.ok) throw await stateError(snapshotResponse)
+      const snapshot = await parseBalanceSnapshot(snapshotResponse, user.id)
+      recoveryTarget = Math.min(reclaimableBalanceMicros, snapshot.available_micros)
+    }
+    await env.DB.prepare(
+      `UPDATE affiliate_rebate_adjustments
+          SET balance_recovery_target_micros = ?,
+              control_version = control_version + 1, updated_at_ms = ?
+        WHERE id = ? AND status = 'processing'
+          AND balance_recovery_target_micros IS NULL`,
+    ).bind(recoveryTarget, Date.now(), adjustment.id).run()
+    adjustment = await findRefundAdjustment(env, refundId)
+    if (adjustment === null) throw commercialUnavailable()
+  }
+  const recoveryTarget = adjustment.balance_recovery_target_micros ?? 0
+  if (recoveryTarget > 0) {
+    const adjusted = await userStatePost(env, adjustment.inviter_user_id, '/balance/adjust', {
       schema_version: 1,
       mutation_id: `affiliate-refund-clawback:${adjustment.id}`,
-      amount_delta_micros: -adjustment.balance_clawback_micros,
+      amount_delta_micros: -recoveryTarget,
     })
-    if (!adjusted.ok) throw await stateError(adjusted)
-    state = await parseBalanceState(adjusted, user.id)
+    if (adjusted.ok) {
+      state = await parseBalanceState(adjusted, adjustment.inviter_user_id)
+      balanceRecoveredMicros = recoveryTarget
+    } else {
+      const code = await responseErrorCode(adjusted)
+      if (code !== 'balance_below_reservations' && code !== 'balance_out_of_range') {
+        throw await stateError(adjusted)
+      }
+    }
   }
+  const debtIncurredMicros = adjustment.balance_clawback_micros - balanceRecoveredMicros
 
   const completedAt = Date.now()
   const eventId = await deterministicUuid(
@@ -579,6 +646,7 @@ export async function clawbackAffiliateRebateForRefund(
     env.DB.prepare(
       `UPDATE affiliate_rebate_adjustments
           SET status = 'completed', balance_after_micros = ?, state_version = ?,
+              balance_recovered_micros = ?, debt_incurred_micros = ?,
               control_version = control_version + 1, completed_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND status = 'processing'
           AND EXISTS (
@@ -588,6 +656,7 @@ export async function clawbackAffiliateRebateForRefund(
                AND settled_amount_micros > 0
           )`,
     ).bind(state?.balance_micros ?? null, state?.state_version ?? null,
+      balanceRecoveredMicros, debtIncurredMicros,
       completedAt, completedAt, adjustment.id),
   ]
   if (state !== null) {
@@ -612,6 +681,9 @@ export async function clawbackAffiliateRebateForRefund(
     adjustment_micros: adjustment.adjustment_micros,
     quota_clawback_micros: adjustment.quota_clawback_micros,
     balance_clawback_micros: adjustment.balance_clawback_micros,
+    balance_recovered_micros: balanceRecoveredMicros,
+    debt_incurred_micros: debtIncurredMicros,
+    debt_reopened_micros: adjustment.debt_reopened_micros,
   }), completedAt, completedAt, adjustment.id))
   await env.DB.batch(statements)
   const completed = await findRefundAdjustment(env, refundId)
@@ -738,6 +810,8 @@ export async function getAdminAffiliateUserOverview(context: Context<CommercialB
       available_quota_micros: profile.available_micros,
       history_quota: microsToUsd(profile.history_micros),
       history_quota_micros: profile.history_micros,
+      debt: microsToUsd(profile.debt_micros),
+      debt_micros: profile.debt_micros,
       control_version: profile.control_version,
     })
   } catch (error) {
@@ -1054,20 +1128,37 @@ async function listAdminRecords(
 ): Promise<Response> {
   try {
     await authenticateAdminSession(context.req.raw, context.env)
-    const { page, pageSize, search, like } = listFilter(context)
+    const filter = listRecordFilter(context, kind)
+    const { page, pageSize } = filter
     const offset = (page - 1) * pageSize
     if (kind === 'invites') {
-      const where = search ? `WHERE inviter.email LIKE ? ESCAPE '\\' OR invitee.email LIKE ? ESCAPE '\\'` : ''
-      const params = search ? [like, like] : []
+      const scoped = recordWhere(
+        filter,
+        `(inviter.email LIKE ? ESCAPE '\\' OR invitee.email LIKE ? ESCAPE '\\')`,
+        'referral.attributed_at_ms',
+        2,
+      )
       const count = await context.env.DB.prepare(
         `SELECT COUNT(*) AS total FROM affiliate_referrals referral
          JOIN users inviter ON inviter.id = referral.inviter_user_id
-         JOIN users invitee ON invitee.id = referral.invitee_user_id ${where}`,
-      ).bind(...params).first<{ total: number }>()
+         JOIN users invitee ON invitee.id = referral.invitee_user_id ${scoped.where}`,
+      ).bind(...scoped.params).first<{ total: number }>()
       const rows = await context.env.DB.prepare(
         `SELECT referral.*, inviter.email AS inviter_email, inviter.display_name AS inviter_username,
                 invitee.email AS invitee_email, invitee.display_name AS invitee_username,
                 COALESCE(SUM(CASE WHEN rebate.status <> 'void' THEN rebate.rebate_micros ELSE 0 END), 0)
+                  AS gross_rebate_micros,
+                COALESCE(SUM(CASE WHEN rebate.status <> 'void'
+                  THEN COALESCE(adjustment.adjustment_micros, 0) ELSE 0 END), 0)
+                  AS adjustment_micros,
+                CASE
+                  WHEN COALESCE(MAX(adjustment.has_processing), 0) = 1 THEN 'processing'
+                  WHEN COALESCE(SUM(adjustment.adjustment_micros), 0) > 0 THEN 'completed'
+                  ELSE 'none'
+                END AS adjustment_status,
+                COALESCE(SUM(CASE WHEN rebate.status <> 'void' THEN rebate.rebate_micros ELSE 0 END), 0)
+                  - COALESCE(SUM(CASE WHEN rebate.status <> 'void'
+                    THEN COALESCE(adjustment.adjustment_micros, 0) ELSE 0 END), 0)
                   AS total_rebate_micros
            FROM affiliate_referrals referral
            JOIN users inviter ON inviter.id = referral.inviter_user_id
@@ -1075,10 +1166,16 @@ async function listAdminRecords(
            LEFT JOIN affiliate_rebates rebate
              ON rebate.inviter_user_id = referral.inviter_user_id
             AND rebate.invitee_user_id = referral.invitee_user_id
-           ${where}
+           LEFT JOIN (
+             SELECT rebate_id, SUM(adjustment_micros) AS adjustment_micros,
+                    MAX(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS has_processing
+               FROM affiliate_rebate_adjustments GROUP BY rebate_id
+           ) adjustment ON adjustment.rebate_id = rebate.id
+           ${scoped.where}
           GROUP BY referral.invitee_user_id
-          ORDER BY referral.attributed_at_ms DESC, referral.invitee_user_id DESC LIMIT ? OFFSET ?`,
-      ).bind(...params, pageSize, offset).all<Record<string, unknown>>()
+          ORDER BY ${filter.orderBy} ${filter.sortOrder}, referral.invitee_user_id ${filter.sortOrder}
+          LIMIT ? OFFSET ?`,
+      ).bind(...scoped.params, pageSize, offset).all<Record<string, unknown>>()
       return paginated(rows.results.map((row) => ({
         inviter_id: row.inviter_user_id,
         inviter_email: row.inviter_email,
@@ -1089,25 +1186,49 @@ async function listAdminRecords(
         aff_code: `${row.affiliate_code_prefix}…`,
         total_rebate: microsToUsd(row.total_rebate_micros as number),
         total_rebate_micros: row.total_rebate_micros,
+        gross_rebate: microsToUsd(row.gross_rebate_micros as number),
+        gross_rebate_micros: row.gross_rebate_micros,
+        adjustment_micros: row.adjustment_micros,
+        adjustment_status: row.adjustment_status,
         created_at: iso(row.attributed_at_ms as number),
       })), count?.total ?? 0, page, pageSize)
     }
     if (kind === 'rebates') {
-      const where = search ? `WHERE rebate.out_trade_no LIKE ? ESCAPE '\\' OR inviter.email LIKE ? ESCAPE '\\' OR invitee.email LIKE ? ESCAPE '\\'` : ''
-      const params = search ? [like, like, like] : []
+      const scoped = recordWhere(
+        filter,
+        `(rebate.out_trade_no LIKE ? ESCAPE '\\' OR inviter.email LIKE ? ESCAPE '\\' OR invitee.email LIKE ? ESCAPE '\\')`,
+        'rebate.created_at_ms',
+        3,
+      )
       const count = await context.env.DB.prepare(
         `SELECT COUNT(*) AS total FROM affiliate_rebates rebate
          JOIN users inviter ON inviter.id = rebate.inviter_user_id
-         JOIN users invitee ON invitee.id = rebate.invitee_user_id ${where}`,
-      ).bind(...params).first<{ total: number }>()
+         JOIN users invitee ON invitee.id = rebate.invitee_user_id ${scoped.where}`,
+      ).bind(...scoped.params).first<{ total: number }>()
       const rows = await context.env.DB.prepare(
         `SELECT rebate.*, inviter.email AS inviter_email, inviter.display_name AS inviter_username,
-                invitee.email AS invitee_email, invitee.display_name AS invitee_username
+                invitee.email AS invitee_email, invitee.display_name AS invitee_username,
+                rebate.rebate_micros AS gross_rebate_micros,
+                COALESCE(adjustment.adjustment_micros, 0) AS adjustment_micros,
+                CASE
+                  WHEN COALESCE(adjustment.has_processing, 0) = 1 THEN 'processing'
+                  WHEN COALESCE(adjustment.adjustment_micros, 0) > 0 THEN 'completed'
+                  ELSE 'none'
+                END AS adjustment_status,
+                rebate.rebate_micros - COALESCE(adjustment.adjustment_micros, 0)
+                  AS net_rebate_micros
            FROM affiliate_rebates rebate
            JOIN users inviter ON inviter.id = rebate.inviter_user_id
-           JOIN users invitee ON invitee.id = rebate.invitee_user_id ${where}
-          ORDER BY rebate.created_at_ms DESC, rebate.id DESC LIMIT ? OFFSET ?`,
-      ).bind(...params, pageSize, offset).all<Record<string, unknown>>()
+           JOIN users invitee ON invitee.id = rebate.invitee_user_id
+           LEFT JOIN (
+             SELECT rebate_id, SUM(adjustment_micros) AS adjustment_micros,
+                    MAX(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS has_processing
+               FROM affiliate_rebate_adjustments GROUP BY rebate_id
+           ) adjustment ON adjustment.rebate_id = rebate.id
+           ${scoped.where}
+          ORDER BY ${filter.orderBy} ${filter.sortOrder}, rebate.id ${filter.sortOrder}
+          LIMIT ? OFFSET ?`,
+      ).bind(...scoped.params, pageSize, offset).all<Record<string, unknown>>()
       return paginated(rows.results.map((row) => ({
         order_id: row.source_order_id,
         out_trade_no: row.out_trade_no,
@@ -1119,29 +1240,38 @@ async function listAdminRecords(
         invitee_username: row.invitee_username,
         order_amount: microsToUsd(row.order_amount_micros as number),
         pay_amount: microsToUsd(row.pay_amount_micros as number),
-        rebate_amount: microsToUsd(row.rebate_micros as number),
-        rebate_micros: row.rebate_micros,
+        rebate_amount: microsToUsd(row.net_rebate_micros as number),
+        rebate_micros: row.net_rebate_micros,
+        gross_rebate_amount: microsToUsd(row.gross_rebate_micros as number),
+        gross_rebate_micros: row.gross_rebate_micros,
+        adjustment_micros: row.adjustment_micros,
+        adjustment_status: row.adjustment_status,
         payment_type: row.payment_type,
         order_status: row.order_status,
         rebate_status: row.status,
         created_at: iso(row.created_at_ms as number),
       })), count?.total ?? 0, page, pageSize)
     }
-    const where = search ? `WHERE user.email LIKE ? ESCAPE '\\' OR user.display_name LIKE ? ESCAPE '\\'` : ''
-    const params = search ? [like, like] : []
+    const scoped = recordWhere(
+      filter,
+      `(user.email LIKE ? ESCAPE '\\' OR user.display_name LIKE ? ESCAPE '\\')`,
+      'transfer.created_at_ms',
+      2,
+    )
     const count = await context.env.DB.prepare(
       `SELECT COUNT(*) AS total FROM affiliate_transfer_operations transfer
-       JOIN users user ON user.id = transfer.user_id ${where}`,
-    ).bind(...params).first<{ total: number }>()
+       JOIN users user ON user.id = transfer.user_id ${scoped.where}`,
+    ).bind(...scoped.params).first<{ total: number }>()
     const rows = await context.env.DB.prepare(
       `SELECT transfer.*, user.email AS user_email, user.display_name AS username,
               profile.available_micros, profile.frozen_micros, profile.history_micros,
               user.balance_micros AS current_balance_micros
          FROM affiliate_transfer_operations transfer
          JOIN users user ON user.id = transfer.user_id
-         JOIN affiliate_profiles profile ON profile.user_id = transfer.user_id ${where}
-        ORDER BY transfer.created_at_ms DESC, transfer.id DESC LIMIT ? OFFSET ?`,
-    ).bind(...params, pageSize, offset).all<Record<string, unknown>>()
+         JOIN affiliate_profiles profile ON profile.user_id = transfer.user_id ${scoped.where}
+        ORDER BY ${filter.orderBy} ${filter.sortOrder}, transfer.id ${filter.sortOrder}
+        LIMIT ? OFFSET ?`,
+    ).bind(...scoped.params, pageSize, offset).all<Record<string, unknown>>()
     return paginated(rows.results.map((row) => ({
       ledger_id: row.id,
       user_id: row.user_id,
@@ -1174,7 +1304,7 @@ async function findProfile(env: Env, userId: string): Promise<AffiliateProfileRo
   return env.DB.prepare(
     `SELECT user_id, code_hash, code_prefix, code_custom, code_key_version,
             code_nonce_b64, code_ciphertext_b64, rebate_rate_ppm, invited_count,
-            available_micros, frozen_micros, history_micros, control_version,
+            available_micros, frozen_micros, history_micros, debt_micros, control_version,
             created_at_ms, updated_at_ms
        FROM affiliate_profiles WHERE user_id = ? LIMIT 1`,
   ).bind(userId).first<AffiliateProfileRow>()
@@ -1252,7 +1382,10 @@ async function findRefundAdjustment(
     `SELECT adjustment.id, adjustment.rebate_id, adjustment.refund_id,
             rebate.inviter_user_id, adjustment.adjustment_kind,
             adjustment.adjustment_micros, adjustment.quota_clawback_micros,
-            adjustment.balance_clawback_micros, adjustment.status,
+            adjustment.balance_clawback_micros,
+            adjustment.balance_recovery_target_micros,
+            adjustment.balance_recovered_micros, adjustment.debt_incurred_micros,
+            adjustment.debt_reopened_micros, adjustment.status,
             adjustment.balance_after_micros, adjustment.state_version
        FROM affiliate_rebate_adjustments adjustment
        JOIN affiliate_rebates rebate ON rebate.id = adjustment.rebate_id
@@ -1270,15 +1403,22 @@ async function findAffiliateRefundSource(
             rebate.order_amount_micros, refund.settled_amount_micros AS refund_amount_micros,
             payment.refunded_amount_micros AS cumulative_refunded_micros,
             profile.available_micros, profile.frozen_micros,
+            COALESCE(repayment.amount_micros, 0) AS debt_repayment_micros,
             COALESCE((
               SELECT SUM(previous.adjustment_micros)
                 FROM affiliate_rebate_adjustments previous
                WHERE previous.rebate_id = rebate.id
-            ), 0) AS previously_adjusted_micros
+            ), 0) AS previously_adjusted_micros,
+            COALESCE((
+              SELECT SUM(previous.debt_reopened_micros)
+                FROM affiliate_rebate_adjustments previous
+               WHERE previous.rebate_id = rebate.id
+            ), 0) AS previously_debt_reopened_micros
        FROM payment_refunds refund
        JOIN payment_orders payment ON payment.id = refund.order_id
        JOIN affiliate_rebates rebate ON rebate.source_order_id = payment.id
        JOIN affiliate_profiles profile ON profile.user_id = rebate.inviter_user_id
+       LEFT JOIN affiliate_debt_repayments repayment ON repayment.source_rebate_id = rebate.id
       WHERE refund.id = ?
         AND refund.status IN ('partially_refunded', 'refunded')
         AND refund.settled_amount_micros > 0
@@ -1309,6 +1449,8 @@ function publicRefundAdjustment(
     adjustment_micros: row.adjustment_micros,
     quota_clawback_micros: row.quota_clawback_micros,
     balance_clawback_micros: row.balance_clawback_micros,
+    balance_recovered_micros: row.balance_recovered_micros,
+    debt_incurred_micros: row.debt_incurred_micros,
     status: row.status,
   }
 }
@@ -1321,6 +1463,8 @@ function emptyRefundAdjustment(): AffiliateRefundAdjustmentResult {
     adjustment_micros: 0,
     quota_clawback_micros: 0,
     balance_clawback_micros: 0,
+    balance_recovered_micros: 0,
+    debt_incurred_micros: 0,
     status: null,
   }
 }
@@ -1395,6 +1539,33 @@ function userStatePost(env: Env, userId: string, path: string, body: Record<stri
   }))
 }
 
+function userStateGet(env: Env, userId: string, path: string): Promise<Response> {
+  const stub = env.USER_STATE.get(env.USER_STATE.idFromName(userId))
+  return stub.fetch(new Request(`https://user-state.internal${path}`))
+}
+
+async function parseBalanceSnapshot(
+  response: Response,
+  userId: string,
+): Promise<{ balance_micros: number; available_micros: number; state_version: number }> {
+  const body = await response.json() as {
+    profile?: { user_id?: unknown; balance_micros?: unknown }
+    available_micros?: unknown
+    state_version?: unknown
+  }
+  if (
+    body.profile?.user_id !== userId ||
+    !Number.isSafeInteger(body.profile.balance_micros) || (body.profile.balance_micros as number) < 0 ||
+    !Number.isSafeInteger(body.available_micros) || (body.available_micros as number) < 0 ||
+    !Number.isSafeInteger(body.state_version) || (body.state_version as number) < 0
+  ) throw commercialUnavailable()
+  return {
+    balance_micros: body.profile.balance_micros as number,
+    available_micros: body.available_micros as number,
+    state_version: body.state_version as number,
+  }
+}
+
 async function parseBalanceState(response: Response, userId: string): Promise<{ balance_micros: number; state_version: number }> {
   const body = await response.json() as {
     profile?: { user_id?: unknown; balance_micros?: unknown }
@@ -1435,6 +1606,167 @@ function listFilter(context: Context<CommercialBindings>) {
   const search = context.req.query('search')?.trim() ?? ''
   if (search.length > 100) throw new GatewayError(400, 'invalid_search', 'search is too long')
   return { page, pageSize, search, like: `%${escapeLike(search)}%` }
+}
+
+interface AdminRecordFilter {
+  page: number
+  pageSize: number
+  search: string
+  like: string
+  startMs: number | null
+  endExclusiveMs: number | null
+  orderBy: string
+  sortOrder: 'ASC' | 'DESC'
+}
+
+const ADMIN_RECORD_SORTS = {
+  invites: {
+    inviter: 'LOWER(inviter.email)',
+    invitee: 'LOWER(invitee.email)',
+    aff_code: 'referral.affiliate_code_prefix',
+    total_rebate: 'total_rebate_micros',
+    created_at: 'referral.attributed_at_ms',
+  },
+  rebates: {
+    order: 'rebate.out_trade_no',
+    inviter: 'LOWER(inviter.email)',
+    invitee: 'LOWER(invitee.email)',
+    order_amount: 'rebate.order_amount_micros',
+    pay_amount: 'rebate.pay_amount_micros',
+    rebate_amount: 'net_rebate_micros',
+    payment_type: 'rebate.payment_type',
+    order_status: 'rebate.order_status',
+    created_at: 'rebate.created_at_ms',
+  },
+  transfers: {
+    user: 'LOWER(user.email)',
+    amount: 'transfer.amount_micros',
+    balance_after: 'transfer.balance_after_micros',
+    available_quota_after: 'profile.available_micros',
+    frozen_quota_after: 'profile.frozen_micros',
+    history_quota_after: 'profile.history_micros',
+    created_at: 'transfer.created_at_ms',
+  },
+} as const
+
+function listRecordFilter(
+  context: Context<CommercialBindings>,
+  kind: keyof typeof ADMIN_RECORD_SORTS,
+): AdminRecordFilter {
+  const basic = listFilter(context)
+  const sortBy = context.req.query('sort_by')?.trim() || 'created_at'
+  const sortOrderInput = context.req.query('sort_order')?.trim().toLowerCase() || 'desc'
+  const sortMap = ADMIN_RECORD_SORTS[kind] as Record<string, string>
+  if (sortMap[sortBy] === undefined) {
+    throw new GatewayError(400, 'invalid_sort_by', `sort_by is not supported for ${kind}`)
+  }
+  if (sortOrderInput !== 'asc' && sortOrderInput !== 'desc') {
+    throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+  }
+  const timezone = context.req.query('timezone')?.trim() || 'UTC'
+  validateTimeZone(timezone)
+  const start = context.req.query('start_at')?.trim() || null
+  const end = context.req.query('end_at')?.trim() || null
+  const startDate = start === null ? null : parseCalendarDate(start, 'start_at')
+  const endDate = end === null ? null : parseCalendarDate(end, 'end_at')
+  if (startDate !== null && endDate !== null && startDate.serial > endDate.serial) {
+    throw new GatewayError(400, 'invalid_date_range', 'start_at must not be after end_at')
+  }
+  return {
+    ...basic,
+    startMs: startDate === null ? null : zonedMidnightMs(startDate, timezone),
+    endExclusiveMs: endDate === null
+      ? null
+      : zonedMidnightMs(calendarDayAfter(endDate), timezone),
+    orderBy: sortMap[sortBy],
+    sortOrder: sortOrderInput === 'asc' ? 'ASC' : 'DESC',
+  }
+}
+
+function recordWhere(
+  filter: AdminRecordFilter,
+  searchSql: string,
+  timestampSql: string,
+  searchBindings: number,
+): { where: string; params: unknown[] } {
+  const conditions: string[] = []
+  const params: unknown[] = []
+  if (filter.search !== '') {
+    conditions.push(searchSql)
+    for (let index = 0; index < searchBindings; index += 1) params.push(filter.like)
+  }
+  if (filter.startMs !== null) {
+    conditions.push(`${timestampSql} >= ?`)
+    params.push(filter.startMs)
+  }
+  if (filter.endExclusiveMs !== null) {
+    conditions.push(`${timestampSql} < ?`)
+    params.push(filter.endExclusiveMs)
+  }
+  return {
+    where: conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`,
+    params,
+  }
+}
+
+interface CalendarDate { year: number; month: number; day: number; serial: number }
+
+function parseCalendarDate(value: string, field: 'start_at' | 'end_at'): CalendarDate {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (matched === null) throw new GatewayError(400, `invalid_${field}`, `${field} must be YYYY-MM-DD`)
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  const day = Number(matched[3])
+  const serial = Date.UTC(year, month - 1, day)
+  const checked = new Date(serial)
+  if (
+    checked.getUTCFullYear() !== year || checked.getUTCMonth() !== month - 1 ||
+    checked.getUTCDate() !== day
+  ) throw new GatewayError(400, `invalid_${field}`, `${field} is not a valid calendar date`)
+  return { year, month, day, serial }
+}
+
+function calendarDayAfter(value: CalendarDate): CalendarDate {
+  const next = new Date(value.serial + 86_400_000)
+  return {
+    year: next.getUTCFullYear(), month: next.getUTCMonth() + 1,
+    day: next.getUTCDate(), serial: next.getTime(),
+  }
+}
+
+function validateTimeZone(timezone: string): void {
+  if (timezone.length > 100) throw new GatewayError(400, 'invalid_timezone', 'timezone is invalid')
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(0)
+  } catch {
+    throw new GatewayError(400, 'invalid_timezone', 'timezone must be a supported IANA time zone')
+  }
+}
+
+function zonedMidnightMs(value: CalendarDate, timezone: string): number {
+  const target = Date.UTC(value.year, value.month - 1, value.day)
+  let candidate = target
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23',
+  })
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = Object.fromEntries(
+      formatter.formatToParts(candidate)
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, Number(part.value)]),
+    ) as Record<string, number>
+    const represented = Date.UTC(
+      parts.year, parts.month - 1, parts.day,
+      parts.hour, parts.minute, parts.second,
+    )
+    const correction = target - represented
+    candidate += correction
+    if (correction === 0) break
+  }
+  return candidate
 }
 
 function paginated(items: unknown[], total: number, page: number, pageSize: number): Response {

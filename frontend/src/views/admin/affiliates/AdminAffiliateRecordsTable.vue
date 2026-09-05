@@ -135,6 +135,7 @@
           <OverviewStat :label="t('admin.affiliates.overview.rebatedInviteeCount')" :value="String(selectedOverview.rebated_invitee_count)" />
           <OverviewStat :label="t('admin.affiliates.overview.availableQuota')" :value="'$' + formatAmount(selectedOverview.available_quota)" />
           <OverviewStat :label="t('admin.affiliates.overview.historyQuota')" :value="'$' + formatAmount(selectedOverview.history_quota)" />
+          <OverviewStat :label="t('admin.affiliates.overview.debt')" :value="'$' + formatAmount(selectedOverview.debt)" />
         </div>
       </div>
     </BaseDialog>
@@ -193,7 +194,7 @@ const columns = computed<Column[]>(() => {
       { key: 'invitee', label: t('admin.affiliates.records.invitee'), sortable: true },
       { key: 'order_amount', label: t('admin.affiliates.records.orderAmount'), sortable: true },
       { key: 'pay_amount', label: t('admin.affiliates.records.payAmount'), sortable: true },
-      { key: 'rebate_amount', label: t('admin.affiliates.records.rebateAmount') },
+      { key: 'rebate_amount', label: t('admin.affiliates.records.rebateAmount'), sortable: true },
       { key: 'payment_type', label: t('admin.affiliates.records.paymentType'), sortable: true },
       { key: 'order_status', label: t('admin.affiliates.records.orderStatus'), sortable: true },
       { key: 'created_at', label: t('admin.affiliates.records.rebatedAt'), sortable: true },
@@ -316,7 +317,7 @@ function formatDateTime(value: string | null | undefined): string {
   return value ? formatDisplayDateTime(value) : '-'
 }
 
-async function openUserOverview(userId: number) {
+async function openUserOverview(userId: string | number) {
   if (!userId) return
   overviewDialog.value = true
   overviewLoading.value = true

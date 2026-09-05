@@ -44,6 +44,11 @@ export interface AffiliateInviteRecord {
   invitee_username: string
   aff_code: string
   total_rebate: number
+  total_rebate_micros?: number
+  gross_rebate?: number
+  gross_rebate_micros?: number
+  adjustment_micros?: number
+  adjustment_status?: 'none' | 'processing' | 'completed'
   created_at: string
 }
 
@@ -59,6 +64,11 @@ export interface AffiliateRebateRecord {
   order_amount: number
   pay_amount: number
   rebate_amount: number
+  rebate_micros?: number
+  gross_rebate_amount?: number
+  gross_rebate_micros?: number
+  adjustment_micros?: number
+  adjustment_status?: 'none' | 'processing' | 'completed'
   payment_type: string
   order_status: string
   created_at: string
@@ -88,6 +98,8 @@ export interface AffiliateUserOverview {
   rebated_invitee_count: number
   available_quota: number
   history_quota: number
+  debt: number
+  debt_micros: number
   control_version: number
 }
 

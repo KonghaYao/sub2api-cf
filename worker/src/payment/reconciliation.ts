@@ -38,12 +38,14 @@ const ISSUE_STATUSES = ['open', 'acknowledged', 'resolved'] as const
 const ISSUE_SEVERITIES = ['warning', 'error', 'critical'] as const
 const SOURCE_KINDS = ['order', 'webhook', 'fulfillment', 'refund'] as const
 const ACTIONS = ['acknowledge', 'resolve', 'reopen'] as const
+const SCAN_PHASES = ['order', 'webhook', 'fulfillment', 'refund'] as const
 
 type IssueType = typeof ISSUE_TYPES[number]
 type IssueStatus = typeof ISSUE_STATUSES[number]
 type IssueSeverity = typeof ISSUE_SEVERITIES[number]
 type SourceKind = typeof SOURCE_KINDS[number]
 type ReconciliationAction = typeof ACTIONS[number]
+type ScanPhase = typeof SCAN_PHASES[number]
 
 interface ScanStateRow {
   cursor: string
@@ -51,7 +53,6 @@ interface ScanStateRow {
 }
 
 interface CandidateRow {
-  cursor_key: string
   issue_type: IssueType
   severity: IssueSeverity
   source_kind: SourceKind
@@ -65,6 +66,17 @@ interface CandidateRow {
   currency: string | null
   attempts: number | null
   event_type: string | null
+}
+
+interface ScannedSourceRow extends Omit<CandidateRow, 'issue_type' | 'severity'> {
+  paid_at_ms: number | null
+  late_payment_requires_refund: number | null
+}
+
+interface ScanCursor {
+  phase: ScanPhase
+  updatedAtMs: number
+  id: string
 }
 
 interface IssueRow {
@@ -128,8 +140,9 @@ export interface PaymentReconciliationScanResult {
 }
 
 /**
- * Bounded, replay-safe Cron scanner. Each source branch has a dedicated
- * partial index and all evidence is a sanitized immutable R2 object.
+ * Bounded, replay-safe Cron scanner. Each invocation scans one source through
+ * an index-backed (updated_at_ms, id) seek and stores one sanitized evidence
+ * snapshot per logical issue in R2.
  */
 export async function scanPaymentReconciliationIssues(
   env: Env,
@@ -149,38 +162,41 @@ export async function scanPaymentReconciliationIssues(
     )
   }
   const staleBefore = startedAt - STALE_PENDING_MS
-  const candidates = await env.DB.prepare(candidateQuery()).bind(
-    staleBefore,
-    staleBefore,
-    staleBefore,
-    state.cursor,
-    limit,
-  ).all<CandidateRow>()
+  const cursor = parseScanCursor(state.cursor)
+  const scannedRows = await loadScannedRows(env, cursor, limit)
+  const candidates = scannedRows.results
+    .map((row) => classifyCandidate(row, staleBefore))
+    .filter((candidate): candidate is CandidateRow => candidate !== null)
 
   let created = 0
   let seen = 0
   let evidenceFailures = 0
-  for (const candidate of candidates.results) {
+  for (const candidate of candidates) {
     const fingerprint = await sha256Hex(
       `payment-reconciliation-issue:v1\0${candidate.issue_type}\0${candidate.source_kind}\0${candidate.source_id}`,
     )
     const issueId = await deterministicUuid('payment.reconciliation.issue.v1', fingerprint)
     const existing = await findIssueByFingerprint(env, fingerprint)
-    const evidence = renderEvidence(candidate, startedAt)
+    const evidence = renderEvidence(candidate)
     const bytes = new TextEncoder().encode(evidence)
     const evidenceDigest = await sha256Hex(evidence)
-    const evidenceKey = `payment-reconciliation-evidence/v1/${issueId}/${evidenceDigest}.json`
-    try {
-      await env.OBJECTS.put(evidenceKey, evidence, {
-        httpMetadata: { contentType: EVIDENCE_CONTENT_TYPE },
-        customMetadata: { schema_version: '1', issue_id: issueId },
-      })
-    } catch (error) {
-      evidenceFailures += 1
-      console.error('payment reconciliation evidence R2 write failed', {
-        name: error instanceof Error ? error.name : 'unknown',
-      })
-      continue
+    const evidenceKey = `payment-reconciliation-evidence/v2/${issueId}.json`
+    const evidenceChanged = existing === null ||
+      existing.evidence_sha256 !== evidenceDigest ||
+      existing.evidence_r2_key !== evidenceKey
+    if (evidenceChanged) {
+      try {
+        await env.OBJECTS.put(evidenceKey, evidence, {
+          httpMetadata: { contentType: EVIDENCE_CONTENT_TYPE },
+          customMetadata: { schema_version: '1', issue_id: issueId },
+        })
+      } catch (error) {
+        evidenceFailures += 1
+        console.error('payment reconciliation evidence R2 write failed', {
+          name: error instanceof Error ? error.name : 'unknown',
+        })
+        continue
+      }
     }
 
     await env.DB.prepare(
@@ -221,9 +237,7 @@ export async function scanPaymentReconciliationIssues(
     else seen += 1
   }
 
-  const nextCursor = candidates.results.length < limit
-    ? ''
-    : candidates.results.at(-1)?.cursor_key ?? ''
+  const nextCursor = advanceScanCursor(cursor, scannedRows.results, limit)
   const completedAt = Date.now()
   const advanced = await env.DB.prepare(
     `UPDATE payment_reconciliation_scan_state
@@ -241,7 +255,7 @@ export async function scanPaymentReconciliationIssues(
   ).run()
 
   return {
-    scanned: candidates.results.length,
+    scanned: scannedRows.results.length,
     issues_created: created,
     issues_seen: seen,
     evidence_failures: evidenceFailures,
@@ -489,34 +503,24 @@ export async function actOnAdminPaymentReconciliationIssue(
   }
 }
 
-function candidateQuery(): string {
-  return `WITH candidates AS (
-    SELECT
-      '01:order:' || payment_order.id || ':' ||
-        CASE
-          WHEN payment_order.status = 'REFUND_REQUESTED'
-            AND payment_order.last_error LIKE 'late_payment_requires_refund%'
-            THEN 'late_paid_refund_required'
-          WHEN payment_order.paid_amount_micros > 0
-            AND payment_order.paid_amount_micros <> payment_order.pay_amount_micros
-            THEN 'provider_amount_mismatch'
-          ELSE 'provider_status_mismatch'
-        END AS cursor_key,
-      CASE
-        WHEN payment_order.status = 'REFUND_REQUESTED'
-          AND payment_order.last_error LIKE 'late_payment_requires_refund%'
-          THEN 'late_paid_refund_required'
-        WHEN payment_order.paid_amount_micros > 0
-          AND payment_order.paid_amount_micros <> payment_order.pay_amount_micros
-          THEN 'provider_amount_mismatch'
-        ELSE 'provider_status_mismatch'
-      END AS issue_type,
-      CASE
-        WHEN payment_order.status = 'REFUND_REQUESTED'
-          AND payment_order.last_error LIKE 'late_payment_requires_refund%'
-          THEN 'critical'
-        ELSE 'error'
-      END AS severity,
+async function loadScannedRows(
+  env: Env,
+  cursor: ScanCursor,
+  limit: number,
+): Promise<D1Result<ScannedSourceRow>> {
+  const statement = env.DB.prepare(candidateQuery(cursor.phase))
+  return statement.bind(cursor.updatedAtMs, cursor.id, limit).all<ScannedSourceRow>()
+}
+
+function candidateQuery(phase: ScanPhase): string {
+  if (phase === 'order') return orderCandidateQuery()
+  if (phase === 'webhook') return webhookCandidateQuery()
+  if (phase === 'fulfillment') return fulfillmentCandidateQuery()
+  return refundCandidateQuery()
+}
+
+function orderCandidateQuery(): string {
+  return `SELECT
       'order' AS source_kind,
       payment_order.id AS source_id,
       payment_order.id AS order_id,
@@ -527,84 +531,207 @@ function candidateQuery(): string {
       payment_order.paid_amount_micros AS observed_amount_micros,
       payment_order.currency,
       NULL AS attempts,
-      NULL AS event_type
-    FROM payment_orders payment_order
-    WHERE
-      (payment_order.status = 'REFUND_REQUESTED'
-        AND payment_order.last_error LIKE 'late_payment_requires_refund%')
-      OR (payment_order.paid_amount_micros > 0
-        AND payment_order.paid_amount_micros <> payment_order.pay_amount_micros)
-      OR (payment_order.status IN (
-            'PAID', 'RECHARGING', 'COMPLETED', 'REFUND_REQUESTED', 'REFUNDING',
-            'REFUND_PENDING', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED'
+      NULL AS event_type,
+      payment_order.paid_at_ms,
+      CASE WHEN payment_order.status = 'REFUND_REQUESTED'
+                  AND payment_order.last_error LIKE 'late_payment_requires_refund%'
+           THEN 1 ELSE 0 END AS late_payment_requires_refund
+    FROM payment_orders payment_order INDEXED BY idx_payment_reconciliation_order_seek
+    WHERE payment_order.status IN (
+            'PENDING', 'PAID', 'RECHARGING', 'COMPLETED', 'EXPIRED', 'CANCELLED',
+            'FAILED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING',
+            'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED'
           )
-          AND (payment_order.paid_amount_micros <= 0 OR payment_order.paid_at_ms IS NULL))
-      OR (payment_order.status IN ('PENDING', 'EXPIRED', 'CANCELLED')
-          AND (payment_order.paid_amount_micros > 0 OR payment_order.paid_at_ms IS NOT NULL))
-
-    UNION ALL
-
-    SELECT
-      '02:webhook:' || inbox.id || ':' ||
-        CASE WHEN inbox.status IN ('failed', 'dead_letter')
-             THEN 'webhook_failed' ELSE 'webhook_pending' END,
-      CASE WHEN inbox.status IN ('failed', 'dead_letter')
-           THEN 'webhook_failed' ELSE 'webhook_pending' END,
-      CASE WHEN inbox.status IN ('failed', 'dead_letter') THEN 'error' ELSE 'warning' END,
-      'webhook', inbox.id, NULL, provider.id, inbox.status, inbox.updated_at_ms,
-      NULL, NULL, NULL, inbox.attempts, inbox.event_type
-    FROM payment_webhook_inbox inbox
-    LEFT JOIN payment_provider_instances provider ON provider.provider_key = inbox.provider_key
-    WHERE inbox.status IN ('failed', 'dead_letter')
-       OR (inbox.status IN ('received', 'processing') AND inbox.updated_at_ms <= ?)
-
-    UNION ALL
-
-    SELECT
-      '03:fulfillment:' || fulfillment.id || ':' ||
-        CASE WHEN fulfillment.status IN ('failed', 'dead_letter')
-             THEN 'fulfillment_failed' ELSE 'fulfillment_pending' END,
-      CASE WHEN fulfillment.status IN ('failed', 'dead_letter')
-           THEN 'fulfillment_failed' ELSE 'fulfillment_pending' END,
-      CASE WHEN fulfillment.status IN ('failed', 'dead_letter') THEN 'error' ELSE 'warning' END,
-      'fulfillment', fulfillment.id, fulfillment.order_id,
-      payment_order.provider_instance_id, fulfillment.status, fulfillment.updated_at_ms,
-      payment_order.pay_amount_micros, payment_order.paid_amount_micros,
-      payment_order.currency, fulfillment.attempts, NULL
-    FROM payment_fulfillments fulfillment
-    JOIN payment_orders payment_order ON payment_order.id = fulfillment.order_id
-    WHERE fulfillment.status IN ('failed', 'dead_letter')
-       OR (fulfillment.status IN ('pending', 'processing') AND fulfillment.updated_at_ms <= ?)
-
-    UNION ALL
-
-    SELECT
-      '04:refund:' || refund.id || ':' ||
-        CASE WHEN refund.status = 'failed' THEN 'refund_failed' ELSE 'refund_pending' END,
-      CASE WHEN refund.status = 'failed' THEN 'refund_failed' ELSE 'refund_pending' END,
-      CASE WHEN refund.status = 'failed' THEN 'error' ELSE 'warning' END,
-      'refund', refund.id, refund.order_id, payment_order.provider_instance_id,
-      refund.status, refund.updated_at_ms, refund.amount_micros,
-      refund.settled_amount_micros, refund.currency, NULL, NULL
-    FROM payment_refunds refund
-    JOIN payment_orders payment_order ON payment_order.id = refund.order_id
-    WHERE refund.status = 'failed'
-       OR (refund.status IN ('requested', 'processing', 'pending') AND refund.updated_at_ms <= ?)
-  )
-  SELECT cursor_key, issue_type, severity, source_kind, source_id,
-         order_id, provider_instance_id, source_status, source_updated_at_ms,
-         expected_amount_micros, observed_amount_micros, currency, attempts, event_type
-    FROM candidates
-   WHERE cursor_key > ?
-   ORDER BY cursor_key ASC
-   LIMIT ?`
+      AND (payment_order.updated_at_ms, payment_order.id) > (?, ?)
+    ORDER BY payment_order.updated_at_ms, payment_order.id
+    LIMIT ?`
 }
 
-function renderEvidence(candidate: CandidateRow, observedAt: number): string {
+function webhookCandidateQuery(): string {
+  return `SELECT
+      'webhook' AS source_kind,
+      inbox.id AS source_id,
+      NULL AS order_id,
+      provider.id AS provider_instance_id,
+      inbox.status AS source_status,
+      inbox.updated_at_ms AS source_updated_at_ms,
+      NULL AS expected_amount_micros,
+      NULL AS observed_amount_micros,
+      NULL AS currency,
+      inbox.attempts,
+      inbox.event_type,
+      NULL AS paid_at_ms,
+      NULL AS late_payment_requires_refund
+    FROM payment_webhook_inbox inbox INDEXED BY idx_payment_reconciliation_webhook_seek
+    LEFT JOIN payment_provider_instances provider ON provider.provider_key = inbox.provider_key
+    WHERE inbox.status IN ('received', 'processing', 'failed', 'dead_letter')
+      AND (inbox.updated_at_ms, inbox.id) > (?, ?)
+    ORDER BY inbox.updated_at_ms, inbox.id
+    LIMIT ?`
+}
+
+function fulfillmentCandidateQuery(): string {
+  return `SELECT
+      'fulfillment' AS source_kind,
+      fulfillment.id AS source_id,
+      fulfillment.order_id,
+      payment_order.provider_instance_id,
+      fulfillment.status AS source_status,
+      fulfillment.updated_at_ms AS source_updated_at_ms,
+      payment_order.pay_amount_micros AS expected_amount_micros,
+      payment_order.paid_amount_micros AS observed_amount_micros,
+      payment_order.currency,
+      fulfillment.attempts,
+      NULL AS event_type,
+      NULL AS paid_at_ms,
+      NULL AS late_payment_requires_refund
+    FROM payment_fulfillments fulfillment INDEXED BY idx_payment_reconciliation_fulfillment_seek
+    JOIN payment_orders payment_order ON payment_order.id = fulfillment.order_id
+    WHERE fulfillment.status IN ('pending', 'processing', 'failed', 'dead_letter')
+      AND (fulfillment.updated_at_ms, fulfillment.id) > (?, ?)
+    ORDER BY fulfillment.updated_at_ms, fulfillment.id
+    LIMIT ?`
+}
+
+function refundCandidateQuery(): string {
+  return `SELECT
+      'refund' AS source_kind,
+      refund.id AS source_id,
+      refund.order_id,
+      payment_order.provider_instance_id,
+      refund.status AS source_status,
+      refund.updated_at_ms AS source_updated_at_ms,
+      refund.amount_micros AS expected_amount_micros,
+      refund.settled_amount_micros AS observed_amount_micros,
+      refund.currency,
+      NULL AS attempts,
+      NULL AS event_type,
+      NULL AS paid_at_ms,
+      NULL AS late_payment_requires_refund
+    FROM payment_refunds refund INDEXED BY idx_payment_reconciliation_refund_seek
+    JOIN payment_orders payment_order ON payment_order.id = refund.order_id
+    WHERE refund.status IN ('requested', 'processing', 'pending', 'failed')
+      AND (refund.updated_at_ms, refund.id) > (?, ?)
+    ORDER BY refund.updated_at_ms, refund.id
+    LIMIT ?`
+}
+
+function classifyCandidate(
+  row: ScannedSourceRow,
+  staleBefore: number,
+): CandidateRow | null {
+  let issueType: IssueType | null = null
+  let severity: IssueSeverity | null = null
+  if (row.source_kind === 'order') {
+    const paidAmount = row.observed_amount_micros
+    const expectedAmount = row.expected_amount_micros
+    const paidStatus = [
+      'PAID', 'RECHARGING', 'COMPLETED', 'REFUND_REQUESTED', 'REFUNDING',
+      'REFUND_PENDING', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED',
+    ].includes(row.source_status)
+    if (row.late_payment_requires_refund === 1) {
+      issueType = 'late_paid_refund_required'
+      severity = 'critical'
+    } else if (
+      paidAmount !== null && expectedAmount !== null &&
+      paidAmount > 0 && paidAmount !== expectedAmount
+    ) {
+      issueType = 'provider_amount_mismatch'
+      severity = 'error'
+    } else if (
+      (paidStatus && ((paidAmount ?? 0) <= 0 || row.paid_at_ms === null)) ||
+      (['PENDING', 'EXPIRED', 'CANCELLED'].includes(row.source_status) &&
+        ((paidAmount ?? 0) > 0 || row.paid_at_ms !== null))
+    ) {
+      issueType = 'provider_status_mismatch'
+      severity = 'error'
+    }
+  } else if (row.source_kind === 'webhook') {
+    if (['failed', 'dead_letter'].includes(row.source_status)) {
+      issueType = 'webhook_failed'
+      severity = 'error'
+    } else if (row.source_updated_at_ms <= staleBefore) {
+      issueType = 'webhook_pending'
+      severity = 'warning'
+    }
+  } else if (row.source_kind === 'fulfillment') {
+    if (['failed', 'dead_letter'].includes(row.source_status)) {
+      issueType = 'fulfillment_failed'
+      severity = 'error'
+    } else if (row.source_updated_at_ms <= staleBefore) {
+      issueType = 'fulfillment_pending'
+      severity = 'warning'
+    }
+  } else if (row.source_status === 'failed') {
+    issueType = 'refund_failed'
+    severity = 'error'
+  } else if (row.source_updated_at_ms <= staleBefore) {
+    issueType = 'refund_pending'
+    severity = 'warning'
+  }
+
+  return issueType === null || severity === null
+    ? null
+    : { ...row, issue_type: issueType, severity }
+}
+
+function parseScanCursor(value: string): ScanCursor {
+  if (value !== '') {
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>
+      if (
+        parsed.version === 2 &&
+        typeof parsed.phase === 'string' &&
+        (SCAN_PHASES as readonly string[]).includes(parsed.phase) &&
+        Number.isSafeInteger(parsed.updated_at_ms) &&
+        (parsed.updated_at_ms as number) >= -1 &&
+        typeof parsed.id === 'string'
+      ) {
+        return {
+          phase: parsed.phase as ScanPhase,
+          updatedAtMs: parsed.updated_at_ms as number,
+          id: parsed.id,
+        }
+      }
+    } catch {
+      // An older scanner cursor restarts at the first indexed phase once.
+    }
+  }
+  return { phase: 'order', updatedAtMs: -1, id: '' }
+}
+
+function encodeScanCursor(cursor: ScanCursor): string {
+  return JSON.stringify({
+    version: 2,
+    phase: cursor.phase,
+    updated_at_ms: cursor.updatedAtMs,
+    id: cursor.id,
+  })
+}
+
+function advanceScanCursor(
+  cursor: ScanCursor,
+  scannedRows: ScannedSourceRow[],
+  limit: number,
+): string {
+  const last = scannedRows.at(-1)
+  if (scannedRows.length === limit && last !== undefined) {
+    return encodeScanCursor({
+      phase: cursor.phase,
+      updatedAtMs: last.source_updated_at_ms,
+      id: last.source_id,
+    })
+  }
+  const nextPhase = SCAN_PHASES[SCAN_PHASES.indexOf(cursor.phase) + 1]
+  return nextPhase === undefined
+    ? ''
+    : encodeScanCursor({ phase: nextPhase, updatedAtMs: -1, id: '' })
+}
+
+function renderEvidence(candidate: CandidateRow): string {
   return `${JSON.stringify({
     schema_version: 1,
     issue_type: candidate.issue_type,
-    observed_at: iso(observedAt),
     source: { kind: candidate.source_kind, id: candidate.source_id },
     observation: {
       order_id: candidate.order_id,

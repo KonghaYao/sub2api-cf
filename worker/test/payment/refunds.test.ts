@@ -28,6 +28,7 @@ interface Fixture {
   authorization: Record<'alice' | 'bob' | 'admin', string>
   stripeFetch: ReturnType<typeof vi.fn<typeof fetch>>
   subscriptionFetch: ReturnType<typeof vi.fn>
+  userState: RefundUserState
 }
 
 interface InsertProviderInput {
@@ -775,6 +776,141 @@ describe('Stripe refund HTTP contract', () => {
     })
   })
 
+  it('commits a Stripe refund while converting an unavailable transferred rebate into debt', async () => {
+    const userState = new RefundUserState(true)
+    const test = await fixture(userState)
+    insertOrder(test.raw, {
+      id: 'order-affiliate-debt',
+      userId: 'alice',
+      providerId: 'stripe-admin-refunds',
+      providerKey: 'stripe-admin-refunds-key',
+      orderType: 'balance',
+      status: 'COMPLETED',
+      amountMicros: 10_000_000,
+      payAmountMicros: 10_000_000,
+      paidAmountMicros: 10_000_000,
+      paymentIntentId: 'pi-affiliate-debt',
+    })
+    seedAvailableAffiliateRebate(test.raw, 'order-affiliate-debt', 'bob', 'alice', 2_000_000)
+    test.raw.prepare(
+      `INSERT INTO affiliate_transfer_operations (
+         id, user_id, idempotency_key_hash, request_hash, amount_micros,
+         created_at_ms, updated_at_ms
+       ) VALUES ('transfer-before-debt', 'bob', ?, ?, 2000000, ?, ?)`,
+    ).run('a'.repeat(64), 'b'.repeat(64), NOW, NOW)
+    test.raw.prepare(
+      `UPDATE affiliate_transfer_operations
+          SET status = 'completed', balance_after_micros = 100000000,
+              state_version = 1, completed_at_ms = ?, updated_at_ms = ?
+        WHERE id = 'transfer-before-debt'`,
+    ).run(NOW, NOW)
+    test.stripeFetch.mockResolvedValue(stripeRefund({
+      id: 're-affiliate-debt',
+      amount: 1000,
+      currency: 'usd',
+      status: 'succeeded',
+      paymentIntent: 'pi-affiliate-debt',
+    }))
+    const request = {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'affiliate-debt-refund-v1',
+      },
+      body: JSON.stringify({
+        amount: 10,
+        reason: 'full refund after commission spend',
+        deduct_balance: false,
+      }),
+    } as const
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await userRequest(
+        test, 'admin', '/api/v1/admin/payment/orders/order-affiliate-debt/refund', request,
+      )
+      expect(response.status).toBe(200)
+      expect(await json(response)).toMatchObject({ code: 0, data: { success: true } })
+    }
+
+    expect(test.stripeFetch).toHaveBeenCalledTimes(1)
+    expect(userState.adjustApplications).toBe(0)
+    expect(test.raw.prepare(
+      `SELECT status, balance_clawback_micros, balance_recovered_micros,
+              debt_incurred_micros
+         FROM affiliate_rebate_adjustments`,
+    ).get()).toEqual({
+      status: 'completed',
+      balance_clawback_micros: 2_000_000,
+      balance_recovered_micros: 0,
+      debt_incurred_micros: 2_000_000,
+    })
+    expect(test.raw.prepare(
+      `SELECT debt_micros FROM affiliate_profiles WHERE user_id = 'bob'`,
+    ).get()).toEqual({ debt_micros: 2_000_000 })
+    await expect(recoverPendingRefundClawbacks(test.env, 10)).resolves.toBe(0)
+  })
+
+  it('returns a committed refund when affiliate DO response is lost and Cron later converges it', async () => {
+    const userState = new RefundUserState(false, true)
+    const test = await fixture(userState)
+    insertOrder(test.raw, {
+      id: 'order-affiliate-response-lost', userId: 'alice',
+      providerId: 'stripe-admin-refunds', providerKey: 'stripe-admin-refunds-key',
+      orderType: 'balance', status: 'COMPLETED', amountMicros: 10_000_000,
+      payAmountMicros: 10_000_000, paidAmountMicros: 10_000_000,
+      paymentIntentId: 'pi-affiliate-response-lost',
+    })
+    seedAvailableAffiliateRebate(
+      test.raw, 'order-affiliate-response-lost', 'bob', 'alice', 2_000_000,
+    )
+    test.raw.prepare(
+      `INSERT INTO affiliate_transfer_operations (
+         id, user_id, idempotency_key_hash, request_hash, amount_micros,
+         created_at_ms, updated_at_ms
+       ) VALUES ('transfer-before-lost', 'bob', ?, ?, 2000000, ?, ?)`,
+    ).run('c'.repeat(64), 'd'.repeat(64), NOW, NOW)
+    test.raw.prepare(
+      `UPDATE affiliate_transfer_operations
+          SET status = 'completed', balance_after_micros = 100000000,
+              state_version = 1, completed_at_ms = ?, updated_at_ms = ?
+        WHERE id = 'transfer-before-lost'`,
+    ).run(NOW, NOW)
+    test.stripeFetch.mockResolvedValue(stripeRefund({
+      id: 're-affiliate-response-lost', amount: 1000, currency: 'usd',
+      status: 'succeeded', paymentIntent: 'pi-affiliate-response-lost',
+    }))
+
+    const response = await userRequest(
+      test, 'admin', '/api/v1/admin/payment/orders/order-affiliate-response-lost/refund', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'affiliate-response-lost-refund-v1',
+        },
+        body: JSON.stringify({ amount: 10, reason: 'lost response', deduct_balance: false }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await json(response)).toMatchObject({ code: 0, data: { success: true } })
+    expect(test.raw.prepare(
+      `SELECT status FROM payment_refunds WHERE order_id = 'order-affiliate-response-lost'`,
+    ).get()).toEqual({ status: 'refunded' })
+    expect(test.raw.prepare(
+      `SELECT status FROM affiliate_rebate_adjustments`,
+    ).get()).toEqual({ status: 'processing' })
+    expect(userState.adjustApplications).toBe(1)
+
+    await expect(recoverPendingRefundClawbacks(test.env, 10)).resolves.toBe(1)
+    expect(test.raw.prepare(
+      `SELECT status, balance_recovered_micros, debt_incurred_micros
+         FROM affiliate_rebate_adjustments`,
+    ).get()).toEqual({
+      status: 'completed', balance_recovered_micros: 2_000_000, debt_incurred_micros: 0,
+    })
+    expect(userState.adjustApplications).toBe(1)
+  })
+
   it('records principal refund while sending the proportional fee-inclusive amount to Stripe', async () => {
     const test = await fixture()
     insertOrder(test.raw, {
@@ -1042,7 +1178,7 @@ describe('Stripe refund HTTP contract', () => {
   })
 })
 
-async function fixture(): Promise<Fixture> {
+async function fixture(userState = new RefundUserState(false)): Promise<Fixture> {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
   for (const [id, role] of [
@@ -1130,7 +1266,7 @@ async function fixture(): Promise<Fixture> {
     CONFIG_KV: {} as KVNamespace,
     OBJECTS: {} as R2Bucket,
     EVENTS_QUEUE: {} as Queue,
-    USER_STATE: {} as DurableObjectNamespace,
+    USER_STATE: userState.namespace(),
     SUBSCRIPTION_STATE: subscriptionNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
   } as Env
@@ -1142,7 +1278,76 @@ async function fixture(): Promise<Fixture> {
   app.post('/api/v1/admin/payment/orders/:id/refund', processAdminRefund)
   app.post('/api/v1/admin/payment/orders/:id/refund/query', queryAdminRefund)
 
-  return { raw, env, app, authorization, stripeFetch, subscriptionFetch }
+  return { raw, env, app, authorization, stripeFetch, subscriptionFetch, userState }
+}
+
+class RefundUserState {
+  balanceMicros = 0
+  reservedMicros = 0
+  stateVersion = 0
+  configured = false
+  adjustApplications = 0
+  private readonly mutations = new Map<string, number>()
+
+  constructor(
+    private readonly reserveAll: boolean,
+    private loseNextAdjustResponse = false,
+  ) {}
+
+  namespace(): DurableObjectNamespace {
+    return {
+      idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+      get: () => ({ fetch: (request: Request) => this.fetch(request) }) as DurableObjectStub,
+    } as unknown as DurableObjectNamespace
+  }
+
+  private async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname
+    if (request.method === 'GET' && path === '/snapshot') return this.state(false)
+    const body = await request.json() as any
+    if (path === '/configure') {
+      if (this.configured) {
+        return Response.json({ error: { code: 'user_already_configured' } }, { status: 409 })
+      }
+      this.configured = true
+      this.balanceMicros = body.balance_micros
+      this.reservedMicros = this.reserveAll ? this.balanceMicros : 0
+      this.stateVersion = body.initial_state_version
+      return this.state(false)
+    }
+    if (path === '/balance/adjust') {
+      const existing = this.mutations.get(body.mutation_id)
+      if (existing !== undefined) return this.state(true)
+      if (this.balanceMicros + body.amount_delta_micros < this.reservedMicros) {
+        return Response.json({
+          error: { code: 'balance_below_reservations', message: 'active reservations consume this balance' },
+        }, { status: 409 })
+      }
+      this.balanceMicros += body.amount_delta_micros
+      this.stateVersion += 1
+      this.adjustApplications += 1
+      this.mutations.set(body.mutation_id, body.amount_delta_micros)
+      if (this.loseNextAdjustResponse) {
+        this.loseNextAdjustResponse = false
+        return Response.json({ error: { code: 'response_lost' } }, { status: 503 })
+      }
+      return this.state(false)
+    }
+    return new Response('not found', { status: 404 })
+  }
+
+  private state(idempotent: boolean): Response {
+    return Response.json({
+      schema_version: 1,
+      idempotent,
+      state_version: this.stateVersion,
+      profile: {
+        user_id: 'bob', enabled: true, balance_micros: this.balanceMicros,
+        reserved_micros: this.reservedMicros, settled_micros: 0,
+      },
+      available_micros: this.balanceMicros - this.reservedMicros,
+    })
+  }
 }
 
 function seedAvailableAffiliateRebate(

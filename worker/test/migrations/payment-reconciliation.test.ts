@@ -104,6 +104,34 @@ describe('payment reconciliation migration', () => {
       `DELETE FROM payment_reconciliation_events`,
     ).run()).toThrow(/payment_reconciliation_event_immutable/)
   })
+
+  it('adds a tuple-seek index that pages raw order rows without sorting history', () => {
+    const { raw } = createSqliteD1()
+    applyMigrations(raw)
+
+    expect(raw.prepare(
+      `SELECT version, name FROM schema_migrations WHERE version = 34`,
+    ).get()).toEqual({ version: 34, name: 'payment_reconciliation_seek_indexes' })
+
+    const plan = raw.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT payment_order.id
+         FROM payment_orders payment_order INDEXED BY idx_payment_reconciliation_order_seek
+        WHERE payment_order.status IN (
+                'PENDING', 'PAID', 'RECHARGING', 'COMPLETED', 'EXPIRED', 'CANCELLED',
+                'FAILED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING',
+                'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED'
+              )
+          AND (payment_order.updated_at_ms, payment_order.id) > (?, ?)
+        ORDER BY payment_order.updated_at_ms, payment_order.id
+        LIMIT ?`,
+    ).all(-1, '', 25) as Array<{ detail: string }>
+
+    expect(plan.map((row) => row.detail).join('\n')).toContain(
+      'USING INDEX idx_payment_reconciliation_order_seek',
+    )
+    expect(plan.map((row) => row.detail).join('\n')).not.toContain('USE TEMP B-TREE')
+  })
 })
 
 function seedOrder(raw: any): void {

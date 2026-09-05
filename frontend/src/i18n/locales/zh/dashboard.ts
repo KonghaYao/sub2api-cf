@@ -681,7 +681,9 @@ export default {
       availableQuota: '可转返利额度',
       frozenQuota: '冻结中',
       frozenQuotaHint: '新产生的返利正在冻结期中',
-      totalQuota: '历史返利额度'
+      totalQuota: '历史返利额度',
+      debt: '待抵扣返利欠款',
+      debtHint: '退款对应的返利已转入并被使用，后续新返利会优先抵扣这笔欠款。'
     },
     transfer: {
       title: '返利额度转余额',

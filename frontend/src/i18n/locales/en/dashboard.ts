@@ -677,7 +677,9 @@ export default {
       availableQuota: 'Available Rebate Quota',
       frozenQuota: 'Frozen',
       frozenQuotaHint: 'Recently earned rebates pending release',
-      totalQuota: 'Historical Rebate Quota'
+      totalQuota: 'Historical Rebate Quota',
+      debt: 'Rebate Debt',
+      debtHint: 'Refunded commission was already transferred and used. Future rebates repay this debt first.'
     },
     transfer: {
       title: 'Transfer Rebate Quota',

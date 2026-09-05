@@ -44,6 +44,16 @@
           </div>
         </div>
 
+        <div
+          v-if="detail.aff_debt > 0"
+          class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+        >
+          <p class="text-sm font-semibold">
+            {{ t('affiliate.stats.debt') }}: {{ formatCurrency(detail.aff_debt) }}
+          </p>
+          <p class="mt-1 text-xs">{{ t('affiliate.stats.debtHint') }}</p>
+        </div>
+
         <div class="card p-6">
           <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('affiliate.title') }}</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.description') }}</p>

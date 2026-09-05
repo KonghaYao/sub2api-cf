@@ -178,7 +178,7 @@ export async function resetAdminUserPlatformQuotaWindow(
     }
     await requireUser(context.env, userId)
     const before = await readQuotaSet(context.env, userId)
-    if (before.control_version !== expected) throw versionConflict()
+    if (before.control_version !== expected) throw resetVersionConflict()
     const current = before.rows.find((row) => row.platform === platform)
     if (current === undefined || current.enabled !== 1) {
       throw new GatewayError(404, 'platform_quota_not_found', 'Platform quota was not found')
@@ -198,23 +198,36 @@ export async function resetAdminUserPlatformQuotaWindow(
       ? resetRow
       : { ...row, control_version: nextVersion, updated_at_ms: now })
     const after = quotaData(nextVersion, nextRows, true, now)
-    await context.env.DB.batch([
-      quotaSetCas(context.env, userId, expected, nextVersion, mutationId, now),
-      ...nextRows.map((row) => upsertQuota(context.env, row)),
-      context.env.DB.prepare(
-        `INSERT INTO admin_platform_quota_audit_events (
-           id, actor_user_id, actor_session_id, target_user_id, action,
-           resource_version, idempotency_key_hash, request_hash,
-           before_json, after_json, occurred_at_ms
-         ) VALUES (?, ?, ?, ?, 'platform_quota.reset', ?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        crypto.randomUUID(), actor.user_id, actor.session_id, userId, nextVersion,
-        idem.key_hash, idem.request_hash,
-        JSON.stringify(quotaData(before.control_version, before.rows, true, before.updated_at_ms)),
-        JSON.stringify(after), now,
-      ),
-      controlIdempotencyInsert(context.env, idem, 'user_platform_quotas', userId, after, now),
-    ])
+    try {
+      await context.env.DB.batch([
+        quotaSetCas(context.env, userId, expected, nextVersion, mutationId, now),
+        ...nextRows.map((row) => upsertQuota(context.env, row)),
+        context.env.DB.prepare(
+          `INSERT INTO admin_platform_quota_audit_events (
+             id, actor_user_id, actor_session_id, target_user_id, action,
+             resource_version, idempotency_key_hash, request_hash,
+             before_json, after_json, occurred_at_ms
+           ) VALUES (?, ?, ?, ?, 'platform_quota.reset', ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          crypto.randomUUID(), actor.user_id, actor.session_id, userId, nextVersion,
+          idem.key_hash, idem.request_hash,
+          JSON.stringify(quotaData(before.control_version, before.rows, true, before.updated_at_ms)),
+          JSON.stringify(after), now,
+        ),
+        controlIdempotencyInsert(context.env, idem, 'user_platform_quotas', userId, after, now),
+      ])
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idem)
+      if (recovered !== null) {
+        const data = parseIdempotentResponse<QuotaResponse>(recovered, 'user_platform_quotas')
+        await syncQuotaSet(context.env, userId)
+        return versionedSuccess(data)
+      }
+      if ((await readQuotaSet(context.env, userId)).control_version !== expected) {
+        throw resetVersionConflict()
+      }
+      throw error
+    }
     await syncQuotaSet(context.env, userId)
     return versionedSuccess(after)
   } catch (error) {
@@ -625,6 +638,10 @@ function checkedNextVersion(value: number): number {
 
 function versionConflict(): GatewayError {
   return new GatewayError(409, 'control_version_conflict', 'The resource changed; reload and retry')
+}
+
+function resetVersionConflict(): GatewayError {
+  return new GatewayError(412, 'control_version_conflict', 'The resource changed; reload and retry')
 }
 
 function nullableUsd(value: number | null): number | null {

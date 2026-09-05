@@ -113,4 +113,34 @@ describe('AffiliateView', () => {
       'affiliate.linkCopied',
     )
   })
+
+  it('makes refund debt visible before later commissions repay it', async () => {
+    getAffiliateDetail.mockResolvedValueOnce({
+      user_id: 'affiliate-user',
+      aff_code: affiliateCode,
+      inviter_id: null,
+      aff_count: 1,
+      aff_quota: 0,
+      aff_frozen_quota: 0,
+      aff_history_quota: 0,
+      aff_debt: 2.5,
+      aff_debt_micros: 2_500_000,
+      effective_rebate_rate_percent: 10,
+      invitees: [],
+    })
+
+    const wrapper = mount(AffiliateView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<main><slot /></main>' },
+          Icon: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('affiliate.stats.debt')
+    expect(wrapper.text()).toContain('affiliate.stats.debtHint')
+    expect(wrapper.text()).toContain('2.50')
+  })
 })

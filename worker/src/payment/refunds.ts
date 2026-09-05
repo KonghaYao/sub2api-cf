@@ -112,7 +112,7 @@ export async function processAdminRefund(
       refund = await reconcilePendingRefundRollback(context.env, order, refund)
       const replay = completedRefundResult(refund)
       if (replay !== null) {
-        await clawbackAffiliateRebateForRefund(context.env, refund.id)
+        await bestEffortAffiliateRefundClawback(context.env, refund.id)
         return controlSuccess(replay)
       }
       if (refund.status === 'pending') return controlSuccess(pendingRefundResult())
@@ -123,7 +123,7 @@ export async function processAdminRefund(
         const reconciled = await reconcilePendingRefundRollback(context.env, order, existing)
         const replay = completedRefundResult(reconciled)
         if (replay !== null) {
-          await clawbackAffiliateRebateForRefund(context.env, reconciled.id)
+          await bestEffortAffiliateRefundClawback(context.env, reconciled.id)
           return controlSuccess(replay)
         }
         if (reconciled.status === 'pending') return controlSuccess(pendingRefundResult())
@@ -216,7 +216,7 @@ export async function queryAdminRefund(
     const refund = await reconcilePendingRefundRollback(context.env, order, foundRefund)
     const replay = completedRefundResult(refund)
     if (replay !== null) {
-      await clawbackAffiliateRebateForRefund(context.env, refund.id)
+      await bestEffortAffiliateRefundClawback(context.env, refund.id)
       return controlSuccess(replay)
     }
     if (!['REFUNDING', 'REFUND_PENDING', 'REFUND_FAILED'].includes(order.status)) {
@@ -1374,8 +1374,22 @@ async function finalizeRefundSuccess(
   const current = await findRefund(env, refund.id)
   const result = current === null ? null : completedRefundResult(current)
   if (result === null) throw new GatewayError(409, 'payment_order_conflict', 'Payment order status changed')
-  await clawbackAffiliateRebateForRefund(env, refund.id)
+  await bestEffortAffiliateRefundClawback(env, refund.id)
   return result
+}
+
+async function bestEffortAffiliateRefundClawback(env: Env, refundId: string): Promise<void> {
+  try {
+    await clawbackAffiliateRebateForRefund(env, refundId)
+  } catch (error) {
+    // The provider refund and D1 refund fact are already committed. Leave an
+    // adjustment in processing (or no adjustment yet) for the bounded Cron
+    // recovery seam; affiliate post-processing must never rewrite that result.
+    console.error('affiliate refund clawback deferred', {
+      refund_id: refundId,
+      name: error instanceof Error ? error.name : 'unknown',
+    })
+  }
 }
 
 async function markRefundPending(
