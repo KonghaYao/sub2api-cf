@@ -354,6 +354,29 @@ describe('synchronous image handler', () => {
     expect(test.settle).toHaveBeenCalledOnce()
   })
 
+  it('returns and bills every unique actual Responses output even when it exceeds requested n', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[' +
+        '{"id":"ig_1","type":"image_generation_call","result":"Zmlyc3Q="},' +
+        '{"id":"ig_2","type":"image_generation_call","result":"c2Vjb25k"}' +
+        ']}}',
+      '',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'two cats', n: 1 }),
+    }, test.env as never)
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect((await response.json() as { data: unknown[] }).data).toHaveLength(2)
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ amountMicros: 400_000 }),
+    }))
+  })
+
   it('retries a completed-without-image Responses result on the same account before switching', async () => {
     const test = await fixture('codex')
     test.upstreamFetch
@@ -434,6 +457,20 @@ describe('synchronous image handler', () => {
     ])
   })
 
+  it('applies the default cooldown to an ordinary upstream transport failure', async () => {
+    const test = await fixture()
+    test.upstreamFetch.mockRejectedValueOnce(new Error('connection reset'))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'cat' }),
+    }, test.env as never)
+
+    expect(response.status).toBe(502)
+    expect(test.failureRequests).toEqual([
+      expect.objectContaining({ account_id: 'account-1', cooldown_ms: 30_000 }),
+    ])
+  })
+
   it('preserves a sanitized Responses client error contract including param', async () => {
     const test = await fixture('codex')
     test.upstreamFetch.mockResolvedValueOnce(new Response([
@@ -446,6 +483,55 @@ describe('synchronous image handler', () => {
       method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'bad size' }),
     }, test.env as never)
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        type: 'invalid_request_error', code: 'invalid_value',
+        message: 'Invalid image size', param: 'size',
+      },
+    })
+    expect(test.failureRequests).toEqual([])
+  })
+
+  it('preserves a sanitized content-policy error without retrying or cooling the account', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(new Response([
+      'event: response.failed',
+      'data: {"type":"response.failed","response":{"status":"failed","error":{' +
+        '"type":"image_generation_user_error","code":"content_policy_violation",' +
+        '"message":"Prompt violates image policy","param":"prompt"}}}',
+      '',
+      '',
+    ].join('\n'), { status: 400, headers: { 'content-type': 'text/event-stream' } }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'blocked' }),
+    }, test.env as never)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        type: 'image_generation_user_error', code: 'content_policy_violation',
+        message: 'Prompt violates image policy', param: 'prompt',
+      },
+    })
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+    expect(test.failureRequests).toEqual([])
+  })
+
+  it('preserves a non-SSE Responses client error including message and param', async () => {
+    const test = await fixture('codex')
+    test.upstreamFetch.mockResolvedValueOnce(Response.json({
+      error: {
+        type: 'invalid_request_error', code: 'invalid_value',
+        message: 'Invalid image size', param: 'size',
+      },
+    }, { status: 400 }))
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'bad size' }),
+    }, test.env as never)
+
     expect(response.status).toBe(400)
     await expect(response.json()).resolves.toEqual({
       error: {

@@ -75,8 +75,10 @@ export interface SyncImageModerator {
 type SyncImageBindings = { Bindings: SyncImageEnv }
 const FAILURE_COOLDOWN_MS = 30_000
 const SYNC_IMAGE_RESPONSES_MODEL = 'gpt-5.4-mini'
-const SYNC_IMAGE_SSE_BODY_LIMIT = 24 * 1024 * 1024
-const SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT = 16 * 1024 * 1024
+const SYNC_IMAGE_MAX_COMPLETED_OUTPUTS = 10
+const SYNC_IMAGE_SSE_BODY_LIMIT = 12 * 1024 * 1024
+const SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT = 8 * 1024 * 1024
+const SYNC_IMAGE_SSE_AGGREGATE_LIMIT = 32 * 1024 * 1024
 const SYNC_IMAGE_SSE_BODY_TIMEOUT_MS = 120_000
 
 /**
@@ -156,7 +158,7 @@ export async function handleSyncImages(
       accountId: string
       normalized: NormalizedSyncImageResult
       publicBody: unknown
-      streamBody?: Uint8Array
+      streamBody?: ReadableStream<Uint8Array>
       status: number
       headers: Headers
     } | null = null
@@ -240,14 +242,16 @@ export async function handleSyncImages(
         // Renewal failure may race a provider that has already accepted paid
         // work. Never switch accounts on this path and risk duplicate images.
         if (renewalError !== null && upstreamStarted) throw mapped
-        const decisionCooldown = error instanceof SyncImageDecisionError ? error.cooldown : null
-        if (accountId !== null && isRetryable(mapped) && decisionCooldown?.scope !== 'none') {
+        const decisionCooldown: SyncImageCooldown = error instanceof SyncImageDecisionError
+          ? error.cooldown
+          : { scope: 'current_account', durationMs: FAILURE_COOLDOWN_MS, reason: 'upstream_failure' }
+        if (accountId !== null && isRetryable(mapped) && decisionCooldown.scope !== 'none') {
           const failedAccountId = accountId
           await bestEffort(() => recordPoolFailure(
             activePool as DurableObjectStub,
             failedAccountId,
             `${requestId}:image:${attempt}`,
-            decisionCooldown?.durationMs ?? FAILURE_COOLDOWN_MS,
+            decisionCooldown.durationMs,
           ))
         }
         if (!isRetryable(mapped) || attempt + 1 >= attempts) throw mapped
@@ -288,7 +292,7 @@ export async function handleSyncImages(
       })))
     }
     return new Response(
-      completed.streamBody === undefined ? JSON.stringify(completed.publicBody) : byteBuffer(completed.streamBody),
+      completed.streamBody === undefined ? JSON.stringify(completed.publicBody) : completed.streamBody,
       {
         status: completed.status,
         headers: completed.headers,
@@ -373,7 +377,7 @@ interface ImageExecutionInput {
 interface ImageExecutionResult {
   normalized: NormalizedSyncImageResult
   publicBody: unknown
-  streamBody?: Uint8Array
+  streamBody?: ReadableStream<Uint8Array>
   status: number
   headers: Headers
 }
@@ -488,7 +492,12 @@ async function executeCodexImages(input: ImageExecutionInput & {
           httpStatus: mapped.status,
           imageCount: 0,
           retryAfter: mapped.retryAfter,
-          error: { type: mapped.type, code: mapped.code },
+          error: {
+            type: mapped.type,
+            code: mapped.code,
+            message: mapped.message,
+            ...(mapped.param === undefined ? {} : { param: mapped.param }),
+          },
         })
         if (classified.kind === 'success') throw mapped
         const decision = decideSyncImageFailover(classified.failure, {
@@ -551,7 +560,7 @@ async function executeCodexImages(input: ImageExecutionInput & {
     return {
       normalized,
       publicBody,
-      ...(input.manifest.options.stream === true ? { streamBody: transformed.body } : {}),
+      ...(input.manifest.options.stream === true ? { streamBody: chunksToStream(transformed.frames) } : {}),
       status: 200,
       headers: input.manifest.options.stream === true
         ? new Headers({
@@ -571,14 +580,14 @@ async function readSyncImageSseResponse(
   publicModel: string,
   retainFrames: boolean,
   leaseSignal: AbortSignal,
-): Promise<{ body: Uint8Array; snapshot: SyncImageSseSnapshot }> {
+): Promise<{ frames: Uint8Array[]; snapshot: SyncImageSseSnapshot }> {
   const transformer = createSyncImageSseTransformer({
     operation: manifest.operation === 'edits' ? 'edit' : 'generation',
     responseFormat: manifest.options.response_format === 'url' ? 'url' : 'b64_json',
     publicModel,
     maxEventBytes: SYNC_IMAGE_SSE_BODY_LIMIT,
     maxTrackedImageBytes: SYNC_IMAGE_SSE_TRACKED_IMAGE_LIMIT,
-    maxCompletedImages: manifest.n,
+    maxCompletedImages: SYNC_IMAGE_MAX_COMPLETED_OUTPUTS,
   })
   if (!retainFrames) transformer.disconnectOutput()
   const reader = response.body?.getReader()
@@ -586,7 +595,8 @@ async function readSyncImageSseResponse(
   let responseBytes = 0
   const deadline = Date.now() + SYNC_IMAGE_SSE_BODY_TIMEOUT_MS
   if (reader !== undefined) {
-    while (transformer.snapshot().state === 'open') {
+    let frameBytes = 0
+    while (transformer.currentState() === 'open') {
       if (leaseSignal.aborted) {
         await reader.cancel('image lease renewal failed')
         throw new GatewayError(503, 'IMAGE_LEASE_RENEWAL_FAILED', 'Image concurrency lease could not be renewed', 'server_error')
@@ -633,14 +643,36 @@ async function readSyncImageSseResponse(
         await reader.cancel('image Responses body too large')
         throw new GatewayError(502, 'IMAGE_RESPONSES_BODY_TOO_LARGE', 'Image Responses provider body exceeded the size limit', 'server_error')
       }
-      frames.push(...transformer.push(next.value))
+      const nextFrames = transformer.push(next.value)
+      frameBytes += nextFrames.reduce((total, frame) => total + frame.byteLength, 0)
+      if (responseBytes + frameBytes + transformer.retainedImageBytes() > SYNC_IMAGE_SSE_AGGREGATE_LIMIT) {
+        await reader.cancel('image Responses aggregate memory budget exceeded')
+        throw new GatewayError(
+          502,
+          'IMAGE_RESPONSES_BODY_TOO_LARGE',
+          'Image Responses provider exceeded the aggregate memory budget',
+          'server_error',
+        )
+      }
+      frames.push(...nextFrames)
     }
-    if (transformer.snapshot().state !== 'open') {
+    if (transformer.currentState() !== 'open') {
       await bestEffort(() => reader.cancel('image Responses terminal event received'))
     }
   }
-  frames.push(...transformer.finish())
-  return { body: joinBytes(frames), snapshot: transformer.snapshot() }
+  const finalFrames = transformer.finish()
+  const finalFrameBytes = finalFrames.reduce((total, frame) => total + frame.byteLength, 0)
+  const retainedFrameBytes = frames.reduce((total, frame) => total + frame.byteLength, 0)
+  if (responseBytes + retainedFrameBytes + finalFrameBytes + transformer.retainedImageBytes() > SYNC_IMAGE_SSE_AGGREGATE_LIMIT) {
+    throw new GatewayError(
+      502,
+      'IMAGE_RESPONSES_BODY_TOO_LARGE',
+      'Image Responses provider exceeded the aggregate memory budget',
+      'server_error',
+    )
+  }
+  frames.push(...finalFrames)
+  return { frames, snapshot: transformer.snapshot() }
 }
 
 function snapshotOutcome(
@@ -714,15 +746,21 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void>
   })
 }
 
-function joinBytes(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-  const output = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return output
+function chunksToStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  let index = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index >= chunks.length) {
+        controller.close()
+        return
+      }
+      controller.enqueue(chunks[index]!)
+      index += 1
+    },
+    cancel() {
+      chunks.length = 0
+    },
+  })
 }
 
 async function readBoundedRequest(request: Request, maximumBytes: number): Promise<Uint8Array> {

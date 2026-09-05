@@ -85,6 +85,38 @@ describe('synchronous Images SSE transformer', () => {
     })
   })
 
+  it('keeps actual outputs independent from the requested output count', () => {
+    const transformer = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2', maxCompletedImages: 10,
+    })
+    transformer.push(encoder.encode(
+      'data: {"type":"response.completed","response":{"status":"completed","output":[' +
+      '{"id":"img_1","type":"image_generation_call","result":"Zmlyc3Q="},' +
+      '{"id":"img_2","type":"image_generation_call","result":"c2Vjb25k"}' +
+      ']}}\n\n',
+    ))
+
+    expect(transformer.snapshot()).toMatchObject({
+      state: 'completed', imageCount: 2, completedImages: [{ id: 'img_1' }, { id: 'img_2' }],
+    })
+  })
+
+  it('uses metadata from the first actual output in buffered JSON', () => {
+    const transformer = createSyncImageSseTransformer({
+      operation: 'generation', responseFormat: 'b64_json', publicModel: 'gpt-image-2',
+    })
+    transformer.push(encoder.encode(
+      'data: {"type":"response.completed","response":{"status":"completed","output":[' +
+      '{"id":"img_1","type":"image_generation_call","result":"aW1hZ2U=","output_format":"webp",' +
+      '"size":"1024x1024","background":"transparent","quality":"high"}' +
+      ']}}\n\n',
+    ))
+
+    expect(buildSyncImageBufferedResponse(transformer.snapshot())).toMatchObject({
+      output_format: 'webp', size: '1024x1024', background: 'transparent', quality: 'high',
+    })
+  })
+
   it('maps CRLF and multiline edit events and deduplicates output-item fallback', () => {
     const transformer = createSyncImageSseTransformer({
       operation: 'edit', responseFormat: 'url', publicModel: 'gpt-image-2', now: () => 99,

@@ -129,10 +129,14 @@ export function classifySyncImageProviderOutcome(
     isPolicySignal(errorType, errorCode, incompleteReason)
     || (errorType === 'image_generation_user_error' && isPolicySignal(errorMessage))
   ) {
-    return {
-      kind: 'failure',
-      failure: { kind: 'content_policy', status: 400, code: 'content_policy_violation' },
-    }
+    const providerError = outcome.error === undefined
+      ? undefined
+      : providerErrorFor(outcome.error, {
+          type: 'invalid_request_error',
+          code: 'content_policy_violation',
+          message: 'Image request was blocked by content policy',
+        })
+    return failure('content_policy', 400, 'content_policy_violation', undefined, providerError)
   }
   if (errorCode === 'image_generation_unavailable') {
     return failure('tool_unavailable', 502, 'image_generation_unavailable')
@@ -146,12 +150,11 @@ export function classifySyncImageProviderOutcome(
   if (outcome.error !== undefined || outcome.responseStatus === 'failed' || outcome.httpStatus >= 400) {
     const clientStatus = semanticClientStatus(outcome.httpStatus, errorType, errorCode)
     if (clientStatus !== null) {
-      const providerError = {
-        type: outcome.error?.type?.trim() || 'invalid_request_error',
-        code: outcome.error?.code?.trim() || 'IMAGE_UPSTREAM_CLIENT_ERROR',
-        message: outcome.error?.message?.trim() || 'Image provider rejected the request',
-        ...(outcome.error?.param?.trim() ? { param: outcome.error.param.trim() } : {}),
-      }
+      const providerError = providerErrorFor(outcome.error, {
+        type: 'invalid_request_error',
+        code: 'IMAGE_UPSTREAM_CLIENT_ERROR',
+        message: 'Image provider rejected the request',
+      })
       return failure('client_error', clientStatus, providerError.code, undefined, providerError)
     }
     return failure('upstream_error', 502, 'IMAGE_UPSTREAM_ERROR')
@@ -290,12 +293,14 @@ function exhaustedDecision(cooldown: SyncImageCooldown): SyncImageFailoverDecisi
 function publicErrorFor(failure: SyncImageFailure): SyncImagePublicError {
   switch (failure.kind) {
     case 'content_policy':
-      return {
-        status: 400,
-        type: 'invalid_request_error',
-        code: 'content_policy_violation',
-        message: 'Image request was blocked by content policy',
-      }
+      return failure.providerError === undefined
+        ? {
+            status: 400,
+            type: 'invalid_request_error',
+            code: 'content_policy_violation',
+            message: 'Image request was blocked by content policy',
+          }
+        : { status: 400, ...failure.providerError }
     case 'text_fallback':
       return {
         status: 502,
@@ -387,6 +392,18 @@ function failure(
       ...(retryAfter === undefined ? {} : { retryAfter }),
       ...(providerError === undefined ? {} : { providerError }),
     },
+  }
+}
+
+function providerErrorFor(
+  error: SyncImageResponseOutcome['error'],
+  fallback: { type: string; code: string; message: string },
+): NonNullable<SyncImageFailure['providerError']> {
+  return {
+    type: error?.type?.trim() || fallback.type,
+    code: error?.code?.trim() || fallback.code,
+    message: error?.message?.trim() || fallback.message,
+    ...(error?.param?.trim() ? { param: error.param.trim() } : {}),
   }
 }
 

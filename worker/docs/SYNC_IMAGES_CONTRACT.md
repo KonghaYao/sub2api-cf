@@ -4,7 +4,7 @@ This document is the source-backed contract for migrating the synchronous OpenAI
 
 ## Current Worker boundary
 
-The historical v0.21 baseline below explains the gaps this contract was written against. v0.22 shipped direct API-key synchronous Images; v0.23 adds Codex OAuth-like Responses execution, bounded Responses-SSE conversion, buffered Images JSON, protocol-compatible collected Images SSE, and semantic retry/failover decisions. Live incremental forwarding, persisted setup-token identity, adapter-specific account-model capability, and direct-provider streaming are still not complete compatibility.
+The historical v0.21 baseline below explains the gaps this contract was written against. v0.22 shipped direct API-key synchronous Images; v0.23 adds Codex OAuth-like Responses execution, bounded Responses-SSE conversion, buffered Images JSON, protocol-compatible collected Images SSE, and semantic retry/failover decisions. The collected path uses an aggregate memory budget and streams its retained frames without a final whole-body copy. Live incremental forwarding, persisted setup-token identity, adapter-specific account-model capability, direct-provider streaming, and supplemental reservation for unexpected outputs beyond requested `n` are still not complete compatibility.
 
 - `app.ts` registers only the batch `/v1/images/batches` family, not synchronous generations/edits ([worker/src/app.ts:735](../src/app.ts#L735)).
 - The generic gateway endpoint union contains only Chat Completions, Responses, and Embeddings ([worker/src/gateway/types.ts:7](../src/gateway/types.ts#L7)); provider operations have no OpenAI Images operation ([worker/src/gateway/providers/index.ts:10](../src/gateway/providers/index.ts#L10)).
@@ -12,7 +12,7 @@ The historical v0.21 baseline below explains the gaps this contract was written 
 - Migration 0043 already provides `allow_image_generation`, 1K/2K/4K prices, image-rate policy, and R2-backed batch task tables ([worker/migrations/0043_media_tasks.sql:3](../migrations/0043_media_tasks.sql#L3)). Its batch provider is Gemini-only, requires `allow_batch_image_generation`, deterministically picks one account, and has no Pool failover; it is infrastructure to reuse selectively, not synchronous compatibility ([worker/src/media/repository.ts:54](../src/media/repository.ts#L54), [worker/src/media/provider.ts:44](../src/media/provider.ts#L44)).
 - The generic gateway already has useful Worker-native primitives: API-key admission, three monetary/quota reservations, Pool Durable Object leases/failure cooldown, settlement recovery, and bounded disconnect draining ([worker/src/gateway/handler.ts:1054](../src/gateway/handler.ts#L1054), [worker/src/gateway/handler.ts:1482](../src/gateway/handler.ts#L1482), [worker/src/gateway/handler.ts:2500](../src/gateway/handler.ts#L2500)). v0.22 should share these primitives rather than fork a second billing/scheduling authority.
 
-Uncommitted synchronous-image work in the working tree is not acceptance evidence. Only the tests named under the vertical slices can move this surface from Pending to compatible.
+Only committed behavior backed by the tests named under the vertical slices is acceptance evidence.
 
 ## Status vocabulary
 

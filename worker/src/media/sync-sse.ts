@@ -30,6 +30,8 @@ export interface SyncImageCompletedImage {
   bytes: Uint8Array
   size: string
   outputFormat: string
+  background: string
+  quality: string
   revisedPrompt: string
 }
 
@@ -190,7 +192,7 @@ export class SyncImageSseTransformer {
     return {
       state: this.state,
       imageCount: this.completedImages.length,
-      completedImages: this.completedImages.map((image) => ({ ...image, bytes: image.bytes.slice() })),
+      completedImages: this.completedImages.map((image) => ({ ...image })),
       usage: { ...this.usage },
       outputSuppressed: this.outputSuppressed,
       responseStatus: this.responseStatus,
@@ -204,10 +206,18 @@ export class SyncImageSseTransformer {
       metadata: {
         outputFormat: this.completedImages[0]?.outputFormat || this.currentMeta.outputFormat,
         size: this.completedImages[0]?.size || this.currentMeta.size,
-        background: this.currentMeta.background,
-        quality: this.currentMeta.quality,
+        background: this.completedImages[0]?.background || this.currentMeta.background,
+        quality: this.completedImages[0]?.quality || this.currentMeta.quality,
       },
     }
+  }
+
+  currentState(): SyncImageSseState {
+    return this.state
+  }
+
+  retainedImageBytes(): number {
+    return this.trackedImageBytes
   }
 
   private drainLines(flush: boolean): Uint8Array[] {
@@ -508,6 +518,8 @@ export class SyncImageSseTransformer {
       bytes,
       size: dimensions === null ? image.size : `${dimensions.width}x${dimensions.height}`,
       outputFormat: image.outputFormat,
+      background: image.background,
+      quality: image.quality,
       revisedPrompt: image.revisedPrompt,
     }
     this.completedImages.push(completed)

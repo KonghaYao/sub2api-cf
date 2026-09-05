@@ -235,7 +235,15 @@ function upstreamError(response: Response, value: unknown): GatewayError {
   const code = safeErrorString(envelope?.code) ?? `IMAGE_UPSTREAM_${response.status}`
   const type = safeErrorString(envelope?.type) ?? (retryable ? 'server_error' : 'invalid_request_error')
   const message = safeErrorString(envelope?.message) ?? `Image provider request failed with status ${response.status}`
-  return new GatewayError(response.status, code, message, type, response.headers.get('retry-after') ?? undefined)
+  const param = safeErrorString(envelope?.param) ?? undefined
+  return new GatewayError(
+    response.status,
+    code,
+    message,
+    type,
+    response.headers.get('retry-after') ?? undefined,
+    param,
+  )
 }
 
 function safeErrorString(value: unknown): string | null {

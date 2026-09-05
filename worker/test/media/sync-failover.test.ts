@@ -152,7 +152,13 @@ describe('synchronous image semantic failover policy', () => {
       },
       expected: {
         kind: 'failure',
-        failure: { kind: 'content_policy', status: 400, code: 'content_policy_violation' },
+        failure: {
+          kind: 'content_policy', status: 400, code: 'content_policy_violation',
+          providerError: {
+            type: 'image_generation_user_error', code: 'moderation_blocked',
+            message: 'Image request was blocked by content policy',
+          },
+        },
       },
     },
     {
