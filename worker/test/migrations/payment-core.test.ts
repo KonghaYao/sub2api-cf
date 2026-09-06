@@ -93,7 +93,7 @@ describe('payment core migration', () => {
              order_timeout_minutes, max_pending_orders, balance_disabled,
              balance_recharge_multiplier_ppm, subscription_usd_to_cny_rate_ppm,
              recharge_fee_ppm, product_name_prefix, product_name_suffix,
-             help_url, help_text, version
+             help_url, help_text, enabled_payment_types_json, version
         FROM payment_config WHERE id = 'global'
     `).get()).toEqual({
       id: 'global',
@@ -111,6 +111,7 @@ describe('payment core migration', () => {
       product_name_suffix: '',
       help_url: '',
       help_text: '',
+      enabled_payment_types_json: '[]',
       version: 0,
     })
 
@@ -119,6 +120,12 @@ describe('payment core migration', () => {
     ).run()).toThrow()
     expect(() => raw.prepare(
       `UPDATE payment_config SET recharge_fee_ppm = 1.5 WHERE id = 'global'`,
+    ).run()).toThrow()
+    expect(() => raw.prepare(
+      `UPDATE payment_config SET enabled_payment_types_json = 'not-json' WHERE id = 'global'`,
+    ).run()).toThrow()
+    expect(() => raw.prepare(
+      `UPDATE payment_config SET enabled_payment_types_json = '{}' WHERE id = 'global'`,
     ).run()).toThrow()
     expect(() => raw.prepare(
       `UPDATE payment_config SET min_amount_micros = 200, max_amount_micros = 100 WHERE id = 'global'`,

@@ -839,7 +839,7 @@ describe("admin SettingsView payment visible method controls", () => {
         daily_limit: 500,
         order_timeout_minutes: 45,
         max_pending_orders: 4,
-        enabled_payment_types: ["stripe"],
+        enabled_payment_types: ["stripe", "airwallex"],
         balance_disabled: true,
         balance_recharge_multiplier: 1,
         subscription_usd_to_cny_rate: 0,
@@ -862,8 +862,13 @@ describe("admin SettingsView payment visible method controls", () => {
     const stripeButton = paymentCard
       .findAll("button")
       .find((button) => button.text() === "payment.methods.stripe");
+    const airwallexButton = paymentCard
+      .findAll("button")
+      .find((button) => button.text() === "payment.methods.airwallex");
     expect(stripeButton).toBeDefined();
+    expect(airwallexButton).toBeDefined();
     expect(stripeButton!.classes()).toContain("bg-primary-500");
+    expect(airwallexButton!.classes()).toContain("bg-primary-500");
     expect(getPaymentConfig).toHaveBeenCalledTimes(1);
     expect(getProviders).toHaveBeenCalledTimes(1);
 
@@ -877,9 +882,65 @@ describe("admin SettingsView payment visible method controls", () => {
       daily_limit: 500,
       order_timeout_minutes: 45,
       max_pending_orders: 4,
+      enabled_payment_types: ["stripe", "airwallex"],
       balance_disabled: true,
       recharge_fee_rate: 1.5,
     }));
+  });
+
+  it("submits an explicit empty payment type selection without treating it as omitted", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+    });
+    getPaymentConfig.mockResolvedValue({
+      data: {
+        enabled: false,
+        min_amount: 1,
+        max_amount: 1000,
+        daily_limit: 0,
+        order_timeout_minutes: 30,
+        max_pending_orders: 3,
+        enabled_payment_types: [],
+        balance_disabled: true,
+        balance_recharge_multiplier: 1,
+        subscription_usd_to_cny_rate: 0,
+        recharge_fee_rate: 0,
+        product_name_prefix: "",
+        product_name_suffix: "",
+        help_image_url: "",
+        help_text: "",
+      },
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updatePaymentConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled_payment_types: [] }),
+    );
+  });
+
+  it("reports a payment config save failure without showing a false success", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+    });
+    updatePaymentConfig.mockRejectedValueOnce(
+      Object.assign(new Error("Only Stripe payment is supported"), {
+        code: "unsupported_payment_type",
+      }),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(showError).toHaveBeenCalledWith("error");
+    expect(showSuccess).not.toHaveBeenCalled();
   });
 
   it("keeps the original per-auth-source entitlement fields visible", async () => {

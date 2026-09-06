@@ -284,6 +284,148 @@ describe('payment configuration', () => {
     expect((await json(stale)).code).toBe('payment_config_version_conflict')
   })
 
+  it('persists configured payment types with explicit empty, omit, typed validation, and CAS semantics', async () => {
+    await subject.app.request('/admin/payment/providers', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-provider-create',
+      },
+      body: JSON.stringify({
+        provider_key: 'stripe',
+        name: 'Stripe payment types',
+        enabled: true,
+        config: {
+          secret_key: 'sk_test_types',
+          webhook_secret: 'whsec_types',
+          publishable_key: 'pk_test_types',
+        },
+      }),
+    }, subject.env)
+
+    const selectStripe = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-select-stripe',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ enabled_payment_types: ['stripe'] }),
+    }, subject.env)
+    expect(selectStripe.status).toBe(200)
+    expect((await json(selectStripe)).data).toMatchObject({
+      enabled_payment_types: ['stripe'],
+      control_version: 1,
+    })
+
+    const enableWithoutTypes = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-enable-omit',
+        'if-match': '"1"',
+      },
+      body: JSON.stringify({ enabled: true }),
+    }, subject.env)
+    expect(enableWithoutTypes.status).toBe(200)
+    expect((await json(enableWithoutTypes)).data.enabled_payment_types).toEqual(['stripe'])
+
+    const publicSelected = await subject.app.request('/payment/config', {
+      headers: { authorization: subject.authorization },
+    }, subject.env)
+    expect((await json(publicSelected)).data).toMatchObject({
+      payment_enabled: true,
+      enabled_payment_types: ['stripe'],
+      stripe_publishable_key: 'pk_test_types',
+    })
+
+    const clearTypes = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-clear',
+        'if-match': '"2"',
+      },
+      body: JSON.stringify({ enabled_payment_types: [] }),
+    }, subject.env)
+    expect(clearTypes.status).toBe(200)
+    expect((await json(clearTypes)).data).toMatchObject({
+      enabled_payment_types: [],
+      control_version: 3,
+    })
+
+    const updateWithoutTypes = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-update-omit',
+        'if-match': '"3"',
+      },
+      body: JSON.stringify({ min_amount: 2 }),
+    }, subject.env)
+    expect(updateWithoutTypes.status).toBe(200)
+    expect((await json(updateWithoutTypes)).data.enabled_payment_types).toEqual([])
+
+    const adminReload = await subject.app.request('/admin/payment/config', {}, subject.env)
+    expect((await json(adminReload)).data).toMatchObject({
+      enabled_payment_types: [],
+      min_amount: 2,
+      control_version: 4,
+    })
+    expect(subject.raw.prepare(
+      `SELECT enabled_payment_types_json FROM payment_config WHERE id = 'global'`,
+    ).get()).toEqual({ enabled_payment_types_json: '[]' })
+
+    const publicCleared = await subject.app.request('/payment/config', {
+      headers: { authorization: subject.authorization },
+    }, subject.env)
+    expect((await json(publicCleared)).data).toMatchObject({
+      payment_enabled: true,
+      enabled_payment_types: [],
+      stripe_publishable_key: '',
+    })
+    await expect(isPaymentEnabled(subject.env)).resolves.toBe(false)
+
+    const limitsCleared = await subject.app.request('/payment/limits', {
+      headers: { authorization: subject.authorization },
+    }, subject.env)
+    expect((await json(limitsCleared)).data).toMatchObject({
+      methods: {},
+      global_min: 0,
+      global_max: 0,
+    })
+
+    const unsupported = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-unsupported',
+        'if-match': '"4"',
+      },
+      body: JSON.stringify({ enabled_payment_types: ['stripe', 'airwallex'] }),
+    }, subject.env)
+    expect(unsupported.status).toBe(400)
+    expect((await json(unsupported)).code).toBe('unsupported_payment_type')
+
+    const stale = await subject.app.request('/admin/payment/config', {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'payment-types-stale',
+        'if-match': '"3"',
+      },
+      body: JSON.stringify({ enabled_payment_types: ['stripe'] }),
+    }, subject.env)
+    expect(stale.status).toBe(412)
+    expect((await json(stale)).code).toBe('payment_config_version_conflict')
+
+    const afterFailures = await subject.app.request('/admin/payment/config', {}, subject.env)
+    expect((await json(afterFailures)).data).toMatchObject({
+      enabled_payment_types: [],
+      control_version: 4,
+    })
+  })
+
   it('preserves blank secrets, protects identities with orders, and safely disables on delete', async () => {
     const create = await subject.app.request('/admin/payment/providers', {
       method: 'POST',
@@ -411,6 +553,7 @@ describe('payment configuration', () => {
       },
       body: JSON.stringify({
         enabled: true,
+        enabled_payment_types: ['stripe'],
         balance_disabled: true,
         balance_recharge_multiplier: 1.2,
         subscription_usd_to_cny_rate: 7,
@@ -510,7 +653,7 @@ describe('payment configuration', () => {
         'idempotency-key': 'effective-payment-config-enable',
         'if-match': '"0"',
       },
-      body: JSON.stringify({ enabled: true }),
+      body: JSON.stringify({ enabled: true, enabled_payment_types: ['stripe'] }),
     }, subject.env)
     await expect(isPaymentEnabled(subject.env)).resolves.toBe(false)
 

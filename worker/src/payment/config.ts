@@ -24,6 +24,7 @@ type PaymentBindings = { Bindings: Env }
 interface PaymentConfigRow {
   schema_version: number
   enabled: number
+  enabled_payment_types_json: string
   min_amount_micros: number
   max_amount_micros: number
   daily_limit_micros: number
@@ -116,10 +117,12 @@ export async function getPaymentConfig(context: Context<PaymentBindings>): Promi
   try {
     await authenticateUserRequest(context.req.raw, context.env)
     const row = await requirePaymentConfigRow(context.env)
-    const stripe = row.enabled === 1
+    const configuredTypes = configuredPaymentTypes(row)
+    const stripe = row.enabled === 1 && configuredTypes.includes('stripe')
       ? await stripePublicState(context.env)
       : { enabledTypes: [], publishableKey: '' }
-    return controlSuccess(publicPaymentConfig(row, stripe.enabledTypes, stripe.publishableKey))
+    const effectiveTypes = stripe.enabledTypes.filter((type) => configuredTypes.includes(type))
+    return controlSuccess(publicPaymentConfig(row, effectiveTypes, stripe.publishableKey))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -134,6 +137,7 @@ export async function isPaymentEnabled(env: Env): Promise<boolean> {
          JOIN payment_provider_instances provider
            ON provider.provider_type = 'stripe' AND provider.enabled = 1
         WHERE config.id = 'global' AND config.enabled = 1
+          AND config.enabled_payment_types_json = '["stripe"]'
      ) AS enabled`,
   ).first<{ enabled: number }>()
   return row?.enabled === 1
@@ -158,7 +162,7 @@ export async function getPaymentCheckoutInfo(context: Context<PaymentBindings>):
       listPublicPlans(context.env),
     ])
     let publishableKey = ''
-    if (config.enabled === 1) {
+    if (config.enabled === 1 && configuredPaymentTypes(config).includes('stripe')) {
       publishableKey = (await requireActiveStripeProvider(context.env)).publishable_key
     }
     return controlSuccess({
@@ -187,7 +191,7 @@ export async function getAdminPaymentConfig(context: Context<PaymentBindings>): 
     const stripe = await stripePublicState(context.env)
     return paymentConfigResponse(
       {
-        ...publicPaymentConfig(row, stripe.enabledTypes, stripe.publishableKey),
+        ...publicPaymentConfig(row, configuredPaymentTypes(row), stripe.publishableKey),
         balance_disabled_configured: row.balance_disabled === 1,
         balance_checkout_available: false,
         order_timeout_minutes_configured: row.order_timeout_minutes,
@@ -228,7 +232,7 @@ export async function updatePaymentConfig(context: Context<PaymentBindings>): Pr
     }
     const stripe = await stripePublicState(context.env)
     const response = {
-      ...publicPaymentConfig(next, stripe.enabledTypes, stripe.publishableKey),
+      ...publicPaymentConfig(next, configuredPaymentTypes(next), stripe.publishableKey),
       balance_disabled_configured: next.balance_disabled === 1,
       balance_checkout_available: false,
       order_timeout_minutes_configured: next.order_timeout_minutes,
@@ -241,7 +245,8 @@ export async function updatePaymentConfig(context: Context<PaymentBindings>): Pr
       await context.env.DB.batch([
         context.env.DB.prepare(
           `UPDATE payment_config SET
-             enabled = ?, min_amount_micros = ?, max_amount_micros = ?,
+             enabled = ?, enabled_payment_types_json = ?,
+             min_amount_micros = ?, max_amount_micros = ?,
              daily_limit_micros = ?, order_timeout_minutes = ?, max_pending_orders = ?,
              balance_disabled = ?, balance_recharge_multiplier_ppm = ?,
              subscription_usd_to_cny_rate_ppm = ?, recharge_fee_ppm = ?,
@@ -250,6 +255,7 @@ export async function updatePaymentConfig(context: Context<PaymentBindings>): Pr
            WHERE id = 'global'`,
         ).bind(
           next.enabled,
+          next.enabled_payment_types_json,
           next.min_amount_micros,
           next.max_amount_micros,
           next.daily_limit_micros,
@@ -654,6 +660,7 @@ export async function requireStripeProviderForExistingOrder(
 async function requirePaymentConfigRow(env: Env): Promise<PaymentConfigRow> {
   const row = await env.DB.prepare(
     `SELECT schema_version, enabled, min_amount_micros, max_amount_micros,
+            enabled_payment_types_json,
             daily_limit_micros, order_timeout_minutes, max_pending_orders,
             balance_disabled, balance_recharge_multiplier_ppm,
             subscription_usd_to_cny_rate_ppm, recharge_fee_ppm,
@@ -687,7 +694,9 @@ async function paymentLimits(
   global_min: number
   global_max: number
 }> {
-  if (config.enabled !== 1) return { methods: {}, global_min: 0, global_max: 0 }
+  if (config.enabled !== 1 || !configuredPaymentTypes(config).includes('stripe')) {
+    return { methods: {}, global_min: 0, global_max: 0 }
+  }
   const provider = await requireActiveStripeProvider(env)
   const configured = provider.limits.stripe ?? {}
   const singleMin = configured.singleMin ?? config.min_amount_micros / 1_000_000
@@ -795,6 +804,29 @@ function publicPaymentConfig(
   }
 }
 
+function configuredPaymentTypes(row: Pick<PaymentConfigRow, 'enabled_payment_types_json'>): string[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.enabled_payment_types_json)
+  } catch {
+    throw new GatewayError(
+      503,
+      'payment_config_invalid',
+      'Stored payment method selection is invalid',
+      'server_error',
+    )
+  }
+  if (!Array.isArray(parsed) || !parsed.every((item) => item === 'stripe')) {
+    throw new GatewayError(
+      503,
+      'payment_config_invalid',
+      'Stored payment method selection is invalid',
+      'server_error',
+    )
+  }
+  return [...new Set(parsed)]
+}
+
 function paymentConfigResponse(data: unknown, version: number): Response {
   const response = controlSuccess(data)
   response.headers.set('etag', `"${version}"`)
@@ -842,6 +874,7 @@ function parsePaymentConfigPatch(body: Record<string, unknown>): Partial<Payment
     if (types.some((type) => type !== 'stripe')) {
       throw new GatewayError(400, 'unsupported_payment_type', 'Only Stripe payment is supported')
     }
+    patch.enabled_payment_types_json = JSON.stringify(types)
   }
   if (body.load_balance_strategy !== undefined) {
     const strategy = optionalTrimmedString(body.load_balance_strategy, 'load_balance_strategy', 32)

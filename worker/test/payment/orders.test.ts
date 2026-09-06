@@ -164,6 +164,29 @@ describe('Stripe subscription order HTTP contract', () => {
     expect((await json(conflict)).code).toBe('idempotency_conflict')
   })
 
+  it('rejects a configured provider when its payment type is explicitly deselected', async () => {
+    const test = await fixture()
+    test.raw.prepare(
+      `UPDATE payment_config SET enabled_payment_types_json = '[]' WHERE id = 'global'`,
+    ).run()
+
+    const response = await userRequest(test, 'alice', '/api/v1/payment/orders', {
+      method: 'POST',
+      headers: mutationHeaders('payment-create-disabled-type'),
+      body: JSON.stringify({
+        amount: 1,
+        payment_type: 'stripe',
+        order_type: 'subscription',
+        plan_id: 'plan-pro',
+      }),
+    })
+
+    expect(response.status).toBe(403)
+    expect((await json(response)).code).toBe('payment_method_disabled')
+    expect(test.stripeFetch).not.toHaveBeenCalled()
+    expect(test.raw.prepare('SELECT COUNT(*) AS count FROM payment_orders').get()).toEqual({ count: 0 })
+  })
+
   it('rejects forged callbacks and fulfills a paid order exactly once through the queue seam', async () => {
     const test = await fixture()
     const created = await createOrder(test, 'payment-create-webhook')
@@ -618,7 +641,7 @@ async function fixture(): Promise<Fixture> {
   raw.prepare(
     `UPDATE payment_config
         SET enabled = 1, balance_disabled = 1, min_amount_micros = 10000,
-            order_timeout_minutes = 30
+            order_timeout_minutes = 30, enabled_payment_types_json = '["stripe"]'
       WHERE id = 'global'`,
   ).run()
   for (const [id, email, role] of [

@@ -10986,8 +10986,8 @@ async function loadWorkerPaymentSettings() {
     form.payment_product_name_suffix = payment.product_name_suffix;
     form.payment_help_image_url = payment.help_image_url;
     form.payment_help_text = payment.help_text;
-    form.payment_enabled_types = payment.enabled_payment_types.length > 0
-      ? payment.enabled_payment_types
+    form.payment_enabled_types = Array.isArray(payment.enabled_payment_types)
+      ? [...payment.enabled_payment_types]
       : ["stripe"];
   } catch (error: unknown) {
     appStore.showError(
@@ -11150,6 +11150,7 @@ async function saveSettings() {
         daily_limit: Number(form.payment_daily_limit) || 0,
         order_timeout_minutes: Number(form.payment_order_timeout_minutes) || 30,
         max_pending_orders: Number(form.payment_max_pending_orders) || 3,
+        enabled_payment_types: [...form.payment_enabled_types],
         balance_disabled: form.payment_balance_disabled,
         balance_recharge_multiplier:
           Number(form.payment_balance_recharge_multiplier) || 1,

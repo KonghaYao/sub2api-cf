@@ -54,6 +54,7 @@ const FULFILLMENT_ACTION = 'subscription_entitlement'
 
 interface PaymentPolicyRow {
   enabled: number
+  enabled_payment_types_json: string
   min_amount_micros: number
   max_amount_micros: number
   daily_limit_micros: number
@@ -541,6 +542,14 @@ async function persistNewOrder(
   if (policy.enabled !== 1) {
     throw new GatewayError(403, 'payment_disabled', 'Payment is disabled', 'permission_error')
   }
+  if (!isStripePaymentConfigured(policy.enabled_payment_types_json)) {
+    throw new GatewayError(
+      403,
+      'payment_method_disabled',
+      'Stripe payment is not enabled',
+      'permission_error',
+    )
+  }
   const plan = await requirePurchasablePlan(env, input.plan_id)
   const provider = await requireActiveStripeProvider(env)
   const priced = paymentAmountWithFee(plan.price_micros, policy.recharge_fee_ppm, plan.currency)
@@ -579,6 +588,7 @@ async function persistNewOrder(
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?
            FROM payment_config admission
           WHERE admission.id = 'global' AND admission.enabled = 1
+            AND admission.enabled_payment_types_json = '["stripe"]'
             AND (
               SELECT COUNT(*) FROM payment_orders pending
                WHERE pending.user_id = ? AND pending.status = 'PENDING'
@@ -1163,7 +1173,7 @@ async function findOrderByIdempotency(
 async function requirePaymentPolicy(env: Env): Promise<PaymentPolicyRow> {
   const row = await env.DB.prepare(
     `SELECT enabled, min_amount_micros, max_amount_micros, daily_limit_micros,
-            order_timeout_minutes, max_pending_orders, recharge_fee_ppm,
+            enabled_payment_types_json, order_timeout_minutes, max_pending_orders, recharge_fee_ppm,
             product_name_prefix, product_name_suffix
        FROM payment_config WHERE id = 'global'`,
   ).first<PaymentPolicyRow>()
@@ -1182,6 +1192,14 @@ async function throwPaymentAdmissionError(
   const policy = await requirePaymentPolicy(env)
   if (policy.enabled !== 1) {
     throw new GatewayError(403, 'payment_disabled', 'Payment is disabled', 'permission_error')
+  }
+  if (!isStripePaymentConfigured(policy.enabled_payment_types_json)) {
+    throw new GatewayError(
+      403,
+      'payment_method_disabled',
+      'Stripe payment is not enabled',
+      'permission_error',
+    )
   }
   const pending = await env.DB.prepare(
     `SELECT COUNT(*) AS total FROM payment_orders
@@ -1205,6 +1223,10 @@ async function throwPaymentAdmissionError(
     }
   }
   throw new GatewayError(409, 'payment_order_admission_changed', 'Payment order admission changed')
+}
+
+function isStripePaymentConfigured(value: string): boolean {
+  return value === '["stripe"]'
 }
 
 async function requirePurchasablePlan(env: Env, id: string): Promise<PlanRow> {
