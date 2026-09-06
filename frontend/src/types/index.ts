@@ -693,8 +693,8 @@ export type CompositeRouteEndpoint =
 export type CompositeRouteSource = 'route' | 'detector' | string
 
 export interface CompositeModelRoute {
-  id: number
-  group_id: number
+  id: string | number
+  group_id: string | number
   public_model: string
   match_type: CompositeRouteMatchType
   target_platform: Exclude<GroupPlatform, 'composite'>
@@ -705,6 +705,7 @@ export interface CompositeModelRoute {
   notes: string
   created_at?: string
   updated_at?: string
+  control_version?: number
 }
 
 export interface CompositeModelRouteInput {
@@ -726,7 +727,7 @@ export interface CompositeRoutePreviewRequest {
 export interface CompositeRouteDecision {
   matched: boolean
   source: CompositeRouteSource
-  group_id: number
+  group_id: string | number
   public_model: string
   target_platform: Exclude<GroupPlatform, 'composite'> | ''
   upstream_model: string

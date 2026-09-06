@@ -152,6 +152,13 @@ import {
   putAdminGroupRateMultipliers,
 } from './control/group-rate'
 import {
+  createCompositeRoute,
+  deleteCompositeRoute,
+  listCompositeRoutes,
+  previewCompositeRoute,
+  updateCompositeRoute,
+} from './control/composite-routes'
+import {
   createAdminInvitationCode,
   createAdminPromotionCode,
   deleteAdminInvitationCode,
@@ -638,6 +645,11 @@ export function createApp() {
   app.get('/api/v1/admin/groups/:id/rate-multipliers', listAdminGroupRateMultipliers)
   app.put('/api/v1/admin/groups/:id/rate-multipliers', putAdminGroupRateMultipliers)
   app.delete('/api/v1/admin/groups/:id/rate-multipliers', clearAdminGroupRateMultipliers)
+  app.get('/api/v1/admin/groups/:id/composite-routes', listCompositeRoutes)
+  app.post('/api/v1/admin/groups/:id/composite-routes', createCompositeRoute)
+  app.put('/api/v1/admin/groups/:id/composite-routes/:route_id', updateCompositeRoute)
+  app.delete('/api/v1/admin/groups/:id/composite-routes/:route_id', deleteCompositeRoute)
+  app.post('/api/v1/admin/groups/:id/composite-routes/preview', previewCompositeRoute)
   app.get('/api/v1/admin/groups/:id/rpm-overrides', listAdminGroupRpmOverrides)
   app.put('/api/v1/admin/groups/:id/rpm-overrides', putAdminGroupRpmOverrides)
   app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)

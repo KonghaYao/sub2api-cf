@@ -209,3 +209,20 @@ explicit typed error. It must never silently discard a submitted field or return
   override tests passed; Worker typecheck, frontend typecheck and Cloudflare SPA
   build passed. Full suites were intentionally not repeated.
 - Production D1 pre-migration bookmark: `00000029-000004db-000050de-fff18bb107b7c0685ec925059274e09f`.
+
+## v0.42.6 Groups composite routes — 2026-09-06
+
+- The restored composite-route dialog now has native list, create, update,
+  delete and preview routes. D1 0069 restricts rows to composite groups and
+  concrete Worker providers; endpoint, exact/prefix matching, priority and
+  stable route ID ordering are explicit.
+- Gateway resolution consults enabled explicit routes before selecting a group
+  model. A match constrains the selected model and account candidates to its
+  target platform, then applies its upstream-model rewrite. No matching rule
+  remains an explicit preview miss rather than fabricated configuration.
+- Writes use opaque IDs, CAS and idempotency keys. The original Groups template
+  and styles remain unchanged.
+- Validation: 2 SQLite CRUD/preview journeys and the gateway routing/billing
+  fixture (5 tests total), Worker typecheck and SPA build passed. Full suites
+  were intentionally not repeated.
+- Production D1 pre-migration bookmark: `00000029-00000527-000050de-5046e408c7d8458c57974226c1c3f699`.

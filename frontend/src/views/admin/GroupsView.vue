@@ -5148,7 +5148,7 @@ const compositeRoutesGroup = ref<AdminGroup | null>(null);
 const compositeRoutes = ref<CompositeModelRoute[]>([]);
 const compositeRoutesLoading = ref(false);
 const compositeRouteSaving = ref(false);
-const compositeRouteEditingId = ref<number | null>(null);
+const compositeRouteEditingId = ref<string | number | null>(null);
 const compositePreviewModel = ref("");
 const compositePreviewEndpoint = ref<CompositeRouteEndpoint>("any");
 const compositePreviewLoading = ref(false);
@@ -6653,7 +6653,7 @@ const loadCompositeRoutes = async () => {
     );
     compositeRoutes.value = routes.sort((a, b) => {
       if (a.priority !== b.priority) return a.priority - b.priority;
-      return a.id - b.id;
+      return String(a.id).localeCompare(String(b.id));
     });
   } catch (error: any) {
     appStore.showError(

@@ -1,4 +1,5 @@
 import type { Env } from '../env'
+import { resolveCompositeRoute } from '../control/composite-routes'
 import { groupAccessPredicate } from '../user/group-access'
 import { apiKeyDigest } from './crypto'
 import type {
@@ -466,6 +467,9 @@ export async function resolveGatewayRoute(
   platform_quota: GatewayPrincipal['platform_quota']
   customer_pricing?: FrozenPricingPlan
 }> {
+  const compositeRoute = await resolveCompositeRoute(env, groupId, publicName, endpoint as never)
+  const compositePlatform = compositeRoute?.target_platform ?? null
+  const compositeUpstream = compositeRoute === null ? null : (compositeRoute.upstream_model || (compositeRoute.match_type === 'prefix' ? publicName : compositeRoute.public_model))
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const modelCapability = endpoint === 'embeddings'
     ? 'm.embeddings = 1'
@@ -473,8 +477,8 @@ export async function resolveGatewayRoute(
       ? 'm.image_generation = 1'
       : `(m.endpoint = ? OR m.endpoint = 'both')`
   const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
-    ? [groupId, publicName]
-    : [groupId, publicName, endpoint]
+    ? [groupId, publicName, compositePlatform, compositePlatform]
+    : [groupId, publicName, compositePlatform, compositePlatform, endpoint]
   const modelBindings = [userId, ...routeBindings]
   const statements = [
     env.DB.prepare(
@@ -483,12 +487,13 @@ export async function resolveGatewayRoute(
           AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
           AND g.enabled = 1
           AND (m.platform = g.platform OR g.platform = 'composite')
+          AND (? IS NULL OR m.platform = ?)
           AND ${modelCapability}
         ORDER BY gm.sort_order ASC, m.platform ASC, m.id ASC
         LIMIT 1`,
     ).bind(...modelBindings),
     channelModelPolicyStatement(env, groupId, publicName, endpoint),
-    accountCandidatesStatement(env, groupId, publicName, endpoint, capabilityColumn),
+    accountCandidatesStatement(env, groupId, publicName, endpoint, capabilityColumn, undefined, compositePlatform),
     platformQuotaStatement(env, userId, groupId, publicName, endpoint),
   ]
   if (
@@ -501,7 +506,7 @@ export async function resolveGatewayRoute(
       publicName,
       endpoint,
       accountCapabilityColumn(fallbackEndpoint),
-      endpoint === 'chat_completions' ? 'openai_or_codex' : 'openai',
+      endpoint === 'chat_completions' ? 'openai_or_codex' : 'openai', compositePlatform,
     ))
   }
   const [modelResult, channelResult, candidateResult, quotaResult, fallbackCandidateResult] =
@@ -518,7 +523,7 @@ export async function resolveGatewayRoute(
     )
   }
   const channelPolicy = channelResult.results[0] as unknown as ChannelModelPolicyRow | undefined
-  const routedModel = applyChannelModelPolicy(publicName, model, channelPolicy)
+  const routedModel = applyChannelModelPolicy(publicName, compositeUpstream === null ? model : { ...model, upstream_name: compositeUpstream }, channelPolicy)
   const customerPricing = channelPolicy === undefined
     ? undefined
     : frozenPricingPlan(channelPolicy, routedModel.platform)
@@ -1086,6 +1091,7 @@ function externalAliasCandidatesStatement(
   modelEndpoint: GatewayEndpoint,
   capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation',
   platformConstraint?: 'openai' | 'openai_or_codex',
+  compositePlatform?: string | null,
 ): D1PreparedStatement {
   const cte = externalAliasCte(groupId, publicName, modelEndpoint)
   const platformPredicate = platformConstraint === 'openai'
@@ -1500,6 +1506,7 @@ function accountCandidatesStatement(
   modelEndpoint: GatewayEndpoint,
   capabilityColumn: 'am.chat_completions' | 'am.responses' | 'am.embeddings' | 'am.image_generation',
   platformConstraint?: 'openai' | 'openai_or_codex',
+  compositePlatform?: string | null,
 ): D1PreparedStatement {
   const platformPredicate = platformConstraint === 'openai'
     ? "AND a.platform = 'openai'"
@@ -1512,8 +1519,8 @@ function accountCandidatesStatement(
       ? 'm.image_generation = 1'
       : `(m.endpoint = ? OR m.endpoint = 'both')`
   const modelBindings = modelEndpoint === 'embeddings' || modelEndpoint === 'images'
-    ? [groupId, publicName]
-    : [groupId, publicName, modelEndpoint]
+    ? [groupId, publicName, compositePlatform ?? null, compositePlatform ?? null]
+    : [groupId, publicName, compositePlatform ?? null, compositePlatform ?? null, modelEndpoint]
   return env.DB.prepare(
     `WITH resolved_model AS (
        SELECT m.id AS model_id, m.platform
@@ -1525,6 +1532,7 @@ function accountCandidatesStatement(
           AND gm.enabled = 1 AND m.enabled = 1 AND p.active = 1
           AND g.enabled = 1
           AND (m.platform = g.platform OR g.platform = 'composite')
+          AND (? IS NULL OR m.platform = ?)
           AND ${modelCapability}
         ORDER BY gm.sort_order ASC, m.platform ASC, m.id ASC
         LIMIT 1

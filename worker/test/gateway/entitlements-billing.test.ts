@@ -199,4 +199,17 @@ describe('gateway entitlement and effective billing', () => {
       effective_rate_multiplier_ppm: 800_000,
     })
   })
+
+  it('uses an enabled composite route to constrain provider selection and rewrite the upstream model', async () => {
+    const test = await fixture()
+    seedRoute(test.raw)
+    test.raw.prepare(`UPDATE "groups" SET platform = 'composite' WHERE id = 'group-1'`).run()
+    test.raw.prepare(`INSERT INTO composite_model_routes (
+      id, group_id, public_model, match_type, target_platform, upstream_model, endpoint, priority, enabled, notes, created_at_ms, updated_at_ms
+    ) VALUES ('route-1', 'group-1', 'gpt-public', 'exact', 'openai', 'gpt-5-routed', 'responses', 10, 1, '', 1, 1)`).run()
+    const route = await resolveGatewayRoute(test.env, 'group-1', 'gpt-public', 'responses', 'alice')
+    expect(route.model).toMatchObject({ platform: 'openai', upstream_name: 'gpt-5-routed' })
+    expect(route.candidates).toHaveLength(1)
+    expect(route.candidates[0]).toMatchObject({ platform: 'openai', account_id: 'account-1' })
+  })
 })

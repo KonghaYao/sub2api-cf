@@ -41,6 +41,7 @@ type WorkerGroupProjection = AdminGroup & {
 }
 
 const groupControlVersions = new Map<string, number>()
+const compositeRouteControlVersions = new Map<string, number>()
 
 export class WorkerGroupFeatureNotSupportedError extends Error {
   readonly code = 'worker_feature_not_supported'
@@ -574,53 +575,64 @@ export async function getGroupApiKeys(
   return data
 }
 
-export async function listCompositeRoutes(id: number): Promise<CompositeModelRoute[]> {
-  requireLegacyGroupFeature('Composite routes')
+export async function listCompositeRoutes(id: string | number): Promise<CompositeModelRoute[]> {
   const { data } = await apiClient.get<CompositeModelRoute[]>(`/admin/groups/${id}/composite-routes`)
+  for (const route of data as Array<CompositeModelRoute & { control_version?: number }>) {
+    if (Number.isSafeInteger(route.control_version)) compositeRouteControlVersions.set(String(route.id), route.control_version!)
+  }
   return data
 }
 
 export async function createCompositeRoute(
-  id: number,
+  id: string | number,
   route: CompositeModelRouteInput
 ): Promise<CompositeModelRoute> {
-  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.post<CompositeModelRoute>(
     `/admin/groups/${id}/composite-routes`,
-    route
+    route,
+    isCloudflareWorkerContractActive() ? { headers: { 'Idempotency-Key': newControlOperationKey('composite-route-create') } } : undefined
   )
   return data
 }
 
 export async function updateCompositeRoute(
-  id: number,
-  routeId: number,
+  id: string | number,
+  routeId: string | number,
   route: CompositeModelRouteInput
 ): Promise<CompositeModelRoute> {
-  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.put<CompositeModelRoute>(
     `/admin/groups/${id}/composite-routes/${routeId}`,
-    route
+    isCloudflareWorkerContractActive()
+      ? { ...route, expected_control_version: requireCompositeRouteControlVersion(routeId) }
+      : route,
+    isCloudflareWorkerContractActive() ? { headers: { 'Idempotency-Key': newControlOperationKey('composite-route-update') } } : undefined
   )
   return data
 }
 
 export async function deleteCompositeRoute(
-  id: number,
-  routeId: number
+  id: string | number,
+  routeId: string | number,
 ): Promise<{ message: string }> {
-  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.delete<{ message: string }>(
-    `/admin/groups/${id}/composite-routes/${routeId}`
+    `/admin/groups/${id}/composite-routes/${routeId}`,
+    isCloudflareWorkerContractActive()
+      ? { data: { expected_control_version: requireCompositeRouteControlVersion(routeId) }, headers: { 'Idempotency-Key': newControlOperationKey('composite-route-delete') } }
+      : undefined
   )
   return data
 }
 
+function requireCompositeRouteControlVersion(id: string | number): number {
+  const version = compositeRouteControlVersions.get(String(id))
+  if (version === undefined) throw Object.assign(new Error('Reload this route before changing it'), { code: 'composite_route_version_not_loaded' })
+  return version
+}
+
 export async function previewCompositeRoute(
-  id: number,
+  id: string | number,
   request: CompositeRoutePreviewRequest
 ): Promise<CompositeRouteDecision> {
-  requireLegacyGroupFeature('Composite route preview')
   const { data } = await apiClient.post<CompositeRouteDecision>(
     `/admin/groups/${id}/composite-routes/preview`,
     request
