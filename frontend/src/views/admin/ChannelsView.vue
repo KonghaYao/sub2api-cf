@@ -257,7 +257,7 @@
             </div>
 
             <!-- Apply Pricing to Account Stats (toggle only in basic settings) -->
-            <div v-if="!workerContractActive" class="border-t border-gray-200 pt-4 dark:border-dark-700">
+            <div class="border-t border-gray-200 pt-4 dark:border-dark-700">
               <div class="flex items-center justify-between">
                 <div>
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -1394,9 +1394,7 @@ async function openEditDialog(channel: Channel) {
   form.billing_model_source = workerContractActive
     ? 'channel_mapped'
     : channel.billing_model_source || 'channel_mapped'
-  form.apply_pricing_to_account_stats = workerContractActive
-    ? false
-    : channel.apply_pricing_to_account_stats || false
+  form.apply_pricing_to_account_stats = channel.apply_pricing_to_account_stats || false
   // Must load groups first so apiToForm can map groupID → platform
   await Promise.all([loadGroups(), loadAllChannelsForConflict()])
   form.platforms = apiToForm(channel)
@@ -1652,7 +1650,7 @@ async function handleSubmit() {
         billing_model_source: form.billing_model_source,
         restrict_models: form.restrict_models,
         features_config,
-        apply_pricing_to_account_stats: workerContractActive ? false : form.apply_pricing_to_account_stats,
+        apply_pricing_to_account_stats: form.apply_pricing_to_account_stats,
         account_stats_pricing_rules: accountStatsRulesToAPI()
       }
       await adminAPI.channels.update(editingChannel.value.id, req)
@@ -1667,7 +1665,7 @@ async function handleSubmit() {
         billing_model_source: form.billing_model_source,
         restrict_models: form.restrict_models,
         features_config,
-        apply_pricing_to_account_stats: workerContractActive ? false : form.apply_pricing_to_account_stats,
+        apply_pricing_to_account_stats: form.apply_pricing_to_account_stats,
         account_stats_pricing_rules: accountStatsRulesToAPI()
       }
       await adminAPI.channels.create(req)

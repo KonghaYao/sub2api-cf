@@ -37,6 +37,11 @@ describe('account-cost D1 projection', () => {
       outcome: 'completed', stream: false, platform: 'openai', request_type: 1,
       inbound_endpoint: '/v1/chat/completions', upstream_endpoint: '/v1/responses',
       billing_mode: 'token', native_compaction_v2: false, duration_ms: 12, estimated: false,
+      customer_pricing_snapshot_json: JSON.stringify({
+        version: 1,
+        source: 'channel',
+        pricing_id: 'channel-price-1',
+      }),
     }
     const item = {
       id: 'message-1', timestamp: new Date(), body: createUsageEvent(payload, 1_000), attempts: 1,
@@ -53,7 +58,7 @@ describe('account-cost D1 projection', () => {
     expect(raw.prepare(`
       SELECT standard_cost_micros, account_stats_cost_micros,
              account_rate_multiplier_ppm, account_cost_micros,
-             account_stats_rollup_version
+             account_stats_rollup_version, customer_pricing_snapshot_json
         FROM usage_projection WHERE event_id = ?
     `).get('usage:request-1')).toEqual({
       standard_cost_micros: 50,
@@ -61,6 +66,7 @@ describe('account-cost D1 projection', () => {
       account_rate_multiplier_ppm: 1_250_000,
       account_cost_micros: 40,
       account_stats_rollup_version: 1,
+      customer_pricing_snapshot_json: '{"version":1,"source":"channel","pricing_id":"channel-price-1"}',
     })
     expect(raw.prepare(`
       SELECT account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint,

@@ -27,6 +27,7 @@ describe('gateway account-cost snapshots', () => {
 
   it('continues after a scoped rule model miss and prefers exact over wildcard pricing', async () => {
     raw.exec(`
+      UPDATE channels SET apply_pricing_to_account_stats = 1 WHERE id = 'channel-1';
       INSERT INTO channel_account_stats_pricing_rules (id,channel_id,name,sort_order,created_at_ms,updated_at_ms)
       VALUES
         ('rule-miss','channel-1','miss',0,1,1),
@@ -55,10 +56,12 @@ describe('gateway account-cost snapshots', () => {
       upstreamModel: 'gpt-upstream',
       usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 2, estimated: false },
       standardCostMicros: 40,
+      channelPricingBasisMicros: 99,
       requestCount: 1,
     })
 
-    // Exact custom price: (8 regular input * 2) + (5 output * 4) + (2 cache * 0) = 36µUSD.
+    // Exact custom price beats the 99µUSD channel basis:
+    // (8 regular input * 2) + (5 output * 4) + (2 cache * 0) = 36µUSD.
     expect(result).toEqual({
       standard_cost_micros: 40,
       account_stats_cost_micros: 36,
@@ -146,15 +149,33 @@ describe('gateway account-cost snapshots', () => {
     })
   })
 
-  it('does not treat canonical pricing as a channel account-statistics override', async () => {
+  it('uses the channel pricing basis when the active channel enables account statistics pricing', async () => {
     raw.exec(`UPDATE channels SET apply_pricing_to_account_stats = 1 WHERE id = 'channel-1'`)
     const result = await resolveAccountCostSnapshot({ DB: d1 }, {
       accountId: 'account-1', groupId: 'group-1', platform: 'openai', upstreamModel: 'gpt-upstream',
       usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0, estimated: false },
-      standardCostMicros: 80, requestCount: 1,
+      standardCostMicros: 80, channelPricingBasisMicros: 64, requestCount: 1,
     })
-    expect(result.account_stats_cost_micros).toBeNull()
-    expect(result.account_cost_micros).toBe(100)
+    expect(result.account_stats_cost_micros).toBe(64)
+    expect(result.account_cost_micros).toBe(80)
+  })
+
+  it('ignores a channel pricing basis when the toggle is disabled or the basis is invalid', async () => {
+    const disabled = await resolveAccountCostSnapshot({ DB: d1 }, {
+      accountId: 'account-1', groupId: 'group-1', platform: 'openai', upstreamModel: 'gpt-upstream',
+      usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0, estimated: false },
+      standardCostMicros: 80, channelPricingBasisMicros: 64, requestCount: 1,
+    })
+    raw.exec(`UPDATE channels SET apply_pricing_to_account_stats = 1 WHERE id = 'channel-1'`)
+    const invalid = await resolveAccountCostSnapshot({ DB: d1 }, {
+      accountId: 'account-1', groupId: 'group-1', platform: 'openai', upstreamModel: 'gpt-upstream',
+      usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0, estimated: false },
+      standardCostMicros: 80, channelPricingBasisMicros: Number.MAX_SAFE_INTEGER + 1, requestCount: 1,
+    })
+    expect(disabled.account_stats_cost_micros).toBeNull()
+    expect(disabled.account_cost_micros).toBe(100)
+    expect(invalid.account_stats_cost_micros).toBeNull()
+    expect(invalid.account_cost_micros).toBe(100)
   })
 
   it('uses the routed upstream catalog snapshot as the default basis and preserves service tier pricing', async () => {
@@ -235,7 +256,7 @@ describe('gateway account-cost snapshots', () => {
     const result = await resolveAccountCostSnapshot({ DB: d1 }, {
       accountId: 'account-1', groupId: 'group-1', platform: 'openai', upstreamModel: 'gpt-upstream',
       usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0, estimated: false },
-      standardCostMicros: 80, requestCount: 1,
+      standardCostMicros: 80, channelPricingBasisMicros: 64, requestCount: 1,
     })
     expect(result).toEqual({
       standard_cost_micros: 80,

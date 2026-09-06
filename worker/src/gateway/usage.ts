@@ -5,6 +5,10 @@ import {
   type ResponsesFailureDetails,
 } from './protocols/chat-from-responses'
 import type { CostBreakdown, GatewayEndpoint, ModelRoute, TokenUsage } from './types'
+import {
+  quoteCustomerReservation,
+  type FrozenPricingPlan,
+} from './customer-pricing'
 
 const MAX_SSE_EVENT_CHARS = 256 * 1024
 const encoder = new TextEncoder()
@@ -14,6 +18,8 @@ export function reservationForRequest(
   body: Record<string, unknown>,
   bodyBytes: number,
   endpoint: GatewayEndpoint = 'responses',
+  customerPricing?: FrozenPricingPlan,
+  pricingAtMs = Date.now(),
 ): number {
   const requestedMaximum = endpoint === 'embeddings'
     ? null
@@ -29,6 +35,14 @@ export function reservationForRequest(
     )
   }
   const conservativeInputTokens = bodyBytes + 1_024
+  if (customerPricing !== undefined) {
+    return quoteCustomerReservation(customerPricing, model, {
+      input_tokens: conservativeInputTokens,
+      max_output_tokens: outputTokens,
+      pricing_at_ms: pricingAtMs,
+      service_tier: typeof body.service_tier === 'string' ? body.service_tier : undefined,
+    }).reservation_micros
+  }
   const projected = calculateCost(model, {
     input_tokens: conservativeInputTokens,
     output_tokens: outputTokens,

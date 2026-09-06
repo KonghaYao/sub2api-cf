@@ -79,6 +79,8 @@ export interface UsageSettledPayload {
   account_rate_multiplier_ppm?: number
   /** Immutable provider-account cost after the account multiplier. */
   account_cost_micros?: number
+  /** Immutable customer/channel pricing decision; absent only on older queued events. */
+  customer_pricing_snapshot_json?: string | null
   outcome: 'completed' | 'failed' | 'cancelled'
   stream: boolean
   platform: string

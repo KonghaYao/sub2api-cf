@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import type { AdminGroup } from '@/types'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import GroupsView from '../GroupsView.vue'
 
 const {
@@ -157,6 +158,9 @@ const DataTableStub = {
       <div v-if="data.length" data-test="usage-cell">
         <slot name="cell-usage" :row="data[0]" />
       </div>
+      <div v-for="row in data" :key="row.id" data-test="actions-cell">
+        <slot name="cell-actions" :row="row" />
+      </div>
     </div>
   `,
 }
@@ -229,6 +233,7 @@ const clickColumnToggle = async (wrapper: ReturnType<typeof mount>, label: strin
 
 describe('admin GroupsView column settings', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     localStorage.clear()
 
     listGroups.mockReset()
@@ -236,6 +241,7 @@ describe('admin GroupsView column settings', () => {
     getModelsListCandidates.mockReset()
     getUsageSummary.mockReset()
     getCapacitySummary.mockReset()
+    getLiveCapability.mockReset()
     listAccounts.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
@@ -259,6 +265,7 @@ describe('admin GroupsView column settings', () => {
   })
 
   afterEach(() => {
+    setCloudflareWorkerContractActive(true)
     localStorage.clear()
   })
 
@@ -405,5 +412,21 @@ describe('admin GroupsView column settings', () => {
     expect(text).toContain('Total$9.75')
     expect(text.indexOf('Today')).toBeLessThan(text.indexOf('Yesterday'))
     expect(text.indexOf('Yesterday')).toBeLessThan(text.indexOf('Total'))
+  })
+
+  it('does not render or request legacy group summaries and actions in Worker mode', async () => {
+    setCloudflareWorkerContractActive(true)
+
+    const wrapper = await mountView()
+
+    expect(columnKeys(wrapper)).not.toContain('usage')
+    expect(columnKeys(wrapper)).not.toContain('capacity')
+    expect(getUsageSummary).not.toHaveBeenCalled()
+    expect(getCapacitySummary).not.toHaveBeenCalled()
+    expect(getLiveCapability).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="group-sort-order"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="group-duplicate"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="group-rate-multipliers"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="group-rpm-overrides"]').exists()).toBe(true)
   })
 })

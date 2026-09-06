@@ -103,6 +103,7 @@ describe('usage queue projection', () => {
     expect(item.ack).toHaveBeenCalledOnce()
     expect(item.retry).not.toHaveBeenCalled()
     expect(database.batches).toHaveLength(1)
+    expect(database.batches[0]).toHaveLength(4)
     expect(database.batches[0][0].query).toContain('INSERT INTO usage_projection')
     expect(database.batches[0][0].query).toContain('base_amount_micros')
     expect(database.batches[0][0].query).toContain('standard_cost_micros')
@@ -142,6 +143,64 @@ describe('usage queue projection', () => {
     ])
   })
 
+  it('projects a customer pricing snapshot and defaults legacy events to null', async () => {
+    const snapshot = JSON.stringify({ version: 1, source: 'channel', pricing_id: 'pricing-1' })
+    const currentDatabase = new QueueDatabase()
+    const current = message(createUsageEvent({
+      ...payload,
+      customer_pricing_snapshot_json: snapshot,
+    }, 1_000))
+
+    await consumeEvents(
+      { queue: 'events', messages: [current] } as unknown as MessageBatch<unknown>,
+      env(currentDatabase),
+    )
+
+    const currentProjection = currentDatabase.batches[0][0]
+    expect(currentProjection.query).toContain('customer_pricing_snapshot_json')
+    expect(currentProjection.values).toContain(snapshot)
+
+    const legacyDatabase = new QueueDatabase()
+    const legacy = message(createUsageEvent({ ...payload }, 1_000))
+
+    await consumeEvents(
+      { queue: 'events', messages: [legacy] } as unknown as MessageBatch<unknown>,
+      env(legacyDatabase),
+    )
+
+    const snapshotIndex = currentProjection.values.indexOf(snapshot)
+    expect(snapshotIndex).toBeGreaterThan(-1)
+    expect(legacyDatabase.batches[0][0].values[snapshotIndex]).toBeNull()
+  })
+
+  it('rejects malformed, non-object, and oversized customer pricing snapshots', async () => {
+    const invalidSnapshots: unknown[] = [
+      42,
+      '{',
+      '[]',
+      'null',
+      JSON.stringify({ value: '😀'.repeat(16_383) }),
+    ]
+    const items = invalidSnapshots.map((customerPricingSnapshot) => {
+      const event = createUsageEvent({ ...payload }, 1_000)
+      Reflect.set(event.payload, 'customer_pricing_snapshot_json', customerPricingSnapshot)
+      return message(event)
+    })
+    const database = new QueueDatabase()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await consumeEvents(
+      { queue: 'events', messages: items } as unknown as MessageBatch<unknown>,
+      env(database),
+    )
+
+    for (const item of items) {
+      expect(item.ack).not.toHaveBeenCalled()
+      expect(item.retry).toHaveBeenCalledOnce()
+    }
+    expect(database.batches).toHaveLength(0)
+  })
+
   it('normalizes a v0.5 usage event while accepting its pre-v0.20 inbox digest', async () => {
     const legacyEvent = createUsageEvent({ ...payload }, 1_000)
     delete (legacyEvent.payload as Partial<UsageSettledPayload>).billing_type
@@ -167,10 +226,10 @@ describe('usage queue projection', () => {
     expect(database.batches[0][0].values.slice(-16, -6)).toEqual([
       'balance', null, '', 'group-1', 1, '', '', 'token', 0, 1,
     ])
-    const normalizedDigest = database.batches[0][1].values[3]
-    expect(typeof normalizedDigest).toBe('string')
+    const wireDigest = database.batches[0][1].values[3]
+    expect(wireDigest).toBe(await sha256Hex(JSON.stringify(legacyEvent)))
 
-    const replayDatabase = new QueueDatabase({ result_digest: normalizedDigest as string })
+    const replayDatabase = new QueueDatabase({ result_digest: wireDigest as string })
     const replay = message(legacyEvent)
     await consumeEvents(
       { queue: 'events', messages: [replay] } as unknown as MessageBatch<unknown>,

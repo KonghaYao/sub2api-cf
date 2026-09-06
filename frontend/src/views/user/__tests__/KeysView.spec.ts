@@ -545,8 +545,8 @@ describe('user KeysView column settings', () => {
       'budgeted',
       groupID,
       undefined,
-      [],
-      [],
+      undefined,
+      undefined,
       0.000001,
       undefined,
       { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
@@ -571,8 +571,8 @@ describe('user KeysView column settings', () => {
       'unlimited',
       groupID,
       undefined,
-      [],
-      [],
+      undefined,
+      undefined,
       0,
       undefined,
       { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }

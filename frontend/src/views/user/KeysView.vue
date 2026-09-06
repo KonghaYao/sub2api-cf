@@ -1696,7 +1696,7 @@ const handleSubmit = async () => {
   }
 
   // Validate custom key if enabled
-  if (!showEditModal.value && formData.value.use_custom_key) {
+  if (legacyKeyControlsAvailable && !showEditModal.value && formData.value.use_custom_key) {
     if (!formData.value.custom_key) {
       appStore.showError(t('keys.customKeyRequired'))
       return
@@ -1709,12 +1709,12 @@ const handleSubmit = async () => {
 
   const parseIPList = (text: string): string[] =>
     text.split('\n').map((ip) => ip.trim()).filter((ip) => ip.length > 0)
-  const ipWhitelist = formData.value.enable_ip_restriction
+  const ipWhitelist = legacyKeyControlsAvailable && formData.value.enable_ip_restriction
     ? parseIPList(formData.value.ip_whitelist)
-    : []
-  const ipBlacklist = formData.value.enable_ip_restriction
+    : legacyKeyControlsAvailable ? [] : undefined
+  const ipBlacklist = legacyKeyControlsAvailable && formData.value.enable_ip_restriction
     ? parseIPList(formData.value.ip_blacklist)
-    : []
+    : legacyKeyControlsAvailable ? [] : undefined
   // The Worker persists integer micros. The adapter performs the exact conversion
   // and rejects values that cannot be represented without rounding.
   const amountOrUnlimited = (value: number | null): number =>
@@ -1778,7 +1778,9 @@ const handleSubmit = async () => {
       const created = await keysAPI.create(
         formData.value.name,
         String(formData.value.group_id),
-        formData.value.use_custom_key ? formData.value.custom_key : undefined,
+        legacyKeyControlsAvailable && formData.value.use_custom_key
+          ? formData.value.custom_key
+          : undefined,
         ipWhitelist,
         ipBlacklist,
         quota,

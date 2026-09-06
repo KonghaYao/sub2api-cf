@@ -42,6 +42,7 @@ import { consumeImageTaskExecute, isImageTaskExecuteEvent } from '../media/image
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
 const SUBSCRIPTION_STATE_CONSUMER = 'subscription-state-projection-v1'
+const MAX_CUSTOMER_PRICING_SNAPSHOT_BYTES = 65_536
 
 export function createUsageEvent(
   payload: UsageSettledPayload,
@@ -172,6 +173,7 @@ export async function consumeEvents(
              input_tokens, output_tokens, amount_micros,
              standard_cost_micros, account_stats_cost_micros,
              account_rate_multiplier_ppm, account_cost_micros,
+             customer_pricing_snapshot_json,
              occurred_at_ms, projected_at_ms,
              group_id, price_id, requested_model, upstream_model, cache_read_tokens,
              input_amount_micros, output_amount_micros, cache_amount_micros,
@@ -181,7 +183,7 @@ export async function consumeEvents(
              dimensions_version, image_count, image_size, image_input_size,
              image_output_size, image_size_source, image_size_breakdown,
              account_stats_rollup_version
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         ).bind(
@@ -198,6 +200,7 @@ export async function consumeEvents(
           payload.account_stats_cost_micros,
           payload.account_rate_multiplier_ppm,
           payload.account_cost_micros,
+          payload.customer_pricing_snapshot_json,
           event.occurred_at_ms,
           Date.now(),
           payload.group_id,
@@ -519,6 +522,9 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     image_output_size: payload.image_output_size ?? null,
     image_size_source: payload.image_size_source ?? null,
     image_size_breakdown: normalizeImageBreakdown(payload.image_size_breakdown ?? null),
+    customer_pricing_snapshot_json: normalizeCustomerPricingSnapshot(
+      payload.customer_pricing_snapshot_json ?? null,
+    ),
   }
   event = { ...event, payload }
   if (event.aggregate_id !== payload.user_id) throw new Error('Usage aggregate does not match user')
@@ -621,6 +627,26 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     throw new Error('Usage account cost does not match its snapshot')
   }
   return event as PlatformEvent<UsageSettledPayload>
+}
+
+function normalizeCustomerPricingSnapshot(value: unknown): string | null {
+  if (value === null) return null
+  if (
+    typeof value !== 'string' ||
+    new TextEncoder().encode(value).byteLength > MAX_CUSTOMER_PRICING_SNAPSHOT_BYTES
+  ) {
+    throw new Error('Invalid usage customer pricing snapshot')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('Invalid usage customer pricing snapshot')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Invalid usage customer pricing snapshot')
+  }
+  return value
 }
 
 function normalizeImageBreakdown(

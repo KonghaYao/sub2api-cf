@@ -13,6 +13,11 @@ import { apiKeyDigest, decryptCredential } from './crypto'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from './errors'
 import { createUsageEvent } from './queue'
 import {
+  quoteCustomerCost,
+  serializeCustomerPricingSnapshot,
+  type FrozenPricingPlan,
+} from './customer-pricing'
+import {
   formatAnthropicSseEvent,
   mapOpenAIErrorToAnthropic,
   parseAnthropicCountTokensRequest,
@@ -1114,6 +1119,18 @@ async function dispatchGateway(
           : undefined,
     )
     principal.platform_quota = route.platform_quota
+    if (
+      route.customer_pricing !== undefined &&
+      route.customer_pricing.billing_model !== 'token' &&
+      route.customer_pricing.billing_model !== 'per_request'
+    ) {
+      throw new GatewayError(
+        409,
+        'unsupported_channel_billing_mode',
+        `Channel billing mode '${route.customer_pricing.billing_model}' is not supported for this endpoint`,
+        'invalid_request_error',
+      )
+    }
     const model = route.model
     const upstreamEndpoint = route.upstream_endpoint as TextGatewayEndpoint
     const provider = providerForCandidates(route.candidates)
@@ -1146,6 +1163,8 @@ async function dispatchGateway(
       upstreamBody,
       parsed.bytes.byteLength,
       endpoint,
+      route.customer_pricing,
+      startedAt,
     )
     // A zero effective multiplier is an explicitly free subscription tier. Its
     // worst-case billed cost is zero, so it must not require a positive quota hold.
@@ -1227,6 +1246,7 @@ async function dispatchGateway(
         requestId,
         principal,
         model,
+        customerPricing: route.customer_pricing,
         requestedModel,
         inputBytes: parsed.bytes.byteLength,
         clientSignal: context.req.raw.signal,
@@ -1264,6 +1284,7 @@ async function dispatchGateway(
         requestId,
         principal,
         model,
+        customerPricing: route.customer_pricing,
         requestedModel,
         inputBytes: parsed.bytes.byteLength,
         stream,
@@ -1295,6 +1316,7 @@ async function dispatchGateway(
       requestId,
       principal,
       model,
+      customerPricing: route.customer_pricing,
       requestedModel,
       inputBytes: parsed.bytes.byteLength,
       clientSignal: context.req.raw.signal,
@@ -1588,6 +1610,7 @@ interface FinalizeInput {
   requestId: string
   principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>
   model: ModelRoute
+  customerPricing?: FrozenPricingPlan
   requestedModel: string
   inputBytes: number
   stream: boolean
@@ -2789,6 +2812,12 @@ async function settleAndProject(
   outcome: UsageSettledPayload['outcome'],
   zeroCost = false,
 ): Promise<void> {
+  const customerQuote = input.customerPricing === undefined
+    ? null
+    : quoteCustomerCost(input.customerPricing, input.model, usage, {
+        pricing_at_ms: input.startedAt,
+        service_tier: input.serviceTier,
+      })
   const cost = zeroCost
     ? {
       input_amount_micros: 0,
@@ -2797,7 +2826,7 @@ async function settleAndProject(
       base_amount_micros: 0,
       amount_micros: 0,
     }
-    : calculateCost(input.model, usage, input.serviceTier)
+    : customerQuote?.cost ?? calculateCost(input.model, usage, input.serviceTier)
   const standardCost = zeroCost
     ? 0
     : calculateCost(
@@ -2812,6 +2841,9 @@ async function settleAndProject(
     upstreamModel: input.model.upstream_name,
     usage,
     standardCostMicros: standardCost,
+    ...(!zeroCost && customerQuote !== null ? {
+      channelPricingBasisMicros: customerQuote.basis_amount_micros,
+    } : {}),
     ...(!zeroCost && hasAccountCostBasePrice(input.model) ? {
       accountCostBasePrice: {
         input_micros_per_million: input.model.account_cost_base_input_micros_per_million,
@@ -2850,7 +2882,10 @@ async function settleAndProject(
     request_type: zeroCost ? 4 : input.stream ? 2 : 1,
     inbound_endpoint: input.inboundEndpointPath,
     upstream_endpoint: input.upstreamEndpointPath,
-    billing_mode: 'token',
+    billing_mode: input.customerPricing?.billing_model ?? 'token',
+    customer_pricing_snapshot_json: customerQuote === null
+      ? null
+      : serializeCustomerPricingSnapshot(customerQuote.snapshot),
     native_compaction_v2: input.nativeCompactionV2,
     duration_ms: Math.max(0, Date.now() - input.startedAt),
     estimated: usage.estimated,

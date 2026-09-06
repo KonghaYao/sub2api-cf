@@ -1021,17 +1021,9 @@ function parseBillingSource(value: unknown): BillingModelSource {
 }
 
 function parseApplyPricingToAccountStats(value: unknown): boolean {
-  const enabled = value === undefined
+  return value === undefined
     ? false
     : requiredBoolean(value, 'apply_pricing_to_account_stats')
-  if (enabled) {
-    throw new GatewayError(
-      409,
-      'apply_pricing_to_account_stats_not_supported',
-      'Channel model pricing cannot be applied to account statistics by the Worker runtime yet',
-    )
-  }
-  return false
 }
 
 function parseStringList(value: unknown, field: string, maximumItems: number, maximumLength: number, minimumItems = 0): string[] {
@@ -1121,7 +1113,9 @@ function wildcard(pattern: string, field: string): boolean {
 }
 
 function clock(value: unknown, field: string): string {
-  if (typeof value !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) throw invalid(field, `${field} must use HH:mm`)
+  if (typeof value !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value)) {
+    throw invalid(field, `${field} must use HH:mm or HH:mm:ss`)
+  }
   return value
 }
 

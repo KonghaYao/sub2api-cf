@@ -65,4 +65,10 @@ describe('AppSidebar Worker capabilities', () => {
     expect(componentSource).toContain("path: '/admin/invitation-codes'")
     expect(componentSource).toContain("t('nav.invitationCodes')")
   })
+
+  it('keeps the Worker request/error explorer visible independently of legacy ops monitoring', () => {
+    expect(componentSource).toContain(
+      'featureFlag: adminSettingsStore.cloudflareWorkerContract ? undefined : flagOpsMonitoring'
+    )
+  })
 })

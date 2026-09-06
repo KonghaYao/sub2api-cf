@@ -10,6 +10,9 @@ import {
 describe('Cloudflare admin capabilities', () => {
   it.each([
     '/admin/settings',
+    '/admin/ops',
+    '/admin/announcements',
+    '/admin/usage',
     '/admin/users/42',
     '/admin/groups',
     '/admin/channels/pricing',
@@ -27,12 +30,11 @@ describe('Cloudflare admin capabilities', () => {
 
   it.each([
     '/admin/dashboard',
-    '/admin/ops',
     '/admin/channels/monitor',
     '/admin/proxies',
     '/admin/plugins',
-    '/admin/announcements',
-    '/admin/usage',
+    '/admin/risk-control',
+    '/admin/prompt-audit',
     '/admin/new-host-feature',
   ])('denies unsupported or unknown route %s', (path) => {
     expect(isCloudflareAdminPathSupported(path)).toBe(false)
@@ -45,7 +47,7 @@ describe('Cloudflare admin capabilities', () => {
         path: '/admin/orders-menu',
         children: [
           { path: '/admin/orders' },
-          { path: '/admin/usage' },
+          { path: '/admin/proxies' },
         ],
       },
     ]

@@ -93,7 +93,9 @@
               </div>
             </div>
             <button
+              v-if="!cloudflareWorker"
               @click="openSortModal"
+              data-testid="group-sort-order"
               class="btn btn-secondary"
               :title="t('admin.groups.sortOrder')"
             >
@@ -179,7 +181,7 @@
               </span>
               <!-- Subscription Limits - compact single line -->
               <div
-                v-if="row.subscription_type === 'subscription'"
+                v-if="!cloudflareWorker && row.subscription_type === 'subscription'"
                 class="space-y-0.5 text-xs text-gray-500 dark:text-gray-400"
               >
                 <div
@@ -383,6 +385,7 @@
                 <span class="text-xs">{{ t("common.edit") }}</span>
               </button>
               <button
+                v-if="!cloudflareWorker"
                 data-testid="group-duplicate"
                 :title="
                   duplicatingGroupIds.has(row.id)
@@ -403,7 +406,8 @@
                 </span>
               </button>
               <button
-                v-if="row.platform === 'composite'"
+                v-if="!cloudflareWorker && row.platform === 'composite'"
+                data-testid="group-composite-routes"
                 @click="handleCompositeRoutes(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-cyan-600 dark:hover:bg-dark-700 dark:hover:text-cyan-400"
               >
@@ -413,6 +417,8 @@
                 }}</span>
               </button>
               <button
+                v-if="!cloudflareWorker"
+                data-testid="group-rate-multipliers"
                 @click="handleRateMultipliers(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-purple-600 dark:hover:bg-dark-700 dark:hover:text-purple-400"
               >
@@ -422,6 +428,7 @@
                 }}</span>
               </button>
               <button
+                data-testid="group-rpm-overrides"
                 @click="handleRPMOverrides(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-orange-600 dark:hover:bg-dark-700 dark:hover:text-orange-400"
               >
@@ -1652,7 +1659,7 @@
 
         <!-- Codex Live 开关（OpenAI 与 Composite 平台） -->
         <div
-          v-if="supportsLivePlatform(createForm.platform)"
+          v-if="!cloudflareWorker && supportsLivePlatform(createForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
           <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
@@ -3449,7 +3456,7 @@
 
         <!-- Codex Live 开关（OpenAI 与 Composite 平台） -->
         <div
-          v-if="supportsLivePlatform(editForm.platform)"
+          v-if="!cloudflareWorker && supportsLivePlatform(editForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
           <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
@@ -4070,6 +4077,7 @@
     />
 
     <ConfirmDialog
+      v-if="!cloudflareWorker"
       :show="showUnsupportedLiveConfirm"
       :title="t('admin.groups.openaiLive.unsupportedTitle')"
       :message="t('admin.groups.openaiLive.unsupportedMessage')"
@@ -4082,6 +4090,7 @@
 
     <!-- Sort Order Modal -->
     <BaseDialog
+      v-if="!cloudflareWorker"
       :show="showSortModal"
       :title="t('admin.groups.sortOrder')"
       width="normal"
@@ -4180,6 +4189,7 @@
 
     <!-- Composite Routes Modal -->
     <BaseDialog
+      v-if="!cloudflareWorker"
       :show="showCompositeRoutesModal"
       :title="
         compositeRoutesGroup
@@ -4539,6 +4549,7 @@
 
     <!-- Group Rate Multipliers Modal -->
     <GroupRateMultipliersModal
+      v-if="!cloudflareWorker"
       :show="showRateMultipliersModal"
       :group="rateMultipliersGroup"
       @close="showRateMultipliersModal = false"
@@ -4604,6 +4615,7 @@ import type { ChannelModelPricing } from "@/api/admin/channels";
 import { VueDraggable } from "vue-draggable-plus";
 import { createStableObjectKeyResolver } from "@/utils/stableObjectKey";
 import { extractApiErrorMessage } from "@/utils/apiError";
+import { isCloudflareWorkerContractActive } from "@/utils/adminCapabilities";
 import { useKeyedDebouncedSearch } from "@/composables/useKeyedDebouncedSearch";
 import { getPersistedPageSize } from "@/composables/usePersistedPageSize";
 import {
@@ -4728,6 +4740,7 @@ const groupPricingToAPI = (
 const { t } = useI18n();
 const appStore = useAppStore();
 const onboardingStore = useOnboardingStore();
+const cloudflareWorker = isCloudflareWorkerContractActive();
 
 const ALWAYS_VISIBLE_COLUMNS = new Set(["name", "actions"]);
 // Default hidden columns (hidden on first load / after schema bumps).
@@ -4776,7 +4789,7 @@ const allColumns = computed<Column[]>(() => [
   { key: "usage", label: t("admin.groups.columns.usage"), sortable: false },
   { key: "status", label: t("admin.groups.columns.status"), sortable: true },
   { key: "actions", label: t("admin.groups.columns.actions"), sortable: false },
-]);
+].filter((column) => !cloudflareWorker || !["capacity", "usage"].includes(column.key)));
 
 const toggleableColumns = computed(() =>
   allColumns.value.filter((col) => !ALWAYS_VISIBLE_COLUMNS.has(col.key)),
@@ -4856,9 +4869,11 @@ const saveColumnsToStorage = () => {
 
 const isColumnVisible = (key: string) => !hiddenColumns.has(key);
 const hasVisibleUsageSummaryConsumer = computed(
-  () => isColumnVisible("usage") || isColumnVisible("billing_type"),
+  () => !cloudflareWorker && (isColumnVisible("usage") || isColumnVisible("billing_type")),
 );
-const hasVisibleCapacityColumn = computed(() => isColumnVisible("capacity"));
+const hasVisibleCapacityColumn = computed(
+  () => !cloudflareWorker && isColumnVisible("capacity"),
+);
 
 const toggleColumn = (key: string) => {
   const validKeys = getValidHiddenColumnKeys();
@@ -7024,7 +7039,7 @@ const saveSortOrder = async () => {
 
 onMounted(() => {
   loadGroups();
-  void loadLiveCapability();
+  if (!cloudflareWorker) void loadLiveCapability();
   loadModelsListCandidates("create", 0, createForm.platform);
   document.addEventListener("click", handleClickOutside);
 });

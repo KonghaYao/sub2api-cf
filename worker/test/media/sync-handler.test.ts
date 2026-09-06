@@ -148,6 +148,42 @@ describe('synchronous image handler', () => {
     expect(test.stateCalls).toContain('/release')
   })
 
+  it('fails closed when a channel-specific image price would otherwise be ignored', async () => {
+    const test = await fixture()
+    test.raw.exec(`
+      INSERT INTO channels (
+        id, name, status, billing_model_source, restrict_models,
+        features_config_json, apply_pricing_to_account_stats,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES (
+        'channel-1', 'Image channel', 'active', 'channel_mapped', 0,
+        '{}', 0, 1, 1, 1
+      );
+      INSERT INTO channel_groups (channel_id, group_id, created_at_ms)
+      VALUES ('channel-1', 'group-1', 1);
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES ('channel-image-price', 'channel-1', 'openai', 'image', 100000, 1, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-image-price', 'gpt-image-2', 0, 0, 1);
+    `)
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'do not silently misprice this' }),
+    }, test.env as never)
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_channel_image_pricing' },
+    })
+    expect(test.reserve).not.toHaveBeenCalled()
+    expect(test.upstreamFetch).not.toHaveBeenCalled()
+  })
+
   it('passes the resolved provider quota into a composite synchronous Images reservation', async () => {
     const test = await fixture()
     configureCompositeOpenAiQuota(test)

@@ -42,6 +42,21 @@ type WorkerGroupProjection = AdminGroup & {
 
 const groupControlVersions = new Map<string, number>()
 
+export class WorkerGroupFeatureNotSupportedError extends Error {
+  readonly code = 'worker_feature_not_supported'
+
+  constructor(feature: string) {
+    super(`${feature} is not supported by the Cloudflare Worker contract`)
+    this.name = 'WorkerGroupFeatureNotSupportedError'
+  }
+}
+
+function requireLegacyGroupFeature(feature: string): void {
+  if (isCloudflareWorkerContractActive()) {
+    throw new WorkerGroupFeatureNotSupportedError(feature)
+  }
+}
+
 function rememberGroup(group: AdminGroup): void {
   const projection = group as WorkerGroupProjection
   if (Number.isSafeInteger(projection.control_version) && projection.control_version >= 0) {
@@ -292,6 +307,7 @@ export async function getByPlatform(platform: GroupPlatform): Promise<AdminGroup
 
 /** 获取当前 Sub2API 服务端的 Live 运行环境能力。 */
 export async function getLiveCapability(): Promise<LiveCapability> {
+  requireLegacyGroupFeature('Live capability discovery')
   const { data } = await apiClient.get<LiveCapability>('/admin/groups/live-capability')
   return data
 }
@@ -397,6 +413,7 @@ function storeDuplicateOperationKey(storageKey: string, key: string | null): voi
 }
 
 export async function duplicate(id: number): Promise<AdminGroup> {
+  requireLegacyGroupFeature('Group duplication')
   const scope = duplicateOperationScope(id)
   let idempotencyKey = scope
     ? duplicateOperationKeys.get(scope.key) ?? getStoredDuplicateOperationKey(scope.key)
@@ -483,6 +500,7 @@ export async function getStats(id: number): Promise<{
   total_requests: number
   total_cost: number
 }> {
+  requireLegacyGroupFeature('Group statistics')
   const { data } = await apiClient.get<{
     total_api_keys: number
     active_api_keys: number
@@ -504,6 +522,7 @@ export async function getGroupApiKeys(
   page: number = 1,
   pageSize: number = 20
 ): Promise<PaginatedResponse<any>> {
+  requireLegacyGroupFeature('Group API key listing')
   const { data } = await apiClient.get<PaginatedResponse<any>>(`/admin/groups/${id}/api-keys`, {
     params: { page, page_size: pageSize }
   })
@@ -511,6 +530,7 @@ export async function getGroupApiKeys(
 }
 
 export async function listCompositeRoutes(id: number): Promise<CompositeModelRoute[]> {
+  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.get<CompositeModelRoute[]>(`/admin/groups/${id}/composite-routes`)
   return data
 }
@@ -519,6 +539,7 @@ export async function createCompositeRoute(
   id: number,
   route: CompositeModelRouteInput
 ): Promise<CompositeModelRoute> {
+  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.post<CompositeModelRoute>(
     `/admin/groups/${id}/composite-routes`,
     route
@@ -531,6 +552,7 @@ export async function updateCompositeRoute(
   routeId: number,
   route: CompositeModelRouteInput
 ): Promise<CompositeModelRoute> {
+  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.put<CompositeModelRoute>(
     `/admin/groups/${id}/composite-routes/${routeId}`,
     route
@@ -542,6 +564,7 @@ export async function deleteCompositeRoute(
   id: number,
   routeId: number
 ): Promise<{ message: string }> {
+  requireLegacyGroupFeature('Composite routes')
   const { data } = await apiClient.delete<{ message: string }>(
     `/admin/groups/${id}/composite-routes/${routeId}`
   )
@@ -552,6 +575,7 @@ export async function previewCompositeRoute(
   id: number,
   request: CompositeRoutePreviewRequest
 ): Promise<CompositeRouteDecision> {
+  requireLegacyGroupFeature('Composite route preview')
   const { data } = await apiClient.post<CompositeRouteDecision>(
     `/admin/groups/${id}/composite-routes/preview`,
     request
@@ -578,6 +602,7 @@ export interface GroupRateMultiplierEntry {
  * @returns List of user rate multiplier entries
  */
 export async function getGroupRateMultipliers(id: number): Promise<GroupRateMultiplierEntry[]> {
+  requireLegacyGroupFeature('Per-user group rate multipliers')
   const { data } = await apiClient.get<GroupRateMultiplierEntry[]>(
     `/admin/groups/${id}/rate-multipliers`
   )
@@ -592,6 +617,7 @@ export async function getGroupRateMultipliers(id: number): Promise<GroupRateMult
 export async function updateSortOrder(
   updates: Array<{ id: number; sort_order: number }>
 ): Promise<{ message: string }> {
+  requireLegacyGroupFeature('Group sort order updates')
   const { data } = await apiClient.put<{ message: string }>('/admin/groups/sort-order', {
     updates
   })
@@ -604,6 +630,7 @@ export async function updateSortOrder(
  * @returns Success confirmation
  */
 export async function clearGroupRateMultipliers(id: number): Promise<{ message: string }> {
+  requireLegacyGroupFeature('Per-user group rate multipliers')
   const { data } = await apiClient.delete<{ message: string }>(`/admin/groups/${id}/rate-multipliers`)
   return data
 }
@@ -616,6 +643,7 @@ export async function batchSetGroupRateMultipliers(
   id: number,
   entries: Array<{ user_id: number; rate_multiplier: number }>
 ): Promise<{ message: string }> {
+  requireLegacyGroupFeature('Per-user group rate multipliers')
   const { data } = await apiClient.put<{ message: string }>(
     `/admin/groups/${id}/rate-multipliers`,
     { entries }
@@ -705,6 +733,7 @@ export async function clearGroupRPMOverrides(id: number): Promise<{ message: str
 export async function getUsageSummary(): Promise<
   { group_id: number; today_cost: number; yesterday_cost: number; total_cost: number }[]
 > {
+  requireLegacyGroupFeature('Group usage summary')
   const { data } = await apiClient.get<
     { group_id: number; today_cost: number; yesterday_cost: number; total_cost: number }[]
   >('/admin/groups/usage-summary')
@@ -717,6 +746,7 @@ export async function getUsageSummary(): Promise<
 export async function getCapacitySummary(): Promise<
   { group_id: number; concurrency_used: number; concurrency_max: number; sessions_used: number; sessions_max: number; rpm_used: number; rpm_max: number }[]
 > {
+  requireLegacyGroupFeature('Group capacity summary')
   const { data } = await apiClient.get<
     { group_id: number; concurrency_used: number; concurrency_max: number; sessions_used: number; sessions_max: number; rpm_used: number; rpm_max: number }[]
   >('/admin/groups/capacity-summary')

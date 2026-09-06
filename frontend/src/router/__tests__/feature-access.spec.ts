@@ -222,11 +222,18 @@ describe('feature route guard', () => {
     expect(next).toHaveBeenCalledWith(target)
   })
 
-  it('redirects unsupported Worker admin routes to the supported admin home', async () => {
+  it.each([
+    '/admin/dashboard',
+    '/admin/channels/monitor',
+    '/admin/plugins',
+    '/admin/proxies',
+    '/admin/risk-control',
+    '/admin/prompt-audit',
+  ])('redirects unsupported Worker admin route %s to the supported admin home', async (path) => {
     authStore.isAdmin = true
     adminSettingsStore.cloudflareWorkerContract = true
 
-    const { navigation, next } = runGuard({ requiresAdmin: true }, '/admin/ops')
+    const { navigation, next } = runGuard({ requiresAdmin: true }, path)
     await navigation
 
     expect(adminSettingsStore.fetch).toHaveBeenCalledOnce()
@@ -236,6 +243,9 @@ describe('feature route guard', () => {
 
   it.each([
     '/admin/settings',
+    '/admin/ops',
+    '/admin/announcements',
+    '/admin/usage',
     '/admin/users',
     '/admin/groups',
     '/admin/accounts',

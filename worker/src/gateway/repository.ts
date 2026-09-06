@@ -1,6 +1,11 @@
 import type { Env } from '../env'
 import { groupAccessPredicate } from '../user/group-access'
 import { apiKeyDigest } from './crypto'
+import type {
+  FrozenPricingInterval,
+  FrozenPricingPlan,
+  FrozenTimePricing,
+} from './customer-pricing'
 import { GatewayError } from './errors'
 import { isProviderPlatform } from './platform'
 import type {
@@ -431,6 +436,7 @@ export async function resolveGatewayRoute(
   candidates: AccountCandidate[]
   upstream_endpoint: GatewayEndpoint
   platform_quota: GatewayPrincipal['platform_quota']
+  customer_pricing?: FrozenPricingPlan
 }> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const modelCapability = endpoint === 'embeddings'
@@ -485,6 +491,9 @@ export async function resolveGatewayRoute(
   }
   const channelPolicy = channelResult.results[0] as unknown as ChannelModelPolicyRow | undefined
   const routedModel = applyChannelModelPolicy(publicName, model, channelPolicy)
+  const customerPricing = channelPolicy === undefined
+    ? undefined
+    : frozenPricingPlan(channelPolicy, routedModel.platform)
 
   // Account eligibility and customer billing remain attached to the requested
   // catalog model. The channel policy may independently snapshot a uniquely
@@ -511,12 +520,231 @@ export async function resolveGatewayRoute(
     candidates,
     upstream_endpoint: upstreamEndpoint,
     platform_quota: quotaRow === undefined ? null : platformQuotaPolicy(quotaRow),
+    ...(customerPricing === undefined ? {} : { customer_pricing: customerPricing }),
   }
 }
 
-interface ExternalAliasModelRow extends ModelRoute {
+interface PricingProjectionRow {
+  channel_id: string
+  channel_control_version: number
+  billing_model: string
+  pricing_match_count: number
+  pricing_id: string | null
+  pricing_control_version: number | null
+  pricing_billing_mode: string | null
+  pricing_model_pattern: string | null
+  pricing_input_micros_per_million: number | null
+  pricing_output_micros_per_million: number | null
+  pricing_cache_read_micros_per_million: number | null
+  pricing_per_request_micros: number | null
+  pricing_fast_multiplier_ppm: number | null
+  pricing_flex_multiplier_ppm: number | null
+  pricing_time_pricing_json: string | null
+  pricing_intervals_json: string | null
+}
+
+interface ExternalAliasModelRow extends ModelRoute, PricingProjectionRow {
   billing_model_source: string
   match_count: number
+}
+
+function externalAliasRouteModel(row: ExternalAliasModelRow): ModelRoute {
+  const copy = { ...row } as unknown as Record<string, unknown>
+  for (const key of [
+    'billing_model_source', 'match_count', 'channel_id', 'channel_control_version',
+    'billing_model', 'pricing_match_count', 'pricing_id', 'pricing_control_version',
+    'pricing_billing_mode', 'pricing_model_pattern',
+    'pricing_input_micros_per_million', 'pricing_output_micros_per_million',
+    'pricing_cache_read_micros_per_million', 'pricing_per_request_micros',
+    'pricing_fast_multiplier_ppm', 'pricing_flex_multiplier_ppm',
+    'pricing_time_pricing_json', 'pricing_intervals_json',
+  ]) delete copy[key]
+  return copy as unknown as ModelRoute
+}
+
+function frozenPricingPlan(
+  row: PricingProjectionRow,
+  platform: ProviderPlatform,
+): FrozenPricingPlan | undefined {
+  if (!Number.isSafeInteger(row.pricing_match_count) || row.pricing_match_count < 0) {
+    return invalidChannelPricing('Channel pricing match count is invalid')
+  }
+  if (row.pricing_match_count > 1) {
+    throw new GatewayError(
+      409,
+      'ambiguous_channel_pricing',
+      `Channel pricing for model '${row.billing_model}' is ambiguous`,
+      'invalid_request_error',
+    )
+  }
+  if (row.pricing_match_count === 0) return undefined
+  if (!['token', 'per_request', 'image', 'video'].includes(row.pricing_billing_mode ?? '')) {
+    return invalidChannelPricing('Channel billing mode is invalid')
+  }
+  if (
+    !nonemptyPricingText(row.channel_id) ||
+    !nonemptyPricingText(row.pricing_id) ||
+    !nonemptyPricingText(row.pricing_model_pattern) ||
+    !nonemptyPricingText(row.billing_model) ||
+    !Number.isSafeInteger(row.channel_control_version) || row.channel_control_version < 0 ||
+    !Number.isSafeInteger(row.pricing_control_version) || (row.pricing_control_version as number) < 0
+  ) {
+    return invalidChannelPricing('Channel pricing identity is invalid')
+  }
+  const nullablePrices = [
+    row.pricing_input_micros_per_million,
+    row.pricing_output_micros_per_million,
+    row.pricing_cache_read_micros_per_million,
+    row.pricing_per_request_micros,
+    row.pricing_fast_multiplier_ppm,
+    row.pricing_flex_multiplier_ppm,
+  ]
+  if (nullablePrices.some((value) => value !== null && (!Number.isSafeInteger(value) || value < 0))) {
+    return invalidChannelPricing('Channel pricing value is invalid')
+  }
+
+  return {
+    version: 1,
+    channel_id: row.channel_id,
+    channel_control_version: row.channel_control_version,
+    pricing_id: row.pricing_id!,
+    matched_model_pattern: row.pricing_model_pattern!,
+    platform,
+    billing_model: row.pricing_billing_mode as FrozenPricingPlan['billing_model'],
+    input_micros_per_million: row.pricing_input_micros_per_million,
+    output_micros_per_million: row.pricing_output_micros_per_million,
+    cache_read_micros_per_million: row.pricing_cache_read_micros_per_million,
+    per_request_micros: row.pricing_per_request_micros,
+    fast_multiplier_ppm: row.pricing_fast_multiplier_ppm,
+    flex_multiplier_ppm: row.pricing_flex_multiplier_ppm,
+    intervals: parseFrozenPricingIntervals(row.pricing_intervals_json),
+    time_pricing: parseFrozenTimePricing(row.pricing_time_pricing_json),
+  }
+}
+
+function parseFrozenPricingIntervals(value: string | null): FrozenPricingInterval[] {
+  if (value === null || value.length > 131_072) {
+    return invalidChannelPricing('Channel pricing intervals are invalid')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return invalidChannelPricing('Channel pricing intervals are invalid')
+  }
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    return invalidChannelPricing('Channel pricing intervals are invalid')
+  }
+  return parsed.map((value) => parseFrozenPricingInterval(value))
+}
+
+function parseFrozenPricingInterval(value: unknown): FrozenPricingInterval {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return invalidChannelPricing('Channel pricing interval is invalid')
+  }
+  const row = value as Record<string, unknown>
+  if (
+    !nonemptyPricingText(row.id) ||
+    typeof row.tier_label !== 'string' ||
+    !safePricingInteger(row.min_tokens) ||
+    !(row.max_tokens === null || safePricingInteger(row.max_tokens)) ||
+    (typeof row.max_tokens === 'number' && row.max_tokens <= (row.min_tokens as number))
+  ) {
+    return invalidChannelPricing('Channel pricing interval is invalid')
+  }
+  const nullableKeys = [
+    'input_micros_per_million', 'output_micros_per_million',
+    'cache_read_micros_per_million', 'input_multiplier_ppm',
+    'output_multiplier_ppm', 'cache_read_multiplier_ppm', 'per_request_micros',
+  ] as const
+  if (nullableKeys.some((key) => row[key] !== null && !safePricingInteger(row[key]))) {
+    return invalidChannelPricing('Channel pricing interval is invalid')
+  }
+  return {
+    id: row.id as string,
+    min_tokens: row.min_tokens as number,
+    max_tokens: row.max_tokens as number | null,
+    tier_label: row.tier_label,
+    input_micros_per_million: row.input_micros_per_million as number | null,
+    output_micros_per_million: row.output_micros_per_million as number | null,
+    cache_read_micros_per_million: row.cache_read_micros_per_million as number | null,
+    input_multiplier_ppm: row.input_multiplier_ppm as number | null,
+    output_multiplier_ppm: row.output_multiplier_ppm as number | null,
+    cache_read_multiplier_ppm: row.cache_read_multiplier_ppm as number | null,
+    per_request_micros: row.per_request_micros as number | null,
+  }
+}
+
+function parseFrozenTimePricing(value: string | null): FrozenTimePricing | null {
+  if (value === null) return null
+  if (value.length > 65_536) return invalidChannelPricing('Channel time pricing is invalid')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return invalidChannelPricing('Channel time pricing is invalid')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return invalidChannelPricing('Channel time pricing is invalid')
+  }
+  const row = parsed as Record<string, unknown>
+  if (
+    !nonemptyPricingText(row.timezone) ||
+    typeof row.weekdays_only !== 'boolean' ||
+    !Array.isArray(row.periods) || row.periods.length > 48
+  ) {
+    return invalidChannelPricing('Channel time pricing is invalid')
+  }
+  const periods = row.periods.map((value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return invalidChannelPricing('Channel time pricing period is invalid')
+    }
+    const period = value as Record<string, unknown>
+    if (
+      typeof period.start_time !== 'string' ||
+      typeof period.end_time !== 'string' ||
+      !safePricingInteger(period.multiplier_ppm)
+    ) {
+      return invalidChannelPricing('Channel time pricing period is invalid')
+    }
+    return {
+      start_time: period.start_time,
+      end_time: period.end_time,
+      multiplier_ppm: period.multiplier_ppm,
+    }
+  })
+  return { timezone: row.timezone, weekdays_only: row.weekdays_only, periods }
+}
+
+function safePricingInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function nonemptyPricingText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function invalidChannelPricing(message: string): never {
+  throw new GatewayError(500, 'invalid_channel_pricing', message, 'server_error')
+}
+
+function normalizedChannelPricingModelSql(expression: string): string {
+  return `(CASE WHEN lower(${expression}) LIKE 'claude-%'
+    THEN replace(lower(${expression}), '.', '-') ELSE lower(${expression}) END)`
+}
+
+function channelPricingMatchSql(candidate: string): string {
+  const normalizedCandidate = normalizedChannelPricingModelSql(candidate)
+  const normalizedPattern = normalizedChannelPricingModelSql('allowed.model_pattern')
+  const normalizedPrefix = normalizedChannelPricingModelSql(
+    'substr(allowed.model_pattern, 1, length(allowed.model_pattern) - 1)',
+  )
+  return `(
+    (allowed.is_wildcard = 0 AND ${normalizedPattern} = ${normalizedCandidate})
+    OR
+    (allowed.is_wildcard = 1 AND
+      substr(${normalizedCandidate}, 1, length(allowed.model_pattern) - 1) = ${normalizedPrefix})
+  )`
 }
 
 async function resolveExternalChannelAlias(
@@ -531,6 +759,7 @@ async function resolveExternalChannelAlias(
   candidates: AccountCandidate[]
   upstream_endpoint: GatewayEndpoint
   platform_quota: GatewayPrincipal['platform_quota']
+  customer_pricing?: FrozenPricingPlan
 }> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const statements = [
@@ -568,7 +797,8 @@ async function resolveExternalChannelAlias(
   }
   const aliasModel = modelRows[0]
   assertSupportedChannelBillingSource(aliasModel.billing_model_source)
-  const { billing_model_source: _billingSource, match_count: _matchCount, ...model } = aliasModel
+  const customerPricing = frozenPricingPlan(aliasModel, aliasModel.platform)
+  const model = externalAliasRouteModel(aliasModel)
   let candidates = candidateResult.results.map(parseAccountCandidate)
   let upstreamEndpoint = endpoint
   if (
@@ -591,6 +821,7 @@ async function resolveExternalChannelAlias(
     candidates,
     upstream_endpoint: upstreamEndpoint,
     platform_quota: quotaRow === undefined ? null : platformQuotaPolicy(quotaRow),
+    ...(customerPricing === undefined ? {} : { customer_pricing: customerPricing }),
   }
 }
 
@@ -609,7 +840,8 @@ function externalAliasCte(
   return {
     sql: `WITH request_input(requested_model) AS (VALUES (?)),
       matching_mappings AS (
-        SELECT c.billing_model_source, mapping.platform,
+        SELECT c.id AS channel_id, c.control_version AS channel_control_version,
+               c.restrict_models, c.billing_model_source, mapping.platform,
                mapping.source_pattern, mapping.target_pattern,
                mapping.source_is_wildcard, mapping.target_is_wildcard,
                mapping.sort_order,
@@ -633,7 +865,8 @@ function externalAliasCte(
                  lower(substr(mapping.source_pattern, 1, length(mapping.source_pattern) - 1)))
            )
       ), selected_mappings AS (
-        SELECT billing_model_source, platform, source_pattern, target_pattern,
+        SELECT channel_id, channel_control_version, restrict_models,
+               billing_model_source, platform, source_pattern, target_pattern,
                source_is_wildcard, target_is_wildcard,
                CASE WHEN target_is_wildcard = 1
                  THEN substr(target_pattern, 1, length(target_pattern) - 1) ||
@@ -647,7 +880,9 @@ function externalAliasCte(
           CROSS JOIN request_input request
          WHERE mapping_rank = 1 AND target_pattern <> ''
       ), backing_matches AS (
-        SELECT mapping.billing_model_source, mapping.expanded_target,
+        SELECT mapping.channel_id, mapping.channel_control_version,
+               mapping.restrict_models, mapping.billing_model_source,
+               mapping.expanded_target,
                COALESCE(gm.upstream_name_override, m.upstream_name) AS backing_upstream_name,
                gm.group_id, gm.model_id, gm.max_output_tokens, gm.default_max_output_tokens,
                g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
@@ -684,7 +919,33 @@ function externalAliasModelStatement(
 ): D1PreparedStatement {
   const cte = externalAliasCte(groupId, publicName, endpoint)
   return env.DB.prepare(
-    `${cte.sql}
+    `${cte.sql}, pricing_pattern_matches AS (
+       SELECT pricing.id AS pricing_id,
+              pricing.control_version AS pricing_control_version,
+              pricing.billing_mode AS pricing_billing_mode,
+              pricing.input_micros_per_million AS pricing_input_micros_per_million,
+              pricing.output_micros_per_million AS pricing_output_micros_per_million,
+              pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.per_request_micros AS pricing_per_request_micros,
+              pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
+              pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
+              pricing.time_pricing_json AS pricing_time_pricing_json,
+              allowed.model_pattern AS pricing_model_pattern,
+              DENSE_RANK() OVER (
+                ORDER BY allowed.is_wildcard ASC,
+                         CASE WHEN allowed.is_wildcard = 1
+                           THEN length(allowed.model_pattern) ELSE 0 END DESC
+              ) AS specificity_rank
+         FROM resolved_alias alias
+         JOIN channel_model_pricing pricing
+           ON pricing.channel_id = alias.channel_id AND pricing.platform = alias.platform
+         JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
+        WHERE alias.match_count = 1 AND ${channelPricingMatchSql('alias.expanded_target')}
+     ), best_pricing AS (
+       SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
+         FROM pricing_pattern_matches matched
+        WHERE matched.specificity_rank = 1
+     )
      SELECT revision.revision AS config_revision,
             alias.model_id, alias.platform, ? AS public_name,
             alias.backing_upstream_name AS upstream_name,
@@ -703,8 +964,42 @@ function externalAliasModelStatement(
             user_rate.rate_multiplier_ppm AS user_rate_multiplier_ppm,
             COALESCE(user_rate.rate_multiplier_ppm, alias.group_rate_multiplier_ppm) AS rate_multiplier_ppm,
             alias.max_output_tokens, alias.default_max_output_tokens,
+            alias.channel_id, alias.channel_control_version,
+            alias.expanded_target AS billing_model,
+            COALESCE(pricing.pricing_match_count, 0) AS pricing_match_count,
+            pricing.pricing_id, pricing.pricing_control_version,
+            pricing.pricing_billing_mode, pricing.pricing_model_pattern,
+            pricing.pricing_input_micros_per_million,
+            pricing.pricing_output_micros_per_million,
+            pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_per_request_micros,
+            pricing.pricing_fast_multiplier_ppm,
+            pricing.pricing_flex_multiplier_ppm,
+            pricing.pricing_time_pricing_json,
+            CASE WHEN pricing.pricing_id IS NULL THEN NULL ELSE (
+              SELECT json_group_array(json_object(
+                'id', interval.id,
+                'min_tokens', interval.min_tokens,
+                'max_tokens', interval.max_tokens,
+                'tier_label', interval.tier_label,
+                'input_micros_per_million', interval.input_micros_per_million,
+                'output_micros_per_million', interval.output_micros_per_million,
+                'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'input_multiplier_ppm', interval.input_multiplier_ppm,
+                'output_multiplier_ppm', interval.output_multiplier_ppm,
+                'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,
+                'per_request_micros', interval.per_request_micros
+              ))
+                FROM (
+                  SELECT * FROM channel_pricing_intervals bounded
+                   WHERE bounded.pricing_id = pricing.pricing_id
+                   ORDER BY bounded.sort_order ASC, bounded.id ASC
+                   LIMIT 101
+                ) interval
+            ) END AS pricing_intervals_json,
             alias.billing_model_source, alias.match_count
        FROM resolved_alias alias
+       LEFT JOIN best_pricing pricing ON 1 = 1
        LEFT JOIN user_group_rate_overrides user_rate
          ON user_rate.group_id = alias.group_id AND user_rate.user_id = ?
        CROSS JOIN gateway_config_revision revision
@@ -842,15 +1137,13 @@ function platformQuotaStatement(
   ).bind(...bindings)
 }
 
-interface ChannelModelPolicyRow {
-  channel_id: string
+interface ChannelModelPolicyRow extends PricingProjectionRow {
   billing_model_source: string
   restrict_models: number
   source_pattern: string | null
   target_pattern: string | null
   source_is_wildcard: number | null
   target_is_wildcard: number | null
-  pricing_match: number
   account_cost_base_match_count: number | null
   account_cost_base_price_id: string | null
   account_cost_base_price_version: number | null
@@ -892,7 +1185,7 @@ function channelModelPolicyStatement(
     : [groupId, requestedModel, endpoint]
   return env.DB.prepare(
     `WITH active_channel AS (
-       SELECT c.id, c.billing_model_source, c.restrict_models,
+       SELECT c.id, c.control_version, c.billing_model_source, c.restrict_models,
               gm.group_id,
               resolved.platform AS target_platform
          FROM channel_groups cg
@@ -923,7 +1216,7 @@ function channelModelPolicyStatement(
         ORDER BY mapping.source_is_wildcard ASC, mapping.sort_order ASC,
                  length(mapping.source_pattern) DESC, mapping.source_pattern ASC
         LIMIT 1
-     ), mapped_target AS (
+     ), route_policy AS (
        SELECT channel.group_id, channel.target_platform,
               CASE WHEN mapping.target_is_wildcard = 1
                 THEN substr(mapping.target_pattern, 1, length(mapping.target_pattern) - 1) ||
@@ -932,10 +1225,20 @@ function channelModelPolicyStatement(
                        ELSE ''
                      END
                 ELSE mapping.target_pattern
-              END AS expanded_target
+              END AS expanded_target,
+              CASE WHEN mapping.target_pattern IS NOT NULL AND mapping.target_pattern <> ''
+                THEN CASE WHEN mapping.target_is_wildcard = 1
+                  THEN substr(mapping.target_pattern, 1, length(mapping.target_pattern) - 1) ||
+                       CASE WHEN mapping.source_is_wildcard = 1
+                         THEN substr(?, length(mapping.source_pattern))
+                         ELSE ''
+                       END
+                  ELSE mapping.target_pattern
+                END
+                ELSE ?
+              END AS billing_model
          FROM active_channel channel
-         JOIN matched_mapping mapping ON mapping.channel_id = channel.id
-        WHERE mapping.target_pattern <> ''
+         LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
      ), account_cost_matches AS (
        SELECT account_cost_price.id AS price_id,
               account_cost_price.version AS price_version,
@@ -944,7 +1247,7 @@ function channelModelPolicyStatement(
               account_cost_price.cache_read_micros_per_million,
               account_cost_price.per_request_micros,
               COUNT(*) OVER () AS match_count
-         FROM mapped_target target
+         FROM route_policy target
          JOIN group_models account_cost_group_model
            ON account_cost_group_model.group_id = target.group_id
          JOIN models account_cost_model
@@ -956,30 +1259,77 @@ function channelModelPolicyStatement(
         WHERE account_cost_group_model.enabled = 1
           AND account_cost_model.enabled = 1
           AND account_cost_price.active = 1
+          AND target.expanded_target IS NOT NULL AND target.expanded_target <> ''
           AND ${accountCostModelCapability}
           AND (
             account_cost_model.public_name = target.expanded_target COLLATE NOCASE OR
             COALESCE(account_cost_group_model.upstream_name_override, account_cost_model.upstream_name) =
               target.expanded_target COLLATE NOCASE
           )
+     ), pricing_pattern_matches AS (
+       SELECT pricing.id AS pricing_id,
+              pricing.control_version AS pricing_control_version,
+              pricing.billing_mode AS pricing_billing_mode,
+              pricing.input_micros_per_million AS pricing_input_micros_per_million,
+              pricing.output_micros_per_million AS pricing_output_micros_per_million,
+              pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.per_request_micros AS pricing_per_request_micros,
+              pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
+              pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
+              pricing.time_pricing_json AS pricing_time_pricing_json,
+              allowed.model_pattern AS pricing_model_pattern,
+              DENSE_RANK() OVER (
+                ORDER BY allowed.is_wildcard ASC,
+                         CASE WHEN allowed.is_wildcard = 1
+                           THEN length(allowed.model_pattern) ELSE 0 END DESC
+              ) AS specificity_rank
+         FROM route_policy target
+         JOIN active_channel channel ON 1 = 1
+         JOIN channel_model_pricing pricing
+           ON pricing.channel_id = channel.id AND pricing.platform = target.target_platform
+         JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
+        WHERE ${channelPricingMatchSql('target.billing_model')}
+     ), best_pricing AS (
+       SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
+         FROM pricing_pattern_matches matched
+        WHERE matched.specificity_rank = 1
      )
      SELECT channel.id AS channel_id, channel.billing_model_source,
-            channel.restrict_models,
+            channel.control_version AS channel_control_version, channel.restrict_models,
             mapping.source_pattern, mapping.target_pattern,
             mapping.source_is_wildcard, mapping.target_is_wildcard,
-            EXISTS (
-              SELECT 1
-                FROM channel_model_pricing pricing
-                JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
-               WHERE pricing.channel_id = channel.id AND pricing.platform = channel.target_platform AND (
-                 (allowed.is_wildcard = 0 AND allowed.model_pattern = ? COLLATE NOCASE)
-                 OR
-                 (allowed.is_wildcard = 1 AND
-                   substr(lower(?), 1, length(allowed.model_pattern) - 1) =
-                     lower(substr(allowed.model_pattern, 1, length(allowed.model_pattern) - 1)))
-               )
-               LIMIT 1
-            ) AS pricing_match,
+            policy.billing_model,
+            COALESCE(pricing.pricing_match_count, 0) AS pricing_match_count,
+            pricing.pricing_id, pricing.pricing_control_version,
+            pricing.pricing_billing_mode, pricing.pricing_model_pattern,
+            pricing.pricing_input_micros_per_million,
+            pricing.pricing_output_micros_per_million,
+            pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_per_request_micros,
+            pricing.pricing_fast_multiplier_ppm,
+            pricing.pricing_flex_multiplier_ppm,
+            pricing.pricing_time_pricing_json,
+            CASE WHEN pricing.pricing_id IS NULL THEN NULL ELSE (
+              SELECT json_group_array(json_object(
+                'id', interval.id,
+                'min_tokens', interval.min_tokens,
+                'max_tokens', interval.max_tokens,
+                'tier_label', interval.tier_label,
+                'input_micros_per_million', interval.input_micros_per_million,
+                'output_micros_per_million', interval.output_micros_per_million,
+                'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'input_multiplier_ppm', interval.input_multiplier_ppm,
+                'output_multiplier_ppm', interval.output_multiplier_ppm,
+                'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,
+                'per_request_micros', interval.per_request_micros
+              ))
+                FROM (
+                  SELECT * FROM channel_pricing_intervals bounded
+                   WHERE bounded.pricing_id = pricing.pricing_id
+                   ORDER BY bounded.sort_order ASC, bounded.id ASC
+                   LIMIT 101
+                ) interval
+            ) END AS pricing_intervals_json,
             account_cost.match_count AS account_cost_base_match_count,
             CASE WHEN account_cost.match_count = 1 THEN account_cost.price_id END
               AS account_cost_base_price_id,
@@ -995,7 +1345,9 @@ function channelModelPolicyStatement(
               AS account_cost_base_per_request_micros
        FROM active_channel channel
       LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
+      JOIN route_policy policy ON 1 = 1
       LEFT JOIN account_cost_matches account_cost ON 1 = 1
+      LEFT JOIN best_pricing pricing ON 1 = 1
       LIMIT 1`,
   )
     .bind(
@@ -1019,7 +1371,7 @@ function applyChannelModelPolicy(
 
   const mapped = row.target_pattern !== null && row.target_pattern !== ''
   if (!mapped) {
-    if (row.restrict_models === 1 && row.pricing_match !== 1) {
+    if (row.restrict_models === 1 && row.pricing_match_count === 0) {
       throw new GatewayError(
         404,
         'model_not_found',

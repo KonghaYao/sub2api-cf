@@ -2,6 +2,7 @@ import { defineComponent } from 'vue'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import OpsDashboard from '../OpsDashboard.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const mocks = vi.hoisted(() => ({
   getDashboardSnapshotV2: vi.fn(),
@@ -72,6 +73,7 @@ const ErrorDetailStub = defineComponent({
 
 describe('OpsDashboard error resolution refresh', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     vi.clearAllMocks()
     mocks.settingsFetch.mockResolvedValue(undefined)
     mocks.getAdvancedSettings.mockResolvedValue({
@@ -120,5 +122,28 @@ describe('OpsDashboard error resolution refresh', () => {
     const list = wrapper.findComponent(ErrorListStub)
     expect(list.props('show')).toBe(true)
     expect(list.props('resumeState')).toBe(false)
+  })
+
+  it('renders only Worker request/error explorers without legacy dashboard requests', async () => {
+    setCloudflareWorkerContractActive(true)
+
+    const wrapper = shallowMount(OpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          OpsErrorDetailsModal: ErrorListStub,
+          OpsErrorDetailModal: ErrorDetailStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="worker-ops-explorer"]').exists()).toBe(true)
+    expect(mocks.getAdvancedSettings).not.toHaveBeenCalled()
+    expect(mocks.getMetricThresholds).not.toHaveBeenCalled()
+    expect(mocks.getDashboardSnapshotV2).not.toHaveBeenCalled()
+    expect(mocks.getThroughputTrend).not.toHaveBeenCalled()
+    expect(mocks.getLatencyHistogram).not.toHaveBeenCalled()
+    expect(mocks.getErrorDistribution).not.toHaveBeenCalled()
   })
 })

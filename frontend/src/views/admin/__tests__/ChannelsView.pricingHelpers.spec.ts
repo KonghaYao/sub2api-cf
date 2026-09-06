@@ -80,7 +80,7 @@ describe('ChannelsView Worker pricing helpers', () => {
     expect(update).not.toHaveBeenCalled()
   })
 
-  it('offers only the Worker-supported billing source and exposes account-stat pricing rules', async () => {
+  it('offers only the Worker-supported billing source and exposes account-stat pricing controls', async () => {
     const wrapper = shallowMount(ChannelsView, {
       global: {
         stubs: {
@@ -111,7 +111,7 @@ describe('ChannelsView Worker pricing helpers', () => {
     await nextTick()
 
     expect(wrapper.text()).toContain('admin.channels.form.accountStatsPricingRules')
-    expect(wrapper.text()).not.toContain('admin.channels.form.applyPricingToAccountStats')
+    expect(wrapper.text()).toContain('admin.channels.form.applyPricingToAccountStats')
   })
 
   it('round-trips multi-platform and platform-neutral account-stat prices without rewriting them', async () => {
@@ -200,6 +200,6 @@ describe('ChannelsView Worker pricing helpers', () => {
     const neutral = request.account_stats_pricing_rules.find((rule: { name: string }) => rule.name === 'Provider neutral account')
     expect(mixed.pricing.map((price: { platform: string }) => price.platform)).toEqual(['openai', 'anthropic'])
     expect(neutral.pricing[0].platform).toBe('')
-    expect(request.apply_pricing_to_account_stats).toBe(false)
+    expect(request.apply_pricing_to_account_stats).toBe(true)
   })
 })

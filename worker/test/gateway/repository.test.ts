@@ -839,6 +839,259 @@ describe('gateway repository channel model policy', () => {
     })
     raw.close()
   })
+
+  it('freezes requested-model token pricing while preserving explicit zero and nullable inheritance', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      UPDATE channels SET control_version = 9 WHERE id = 'channel-openai';
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode,
+        input_micros_per_million, output_micros_per_million,
+        cache_read_micros_per_million, per_request_micros,
+        fast_multiplier_ppm, flex_multiplier_ppm, time_pricing_json,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES (
+        'customer-price', 'channel-openai', 'openai', 'token',
+        0, NULL, 30, NULL, NULL, 0,
+        '{"timezone":"Asia/Shanghai","weekdays_only":false,"periods":[]}',
+        4, 1, 1
+      );
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('customer-price', 'openai-public', 0, 7, 1);
+      INSERT INTO channel_pricing_intervals (
+        id, pricing_id, min_tokens, max_tokens, tier_label,
+        input_micros_per_million, output_micros_per_million,
+        cache_read_micros_per_million, input_multiplier_ppm,
+        output_multiplier_ppm, cache_read_multiplier_ppm,
+        per_request_micros, sort_order, created_at_ms, updated_at_ms
+      ) VALUES (
+        'customer-interval', 'customer-price', 0, 1000, 'small',
+        NULL, 0, NULL, 1000000, NULL, 0, NULL, 0, 1, 1
+      );
+    `)
+
+    const route = await resolveGatewayRoute(
+      { DB: d1 } as Env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )
+
+    expect(route.customer_pricing).toEqual({
+      version: 1,
+      channel_id: 'channel-openai',
+      channel_control_version: 9,
+      pricing_id: 'customer-price',
+      matched_model_pattern: 'openai-public',
+      platform: 'openai',
+      billing_model: 'token',
+      input_micros_per_million: 0,
+      output_micros_per_million: null,
+      cache_read_micros_per_million: 30,
+      per_request_micros: null,
+      fast_multiplier_ppm: null,
+      flex_multiplier_ppm: 0,
+      intervals: [{
+        id: 'customer-interval', min_tokens: 0, max_tokens: 1000, tier_label: 'small',
+        input_micros_per_million: null, output_micros_per_million: 0,
+        cache_read_micros_per_million: null, input_multiplier_ppm: 1000000,
+        output_multiplier_ppm: null, cache_read_multiplier_ppm: 0,
+        per_request_micros: null,
+      }],
+      time_pricing: { timezone: 'Asia/Shanghai', weekdays_only: false, periods: [] },
+    })
+    raw.close()
+  })
+
+  it('matches mapped billing models with exact-before-longest-wildcard precedence', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-openai', 'openai', 'openai-public', 'vendor-target', 0, 0, 0, 1);
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES
+        ('price-short', 'channel-openai', 'openai', 'per_request', 1, 1, 1, 1),
+        ('price-long', 'channel-openai', 'openai', 'per_request', 2, 2, 1, 1),
+        ('price-exact', 'channel-openai', 'openai', 'per_request', 3, 3, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('price-short', 'vendor-*', 1, 0, 1),
+        ('price-long', 'vendor-tar*', 1, 99, 1),
+        ('price-exact', 'vendor-target', 0, 999, 1);
+    `)
+    const env = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'price-exact', matched_model_pattern: 'vendor-target',
+        billing_model: 'per_request', per_request_micros: 3,
+      },
+    })
+
+    raw.prepare("DELETE FROM channel_model_pricing WHERE id = 'price-exact'").run()
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'price-long', matched_model_pattern: 'vendor-tar*',
+        per_request_micros: 2,
+      },
+    })
+    raw.close()
+  })
+
+  it('freezes pricing for an external alias without adding a routing statement', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-openai', 'openai', 'external-alias', 'openai-public', 0, 0, 0, 1);
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES ('external-price', 'channel-openai', 'openai', 'per_request', 55, 6, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('external-price', 'openai-public', 0, 0, 1);
+    `)
+    const batchSizes: number[] = []
+    const counted = {
+      prepare: d1.prepare.bind(d1),
+      batch: async (statements: D1PreparedStatement[]) => {
+        batchSizes.push(statements.length)
+        return d1.batch(statements)
+      },
+    } as unknown as D1Database
+
+    const route = await resolveGatewayRoute(
+      { DB: counted } as Env, 'group-openai', 'external-alias', 'responses', 'user-1',
+    )
+    expect(route.customer_pricing).toMatchObject({
+      pricing_id: 'external-price', matched_model_pattern: 'openai-public',
+      platform: 'openai', billing_model: 'per_request', per_request_micros: 55,
+    })
+    expect(batchSizes).toEqual([4, 3])
+    raw.close()
+  })
+
+  it('normalizes Claude dots and dashes for direct and external pricing matches', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      UPDATE models
+         SET public_name = 'claude-sonnet-4-5', upstream_name = 'claude-sonnet-4-5'
+       WHERE id = 'model-openai';
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES (
+        'channel-openai', 'openai', 'customer-claude', 'claude-sonnet-4-5',
+        0, 0, 0, 1
+      );
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES (
+        'claude-price', 'channel-openai', 'openai', 'per_request', 73,
+        1, 1, 1
+      );
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('claude-price', 'claude-sonnet-4.5', 0, 0, 1);
+    `)
+    const env = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'claude-sonnet-4-5', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'claude-price', matched_model_pattern: 'claude-sonnet-4.5',
+        per_request_micros: 73,
+      },
+    })
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'customer-claude', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'claude-price', matched_model_pattern: 'claude-sonnet-4.5',
+        per_request_micros: 73,
+      },
+    })
+    raw.close()
+  })
+
+  it('fails closed for ambiguous pricing and freezes non-text billing modes for the caller', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES
+        ('ambiguous-a', 'channel-openai', 'openai', 'per_request', 1, 0, 1, 1),
+        ('ambiguous-b', 'channel-openai', 'openai', 'per_request', 2, 0, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('ambiguous-a', 'openai-*', 1, 0, 1),
+        ('ambiguous-b', 'openai-*', 1, 1, 1);
+    `)
+    const env = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )).rejects.toMatchObject({ status: 409, code: 'ambiguous_channel_pricing' })
+
+    raw.prepare("DELETE FROM channel_model_pricing WHERE id = 'ambiguous-b'").run()
+    raw.prepare("UPDATE channel_model_pricing SET billing_mode = 'image' WHERE id = 'ambiguous-a'").run()
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: { pricing_id: 'ambiguous-a', billing_model: 'image' },
+    })
+    raw.close()
+  })
+
+  it('keeps the direct route statement budget at four, or five with endpoint fallback', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    const batchSizes: number[] = []
+    const counted = {
+      prepare: d1.prepare.bind(d1),
+      batch: async (statements: D1PreparedStatement[]) => {
+        batchSizes.push(statements.length)
+        return d1.batch(statements)
+      },
+    } as unknown as D1Database
+    const env = { DB: counted } as Env
+
+    await resolveGatewayRoute(env, 'group-openai', 'openai-public', 'responses', 'user-1')
+    await resolveGatewayRoute(
+      env, 'group-openai', 'openai-public', 'responses', 'user-1', 'chat_completions',
+    )
+    expect(batchSizes).toEqual([4, 5])
+    raw.close()
+  })
 })
 
 function seedEmbeddingRoute(database: any): void {

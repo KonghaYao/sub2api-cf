@@ -181,10 +181,15 @@ write-budgeted recovery folds recent legacy facts into the rollup while the
 read path uses a bounded raw fallback. When a public channel alias resolves to
 a unique different upstream model, the account-cost snapshot uses that
 upstream model's base catalog price while the customer charge keeps its public
-model snapshot.
+model snapshot. v0.32 also freezes the selected channel price graph at route
+time and stores its exact token/per-request, interval, service-tier and time
+pricing decision with the usage event. Customer billing therefore cannot be
+changed by a later channel edit, and ambiguous prices fail before a hold is
+created.
 Custom rules currently support input, output and cache-read tokens plus flat
 per-request/image prices. Cache-write and image-token dimensions are rejected
 until the gateway usage projection carries those quantities. The legacy
-`apply_pricing_to_account_stats` switch is also rejected in Worker mode until
-channel model prices participate in customer billing; this prevents a saved
-configuration from silently using the canonical catalog price instead.
+`apply_pricing_to_account_stats` switch now uses the frozen channel basis after
+any scoped custom account-stat rule and before the account multiplier. Channel
+image/video pricing remains fail-closed until the media projection carries its
+complete price dimensions.

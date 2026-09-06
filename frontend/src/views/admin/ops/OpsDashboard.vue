@@ -8,10 +8,28 @@
         {{ errorMessage }}
       </div>
 
-      <OpsDashboardSkeleton v-if="loading && !hasLoadedOnce" :fullscreen="isFullscreen" />
+      <section v-if="cloudflareWorker" class="card space-y-4" data-testid="worker-ops-explorer">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.ops.title') }}</h2>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.ops.description') }}</p>
+        </div>
+        <div class="flex flex-wrap gap-3">
+          <button type="button" class="btn btn-primary" data-testid="worker-ops-requests" @click="handleOpenRequestDetails()">
+            {{ t('admin.ops.requestDetails.title') }}
+          </button>
+          <button type="button" class="btn btn-secondary" data-testid="worker-ops-request-errors" @click="openErrorDetails('request')">
+            {{ t('admin.ops.requestErrors') }}
+          </button>
+          <button type="button" class="btn btn-secondary" data-testid="worker-ops-upstream-errors" @click="openErrorDetails('upstream')">
+            {{ t('admin.ops.upstreamErrors') }}
+          </button>
+        </div>
+      </section>
+
+      <OpsDashboardSkeleton v-if="!cloudflareWorker && loading && !hasLoadedOnce" :fullscreen="isFullscreen" />
 
       <OpsDashboardHeader
-        v-else-if="opsEnabled"
+        v-else-if="!cloudflareWorker && opsEnabled"
         :overview="overview"
         :platform="platform"
         :group-id="groupId"
@@ -40,7 +58,7 @@
       />
 
       <!-- Row: Concurrency + Throughput -->
-      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
+      <div v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
         <div class="lg:col-span-1 min-h-[360px]">
           <OpsConcurrencyCard :platform-filter="platform" :group-id-filter="legacyGroupId" :refresh-token="dashboardRefreshToken" />
         </div>
@@ -68,7 +86,7 @@
       </div>
 
       <!-- Row: Visual Analysis (baseline 3-up grid) -->
-      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 md:grid-cols-3">
+      <div v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 md:grid-cols-3">
         <OpsLatencyChart :latency-data="latencyHistogram" :loading="loadingLatency" />
         <OpsErrorDistributionChart
           :data="errorDistribution"
@@ -85,7 +103,7 @@
       </div>
 
       <!-- Row: OpenAI Token Stats -->
-      <div v-if="opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
+      <div v-if="!cloudflareWorker && opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
         <OpsOpenAITokenStatsCard
           :platform-filter="platform"
           :group-id-filter="legacyGroupId"
@@ -94,20 +112,20 @@
       </div>
 
       <!-- Alert Events -->
-      <OpsAlertEventsCard v-if="opsEnabled && showAlertEvents && !(loading && !hasLoadedOnce)" />
+      <OpsAlertEventsCard v-if="!cloudflareWorker && opsEnabled && showAlertEvents && !(loading && !hasLoadedOnce)" />
 
       <!-- System Logs -->
       <OpsSystemLogTable
-        v-if="opsEnabled && !(loading && !hasLoadedOnce)"
+        v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)"
         :platform-filter="platform"
         :refresh-token="dashboardRefreshToken"
       />
 
       <!-- Settings Dialog (hidden in fullscreen mode) -->
       <template v-if="!isFullscreen">
-        <OpsSettingsDialog :show="showSettingsDialog" @close="showSettingsDialog = false" @saved="onSettingsSaved" />
+        <OpsSettingsDialog v-if="!cloudflareWorker" :show="showSettingsDialog" @close="showSettingsDialog = false" @saved="onSettingsSaved" />
 
-        <BaseDialog :show="showAlertRulesCard" :title="t('admin.ops.alertRules.title')" width="extra-wide" @close="showAlertRulesCard = false">
+        <BaseDialog v-if="!cloudflareWorker" :show="showAlertRulesCard" :title="t('admin.ops.alertRules.title')" width="extra-wide" @close="showAlertRulesCard = false">
           <OpsAlertRulesCard />
         </BaseDialog>
 
@@ -160,6 +178,7 @@ import {
 } from '@/api/admin/ops'
 import type { GroupId } from '@/types'
 import { useAdminSettingsStore, useAppStore } from '@/stores'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
 import OpsDashboardSkeleton from './components/OpsDashboardSkeleton.vue'
 import OpsConcurrencyCard from './components/OpsConcurrencyCard.vue'
@@ -181,6 +200,7 @@ const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
 const adminSettingsStore = useAdminSettingsStore()
+const cloudflareWorker = isCloudflareWorkerContractActive()
 const { t } = useI18n()
 
 const opsEnabled = computed(() => adminSettingsStore.opsMonitoringEnabled)
@@ -541,7 +561,7 @@ function handleBackToList() {
 
 function handleErrorResolutionChanged() {
   errorDetailChanged.value = true
-  void fetchData()
+  if (!cloudflareWorker) void fetchData()
 }
 
 function buildApiParams() {
@@ -727,7 +747,7 @@ function isOpsDisabledError(err: unknown): boolean {
 }
 
 async function fetchData() {
-  if (!opsEnabled.value) return
+  if (cloudflareWorker || !opsEnabled.value) return
 
   abortDashboardFetch()
   dashboardFetchSeq += 1
@@ -807,6 +827,11 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
 
   await adminSettingsStore.fetch()
+  if (cloudflareWorker) {
+    loading.value = false
+    hasLoadedOnce.value = true
+    return
+  }
   if (!adminSettingsStore.opsMonitoringEnabled) {
     await router.replace('/admin/settings')
     return

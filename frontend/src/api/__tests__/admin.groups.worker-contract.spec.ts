@@ -253,4 +253,29 @@ describe('admin groups Cloudflare Worker contract', () => {
       }
     })
   })
+
+  it('blocks every legacy-only group route before an HTTP request is sent', async () => {
+    const groups = await import('@/api/admin/groups')
+
+    await expect(groups.getLiveCapability()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.duplicate(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.getStats(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.getGroupApiKeys(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.listCompositeRoutes(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.createCompositeRoute(1, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.updateCompositeRoute(1, 2, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.deleteCompositeRoute(1, 2)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.previewCompositeRoute(1, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.getGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.clearGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.batchSetGroupRateMultipliers(1, [])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.updateSortOrder([])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.getUsageSummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(groups.getCapacitySummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+
+    expect(get).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    expect(deleteRequest).not.toHaveBeenCalled()
+  })
 })

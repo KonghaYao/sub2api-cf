@@ -146,6 +146,14 @@ async function executeSyncImages(
       resolveSyncImagePricePolicy(context.env, principal),
       resolveGatewayRoute(context.env, principal.group_id, manifest.model, 'images', principal.user_id),
     ])
+    if (route.customer_pricing !== undefined) {
+      throw new GatewayError(
+        409,
+        'unsupported_channel_image_pricing',
+        'Channel-specific image pricing is not supported by the Worker runtime yet',
+        'invalid_request_error',
+      )
+    }
     principal = { ...principal, platform_quota: route.platform_quota }
     const compatibleCandidates = route.candidates.filter((candidate) =>
       (candidate.platform === 'openai' && candidate.image_adapter === 'direct_images' &&

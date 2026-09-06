@@ -17,6 +17,7 @@ export interface AccountCostInput {
   upstreamModel: string
   usage: TokenUsage
   standardCostMicros: number
+  channelPricingBasisMicros?: number
   accountCostBasePrice?: {
     input_micros_per_million: number
     output_micros_per_million: number
@@ -30,6 +31,7 @@ export interface AccountCostInput {
 interface ContextRow {
   account_rate_multiplier_ppm: number
   channel_id: string | null
+  apply_pricing_to_account_stats: number | null
 }
 
 interface PricingRow {
@@ -75,7 +77,8 @@ export async function resolveAccountCostSnapshot(
   try {
     context = await env.DB.prepare(
       `SELECT account.billing_rate_multiplier_ppm AS account_rate_multiplier_ppm,
-              channel.id AS channel_id
+              channel.id AS channel_id,
+              channel.apply_pricing_to_account_stats AS apply_pricing_to_account_stats
          FROM accounts AS account
          LEFT JOIN channel_groups AS membership ON membership.group_id = ?
          LEFT JOIN channels AS channel
@@ -87,12 +90,17 @@ export async function resolveAccountCostSnapshot(
     return fallback
   }
   if (context === null || !safeNonNegative(context.account_rate_multiplier_ppm)) return fallback
+  const channelOverride = context.apply_pricing_to_account_stats === 1 &&
+      input.channelPricingBasisMicros !== undefined &&
+      safeNonNegative(input.channelPricingBasisMicros)
+    ? input.channelPricingBasisMicros
+    : null
   let contextFallback: AccountCostSnapshot
   try {
     contextFallback = baseSnapshot(
       standardCostMicros,
       context.account_rate_multiplier_ppm,
-      null,
+      channelOverride,
     )
   } catch {
     // Account-cost reporting is operational metadata. A legal but unusably
@@ -100,7 +108,7 @@ export async function resolveAccountCostSnapshot(
     return fallback
   }
   try {
-    let override: number | null = null
+    let override = channelOverride
     if (context.channel_id !== null && input.upstreamModel.trim() !== '') {
       const pricing = await matchingPricing(
         env.DB,
@@ -110,7 +118,7 @@ export async function resolveAccountCostSnapshot(
         input.platform,
         input.upstreamModel,
       )
-      override = calculateCustomCost(pricing, input.usage, input.requestCount)
+      override = calculateCustomCost(pricing, input.usage, input.requestCount) ?? channelOverride
     }
     return baseSnapshot(standardCostMicros, context.account_rate_multiplier_ppm, override)
   } catch {

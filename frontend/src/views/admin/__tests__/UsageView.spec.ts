@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, ref } from 'vue'
 
 import UsageView from '../UsageView.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const { list, exportList, getStats, getSnapshotV2, getById, getModelStats, listErrorLogs, routeQuery, aoaToSheet, sheetAddAoa, saveAs, xlsxWrite } = vi.hoisted(() => {
   vi.stubGlobal('localStorage', {
@@ -174,6 +175,14 @@ const mountRouteFilteredUsageView = () => mount(UsageView, {
   } },
 })
 
+beforeEach(() => {
+  setCloudflareWorkerContractActive(false)
+})
+
+afterEach(() => {
+  setCloudflareWorkerContractActive(true)
+})
+
 describe('admin UsageView route filters', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -268,6 +277,19 @@ describe('admin UsageView route filters', () => {
 
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ user_id: '42' }), expect.anything())
     expect(wrapper.find('[data-test="user-filter-label"]').text()).toBe('42')
+  })
+
+  it('uses only the Worker usage explorer route in Worker mode', async () => {
+    setCloudflareWorkerContractActive(true)
+
+    mountRouteFilteredUsageView()
+    vi.advanceTimersByTime(120)
+    await flushPromises()
+
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(getStats).not.toHaveBeenCalled()
+    expect(getModelStats).not.toHaveBeenCalled()
+    expect(getSnapshotV2).not.toHaveBeenCalled()
   })
 })
 

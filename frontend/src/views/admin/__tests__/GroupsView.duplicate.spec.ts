@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AdminGroup } from '@/types'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import GroupsView from '@/views/admin/GroupsView.vue'
 
 const {
@@ -170,6 +171,7 @@ function mountView() {
 
 describe('GroupsView duplicate action', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     localStorage.clear()
     vi.spyOn(console, 'error').mockImplementation(() => {})
     for (const fn of [
@@ -206,6 +208,7 @@ describe('GroupsView duplicate action', () => {
   })
 
   afterEach(() => {
+    setCloudflareWorkerContractActive(true)
     vi.restoreAllMocks()
   })
 

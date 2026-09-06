@@ -158,7 +158,7 @@ const completeChannel = {
     flex_multiplier_ppm: null,
     time_pricing: {
       timezone: 'Asia/Shanghai', weekdays_only: true,
-      periods: [{ start_time: '09:00', end_time: '18:00', multiplier_ppm: 900_000 }],
+      periods: [{ start_time: '09:00:15', end_time: '18:00:45', multiplier_ppm: 900_000 }],
     },
     intervals: [{
       min_tokens: 0, max_tokens: 199_999, tier_label: 'small',
@@ -464,26 +464,21 @@ describe('admin channels HTTP contract', () => {
     }
   })
 
-  it('rejects enabling legacy channel pricing for account statistics', async () => {
+  it('creates and updates channels with account-statistics channel pricing enabled', async () => {
     const test = await fixture()
     const create = await request(test, '/api/v1/admin/channels', {
-      method: 'POST', headers: mutationHeaders('unsupported-apply-pricing-create'),
-      body: JSON.stringify({ name: 'Unsupported legacy pricing', apply_pricing_to_account_stats: true }),
+      method: 'POST', headers: mutationHeaders('apply-pricing-create'),
+      body: JSON.stringify({ name: 'Channel pricing stats', apply_pricing_to_account_stats: true }),
     })
-    expect(create.status).toBe(409)
-    expect((await json(create)).error.code).toBe('apply_pricing_to_account_stats_not_supported')
-
-    const created = await request(test, '/api/v1/admin/channels', {
-      method: 'POST', headers: mutationHeaders('supported-apply-pricing-create'),
-      body: JSON.stringify({ name: 'Supported legacy pricing', apply_pricing_to_account_stats: false }),
-    })
-    const channel = (await json(created)).data
+    expect(create.status).toBe(201)
+    const channel = (await json(create)).data
+    expect(channel.apply_pricing_to_account_stats).toBe(true)
     const update = await request(test, `/api/v1/admin/channels/${channel.id}`, {
-      method: 'PUT', headers: mutationHeaders('unsupported-apply-pricing-update', 0),
-      body: JSON.stringify({ apply_pricing_to_account_stats: true }),
+      method: 'PUT', headers: mutationHeaders('apply-pricing-update', 0),
+      body: JSON.stringify({ apply_pricing_to_account_stats: false }),
     })
-    expect(update.status).toBe(409)
-    expect((await json(update)).error.code).toBe('apply_pricing_to_account_stats_not_supported')
+    expect(update.status).toBe(200)
+    expect((await json(update)).data.apply_pricing_to_account_stats).toBe(false)
   })
 
   it('requires top-level positive per-request pricing without intervals', async () => {

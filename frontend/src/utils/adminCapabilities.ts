@@ -13,6 +13,9 @@ const WORKER_UNSUPPORTED_ACCOUNT_FIELDS = new Set([
 
 const CLOUDFLARE_ADMIN_PATHS = [
   '/admin/settings',
+  '/admin/ops',
+  '/admin/announcements',
+  '/admin/usage',
   '/admin/users',
   '/admin/groups',
   '/admin/channels/pricing',

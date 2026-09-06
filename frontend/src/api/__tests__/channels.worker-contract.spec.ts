@@ -126,7 +126,7 @@ describe('channels Cloudflare Worker contract', () => {
     expect(result.items[0]).toMatchObject({
       id: 'channel-uuid',
       status: 'disabled',
-      apply_pricing_to_account_stats: false,
+      apply_pricing_to_account_stats: true,
       group_ids: ['group-uuid'],
       created_at: '2026-09-03T16:00:00.000Z',
       updated_at: '2026-09-03T16:01:00.000Z',
@@ -208,7 +208,7 @@ describe('channels Cloudflare Worker contract', () => {
           periods: [{ start_time: '09:00', end_time: '11:00', multiplier_ppm: 1_500_000 }],
         },
       })],
-      apply_pricing_to_account_stats: false,
+      apply_pricing_to_account_stats: true,
       account_stats_pricing_rules: [{
         name: 'Operations',
         group_ids: ['group-uuid'],

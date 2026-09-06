@@ -9,9 +9,11 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { duplicate } from '@/api/admin/groups'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 describe('admin group duplicate API', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     localStorage.clear()
     sessionStorage.clear()
     localStorage.setItem('auth_user', JSON.stringify({ id: 7 }))
@@ -21,6 +23,7 @@ describe('admin group duplicate API', () => {
   })
 
   afterEach(() => {
+    setCloudflareWorkerContractActive(true)
     vi.restoreAllMocks()
   })
 
@@ -55,6 +58,8 @@ describe('admin group duplicate API', () => {
 
     vi.resetModules()
     post.mockResolvedValueOnce({ data: { id: 78, name: 'reload (Copy)' } })
+    const { setCloudflareWorkerContractActive: setReloadedContractActive } = await import('@/utils/adminCapabilities')
+    setReloadedContractActive(false)
     const { duplicate: duplicateAfterReload } = await import('@/api/admin/groups')
     await duplicateAfterReload(77)
 

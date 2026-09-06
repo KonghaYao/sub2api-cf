@@ -1,9 +1,9 @@
 <template>
   <AppLayout>
     <div class="space-y-6">
-      <UsageStatsCards :stats="usageStats" />
+      <UsageStatsCards v-if="!workerExplorer" :stats="usageStats" />
       <!-- Charts Section -->
-      <div class="space-y-4">
+      <div v-if="!workerExplorer" class="space-y-4">
         <div class="card p-4">
           <div class="flex flex-wrap items-center gap-4">
             <div class="flex items-center gap-2">
@@ -151,9 +151,10 @@
               <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
                 <tr v-for="row in usageLogs" :key="row.id">
                   <td v-if="isColumnVisible('user')" class="whitespace-nowrap px-4 py-3">
-                    <button v-if="row.user_id" data-testid="admin-usage-user" class="text-primary-600 hover:underline dark:text-primary-400" @click="handleUserClick(row.user_id)">
+                    <button v-if="row.user_id && !workerExplorer" data-testid="admin-usage-user" class="text-primary-600 hover:underline dark:text-primary-400" @click="handleUserClick(row.user_id)">
                       {{ row.user_id }}
                     </button>
+                    <span v-else-if="row.user_id">{{ row.user_id }}</span>
                     <span v-else>—</span>
                   </td>
                   <td v-if="isColumnVisible('api_key')" class="whitespace-nowrap px-4 py-3">{{ row.api_key_id || '—' }}</td>
@@ -200,6 +201,7 @@
   </AppLayout>
   <!-- Balance history modal triggered from usage table user click -->
   <UserBalanceHistoryModal
+    v-if="!workerExplorer"
     :show="showBalanceHistoryModal"
     :user="balanceHistoryUser"
     :hide-actions="true"
@@ -214,6 +216,7 @@ import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'; import { adminAPI } from '@/api/admin'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { requestTypeToLegacyStream } from '@/utils/usageRequestType'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import AppLayout from '@/components/layout/AppLayout.vue'; import CursorPagination from '@/components/user/CursorPagination.vue'; import Select from '@/components/common/Select.vue'; import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import UsageStatsCards from '@/components/admin/usage/UsageStatsCards.vue'; import UsageFilters from '@/components/admin/usage/UsageFilters.vue'
 import UserTokenRanking from '@/components/admin/usage/UserTokenRanking.vue'
@@ -232,6 +235,7 @@ type AdminExplorerFilters = Omit<AdminUsageQueryParams, 'user_id' | 'api_key_id'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const workerExplorer = isCloudflareWorkerContractActive()
 type DistributionMetric = 'tokens' | 'actual_cost'
 type EndpointSource = 'inbound' | 'upstream' | 'path'
 type ModelDistributionSource = 'requested' | 'upstream' | 'mapping'
@@ -542,6 +546,10 @@ const loadChartData = async () => {
 }
 const applyFilters = () => {
   resetUsageCursor()
+  if (workerExplorer) {
+    loadLogs()
+    return
+  }
   invalidateModelStatsCache()
   loadLogs()
   loadStats()
@@ -549,6 +557,10 @@ const applyFilters = () => {
   loadChartData()
 }
 const refreshData = () => {
+  if (workerExplorer) {
+    loadLogs()
+    return
+  }
   invalidateModelStatsCache()
   loadLogs()
   loadStats(true)
@@ -679,7 +691,9 @@ type DetailTab = 'usage' | 'ranking'
 const activeTab = ref<DetailTab>('usage')
 const detailTabs = computed(() => [
   { key: 'usage' as const, label: t('usage.tabs.usage'), icon: 'document' as const },
-  { key: 'ranking' as const, label: t('usage.tabs.ranking'), icon: 'chart' as const },
+  ...(!workerExplorer
+    ? [{ key: 'ranking' as const, label: t('usage.tabs.ranking'), icon: 'chart' as const }]
+    : []),
 ])
 const usageFiltersRef = ref<InstanceType<typeof UsageFilters> | null>(null)
 const rankingMounted = ref(false)
@@ -703,6 +717,11 @@ onMounted(() => {
   applyRouteQueryFilters()
   void loadRouteUserFilterLabel()
   loadLogs()
+  if (workerExplorer) {
+    loadSavedColumns()
+    document.addEventListener('click', handleColumnClickOutside)
+    return
+  }
   loadStats()
   loadModelStats(modelDistributionSource.value, true)
   window.setTimeout(() => {

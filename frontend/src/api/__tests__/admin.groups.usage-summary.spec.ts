@@ -9,9 +9,11 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { getUsageSummary } from '@/api/admin/groups'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 describe('admin group usage summary API', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     get.mockReset()
     get.mockResolvedValue({ data: [] })
   })

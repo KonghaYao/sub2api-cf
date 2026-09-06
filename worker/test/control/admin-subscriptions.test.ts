@@ -443,7 +443,9 @@ describe('admin subscriptions HTTP contract', () => {
   it('keeps a zero-used activation daily anchor aligned across reset and Queue projection', async () => {
     const test = await fixture()
     const assigned = (await json(await assign(test))).data
-    const activationAnchor = Math.floor(now / DAY_MS) * DAY_MS - 10 * 60_000
+    // Keep the activation anchor inside the current natural window. Basing it
+    // on UTC midnight made this assertion depend on which minute CI started.
+    const activationAnchor = now - 10 * 60_000
     test.raw.prepare(
       `UPDATE user_subscriptions
           SET starts_at_ms = ?, expires_at_ms = ?, daily_anchor_ms = ?,

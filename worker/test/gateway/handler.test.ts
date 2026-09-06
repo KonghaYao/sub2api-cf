@@ -901,6 +901,7 @@ describe('OpenAI-compatible gateway', () => {
       source_is_wildcard: 0,
       target_is_wildcard: 0,
       pricing_match: 0,
+      pricing_match_count: 0,
       account_cost_base_match_count: 1,
       account_cost_base_price_id: 'price-upstream',
       account_cost_base_price_version: 3,
@@ -969,6 +970,7 @@ describe('OpenAI-compatible gateway', () => {
       upstream_name: 'gpt-upstream',
       billing_model_source: 'channel_mapped',
       match_count: 1,
+      pricing_match_count: 0,
     }
     const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) =>
       Response.json({
@@ -1003,6 +1005,115 @@ describe('OpenAI-compatible gateway', () => {
         payload: { requested_model: 'customer-alias', upstream_model: 'gpt-upstream' },
       },
     })
+  })
+
+  it('bills with the frozen channel price and preserves its immutable snapshot', async () => {
+    const { env, database, user } = await harness()
+    database.channelPolicy = {
+      billing_model_source: 'channel_mapped',
+      restrict_models: 0,
+      mapped_model: null,
+      source_pattern: null,
+      target_pattern: null,
+      source_is_wildcard: null,
+      target_is_wildcard: null,
+      pricing_match: 1,
+      account_cost_base_match_count: 0,
+      account_cost_base_price_id: null,
+      account_cost_base_price_version: null,
+      account_cost_base_input_micros_per_million: null,
+      account_cost_base_output_micros_per_million: null,
+      account_cost_base_cache_read_micros_per_million: null,
+      account_cost_base_per_request_micros: null,
+      channel_id: 'channel-1',
+      channel_control_version: 9,
+      billing_model: 'gpt-public',
+      pricing_match_count: 1,
+      pricing_id: 'channel-price-1',
+      pricing_control_version: 4,
+      pricing_billing_mode: 'token',
+      pricing_model_pattern: 'gpt-public',
+      pricing_input_micros_per_million: 10_000_000,
+      pricing_output_micros_per_million: 20_000_000,
+      pricing_cache_read_micros_per_million: 1_000_000,
+      pricing_per_request_micros: 7,
+      pricing_fast_multiplier_ppm: null,
+      pricing_flex_multiplier_ppm: null,
+      pricing_time_pricing_json: null,
+      pricing_intervals_json: '[]',
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      model: 'gpt-upstream',
+      choices: [],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    })))
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    const usageEvent = user.calls.find((call) => call.path === '/settle')?.body
+      .usage_event as { payload: Record<string, unknown> }
+    expect(usageEvent.payload).toMatchObject({
+      price_id: 'price-1',
+      billing_mode: 'token',
+      input_amount_micros: 100,
+      output_amount_micros: 100,
+      base_amount_micros: 7,
+      amount_micros: 207,
+      standard_cost_micros: 40,
+    })
+    expect(JSON.parse(String(usageEvent.payload.customer_pricing_snapshot_json))).toMatchObject({
+      source: 'channel',
+      channel_id: 'channel-1',
+      channel_control_version: 9,
+      pricing_id: 'channel-price-1',
+      customer_rate_multiplier_ppm: 1_000_000,
+      effective_pricing: {
+        input_micros_per_million: 10_000_000,
+        output_micros_per_million: 20_000_000,
+        per_request_micros: 7,
+      },
+    })
+  })
+
+  it('rejects unsupported channel image pricing before reserving or calling upstream', async () => {
+    const { env, database, user } = await harness()
+    database.channelPolicy = {
+      billing_model_source: 'channel_mapped', restrict_models: 0, mapped_model: null,
+      source_pattern: null, target_pattern: null, source_is_wildcard: null,
+      target_is_wildcard: null, pricing_match: 1, account_cost_base_match_count: 0,
+      account_cost_base_price_id: null, account_cost_base_price_version: null,
+      account_cost_base_input_micros_per_million: null,
+      account_cost_base_output_micros_per_million: null,
+      account_cost_base_cache_read_micros_per_million: null,
+      account_cost_base_per_request_micros: null,
+      channel_id: 'channel-1', channel_control_version: 1, billing_model: 'gpt-public',
+      pricing_match_count: 1, pricing_id: 'channel-image-1', pricing_control_version: 1,
+      pricing_billing_mode: 'image', pricing_model_pattern: 'gpt-public',
+      pricing_input_micros_per_million: null, pricing_output_micros_per_million: null,
+      pricing_cache_read_micros_per_million: null, pricing_per_request_micros: 1,
+      pricing_fast_multiplier_ppm: null, pricing_flex_multiplier_ppm: null,
+      pricing_time_pricing_json: null, pricing_intervals_json: '[]',
+    }
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_channel_billing_mode' },
+    })
+    expect(upstream).not.toHaveBeenCalled()
+    expect(user.calls).toEqual([])
   })
 
   it('returns a fail-closed error before reservations for an unsupported channel billing source', async () => {

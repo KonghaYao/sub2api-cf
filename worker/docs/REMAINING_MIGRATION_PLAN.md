@@ -3,12 +3,28 @@
 This plan orders the remaining work by whether the Go service can be safely
 removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 
+## Completed locally in v0.32
+
+- The reachable Worker frontend no longer calls legacy-only group, capacity,
+  Live, duplicate, composite-route, sort, multiplier, key-token or IP-policy
+  endpoints. Implemented announcements, usage and operations explorers are now
+  reachable in Worker mode.
+- Text gateway routes freeze exact/longest-wildcard channel pricing inside the
+  existing D1 route batch. Token, cache-read, per-request, interval,
+  service-tier and timezone pricing use integer micros and an immutable usage
+  snapshot. Ambiguous prices fail before reservation.
+- Customer charge, catalog standard cost, optional channel/account-stat basis
+  and final provider-account cost are independent immutable facts. The channel
+  account-stat toggle is active end to end.
+- Channel-specific image/video pricing remains intentionally fail-closed until
+  its separate media pricing contract is migrated.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
-| Frontend/Worker contract closure | Some reachable admin views still call legacy group, capacity, Live, duplicate, composite-route, sort and multiplier APIs. Other implemented Worker routes are hidden by the frontend capability guard. | Make the Worker route inventory authoritative. Adapt composite routing to channels, and remove controls for explicitly unsupported fields. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
-| Channel customer pricing | Channel mappings route traffic, but `channel_model_pricing` does not yet determine the customer reservation and settlement. | Resolve one immutable channel-price snapshot in the existing bounded D1 routing query; use integer micros for every hold and settlement. Keep upstream account cost separate. | Alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
+| Frontend/Worker contract closure | Local route guards and reachable-page contracts are closed; browser-level deployed proof remains. | Keep the Worker route inventory authoritative and expose new controls only with a complete Worker contract. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
+| Channel customer pricing | Text token/per-request pricing is complete locally; image/video channel tiers are explicitly rejected instead of being mispriced. | Extend the frozen pricing snapshot contract to media dimensions without changing the independent account-cost facts. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
 | Core provider and protocol closure | The four Worker providers cover the main text paths, but retained legacy protocol variants and upstream credential lifecycles are incomplete. | Worker streaming codecs and provider adapters; D1 encrypted credential generations; DO leases/refresh serialization; Queue/Cron health recovery. | Every retained Go compatibility fixture is mapped; OpenAI, Anthropic, Gemini and Codex run authenticated binding and deployed smoke tests with exact settlement and no lease leaks. |
 | Production data cutover | Local binding tests exist, but PostgreSQL/Redis state has not been fully imported and reconciled with D1/DO/R2. | Versioned D1 import, R2 manifests, DO initialization commands and Queue projection catch-up. | Users, keys, balances, ledgers, subscriptions, orders and provider accounts reconcile by row count and sampled digest before staged traffic reaches 100%. |
 | Backup, restore and rollback | Cloudflare deployment rollback exists conceptually; data restore has not been drilled. | D1 export, versioned R2 manifests, per-DO export/restore and Worker Versions rollback notes. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |

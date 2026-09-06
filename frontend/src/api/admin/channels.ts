@@ -342,9 +342,6 @@ function adaptWorkerChannel(raw: Channel | WorkerChannel): Channel {
   const channel = raw as WorkerChannel
   const adapted: Channel = {
     ...channel,
-    // Channel model pricing is not part of Worker customer billing yet. Do not
-    // expose a stale backend flag as an effective setting in the admin UI.
-    apply_pricing_to_account_stats: false,
     group_ids: channel.group_ids.map((id) => String(id)),
     model_pricing: channel.model_pricing.map(adaptWorkerPricing),
     account_stats_pricing_rules: (channel.account_stats_pricing_rules ?? []).map((rule) => ({
@@ -465,7 +462,7 @@ function workerPayload(request: CreateChannelRequest | UpdateChannelRequest): Re
     payload.model_pricing = request.model_pricing.map(workerPricing)
   }
   if (request.apply_pricing_to_account_stats !== undefined) {
-    payload.apply_pricing_to_account_stats = false
+    payload.apply_pricing_to_account_stats = request.apply_pricing_to_account_stats
   }
   if (request.account_stats_pricing_rules !== undefined) {
     payload.account_stats_pricing_rules = request.account_stats_pricing_rules.map((rule) => ({
