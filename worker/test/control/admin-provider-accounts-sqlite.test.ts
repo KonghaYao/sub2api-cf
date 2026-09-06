@@ -681,6 +681,37 @@ describe('admin provider account control plane on D1', () => {
     }, test.env)
     expect(unsupported.status).toBe(409)
     await expect(unsupported.json()).resolves.toMatchObject({ error: { code: 'subscription_plan_not_supported' } })
+
+    const directConfig = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'apikey-direct-provider-config-subscription' },
+      body: JSON.stringify({
+        name: 'apikey-direct-provider-config-subscription',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'sk-test',
+        provider_config: { subscription_plan: 'plus' },
+      }),
+    }, test.env)
+    expect(directConfig.status).toBe(409)
+    await expect(directConfig.json()).resolves.toMatchObject({ error: { code: 'subscription_plan_not_supported' } })
+
+    const apiKeyCreated = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'apikey-update-provider-config-subscription' },
+      body: JSON.stringify({
+        name: 'apikey-update-provider-config-subscription',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'sk-test',
+      }),
+    }, test.env)
+    const apiKeyPayload = await apiKeyCreated.json() as any
+    expect(apiKeyCreated.status, JSON.stringify(apiKeyPayload)).toBe(201)
+    const directConfigPatch = await test.app.request(`/accounts/${apiKeyPayload.data.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ provider_config: { subscription_plan: 'plus' } }),
+    }, test.env)
+    expect(directConfigPatch.status).toBe(409)
+    await expect(directConfigPatch.json()).resolves.toMatchObject({ error: { code: 'subscription_plan_not_supported' } })
   })
 
   it('rejects provider contract mismatches and secret-like provider config fields', async () => {

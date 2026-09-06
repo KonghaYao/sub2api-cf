@@ -1337,7 +1337,11 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     base_url: baseUrl,
     auth_scheme: authScheme,
     provider_config: applySubscriptionPlan(
-      parseProviderConfig(body.provider_config, platform),
+      assertProviderConfigSubscriptionPlanEligible(
+        parseProviderConfig(body.provider_config, platform),
+        platform,
+        credentialKind,
+      ),
       body.subscription_plan,
       platform,
       credentialKind,
@@ -1399,6 +1403,9 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
     patch.credential_kind ?? account.credential_kind,
   )
   if (patch.subscription_plan !== undefined) {
+    assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
+  }
+  if (patch.provider_config?.subscription_plan !== undefined) {
     assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
   }
   if (body.enabled !== undefined || body.status !== undefined || body.schedulable !== undefined) {
@@ -1769,6 +1776,17 @@ function assertSubscriptionPlanEligible(platform: ProviderPlatform, credentialKi
   if (platform !== 'openai' || credentialKind !== 'oauth') {
     throw new GatewayError(409, 'subscription_plan_not_supported', 'subscription_plan is supported only for OpenAI OAuth accounts')
   }
+}
+
+function assertProviderConfigSubscriptionPlanEligible(
+  providerConfig: ProviderConfig,
+  platform: ProviderPlatform,
+  credentialKind: AccountCredentialKind,
+): ProviderConfig {
+  if (providerConfig.subscription_plan !== undefined) {
+    assertSubscriptionPlanEligible(platform, credentialKind)
+  }
+  return providerConfig
 }
 
 function applySubscriptionPlan(

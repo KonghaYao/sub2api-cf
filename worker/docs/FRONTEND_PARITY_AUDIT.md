@@ -281,3 +281,12 @@ explicit typed error. It must never silently discard a submitted field or return
 - Duplicate requests use a deterministic idempotency record: retries return the
   same copied account rather than creating a second clone. The original menu,
   list refresh, template and styles are unchanged.
+
+## v0.42.11 Accounts subscription-plan contract hardening — 2026-09-07
+
+- `provider_config.subscription_plan` now follows the same OpenAI OAuth-only
+  contract as the top-level form field on both account creation and update.
+  This closes the direct configuration path that could otherwise assign a paid
+  subscription plan to an API-key account.
+- Validation: focused SQLite account suite (18 tests) and Worker typecheck
+  passed. No schema change or visible UI change.
