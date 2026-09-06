@@ -1,5 +1,6 @@
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
 import { defineConfig } from 'vitest/config'
+import { emailDeliveryFixture } from './test/e2e/fixtures/email-delivery.js'
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(new URL('./migrations', import.meta.url).pathname)
@@ -10,6 +11,7 @@ export default defineConfig(async () => {
         wrangler: { configPath: './wrangler.e2e.jsonc' },
         miniflare: {
           bindings: { TEST_MIGRATIONS: migrations },
+          serviceBindings: { EMAIL_DELIVERY: emailDeliveryFixture },
           outboundService: async (request) => {
             const url = new URL(request.url)
             if (

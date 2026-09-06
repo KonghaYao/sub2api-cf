@@ -34,6 +34,7 @@ const ENVIRONMENTS = Object.freeze({
     ]),
     r2: Object.freeze({ binding: 'OBJECTS', bucketName: 'sub2api-staging' }),
     workerService: 'sub2api-worker-staging',
+    workerOrigin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
   }),
   production: Object.freeze({
     d1: Object.freeze({ binding: 'DB', databaseName: 'sub2api-production' }),
@@ -46,6 +47,7 @@ const ENVIRONMENTS = Object.freeze({
     ]),
     r2: Object.freeze({ binding: 'OBJECTS', bucketName: 'sub2api-production' }),
     workerService: 'sub2api-worker-production',
+    workerOrigin: 'https://sub2api-worker-production.claude-code-best.workers.dev',
   }),
 })
 
@@ -189,17 +191,21 @@ export function createRemoteBackupPlan(options) {
   }]
   for (const durableObject of durableObjects) {
     const output = join(workingDirectory, durableObject.logicalName)
+    const hasWorkerHttpTransport = durableObject.namespace === 'USER_STATE'
     steps.push({
       sequence: steps.length + 1,
       id: `backup:do:${durableObject.namespace}:${durableObject.objectId}`,
       phase: 'durable-objects',
       operation: 'export-durable-object-ndjson',
-      transport: 'api-contract',
-      contract_only: true,
+      transport: hasWorkerHttpTransport ? 'worker-http' : 'api-contract',
+      ...(hasWorkerHttpTransport
+        ? { environment: options.environment }
+        : { contract_only: true }),
       resource: { namespace: durableObject.namespace, objectId: durableObject.objectId },
       request: {
         method: 'POST',
         service: resources.workerService,
+        origin: resources.workerOrigin,
         path: `/internal/backup/durable-objects/${durableObject.namespace}/${encodeURIComponent(durableObject.objectId)}/export`,
         response_format: 'ndjson',
         authentication: 'operator-service-token',
@@ -400,17 +406,21 @@ export async function createRemoteRestorePlan(options) {
     }
     if (artifact.kind === 'do-ndjson') {
       const { namespace, objectId } = parseDurableObjectSource(artifact.source, resources.durableObjectNamespaces)
+      const hasWorkerHttpTransport = namespace === 'USER_STATE'
       return {
         ...common,
         id: `restore:do:${namespace}:${objectId}:${artifact.logical_name}`,
         phase: 'durable-objects',
         operation: 'restore-durable-object-ndjson',
-        transport: 'api-contract',
-        contract_only: true,
+        transport: hasWorkerHttpTransport ? 'worker-http' : 'api-contract',
+        ...(hasWorkerHttpTransport
+          ? { environment: options.environment }
+          : { contract_only: true }),
         resource: { namespace, objectId },
         request: {
           method: 'POST',
           service: resources.workerService,
+          origin: resources.workerOrigin,
           path: `/internal/backup/durable-objects/${namespace}/${encodeURIComponent(objectId)}/restore`,
           request_format: 'ndjson',
           body_file: common.artifact,
@@ -634,7 +644,9 @@ async function verifyJournalPostconditions(plan, journal, executor) {
       if (actual.bytes !== proof.bytes || actual.sha256 !== proof.sha256) {
         throw new Error(`Remote adapter output no longer matches its verified postcondition: ${step.id}`)
       }
-      if (step.contract_only === true) await verifyContractReadback(step, proof, executor)
+      if (step.contract_only === true || step.transport === 'worker-http') {
+        await verifyContractReadback(step, proof, executor)
+      }
     } else {
       const requiredDigests = step.postcondition.required_digests
       requireExactKeys(

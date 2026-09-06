@@ -385,4 +385,101 @@ describe('admin accounts Worker transport capabilities', () => {
       headers: { 'If-Match': '"8"' },
     })
   })
+
+  it('queues exact per-model synthetic probe targets with retry-stable idempotency', async () => {
+    const response = {
+      total: 2,
+      queued: 1,
+      failed: 1,
+      queued_ids: ['account-1'],
+      failed_ids: ['account-2'],
+      results: [
+        {
+          account_id: 'account-1', expected_control_version: 7,
+          model_id: 'model-1', capability: 'responses', success: true,
+          generation: 3, job_id: 'account-1:synthetic:model-1:responses:3',
+        },
+        {
+          account_id: 'account-2', expected_control_version: 4,
+          model_id: 'model-2', capability: 'embeddings', success: false,
+          error: { code: 'account_version_conflict', message: 'Account changed; reload it and retry' },
+        },
+      ],
+    }
+    post.mockResolvedValueOnce({ data: response })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { queueSyntheticProbes } = await import('@/api/admin/accounts')
+    const targets = response.results.map(({ success: _success, generation: _generation, job_id: _jobId, error: _error, ...target }) => target)
+
+    await expect(queueSyntheticProbes(targets as never)).resolves.toEqual(response)
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/synthetic-probes',
+      { targets },
+      { headers: { 'Idempotency-Key': 'admin-account-synthetic-probes-33333333-3333-4333-8333-333333333333' } },
+    )
+  })
+
+  it('rejects empty, duplicate and oversized synthetic targets before transport', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { queueSyntheticProbes } = await import('@/api/admin/accounts')
+    const target = {
+      account_id: 'account-1', expected_control_version: 7,
+      model_id: 'model-1', capability: 'responses',
+    }
+
+    await expect(queueSyntheticProbes([])).rejects.toThrow(/between 1 and 25/)
+    await expect(queueSyntheticProbes([target, target] as never)).rejects.toThrow(/duplicate/)
+    await expect(queueSyntheticProbes(Array.from({ length: 26 }, (_, index) => ({
+      ...target, model_id: `model-${index}`,
+    })) as never)).rejects.toThrow(/between 1 and 25/)
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('reuses the synthetic probe idempotency key after an ambiguous failure', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { queueSyntheticProbes } = await import('@/api/admin/accounts')
+    const targets = [{
+      account_id: 'account-1', expected_control_version: 7,
+      model_id: 'model-1', capability: 'responses',
+    }]
+    post
+      .mockRejectedValueOnce(new Error('response lost'))
+      .mockResolvedValueOnce({ data: { total: 1, queued: 1, failed: 0, queued_ids: ['account-1'], failed_ids: [], results: [] } })
+
+    await expect(queueSyntheticProbes(targets as never)).rejects.toThrow('response lost')
+    await queueSyntheticProbes(targets as never)
+
+    expect(post.mock.calls[0]?.[2]).toEqual(post.mock.calls[1]?.[2])
+  })
+
+  it('passes the opaque synthetic history cursor without decoding it', async () => {
+    const page = {
+      items: [{
+        id: 'history-1', job_id: 'job-1', account_id: 'account-1', model_id: 'model-1',
+        capability: 'responses', generation: 2, outcome: 'failed',
+        error_code: 'upstream_http_error', upstream_status: 429, latency_ms: 87,
+        alert_transition: 'firing', checked_at_ms: 1_788_451_260_000,
+      }],
+      has_more: true,
+      next_cursor: 'eyJ2IjoxLCJjaGVja2VkX2F0X21zIjoxfQ',
+    }
+    get.mockResolvedValueOnce({ data: page })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { listSyntheticProbeHistory } = await import('@/api/admin/accounts')
+
+    await expect(listSyntheticProbeHistory({
+      account_id: 'account-1', model_id: 'model-1', capability: 'responses',
+      limit: 10, cursor: page.next_cursor,
+    })).resolves.toEqual(page)
+    expect(get).toHaveBeenCalledWith('/admin/accounts/synthetic-probes/history', {
+      params: {
+        account_id: 'account-1', model_id: 'model-1', capability: 'responses',
+        limit: 10, cursor: page.next_cursor,
+      },
+    })
+  })
 })

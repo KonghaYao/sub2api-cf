@@ -364,6 +364,7 @@ import {
   getAdminPaymentReconciliationIssue,
   listAdminPaymentReconciliationIssues,
 } from './payment/reconciliation'
+import { handleDurableObjectBackup } from './backup/routes'
 
 type AppBindings = {
   Bindings: Env
@@ -440,6 +441,11 @@ export function createApp() {
       return context.json({ status: 'not_ready' }, 503)
     }
   })
+
+  app.all(
+    '/internal/backup/durable-objects/:namespace/:objectId/:action',
+    handleDurableObjectBackup,
+  )
 
   app.get('/api/v1/settings/public', async (context) => {
     const key = `${context.env.ENVIRONMENT}:public-settings:v1`

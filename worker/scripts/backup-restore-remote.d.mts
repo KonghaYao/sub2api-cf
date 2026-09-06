@@ -2,7 +2,7 @@ import type { BackupArtifactKind } from './backup-restore.mjs'
 
 export type RemoteEnvironment = 'staging' | 'production'
 export type RemotePhase = 'd1' | 'durable-objects' | 'r2'
-export type RemoteTransport = 'command' | 'api-contract'
+export type RemoteTransport = 'command' | 'api-contract' | 'worker-http'
 
 export interface DurableObjectSelection {
   readonly namespace: string
@@ -39,6 +39,7 @@ export interface RemoteStep {
   readonly phase: RemotePhase
   readonly operation: string
   readonly transport: RemoteTransport
+  readonly environment?: RemoteEnvironment
   readonly contract_only?: true
   readonly resource: Readonly<Record<string, unknown>>
   readonly command?: {

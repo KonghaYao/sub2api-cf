@@ -1203,6 +1203,15 @@ export interface Account {
     tier: { status: 'unknown' | 'unsupported'; value: unknown | null }
     privacy: { status: 'unknown' | 'unsupported'; value: unknown | null }
   }
+  /** Worker account mutation version used by guarded bulk/probe operations. */
+  control_version?: number
+  /** Worker-only, per-model capabilities retained for synthetic probes. */
+  model_capabilities?: Array<{
+    model_id: string
+    chat_completions?: boolean
+    responses?: boolean
+    embeddings?: boolean
+  }>
   ollama_cloud_usage?: OllamaCloudUsageState
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {

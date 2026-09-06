@@ -18,6 +18,17 @@
             @create="showCreate = true"
           >
             <template #after>
+              <button
+                v-if="cloudflareWorkerContract"
+                data-testid="open-synthetic-probes"
+                class="btn btn-secondary px-2 md:px-3"
+                :disabled="selectedSyntheticProbeAccounts.length === 0"
+                :title="t('admin.accounts.syntheticProbe.open')"
+                @click="showSyntheticProbe = true"
+              >
+                <Icon name="refresh" size="sm" />
+                <span class="hidden md:inline">{{ t('admin.accounts.syntheticProbe.open') }}</span>
+              </button>
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
                 <button
@@ -482,6 +493,13 @@
     <ReAuthAccountModal v-if="!cloudflareWorkerContract" :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal v-if="!cloudflareWorkerContract" :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
+    <SyntheticProbeModal
+      v-if="cloudflareWorkerContract"
+      :show="showSyntheticProbe"
+      :accounts="selectedSyntheticProbeAccounts"
+      :models="workerModels"
+      @close="showSyntheticProbe = false"
+    />
     <ScheduledTestsPanel v-if="!cloudflareWorkerContract" :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu v-if="!cloudflareWorkerContract" :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
     <SyncFromCrsModal v-if="!cloudflareWorkerContract" :show="showSync" @close="showSync = false" @synced="reload" />
@@ -543,6 +561,7 @@ import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vu
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
+import SyntheticProbeModal from '@/components/admin/account/SyntheticProbeModal.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
@@ -628,6 +647,7 @@ const showCreateShadowDialog = ref(false)
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
+const showSyntheticProbe = ref(false)
 const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
 const edAcc = ref<Account | null>(null)
@@ -1140,6 +1160,11 @@ const {
   getId: (account) => account.id
 })
 
+const selectedSyntheticProbeAccounts = computed(() => {
+  const selected = new Set(selIds.value.map((id) => String(id)))
+  return accounts.value.filter((account) => selected.has(String(account.id)))
+})
+
 const selectingAllResults = ref(false)
 const selectedAllResultIDs = ref<Set<number> | null>(null)
 const selectionRequestVersion = ref(0)
@@ -1404,6 +1429,7 @@ const isAnyModalOpen = computed(() => {
     showReAuth.value ||
     showTest.value ||
     showStats.value ||
+    showSyntheticProbe.value ||
     showSchedulePanel.value ||
     showErrorPassthrough.value ||
     showTLSFingerprintProfiles.value

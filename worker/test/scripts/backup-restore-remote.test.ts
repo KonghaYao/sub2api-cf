@@ -111,10 +111,11 @@ describe('remote Cloudflare adapter plans', () => {
     })
     expect(plan.steps[1]).toMatchObject({
       phase: 'durable-objects',
-      transport: 'api-contract',
+      transport: 'worker-http',
       request: {
         method: 'POST',
         service: 'sub2api-worker-staging',
+        origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
         path: '/internal/backup/durable-objects/USER_STATE/user-1/export',
         response_format: 'ndjson',
       },
@@ -129,6 +130,23 @@ describe('remote Cloudflare adapter plans', () => {
         response_format: 'canonical-ndjson-inventory',
       },
     })
+
+    const mixedPlan = createRemoteBackupPlan({
+      environment: 'staging',
+      accountId: 'a'.repeat(32),
+      workingDirectory: root,
+      bundleDirectory: '/safe/mixed-backup.bundle',
+      durableObjects: [
+        { namespace: 'USER_STATE', objectId: 'user-1', logicalName: 'user-1.ndjson' },
+        { namespace: 'SUBSCRIPTION_STATE', objectId: 'subscription-1', logicalName: 'subscription-1.ndjson' },
+      ],
+    })
+    expect(mixedPlan.steps.find(({ phase, resource }) => (
+      phase === 'durable-objects' && resource.namespace === 'USER_STATE'
+    ))).toMatchObject({ transport: 'worker-http' })
+    expect(mixedPlan.steps.find(({ phase, resource }) => (
+      phase === 'durable-objects' && resource.namespace === 'SUBSCRIPTION_STATE'
+    ))).toMatchObject({ transport: 'api-contract', contract_only: true })
 
     expect(() => createRemoteBackupPlan({
       environment: 'development' as 'staging',
@@ -278,6 +296,49 @@ describe('remote Cloudflare adapter plans', () => {
         request_format: 'canonical-ndjson-inventory-with-content-locator',
       },
     })
+  })
+
+  it('keeps non-USER_STATE restore artifacts contract-only', async () => {
+    const root = await temporaryDirectory()
+    const sourceDirectory = join(root, 'source')
+    await mkdir(sourceDirectory)
+    const d1 = join(sourceDirectory, 'database.sql')
+    const userState = join(sourceDirectory, 'user-1.ndjson')
+    const subscriptionState = join(sourceDirectory, 'subscription-1.ndjson')
+    const r2 = join(sourceDirectory, 'objects.ndjson')
+    await Promise.all([
+      writeFile(d1, 'CREATE TABLE users(id TEXT PRIMARY KEY);\n'),
+      writeFile(userState, '{"state":"user"}\n'),
+      writeFile(subscriptionState, '{"state":"subscription"}\n'),
+      writeFile(r2, '{"key":"media/a.png","etag":"abc","size":3}\n'),
+    ])
+    const bundleDirectory = join(root, 'mixed.bundle')
+    await createBackupBundle({
+      outputDirectory: bundleDirectory,
+      createdAt: '2026-09-06T00:00:00.000Z',
+      artifacts: [
+        { kind: 'd1-sql', logicalName: 'primary.sql', source: 'DB', filePath: d1 },
+        { kind: 'do-ndjson', logicalName: 'user-1.ndjson', source: 'USER_STATE:user-1', filePath: userState },
+        {
+          kind: 'do-ndjson', logicalName: 'subscription-1.ndjson',
+          source: 'SUBSCRIPTION_STATE:subscription-1', filePath: subscriptionState,
+        },
+        { kind: 'r2-inventory', logicalName: 'objects.ndjson', source: 'OBJECTS', filePath: r2 },
+      ],
+    })
+    const proof = emptyTargetProof()
+    proof.durable_objects.push({
+      namespace: 'SUBSCRIPTION_STATE', object_id: 'subscription-1', storage_entry_count: 0,
+    })
+    const plan = await createRemoteRestorePlan({
+      environment: 'staging', accountId: 'a'.repeat(32), bundleDirectory,
+      emptyTargetProof: proof, now: new Date('2026-09-06T00:05:00.000Z'),
+    })
+
+    expect(plan.steps.find(({ resource }) => resource.namespace === 'USER_STATE'))
+      .toMatchObject({ transport: 'worker-http' })
+    expect(plan.steps.find(({ resource }) => resource.namespace === 'SUBSCRIPTION_STATE'))
+      .toMatchObject({ transport: 'api-contract', contract_only: true })
   })
 })
 

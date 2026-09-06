@@ -130,15 +130,39 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   or item-reference pairing. Invalid replay IDs and reasoning-only IDs are
   removed while valid input IDs and arbitrary output item IDs are preserved.
 
+## Completed locally in v0.38
+
+- The first real-browser Worker vertical slice now drives the built Vue SPA in
+  system Chrome against an isolated local Wrangler runtime. It proves
+  registration, login, administrator funding through the UserStateDO/Queue/D1
+  projection, one-time API-key creation, Chat Completions settlement, Usage UI
+  projection and R2 avatar persistence. It is the first route slice, not yet
+  evidence for every reachable Vue route or a deployed environment.
+- Registration verification, password reset, email binding, notification-email
+  verification and TOTP setup now pass Workerd E2E through the public HTTP
+  routes, the real Queue consumer, D1 leases and a process-external mail Worker
+  service binding. Production still requires a verified sender binding and a
+  deployed smoke run.
+- USER_STATE has a privileged, environment-bound Worker backup transport and a
+  Node remote adapter. Versioned canonical NDJSON captures all six SQLite
+  tables, validates the exact schema, ordering and three independently
+  recomputed digests, restores atomically only into a logically empty object,
+  verifies read-back, permits identical replay and rejects conflicting state.
+  Other Durable Object namespaces and R2 deliberately remain contract-only.
+- The Worker account page can now queue bounded account/model/capability probes
+  and inspect immutable cursor-paginated history. Targets are restricted to the
+  enabled model/account capability intersection and retain configuration
+  versions so stale work cannot overwrite newer account state.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
-| Frontend/Worker contract closure | Local route guards and reachable-page contracts are closed; browser-level deployed proof remains. | Keep the Worker route inventory authoritative and expose new controls only with a complete Worker contract. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
+| Frontend/Worker contract closure | Local route guards are closed and v0.38 proves the first browser-to-Worker core user slice; the remaining reachable pages and deployed proof remain. | Keep the Worker route inventory authoritative and expose new controls only with a complete Worker contract. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
 | Channel customer pricing | Text and synchronous-image channel pricing are complete locally; deployed proof remains. Video routes and pricing are deferred together. | Keep frozen token/request/image decisions independent from provider account-cost facts; add video only with its Worker route. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
 | Core provider and protocol closure | The four Worker providers cover the main text paths, but retained legacy protocol variants and upstream credential lifecycles are incomplete. | Worker streaming codecs and provider adapters; D1 encrypted credential generations; DO leases/refresh serialization; Queue/Cron health recovery. | Every retained Go compatibility fixture is mapped; OpenAI, Anthropic, Gemini and Codex run authenticated binding and deployed smoke tests with exact settlement and no lease leaks. |
 | Production data cutover | Versioned conversion/reconciliation and ownership-cohort artifacts pass locally; the real PostgreSQL/Redis export, Queue catch-up and staged import have not run. | Execute the validated D1/DO/R2 artifacts under the generated single-writer cohort plan. | Users, keys, balances, ledgers, subscriptions, orders, provider accounts, runtime dependencies and R2 objects reconcile by row count and full-domain digest before staged traffic reaches 100%. |
-| Backup, restore and rollback | Local bundles and strict remote plans pass; privileged DO/R2 executors and real drills remain. | Implement the contract-only per-DO and R2 adapters, then exercise the allow-listed journaled plan with Worker Versions rollback notes. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
+| Backup, restore and rollback | Local bundles and strict remote plans pass; v0.38 adds the privileged USER_STATE transport/adapter. Other DO namespaces, R2 and real drills remain. | Implement the remaining contract-only per-DO and R2 adapters, then exercise the allow-listed journaled plan with Worker Versions rollback notes. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
 | Production identity delivery | Queue/D1 delivery behavior and Cloudflare binding adapters pass locally, but no sender is committed in environment config and deployed flows are not proven. | Configure a verified `SEND_EMAIL` sender or an idempotent bounded mail Worker separately in every environment. | Registration verification, password reset, account binding, TOTP and notification-mail verification pass deployed E2E without leaking challenge data. |
 
 ## P1: commercial and operational completeness
@@ -149,7 +173,7 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Admin usage and finance | Immutable per-user balance/debt history and bounded operator-driven batch coordination now exist; automatic discovery, broader aggregates and correction/export workflows are incomplete. | Add scheduled discovery, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | Custom tokens and IPv4/IPv6 policy are complete locally; deployed proof and optional last-used-IP observability remain. | Keep keyed HMAC tokens, one-time plaintext display and D1 CIDR rules sourced only from trusted `CF-Connecting-IP`; retain `last_used_ip: null` until a privacy-reviewed projection exists. | Deployed custom-token, IPv4/IPv6, spoofing and concurrent-update tests pass without persisting plaintext or source IP. |
-| Channel monitor and alerts | Manual per-model probes, bounded Cron outbox recovery, immutable history and firing/recovery state are complete locally; UI, silences, reports and delivery are not. | Add D1 silences, R2 evidence/reports and replay-safe email/webhook delivery around the existing Queue consumer and recovery dispatcher. | Silence/DLQ and deployed per-model inference probes pass without duplicate alerts. |
+| Channel monitor and alerts | Manual per-model probes, bounded Cron recovery, immutable history and the v0.38 Worker UI are complete locally; silences, reports and alert delivery remain. | Add D1 silences, R2 evidence/reports and replay-safe email/webhook delivery around the existing Queue consumer and recovery dispatcher. | Silence/DLQ and deployed per-model inference probes pass without duplicate alerts. |
 | Payment closure | Stripe is implemented; retained Alipay, WeChat Pay, EasyPay or Airwallex behavior is not. | Separate Worker adapters with D1 webhook inbox/order/refund state, Queue fulfilment and R2 evidence. | Every retained provider passes signature, replay, out-of-order, late payment, refund and sandbox E2E. Non-retained providers disappear from the UI. |
 | Settings, audit and compliance | Several legacy settings and audit sources have no Worker contract; risk actions are incomplete. | Typed D1 settings, KV version cache, append-only D1 audit and R2 large details. | Every unsafe admin mutation emits actor audit; settings have defaults, CAS, secret redaction and hot-path effect tests. |
 | Cross-domain retention and DLQ | Individual recovery jobs exist without one complete replay/retention surface. | Bounded D1 cursors/inboxes, Queue DLQs and R2 quarantine/evidence. | Poison, duplicate and out-of-order messages are observable and safely replayable; every job has a tested write/read budget. |

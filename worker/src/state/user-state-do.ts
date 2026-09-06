@@ -38,6 +38,12 @@ import type {
 import { isProviderPlatform } from "../gateway/platform";
 import { groupAccessPredicate } from "../user/group-access";
 import { financialSourceForMutation } from "../shared/user-financial-event";
+import {
+  exportUserStateBackup,
+  inspectUserStateBackup,
+  readUserStateBackupIdentity,
+  restoreUserStateBackup,
+} from "../backup/user-state-backup";
 
 interface UserProfileRow {
   schema_version: number;
@@ -152,6 +158,28 @@ export class UserStateDO {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.health();
       if (request.method === "GET" && url.pathname === "/snapshot") return this.snapshot();
+      if (request.method === "GET" && url.pathname === "/backup/verify") {
+        return await inspectUserStateBackup(
+          this.state.storage,
+          readUserStateBackupIdentity(request),
+        );
+      }
+      if (request.method === "POST" && url.pathname === "/backup/export") {
+        return await exportUserStateBackup(
+          this.state.storage,
+          readUserStateBackupIdentity(request),
+        );
+      }
+      if (request.method === "POST" && url.pathname === "/backup/restore") {
+        const response = await restoreUserStateBackup(
+          this.state.storage,
+          request,
+          readUserStateBackupIdentity(request),
+        );
+        await this.state.storage.deleteAlarm();
+        await this.scheduleNextReservationAlarm();
+        return response;
+      }
       if (request.method === "GET" && url.pathname === "/ledger/export") {
         return this.exportLedger(url);
       }

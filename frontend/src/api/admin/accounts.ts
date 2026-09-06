@@ -796,6 +796,77 @@ export interface WorkerAccountHealthProbeBatchResult {
   }>
 }
 
+export type WorkerSyntheticProbeCapability = 'chat_completions' | 'responses' | 'embeddings'
+
+export interface WorkerSyntheticProbeTarget {
+  account_id: string
+  expected_control_version: number
+  model_id: string
+  capability: WorkerSyntheticProbeCapability
+}
+
+export type WorkerSyntheticProbeTargetErrorCode =
+  | 'account_not_found'
+  | 'account_version_conflict'
+  | 'account_disabled'
+  | 'account_model_not_available'
+  | 'account_model_capability_not_enabled'
+
+export interface WorkerSyntheticProbeTargetResult extends WorkerSyntheticProbeTarget {
+  success: boolean
+  generation?: number
+  job_id?: string
+  error?: {
+    code: WorkerSyntheticProbeTargetErrorCode
+    message: string
+  }
+}
+
+export interface WorkerSyntheticProbeBatchResult {
+  total: number
+  queued: number
+  failed: number
+  queued_ids: string[]
+  failed_ids: string[]
+  results: WorkerSyntheticProbeTargetResult[]
+}
+
+export type WorkerSyntheticProbeErrorCode =
+  | 'provider_configuration_unavailable'
+  | 'upstream_timeout'
+  | 'upstream_transport_failed'
+  | 'upstream_http_error'
+  | 'upstream_invalid_response'
+
+export interface WorkerSyntheticProbeHistoryItem {
+  id: string
+  job_id: string
+  account_id: string
+  model_id: string
+  capability: WorkerSyntheticProbeCapability
+  generation: number
+  outcome: 'succeeded' | 'failed'
+  error_code: WorkerSyntheticProbeErrorCode | null
+  upstream_status: number | null
+  latency_ms: number
+  alert_transition: 'firing' | 'resolved' | null
+  checked_at_ms: number
+}
+
+export interface WorkerSyntheticProbeHistoryPage {
+  items: WorkerSyntheticProbeHistoryItem[]
+  has_more: boolean
+  next_cursor: string | null
+}
+
+export interface WorkerSyntheticProbeHistoryParams {
+  account_id?: string
+  model_id?: string
+  capability?: WorkerSyntheticProbeCapability
+  cursor?: string
+  limit?: number
+}
+
 function workerOperationAccounts(accounts: WorkerAccountOperationTarget[]) {
   if (accounts.length === 0 || accounts.length > 25) {
     throw new Error('Worker account operations require between 1 and 25 accounts')
@@ -837,6 +908,61 @@ export async function queueHealthProbes(
     { headers: { 'Idempotency-Key': operation.key } }
   )
   pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
+function syntheticProbeTargets(targets: WorkerSyntheticProbeTarget[]): WorkerSyntheticProbeTarget[] {
+  if (targets.length === 0 || targets.length > 25) {
+    throw new Error('Worker synthetic probe operations require between 1 and 25 targets')
+  }
+
+  const capabilities: WorkerSyntheticProbeCapability[] = ['chat_completions', 'responses', 'embeddings']
+  const seen = new Set<string>()
+  return targets.map((target) => {
+    if (!target.account_id.trim() || !target.model_id.trim()
+      || !Number.isSafeInteger(target.expected_control_version) || target.expected_control_version < 0
+      || !capabilities.includes(target.capability)) {
+      throw new Error('Worker synthetic probe targets must include a valid account, model, capability, and control version')
+    }
+    const identity = `${target.account_id}\u0000${target.model_id}\u0000${target.capability}`
+    if (seen.has(identity)) throw new Error('Worker synthetic probe targets must not contain duplicate targets')
+    seen.add(identity)
+    return {
+      account_id: target.account_id,
+      expected_control_version: target.expected_control_version,
+      model_id: target.model_id,
+      capability: target.capability,
+    }
+  })
+}
+
+export async function queueSyntheticProbes(
+  targets: WorkerSyntheticProbeTarget[]
+): Promise<WorkerSyntheticProbeBatchResult> {
+  const payload = { targets: syntheticProbeTargets(targets) }
+  const operation = await workerOperationKey('admin-account-synthetic-probes', payload)
+  const { data } = await apiClient.post<WorkerSyntheticProbeBatchResult>(
+    '/admin/accounts/synthetic-probes',
+    payload,
+    { headers: { 'Idempotency-Key': operation.key } }
+  )
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
+export async function listSyntheticProbeHistory(
+  params: WorkerSyntheticProbeHistoryParams = {}
+): Promise<WorkerSyntheticProbeHistoryPage> {
+  const query: WorkerSyntheticProbeHistoryParams = {}
+  if (params.account_id !== undefined) query.account_id = params.account_id
+  if (params.model_id !== undefined) query.model_id = params.model_id
+  if (params.capability !== undefined) query.capability = params.capability
+  if (params.cursor !== undefined) query.cursor = params.cursor
+  if (params.limit !== undefined) query.limit = params.limit
+  const { data } = await apiClient.get<WorkerSyntheticProbeHistoryPage>(
+    '/admin/accounts/synthetic-probes/history',
+    { params: query }
+  )
   return data
 }
 
@@ -1395,6 +1521,8 @@ export const accountsAPI = {
   bulkUpdate,
   bulkSetEnabled,
   queueHealthProbes,
+  queueSyntheticProbes,
+  listSyntheticProbeHistory,
   previewFromCrs,
   syncFromCrs,
   exportData,

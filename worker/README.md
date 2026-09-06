@@ -127,6 +127,13 @@ This command proves local binding compatibility only. It does not replace a
 staging/production smoke run against deployed bindings, Cloudflare routing, or
 a real provider account.
 
+Run `pnpm --dir ../frontend run test:e2e:worker` for the real-browser core-user
+slice. It builds the SPA, migrates an isolated local D1, starts Wrangler with
+local D1/KV/R2/Queue/Durable Object bindings and drives system Chrome through
+registration, funding, API-key creation, Chat settlement, Usage and avatar
+persistence. It never reads production bindings. This is one vertical slice;
+it does not yet cover every reachable Vue route.
+
 ## Deployment
 
 Use `pnpm run deploy:staging` or `pnpm run deploy:production`. These are the
@@ -158,6 +165,11 @@ file import or an interruption between the verified import and registration.
 
 ### Backup bundle core
 
+Set a separate high-entropy `BACKUP_OPERATOR_TOKEN` secret before using any
+remote Durable Object backup route. Requests are environment-bound and the
+staging/production Node adapter accepts only the exact Workers.dev origin
+recorded in the remote plan; redirects are rejected.
+
 `scripts/backup-restore.mjs` packages pre-exported D1 SQL, Durable Object NDJSON,
 and an R2 inventory into a versioned manifest with byte lengths and SHA-256
 digests. It rejects missing, extra, tampered, traversal, and symlink entries,
@@ -182,12 +194,15 @@ environment adapters and an empty-environment drill.
 
 `backup:remote-plan` and `backup:remote-restore-plan` add allow-listed
 staging/production plans around that bundle. D1 steps use Wrangler argument
-arrays; Durable Object and R2 steps remain explicit adapter contracts. The CLI
-never applies a plan. Programmatic execution rejects remaining contract-only
-steps before probing an executor; executable steps require an injected executor
-with an independent read-back verifier, manifest revalidation, a fresh empty
-target proof plus exact restore confirmation, and an atomic prefix journal in
-D1-to-DO-to-R2 order.
+arrays. USER_STATE now has a privileged Worker HTTP transport and the
+`createUserStateBackupRemoteAdapter` Node adapter; its canonical NDJSON covers
+all six SQLite tables, is limited to 32 MiB/200,000 rows, and restores only an
+empty object (or accepts an identical replay). Other Durable Object namespaces
+and R2 remain explicit contract-only adapters. The CLI never applies a plan.
+Programmatic execution rejects any remaining contract-only step before side
+effects; executable steps require an injected executor with an independent
+read-back verifier, manifest revalidation, a fresh empty-target proof plus exact
+restore confirmation, and an atomic prefix journal in D1-to-DO-to-R2 order.
 
 ### Production cutover artifacts
 
