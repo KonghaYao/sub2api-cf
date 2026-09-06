@@ -26,6 +26,7 @@ const MANIFEST_VERSION = 1
 const RESTORE_PLAN_SCHEMA = 'sub2api-cloudflare-restore-plan'
 const RESTORE_PLAN_VERSION = 1
 const MAX_MANIFEST_BYTES = 1024 * 1024
+const MAX_ARTIFACTS = 4_096
 const SHA256 = /^[a-f0-9]{64}$/
 const LOGICAL_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/
 const KINDS = Object.freeze(['d1-sql', 'do-ndjson', 'r2-inventory'])
@@ -233,6 +234,9 @@ function validateManifest(value) {
   if (!Array.isArray(value.artifacts) || value.artifacts.length === 0) {
     throw new Error('Backup manifest must contain at least one artifact')
   }
+  if (value.artifacts.length > MAX_ARTIFACTS) {
+    throw new Error(`Backup manifest may contain at most ${MAX_ARTIFACTS} artifacts`)
+  }
   const names = new Set()
   const paths = new Set()
   const artifacts = value.artifacts.map((rawArtifact, index) => {
@@ -304,6 +308,9 @@ export async function createBackupBundle(options) {
   if (!Array.isArray(options.artifacts) || options.artifacts.length === 0) {
     throw new Error('At least one artifact is required')
   }
+  if (options.artifacts.length > MAX_ARTIFACTS) {
+    throw new Error(`Backup bundle may contain at most ${MAX_ARTIFACTS} artifacts`)
+  }
   const outputDirectory = resolve(options.outputDirectory)
   if (await pathExists(outputDirectory)) throw new Error(`Bundle output already exists: ${outputDirectory}`)
   const createdAt = validateCreatedAt(options.createdAt ?? new Date().toISOString())
@@ -351,9 +358,13 @@ export async function createBackupBundle(options) {
       created_at: createdAt,
       artifacts,
     })
+    const manifestContents = `${JSON.stringify(manifest, null, 2)}\n`
+    if (new TextEncoder().encode(manifestContents).byteLength > MAX_MANIFEST_BYTES) {
+      throw new Error(`Backup manifest exceeds ${MAX_MANIFEST_BYTES} bytes`)
+    }
     await writeFile(
       join(temporaryDirectory, MANIFEST_FILENAME),
-      `${JSON.stringify(manifest, null, 2)}\n`,
+      manifestContents,
       { encoding: 'utf8', flag: 'wx', mode: 0o600 },
     )
     await rename(temporaryDirectory, outputDirectory)

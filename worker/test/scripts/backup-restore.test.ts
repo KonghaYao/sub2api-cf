@@ -196,6 +196,23 @@ describe('versioned backup bundle', () => {
     expect((await readdir(root)).some((name: string) => name.startsWith('.partial.bundle.tmp-'))).toBe(false)
   })
 
+  it('rejects an artifact set that cannot fit the bounded manifest', async () => {
+    const root = await temporaryDirectory()
+    const source = await createSourceArtifacts(root)
+    const outputDirectory = join(root, 'oversized.bundle')
+    const artifacts = Array.from({ length: 4_097 }, (_unused, index) => ({
+      kind: 'do-ndjson' as const,
+      logicalName: `ledger-${String(index).padStart(4, '0')}.ndjson`,
+      source: 'USER_STATE',
+      filePath: source.durableObjects,
+    }))
+
+    await expect(createBackupBundle({ outputDirectory, artifacts })).rejects.toThrow(
+      'at most 4096 artifacts',
+    )
+    await expect(readdir(root)).resolves.not.toContain('oversized.bundle')
+  })
+
   it('rejects an interrupted bundle directory that has artifacts but no manifest', async () => {
     const root = await temporaryDirectory()
     const interrupted = join(root, 'interrupted.bundle')
