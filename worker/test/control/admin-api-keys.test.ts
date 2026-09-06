@@ -30,6 +30,8 @@ interface ApiKeyRow {
   window_7d_start_ms?: number | null
   quota_reset_epoch?: number
   rate_limit_reset_epoch?: number
+  ip_allowlist_json?: string
+  ip_denylist_json?: string
 }
 
 interface GroupRow {
@@ -149,6 +151,8 @@ class KeyStatement {
         resetWindow7d,
         bumpQuotaEpoch,
         bumpRateLimitEpoch,
+        ipAllowlistJson,
+        ipDenylistJson,
         expectedControlVersion,
         controlVersion,
         updatedAt,
@@ -188,6 +192,8 @@ class KeyStatement {
         if (Number(bumpRateLimitEpoch) === 1) {
           key.rate_limit_reset_epoch = (key.rate_limit_reset_epoch ?? 0) + 1
         }
+        key.ip_allowlist_json = String(ipAllowlistJson)
+        key.ip_denylist_json = String(ipDenylistJson)
         key.control_version = Number(controlVersion)
         key.updated_at_ms = Number(updatedAt)
         changes = 1
@@ -218,6 +224,8 @@ class KeyStatement {
         rateLimit5hMicros,
         rateLimit1dMicros,
         rateLimit7dMicros,
+        ipAllowlistJson,
+        ipDenylistJson,
       ] = this.values
       if (
         permissionUserId !== userId ||
@@ -247,6 +255,8 @@ class KeyStatement {
         rate_limit_5h_micros: Number(rateLimit5hMicros),
         rate_limit_1d_micros: Number(rateLimit1dMicros),
         rate_limit_7d_micros: Number(rateLimit7dMicros),
+        ip_allowlist_json: String(ipAllowlistJson),
+        ip_denylist_json: String(ipDenylistJson),
         usage_5h_micros: 0,
         usage_1d_micros: 0,
         usage_7d_micros: 0,

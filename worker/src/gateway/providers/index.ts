@@ -399,22 +399,127 @@ function normalizeCodexSystemInstructions(body: Record<string, unknown>): void {
 }
 
 function normalizeCodexToolCallIds(input: unknown[]): void {
+  const referenceMappings = new Map<string, string>()
+  const ambiguousReferences = new Set<string>()
+  const rawCallIds = new Set<string>()
+  const inputItemIds = new Set<string>()
+  for (const value of input) {
+    const item = objectRecord(value)
+    const itemType = typeof item?.type === 'string' ? item.type.trim() : ''
+    if (
+      itemType !== 'item_reference' && itemType !== 'reasoning' &&
+      typeof item?.id === 'string' && item.id.trim() !== '' &&
+      !shouldStripCodexInputItemId(itemType, item.id.trim())
+    ) {
+      inputItemIds.add(item.id.trim())
+    }
+    const prefix = codexToolCallIdPrefix(itemType)
+    if (item === null || prefix === null || typeof item.call_id !== 'string') continue
+    const raw = item.call_id.trim()
+    if (raw === '') continue
+    rawCallIds.add(raw)
+    const normalized = normalizedCodexToolCallId(raw, prefix)
+    const existing = referenceMappings.get(raw)
+    if (existing !== undefined && existing !== normalized) {
+      referenceMappings.delete(raw)
+      ambiguousReferences.add(raw)
+    } else if (!ambiguousReferences.has(raw)) {
+      referenceMappings.set(raw, normalized)
+    }
+  }
+
   for (let index = 0; index < input.length; index += 1) {
     const item = objectRecord(input[index])
-    const prefix = codexToolCallIdPrefix(item?.type)
-    if (item === null || prefix === null || typeof item.call_id !== 'string') {
+    const itemType = typeof item?.type === 'string' ? item.type.trim() : ''
+    const prefix = codexToolCallIdPrefix(itemType)
+    if (item === null) continue
+    if (itemType === 'reasoning') {
+      const normalized = { ...item }
+      delete normalized.id
+      delete normalized.call_id
+      if (normalized.summary === undefined || normalized.summary === null) normalized.summary = []
+      input[index] = normalized
       continue
     }
-    const raw = item.call_id.trim()
-    if (raw !== '') input[index] = { ...item, call_id: normalizedCodexToolCallId(raw, prefix) }
+    if (prefix !== null) {
+      const normalized: Record<string, unknown> = { ...item }
+      let rawCallId = typeof item.call_id === 'string' ? item.call_id.trim() : ''
+      if (rawCallId === '' && typeof item.id === 'string' && item.id.trim() !== '') {
+        rawCallId = item.id.trim()
+      }
+      if (rawCallId !== '') normalized.call_id = normalizedCodexToolCallId(rawCallId, prefix)
+      if (codexInputItemRequiresName(itemType) && !nonEmptyRecordString(item.name)) {
+        normalized.name = nonEmptyRecordString(item.tool_name) ??
+          nonEmptyRecordString(objectRecord(item.function)?.name) ??
+          'tool'
+      }
+      if (typeof normalized.id === 'string' && shouldStripCodexInputItemId(itemType, normalized.id)) {
+        delete normalized.id
+      }
+      input[index] = normalized
+      continue
+    }
+    if (itemType !== 'item_reference') {
+      if ('call_id' in item || (typeof item.id === 'string' && shouldStripCodexInputItemId(itemType, item.id))) {
+        const normalized = { ...item }
+        delete normalized.call_id
+        if (typeof item.id === 'string' && shouldStripCodexInputItemId(itemType, item.id)) {
+          delete normalized.id
+        }
+        input[index] = normalized
+      }
+      continue
+    }
+    if (typeof item.id !== 'string') continue
+    const raw = item.id.trim()
+    if (!raw.startsWith('call_')) continue
+    const normalized = inputItemIds.has(raw)
+      ? undefined
+      : referenceMappings.get(raw) ??
+        (rawCallIds.has(raw) ? undefined : normalizedCodexToolCallId(raw, 'fc'))
+    if (normalized !== undefined) input[index] = { ...item, id: normalized }
   }
 }
 
 function codexToolCallIdPrefix(value: unknown): 'fc' | 'ctc' | 'tsc' | null {
   if (value === 'custom_tool_call' || value === 'custom_tool_call_output') return 'ctc'
   if (value === 'tool_search_call' || value === 'tool_search_output') return 'tsc'
-  if (value === 'function_call' || value === 'function_call_output') return 'fc'
+  if (
+    value === 'function_call' || value === 'function_call_output' ||
+    value === 'tool_call' || value === 'local_shell_call' ||
+    value === 'mcp_tool_call' || value === 'mcp_tool_call_output'
+  ) return 'fc'
   return null
+}
+
+function shouldStripCodexInputItemId(itemType: string, id: string): boolean {
+  const requiredPrefix = codexInputItemIdPrefix(itemType)
+  return requiredPrefix !== null && !id.startsWith(requiredPrefix)
+}
+
+function codexInputItemIdPrefix(itemType: string): string | null {
+  switch (itemType) {
+    case 'message': return 'msg'
+    case 'reasoning': return 'rs'
+    case 'web_search_call': return 'ws'
+    case 'custom_tool_call': return 'ctc'
+    case 'tool_search_call': return 'tsc'
+    case 'function_call':
+    case 'tool_call':
+    case 'local_shell_call':
+    case 'mcp_tool_call':
+      return 'fc'
+    default:
+      return null
+  }
+}
+
+function codexInputItemRequiresName(itemType: string): boolean {
+  return itemType === 'function_call' || itemType === 'custom_tool_call' || itemType === 'mcp_tool_call'
+}
+
+function nonEmptyRecordString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
 }
 
 function normalizedCodexToolCallId(value: string, prefix: 'fc' | 'ctc' | 'tsc'): string {

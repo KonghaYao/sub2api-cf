@@ -200,6 +200,187 @@ describe('user API keys', () => {
     ).get()).toEqual({ event_type: 'user.api_keys.create', outcome: 'succeeded', user_id: 'alice' })
   })
 
+  it('creates a custom token once and normalizes IPv4/IPv6 access policy without persisting plaintext', async () => {
+    const test = await fixture()
+    const customKey = 'Customer_Key-2026_abcdef'
+    const request = {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': 'alice-custom-key-0001',
+      },
+      body: JSON.stringify({
+        name: 'Restricted automation',
+        group_id: 'group-a',
+        custom_key: customKey,
+        ip_whitelist: [' 192.168.1.42/24 ', '2001:0DB8:0:0::1/64', '192.168.1.0/24'],
+        ip_blacklist: ['192.168.1.9', '2001:db8::dead:BEEF'],
+      }),
+    }
+
+    const created = await app().request('/keys', request, test.env)
+    const replayed = await app().request('/keys', request, test.env)
+
+    expect(created.status).toBe(201)
+    await expect(created.json()).resolves.toMatchObject({
+      data: {
+        key: customKey,
+        key_prefix: customKey.slice(0, 8),
+        ip_whitelist: ['192.168.1.0/24', '2001:db8::/64'],
+        ip_blacklist: ['192.168.1.9', '2001:db8::dead:beef'],
+      },
+    })
+    expect(replayed.status).toBe(200)
+    const replay = await replayed.json() as { data: Record<string, unknown> }
+    expect(replay.data).not.toHaveProperty('key')
+
+    const persisted = test.raw.prepare(
+      `SELECT key_hash, key_prefix, ip_allowlist_json, ip_denylist_json
+         FROM api_keys WHERE name = 'Restricted automation'`,
+    ).get() as Record<string, unknown>
+    expect(persisted).toEqual({
+      key_hash: await apiKeyDigest(customKey, PEPPER),
+      key_prefix: customKey.slice(0, 8),
+      ip_allowlist_json: '["192.168.1.0/24","2001:db8::/64"]',
+      ip_denylist_json: '["192.168.1.9","2001:db8::dead:beef"]',
+    })
+    expect(JSON.stringify(persisted)).not.toContain(customKey)
+    const persistedMetadata = test.raw.prepare(
+      `SELECT request_hash, response_json FROM control_idempotency
+        WHERE scope = 'user.api_keys.create.v1:alice'`,
+    ).get() as Record<string, unknown>
+    const audit = test.raw.prepare(
+      `SELECT metadata_json FROM auth_audit_events
+        WHERE event_type = 'user.api_keys.create' AND user_id = 'alice'`,
+    ).get() as Record<string, unknown>
+    expect(JSON.stringify({ persistedMetadata, audit })).not.toContain(customKey)
+  })
+
+  it('validates custom-token boundaries, rejects update-time replacement, and reports digest conflicts safely', async () => {
+    const test = await fixture()
+    const create = (idempotencyKey: string, customKey: unknown, authorization = test.authorization.alice) =>
+      app().request('/keys', {
+        method: 'POST',
+        headers: {
+          authorization,
+          'content-type': 'application/json',
+          'idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify({ name: 'Custom', group_id: 'group-a', custom_key: customKey }),
+      }, test.env)
+
+    for (const [index, value, code] of [
+      ['short', '12345678901234567890123', 'api_key_too_short'],
+      ['long', 'a'.repeat(129), 'api_key_too_long'],
+      ['chars', '12345678901234567890123!', 'api_key_invalid_chars'],
+      ['entropy', 'a'.repeat(24), 'api_key_low_entropy'],
+      ['type', 1234567890123456, 'invalid_custom_key'],
+    ] as const) {
+      const response = await create(`invalid-custom-${index}`, value)
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({ code })
+    }
+
+    const token = 'same-token-1234567890-abcd'
+    expect((await create('custom-conflict-alice', token)).status).toBe(201)
+    const conflict = await create('custom-conflict-bob', token, test.authorization.bob)
+    expect(conflict.status).toBe(409)
+    const conflictText = await conflict.text()
+    expect(conflictText).toContain('api_key_exists')
+    expect(conflictText).not.toContain(token)
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM api_keys').get()).toEqual({ total: 1 })
+
+    const keyId = (test.raw.prepare('SELECT id FROM api_keys').get() as { id: string }).id
+    const replacement = await app().request(`/keys/${keyId}`, {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ custom_key: 'replacement-token-123456' }),
+    }, test.env)
+    expect(replacement.status).toBe(400)
+    await expect(replacement.json()).resolves.toMatchObject({ code: 'custom_key_create_only' })
+  })
+
+  it('updates normalized IP policy with owner CAS and advances both control and auth versions', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-key', userId: 'alice', name: 'Alice key', hashByte: 'a' })
+
+    const updated = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({
+        ip_whitelist: ['10.2.3.4/8', '2001:db8:abcd::/48'],
+        ip_blacklist: ['10.9.0.0/16'],
+      }),
+    }, test.env)
+
+    expect(updated.status).toBe(200)
+    await expect(updated.json()).resolves.toMatchObject({
+      data: {
+        ip_whitelist: ['10.0.0.0/8', '2001:db8:abcd::/48'],
+        ip_blacklist: ['10.9.0.0/16'],
+        control_version: 1,
+      },
+    })
+    expect(test.raw.prepare(
+      `SELECT auth_version, control_version, ip_allowlist_json, ip_denylist_json
+         FROM api_keys WHERE id = 'alice-key'`,
+    ).get()).toEqual({
+      auth_version: 2,
+      control_version: 1,
+      ip_allowlist_json: '["10.0.0.0/8","2001:db8:abcd::/48"]',
+      ip_denylist_json: '["10.9.0.0/16"]',
+    })
+
+    const stale = await app().request('/keys/alice-key', {
+      method: 'PUT',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ ip_blacklist: [] }),
+    }, test.env)
+    expect(stale.status).toBe(412)
+  })
+
+  it('rejects malformed or oversized IP policy input and bounds key bodies to 16 KiB', async () => {
+    const test = await fixture()
+    const create = (idempotencyKey: string, policy: Record<string, unknown>) => app().request('/keys', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify({ name: 'Invalid policy', group_id: 'group-a', ...policy }),
+    }, test.env)
+
+    for (const [index, policy] of [
+      { ip_whitelist: ['10.0.0.1/33'] },
+      { ip_whitelist: ['010.0.0.1'] },
+      { ip_blacklist: ['2001:db8::1/129'] },
+      { ip_whitelist: '10.0.0.1' },
+      { ip_blacklist: Array.from({ length: 65 }, (_, value) => `10.0.0.${value}`) },
+    ].entries()) {
+      const response = await create(`invalid-ip-policy-${index}`, policy)
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({ code: expect.stringMatching(/^invalid_ip_/) })
+    }
+
+    const oversized = await create('oversized-key-body', { ignored: 'x'.repeat(17 * 1024) })
+    expect(oversized.status).toBe(413)
+    await expect(oversized.json()).resolves.toMatchObject({ code: 'request_too_large' })
+  })
+
   it('accepts expires_at_ms for compatibility but exposes only RFC3339 expires_at', async () => {
     const test = await fixture()
     const expiresAtMs = Date.now() + 86_400_000

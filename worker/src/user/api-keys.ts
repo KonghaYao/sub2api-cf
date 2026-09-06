@@ -21,6 +21,7 @@ import {
 import type { Env } from '../env'
 import { apiKeyDigest, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { normalizeIpPolicyList, parseStoredIpPolicy } from '../gateway/ip-policy'
 import { requireUserGroupAccess } from './groups'
 
 type UserBindings = { Bindings: Env }
@@ -53,6 +54,8 @@ interface ApiKeyRow {
   window_7d_start_ms: number | null
   quota_reset_epoch: number
   rate_limit_reset_epoch: number
+  ip_allowlist_json: string
+  ip_denylist_json: string
 }
 
 interface CreateApiKeyInput {
@@ -63,6 +66,9 @@ interface CreateApiKeyInput {
   rate_limit_5h_micros: number
   rate_limit_1d_micros: number
   rate_limit_7d_micros: number
+  custom_key?: string
+  ip_whitelist: string[]
+  ip_blacklist: string[]
 }
 
 interface UpdateApiKeyPatch {
@@ -76,7 +82,11 @@ interface UpdateApiKeyPatch {
   rate_limit_7d_micros?: number
   reset_quota?: boolean
   reset_rate_limit_usage?: boolean
+  ip_whitelist?: string[]
+  ip_blacklist?: string[]
 }
+
+const API_KEY_BODY_LIMIT_BYTES = 16 * 1024
 
 export async function listUserApiKeys(context: Context<UserBindings>): Promise<Response> {
   try {
@@ -124,11 +134,17 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
-    const input = parseCreateInput(await readJsonObject(context.req.raw))
+    const input = parseCreateInput(await readJsonObject(context.req.raw, API_KEY_BODY_LIMIT_BYTES))
+    const pepper = requireApiKeyPepper(context.env)
+    const customKeyHash = input.custom_key === undefined
+      ? undefined
+      : await apiKeyDigest(input.custom_key, pepper)
     const idempotency = await controlIdempotency(
       `user.api_keys.create.v1:${user.id}`,
       idempotencyKey,
-      input,
+      customKeyHash === undefined
+        ? input
+        : { ...input, custom_key: undefined, custom_key_digest: customKeyHash },
     )
     const previous = await findControlIdempotency(context.env, idempotency)
     if (previous !== null) {
@@ -155,8 +171,8 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
         'API key exists without its idempotency record',
       )
     }
-    const rawKey = `sk-sub2api-${randomToken(36)}`
-    const keyHash = await apiKeyDigest(rawKey, requireApiKeyPepper(context.env))
+    const rawKey = input.custom_key ?? `sk-sub2api-${randomToken(36)}`
+    const keyHash = customKeyHash ?? await apiKeyDigest(rawKey, pepper)
     const now = Date.now()
     const row: ApiKeyRow = {
       id: keyId,
@@ -169,7 +185,7 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
       created_at_ms: now,
       updated_at_ms: now,
       group_id: input.group_id,
-      key_prefix: rawKey.slice(0, 16),
+      key_prefix: input.custom_key === undefined ? rawKey.slice(0, 16) : rawKey.slice(0, 8),
       auth_version: 1,
       control_version: 0,
       revoked_at_ms: null,
@@ -186,6 +202,8 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
       window_7d_start_ms: null,
       quota_reset_epoch: 0,
       rate_limit_reset_epoch: 0,
+      ip_allowlist_json: JSON.stringify(input.ip_whitelist),
+      ip_denylist_json: JSON.stringify(input.ip_blacklist),
     }
     const safe = publicApiKey(row)
     try {
@@ -196,8 +214,9 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
              last_used_at_ms, created_at_ms, updated_at_ms,
              group_id, key_prefix, auth_version, revoked_at_ms,
              quota_micros, rate_limit_5h_micros,
-             rate_limit_1d_micros, rate_limit_7d_micros
-           ) VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?)`,
+             rate_limit_1d_micros, rate_limit_7d_micros,
+             ip_allowlist_json, ip_denylist_json
+           ) VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id,
           row.user_id,
@@ -212,6 +231,8 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
           input.rate_limit_5h_micros,
           input.rate_limit_1d_micros,
           input.rate_limit_7d_micros,
+          row.ip_allowlist_json,
+          row.ip_denylist_json,
         ),
         controlIdempotencyInsert(context.env, idempotency, 'api_key', row.id, safe, now),
         apiKeyAuditInsert(
@@ -225,7 +246,12 @@ export async function createUserApiKey(context: Context<UserBindings>): Promise<
       ])
     } catch (error) {
       const recovered = await findControlIdempotency(context.env, idempotency)
-      if (recovered === null) throw error
+      if (recovered === null) {
+        if (isApiKeyDigestConflict(error)) {
+          throw new GatewayError(409, 'api_key_exists', 'API key already exists')
+        }
+        throw error
+      }
       const replay = parseIdempotentResponse<Record<string, unknown>>(recovered, 'api_key')
       if (recovered.resource_id !== replay.id || replay.user_id !== user.id) {
         throw invalidIdempotencyRecord()
@@ -250,7 +276,7 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const keyId = requireResourceId(context.req.param('id'), 'api_key')
-    const body = await readJsonObject(context.req.raw)
+    const body = await readJsonObject(context.req.raw, API_KEY_BODY_LIMIT_BYTES)
     const patch = parseUpdatePatch(body)
     const expectedControlVersion = requireExpectedControlVersion(context.req.raw, body)
     let row = await findOwnedApiKey(context.env, keyId, user.id)
@@ -269,6 +295,8 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
     const rateLimit7dMicros = patch.rate_limit_7d_micros ?? row.rate_limit_7d_micros
     const resetQuota = patch.reset_quota === true
     const resetRateLimitUsage = patch.reset_rate_limit_usage === true
+    const ipWhitelist = patch.ip_whitelist ?? storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json')
+    const ipBlacklist = patch.ip_blacklist ?? storedPolicy(row.ip_denylist_json, 'ip_denylist_json')
     assertResetEpochAvailable(row.quota_reset_epoch, resetQuota, 'quota_reset_epoch')
     assertResetEpochAvailable(
       row.rate_limit_reset_epoch,
@@ -286,7 +314,9 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
     const authChanged =
       groupId !== row.group_id ||
       expiresAtMs !== row.expires_at_ms ||
-      enabled !== (row.enabled === 1)
+      enabled !== (row.enabled === 1) ||
+      !samePolicy(ipWhitelist, storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json')) ||
+      !samePolicy(ipBlacklist, storedPolicy(row.ip_denylist_json, 'ip_denylist_json'))
     const monetaryChanged =
       quotaMicros !== row.quota_micros ||
       rateLimit5hMicros !== row.rate_limit_5h_micros ||
@@ -323,6 +353,7 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
                   window_7d_start_ms = CASE WHEN ? THEN NULL ELSE window_7d_start_ms END,
                   quota_reset_epoch = CASE WHEN ? THEN quota_reset_epoch + 1 ELSE quota_reset_epoch END,
                   rate_limit_reset_epoch = CASE WHEN ? THEN rate_limit_reset_epoch + 1 ELSE rate_limit_reset_epoch END,
+                  ip_allowlist_json = ?, ip_denylist_json = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ? AND user_id = ?`,
@@ -345,6 +376,8 @@ export async function updateUserApiKey(context: Context<UserBindings>): Promise<
           resetRateLimitUsage ? 1 : 0,
           resetQuota ? 1 : 0,
           resetRateLimitUsage ? 1 : 0,
+          JSON.stringify(ipWhitelist),
+          JSON.stringify(ipBlacklist),
           row.control_version,
           controlVersion,
           now,
@@ -451,13 +484,15 @@ function apiKeySelect(): string {
                  rate_limit_5h_micros, rate_limit_1d_micros, rate_limit_7d_micros,
                  usage_5h_micros, usage_1d_micros, usage_7d_micros,
                  window_5h_start_ms, window_1d_start_ms, window_7d_start_ms,
-                 quota_reset_epoch, rate_limit_reset_epoch
+                 quota_reset_epoch, rate_limit_reset_epoch,
+                 ip_allowlist_json, ip_denylist_json
             FROM api_keys`
 }
 
 function parseCreateInput(body: Record<string, unknown>): CreateApiKeyInput {
   rejectLegacyMonetaryFields(body)
   rejectServerManagedMonetaryFields(body)
+  const customKey = parseCustomKey(body)
   return {
     name: requireString(body, 'name', 128),
     group_id: requireResourceId(requireString(body, 'group_id', 128), 'group'),
@@ -466,10 +501,16 @@ function parseCreateInput(body: Record<string, unknown>): CreateApiKeyInput {
     rate_limit_5h_micros: optionalMonetaryLimit(body, 'rate_limit_5h_micros'),
     rate_limit_1d_micros: optionalMonetaryLimit(body, 'rate_limit_1d_micros'),
     rate_limit_7d_micros: optionalMonetaryLimit(body, 'rate_limit_7d_micros'),
+    ...(customKey === undefined ? {} : { custom_key: customKey }),
+    ip_whitelist: optionalIpPolicy(body, 'ip_whitelist'),
+    ip_blacklist: optionalIpPolicy(body, 'ip_blacklist'),
   }
 }
 
 function parseUpdatePatch(body: Record<string, unknown>): UpdateApiKeyPatch {
+  if (Object.hasOwn(body, 'custom_key')) {
+    throw new GatewayError(400, 'custom_key_create_only', 'custom_key is accepted only when creating an API key')
+  }
   rejectLegacyMonetaryFields(body)
   rejectServerManagedMonetaryFields(body)
   const patch: UpdateApiKeyPatch = {}
@@ -505,7 +546,50 @@ function parseUpdatePatch(body: Record<string, unknown>): UpdateApiKeyPatch {
     }
     patch.reset_rate_limit_usage = body.reset_rate_limit_usage
   }
+  if (Object.hasOwn(body, 'ip_whitelist')) {
+    patch.ip_whitelist = normalizeIpPolicyList(body.ip_whitelist, 'ip_whitelist')
+  }
+  if (Object.hasOwn(body, 'ip_blacklist')) {
+    patch.ip_blacklist = normalizeIpPolicyList(body.ip_blacklist, 'ip_blacklist')
+  }
   return patch
+}
+
+function parseCustomKey(body: Record<string, unknown>): string | undefined {
+  if (!Object.hasOwn(body, 'custom_key') || body.custom_key === undefined || body.custom_key === null || body.custom_key === '') {
+    return undefined
+  }
+  if (typeof body.custom_key !== 'string') {
+    throw new GatewayError(400, 'invalid_custom_key', 'custom_key must be a string')
+  }
+  if (body.custom_key.length < 24) {
+    throw new GatewayError(400, 'api_key_too_short', 'custom_key must contain at least 24 characters')
+  }
+  if (body.custom_key.length > 128) {
+    throw new GatewayError(400, 'api_key_too_long', 'custom_key must contain at most 128 characters')
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(body.custom_key)) {
+    throw new GatewayError(
+      400,
+      'api_key_invalid_chars',
+      'custom_key may contain only letters, numbers, underscores, and hyphens',
+    )
+  }
+  if (new Set(body.custom_key).size < 8) {
+    throw new GatewayError(
+      400,
+      'api_key_low_entropy',
+      'custom_key must contain at least 8 distinct characters',
+    )
+  }
+  return body.custom_key
+}
+
+function optionalIpPolicy(
+  body: Record<string, unknown>,
+  field: 'ip_whitelist' | 'ip_blacklist',
+): string[] {
+  return Object.hasOwn(body, field) ? normalizeIpPolicyList(body[field], field) : []
 }
 
 const MONETARY_LIMIT_FIELDS = [
@@ -652,6 +736,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isApiKeyDigestConflict(error: unknown): boolean {
+  return /UNIQUE constraint failed:\s*api_keys\.key_hash/i.test(errorMessage(error))
+}
+
+function storedPolicy(
+  value: string,
+  field: 'ip_allowlist_json' | 'ip_denylist_json',
+): string[] {
+  return parseStoredIpPolicy(value, field).map((rule) => rule.canonical)
+}
+
+function samePolicy(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((rule, index) => rule === right[index])
+}
+
 function publicApiKey(row: ApiKeyRow): Record<string, unknown> {
   const windows = effectiveRateLimitWindows(row, Date.now())
   return {
@@ -684,6 +783,9 @@ function publicApiKey(row: ApiKeyRow): Record<string, unknown> {
     created_at: new Date(row.created_at_ms).toISOString(),
     updated_at: new Date(row.updated_at_ms).toISOString(),
     revoked_at: toIso(row.revoked_at_ms),
+    ip_whitelist: storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json'),
+    ip_blacklist: storedPolicy(row.ip_denylist_json, 'ip_denylist_json'),
+    last_used_ip: null,
   }
 }
 

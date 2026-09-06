@@ -265,15 +265,14 @@ export async function create(
     return data
   }
 
-  if (customKey) throw new WorkerFeatureNotSupportedError('Custom API keys')
-  if (ipWhitelist?.length || ipBlacklist?.length) {
-    throw new WorkerFeatureNotSupportedError('API key IP restrictions')
-  }
   if (groupId === undefined || groupId === null || String(groupId).length === 0) {
     throw new Error('group_id is required')
   }
 
   const payload: Record<string, unknown> = { name, group_id: String(groupId) }
+  if (customKey !== undefined) payload.custom_key = customKey
+  if (ipWhitelist !== undefined) payload.ip_whitelist = ipWhitelist
+  if (ipBlacklist !== undefined) payload.ip_blacklist = ipBlacklist
   workerAmountPayload(payload, 'quota', quota)
   workerAmountPayload(payload, 'rate_limit_5h', rateLimitData?.rate_limit_5h)
   workerAmountPayload(payload, 'rate_limit_1d', rateLimitData?.rate_limit_1d)
@@ -304,14 +303,6 @@ export async function update(
     return data
   }
 
-  const unsupported = [
-    'ip_whitelist',
-    'ip_blacklist'
-  ].filter((field) => Object.prototype.hasOwnProperty.call(updates, field))
-  if (unsupported.length > 0) {
-    throw new WorkerFeatureNotSupportedError(`API key fields: ${unsupported.join(', ')}`)
-  }
-
   const payload: Record<string, unknown> = {}
   if (updates.name !== undefined) payload.name = updates.name
   if (updates.group_id === null) {
@@ -319,6 +310,8 @@ export async function update(
   }
   if (updates.group_id !== undefined) payload.group_id = String(updates.group_id)
   if (updates.status !== undefined) payload.status = updates.status
+  if (updates.ip_whitelist !== undefined) payload.ip_whitelist = updates.ip_whitelist
+  if (updates.ip_blacklist !== undefined) payload.ip_blacklist = updates.ip_blacklist
   if (updates.expires_at !== undefined) {
     const expiresAtMs = updates.expires_at ? Date.parse(updates.expires_at) : null
     if (expiresAtMs !== null && !Number.isSafeInteger(expiresAtMs)) {

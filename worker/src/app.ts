@@ -50,6 +50,10 @@ import {
   bulkUpdateAdminAccounts,
   queueAdminAccountHealthProbes,
 } from './control/account-operations'
+import {
+  listAdminAccountSyntheticProbeHistory,
+  queueAdminAccountSyntheticProbes,
+} from './control/account-synthetic-probes'
 import { getAdminAuditEvent, listAdminAuditEvents } from './control/audit'
 import {
   recoverAdminSession,
@@ -617,6 +621,8 @@ export function createApp() {
   app.post('/api/v1/admin/accounts', createAdminAccount)
   app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
+  app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)
+  app.get('/api/v1/admin/accounts/synthetic-probes/history', listAdminAccountSyntheticProbeHistory)
   app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)

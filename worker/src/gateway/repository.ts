@@ -7,6 +7,7 @@ import type {
   FrozenTimePricing,
 } from './customer-pricing'
 import { GatewayError } from './errors'
+import { isSourceIpAllowed, parseStoredIpPolicy, trustedSourceIp } from './ip-policy'
 import { isProviderPlatform } from './platform'
 import type {
   AccountCandidate,
@@ -88,12 +89,17 @@ interface PrincipalRow {
   quota_reset_epoch: number | null
   quota_reset_generation: number | null
   subscription_control_version: number | null
+  ip_allowlist_json?: string
+  ip_denylist_json?: string
 }
 
 export async function authenticateGatewayRequest(
   request: Request,
   env: Env,
 ): Promise<GatewayPrincipal> {
+  // D1 is deliberately consulted on every authentication. We do not cache
+  // token or IP-policy rows in isolate memory/KV, so a CAS update that bumps
+  // auth_version is visible to the very next request without invalidation lag.
   const url = new URL(request.url)
   if (url.searchParams.has('key') || url.searchParams.has('api_key')) {
     throw new GatewayError(
@@ -127,6 +133,7 @@ export async function authenticateGatewayRequest(
             k.window_7d_start_ms,
             k.quota_reset_epoch AS api_key_quota_reset_epoch,
             k.rate_limit_reset_epoch AS api_key_rate_limit_reset_epoch,
+            k.ip_allowlist_json, k.ip_denylist_json,
             platform_quota.platform AS platform_quota_platform,
             platform_quota.enabled AS platform_quota_enabled,
             platform_quota.control_version AS platform_quota_control_version,
@@ -182,6 +189,7 @@ export async function authenticateGatewayRequest(
   ) {
     throw new GatewayError(401, 'invalid_api_key', 'Invalid or expired API key', 'authentication_error')
   }
+  enforceApiKeyIpPolicy(request, env, row)
   if (row.user_status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
@@ -233,6 +241,26 @@ export async function authenticateGatewayRequest(
     api_key_monetary: apiKeyMonetaryPolicy(row, now),
     platform_quota: platformQuotaPolicy(row),
     billing,
+  }
+}
+
+function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): void {
+  // Compatibility for hand-written pre-0059 unit fixtures only. A partial
+  // projection is never accepted; deployed D1 always returns both columns.
+  if (row.ip_allowlist_json === undefined && row.ip_denylist_json === undefined) return
+  if (row.ip_allowlist_json === undefined || row.ip_denylist_json === undefined) {
+    throw new GatewayError(500, 'invalid_api_key_ip_policy', 'API key IP policy is incomplete', 'server_error')
+  }
+  const allowlist = parseStoredIpPolicy(row.ip_allowlist_json, 'ip_allowlist_json')
+  const denylist = parseStoredIpPolicy(row.ip_denylist_json, 'ip_denylist_json')
+  if (allowlist.length === 0 && denylist.length === 0) return
+  if (!isSourceIpAllowed(trustedSourceIp(request, env.ENVIRONMENT), allowlist, denylist)) {
+    throw new GatewayError(
+      403,
+      'api_key_ip_restricted',
+      'Access is not permitted for this API key',
+      'permission_error',
+    )
   }
 }
 

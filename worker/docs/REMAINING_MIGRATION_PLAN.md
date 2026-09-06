@@ -109,6 +109,25 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   operations; unavailable provider quota, tier and privacy facts are explicit
   `unsupported`/`null`, never zero or guessed.
 
+## Completed locally in v0.37
+
+- User-created custom API tokens now use keyed HMAC storage and one-time
+  plaintext display. Migration 0059 adds normalized IPv4/IPv6 allow/deny rules;
+  deny rules win, restricted keys fail closed without a valid
+  `CF-Connecting-IP`, policy writes use CAS and increment the authentication
+  version, and Worker-mode key controls are enabled in the Vue frontend.
+- Administrators can queue bounded account/model/capability inference probes.
+  Migration 0060 keeps versioned jobs, per-model monitor state, immutable
+  history and firing/recovery alert events in D1. Queue consumers re-read
+  encrypted credentials, reject stale configuration at claim and persistence,
+  classify invalid 2xx responses as failures, and never turn one model failure
+  into whole-account health failure. Cron outbox recovery, frontend controls,
+  unified audit projection and alert delivery remain outstanding.
+- Codex Responses forwarding now normalizes native function, custom,
+  tool-search, local-shell and MCP call identities without breaking call/output
+  or item-reference pairing. Invalid replay IDs and reasoning-only IDs are
+  removed while valid input IDs and arbitrary output item IDs are preserved.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
@@ -127,8 +146,8 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Account operations | Guarded bulk enable/disable and Queue health probes are complete locally; per-model synthetic probes remain. Provider quota/tier/privacy are explicitly unsupported until stable APIs exist. | Extend the existing versioned Queue/Cron probe path only for documented provider facts and retained per-model checks. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota/tier/privacy is `unsupported` with `null`, never zero. |
 | Admin usage and finance | Immutable per-user balance/debt history and bounded operator-driven batch coordination now exist; automatic discovery, broader aggregates and correction/export workflows are incomplete. | Add scheduled discovery, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
-| API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |
-| Channel monitor and alerts | Generic account health exists; model probes, alert rules, silences and reports do not. | Cron to Queue probes, D1 rules/history/silences, R2 evidence/reports and replay-safe delivery. | Duplicate schedules do not duplicate alerts; silence/recovery/DLQ behavior and per-model inference probes pass. |
+| API-key custom token/IP policy | Custom tokens and IPv4/IPv6 policy are complete locally; deployed proof and optional last-used-IP observability remain. | Keep keyed HMAC tokens, one-time plaintext display and D1 CIDR rules sourced only from trusted `CF-Connecting-IP`; retain `last_used_ip: null` until a privacy-reviewed projection exists. | Deployed custom-token, IPv4/IPv6, spoofing and concurrent-update tests pass without persisting plaintext or source IP. |
+| Channel monitor and alerts | Manual per-model probes, immutable history and firing/recovery state are complete locally; Cron recovery, UI, silences, reports and delivery are not. | Add a bounded Cron outbox dispatcher, then D1 silences, R2 evidence/reports and replay-safe email/webhook delivery around the existing Queue consumer. | Failed Queue sends recover without duplicate alerts; silence/recovery/DLQ and deployed per-model inference probes pass. |
 | Payment closure | Stripe is implemented; retained Alipay, WeChat Pay, EasyPay or Airwallex behavior is not. | Separate Worker adapters with D1 webhook inbox/order/refund state, Queue fulfilment and R2 evidence. | Every retained provider passes signature, replay, out-of-order, late payment, refund and sandbox E2E. Non-retained providers disappear from the UI. |
 | Settings, audit and compliance | Several legacy settings and audit sources have no Worker contract; risk actions are incomplete. | Typed D1 settings, KV version cache, append-only D1 audit and R2 large details. | Every unsafe admin mutation emits actor audit; settings have defaults, CAS, secret redaction and hot-path effect tests. |
 | Cross-domain retention and DLQ | Individual recovery jobs exist without one complete replay/retention surface. | Bounded D1 cursors/inboxes, Queue DLQs and R2 quarantine/evidence. | Poison, duplicate and out-of-order messages are observable and safely replayable; every job has a tested write/read budget. |

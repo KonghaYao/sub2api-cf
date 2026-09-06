@@ -206,9 +206,12 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
     return [category('admin.commerce.read', 'admin.commerce.write')]
   }
   if (
-    /^\/api\/v1\/admin\/accounts\/(?:[^/]+\/test|health-probes)$/.test(pathname)
+    /^\/api\/v1\/admin\/accounts\/(?:[^/]+\/test|health-probes|synthetic-probes)$/.test(pathname)
   ) {
     return ['admin.catalog.write', 'admin.operations.write']
+  }
+  if (/^\/api\/v1\/admin\/accounts\/synthetic-probes\/history$/.test(pathname)) {
+    return ['admin.catalog.read', 'admin.operations.read']
   }
   if (/^\/api\/v1\/admin\/accounts\/[^/]+\/stats$/.test(pathname)) {
     return ['admin.catalog.read', 'admin.operations.read']

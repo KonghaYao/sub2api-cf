@@ -275,13 +275,38 @@ describe('user API keys Cloudflare Worker contract', () => {
     expect(put).not.toHaveBeenCalled()
   })
 
-  it('still rejects Worker-only unsupported custom keys and IP restrictions', async () => {
-    await expect(create('primary', GROUP_ID, 'custom-secret'))
-      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(update(KEY_ID, { ip_whitelist: ['127.0.0.1'] }, 4))
-      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    expect(post).not.toHaveBeenCalled()
-    expect(put).not.toHaveBeenCalled()
+  it('sends custom-token creation and IP policies through the Worker contract with create-only plaintext', async () => {
+    post.mockResolvedValueOnce({
+      data: workerKey({
+        key: 'Customer_Key-2026_abcdefgh',
+        ip_whitelist: ['10.0.0.0/8'],
+        ip_blacklist: ['10.2.0.0/16'],
+        control_version: 0
+      })
+    })
+    put.mockResolvedValueOnce({
+      data: workerKey({ ip_whitelist: [], ip_blacklist: ['2001:db8::/32'], control_version: 5 })
+    })
+
+    await create(
+      'primary',
+      GROUP_ID,
+      'Customer_Key-2026_abcdefgh',
+      ['10.0.0.0/8'],
+      ['10.2.0.0/16']
+    )
+    await update(KEY_ID, { ip_whitelist: [], ip_blacklist: ['2001:db8::/32'] }, 4)
+
+    expect(post.mock.calls[0][1]).toMatchObject({
+      custom_key: 'Customer_Key-2026_abcdefgh',
+      ip_whitelist: ['10.0.0.0/8'],
+      ip_blacklist: ['10.2.0.0/16']
+    })
+    expect(put.mock.calls[0][1]).toEqual({
+      ip_whitelist: [],
+      ip_blacklist: ['2001:db8::/32']
+    })
+    expect(put.mock.calls[0][2].headers).toMatchObject({ 'If-Match': '"4"' })
   })
 
   it('returns the revoked key projection from the existing delete route', async () => {

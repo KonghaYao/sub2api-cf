@@ -45,7 +45,7 @@ Status vocabulary:
 | Same: known GPT-5.6 reasoning choices/default and priority service tier | Retain | `test/gateway/legacy-codex-contract.test.ts` |
 | Same: dedicated image models are omitted and other model service tiers remain empty | Retain | `test/gateway/legacy-codex-contract.test.ts` |
 | `openai_codex_models_handler_test.go`: ETag is computed from the final client body and supports weak/comma validators | Retain | `test/gateway/legacy-codex-contract.test.ts`; authenticated route in `test/gateway/handler.test.ts` |
-| `openai_codex_function_call_id_test.go`: native function/custom/tool-search call IDs use the `fc_`/`ctc_`/`tsc_` family, keep call/output pairs aligned and compact oversized IDs deterministically | Retain | `test/gateway/providers/request.test.ts` — Codex provider plan normalization through the public request builder |
+| `openai_codex_function_call_id_test.go`, `openai_codex_message_item_id_test.go` and continuation/reasoning cases in `openai_codex_transform_test.go`: native function/custom/tool-search/local-shell/MCP call IDs use the `fc_`/`ctc_`/`tsc_` family, keep call/output/reference pairs aligned, sanitize rejected replay IDs and preserve valid output IDs | Retain | v0.37 `test/gateway/providers/request.test.ts` covers unambiguous and cross-turn reference mapping, ambiguous-reference preservation, valid input/output IDs, reasoning replay fields and immutable request input through the public request builder |
 
 ## Gateway routes, subroutes and embeddings
 
@@ -198,8 +198,9 @@ The following classifications apply test-by-test by behavioral family in
    `response.failed` can switch accounts only before any Chat bytes are exposed;
    failure code/message, deterministic no-cooldown, cyber zero billing and exact
    settlement are covered, while semantic failover and partial-output fixtures remain.
-2. Complete custom/freeform tools, namespace tools, `tool_search` and object
-   arguments in both directions.
+2. Complete the remaining bidirectional response codecs for custom/freeform
+   tools, namespace tools, `tool_search` and object arguments. v0.37 completes
+   their Codex request-side call/output/reference identity normalization.
 3. Complete Anthropic cache-token accounting and remaining URL/file media
    variants; v0.34 already covers compatible signed thinking, native redacted
    blocks, bounded cache breakpoints, base64 tool-result images and Responses

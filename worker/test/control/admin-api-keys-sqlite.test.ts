@@ -107,6 +107,70 @@ async function createKey(
 }
 
 describe('admin API key D1 authorization', () => {
+  it('creates, lists, and CAS-updates the same normalized IP policy used by gateway auth', async () => {
+    const test = await fixture()
+    const created = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      method: 'POST',
+      headers: { ...test.headers, 'idempotency-key': 'admin-ip-policy-create' },
+      body: JSON.stringify({
+        name: 'restricted',
+        group_id: EXCLUSIVE_GROUP_ID,
+        ip_whitelist: ['10.2.3.4/8', '2001:0db8::1/32'],
+        ip_blacklist: ['10.9.0.0/16'],
+      }),
+    }, test.env)
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as { data: { id: string } & Record<string, unknown> }
+    expect(createdBody.data).toMatchObject({
+      ip_whitelist: ['10.0.0.0/8', '2001:db8::/32'],
+      ip_blacklist: ['10.9.0.0/16'],
+    })
+
+    const listed = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      headers: { authorization: test.headers.authorization },
+    }, test.env)
+    await expect(listed.json()).resolves.toMatchObject({
+      data: { items: [{ ip_whitelist: ['10.0.0.0/8', '2001:db8::/32'] }] },
+    })
+
+    const updated = await createApp().request(`/api/v1/admin/api-keys/${createdBody.data.id}`, {
+      method: 'PUT',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-ip-policy-update',
+        'if-match': '"0"',
+      },
+      body: JSON.stringify({ ip_whitelist: [], ip_blacklist: ['2001:db8:ffff::/48'] }),
+    }, test.env)
+    expect(updated.status).toBe(200)
+    await expect(updated.json()).resolves.toMatchObject({
+      data: {
+        api_key: {
+          ip_whitelist: [],
+          ip_blacklist: ['2001:db8:ffff::/48'],
+          auth_version: 2,
+          control_version: 1,
+        },
+      },
+    })
+  })
+
+  it('rejects admin custom-token input instead of silently creating a different key', async () => {
+    const test = await fixture()
+    const response = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      method: 'POST',
+      headers: { ...test.headers, 'idempotency-key': 'admin-custom-rejected' },
+      body: JSON.stringify({
+        name: 'custom',
+        group_id: EXCLUSIVE_GROUP_ID,
+        custom_key: 'admin-chosen-token-1234567890',
+      }),
+    }, test.env)
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ code: 'admin_custom_key_not_supported' })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM api_keys').get()).toEqual({ total: 0 })
+  })
+
   it('atomically grants an exclusive standard group and hydrates it after a list reload', async () => {
     const test = await fixture()
 

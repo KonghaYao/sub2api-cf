@@ -2,6 +2,7 @@ import type { Context } from 'hono'
 import type { Env } from '../env'
 import { apiKeyDigest, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { normalizeIpPolicyList, parseStoredIpPolicy } from '../gateway/ip-policy'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -52,6 +53,8 @@ interface ApiKeyRow {
   window_7d_start_ms?: number | null
   quota_reset_epoch?: number
   rate_limit_reset_epoch?: number
+  ip_allowlist_json?: string
+  ip_denylist_json?: string
 }
 
 interface HydratedApiKeyRow extends ApiKeyRow {
@@ -72,6 +75,8 @@ interface CreateApiKeyInput {
   rate_limit_5h_micros: number
   rate_limit_1d_micros: number
   rate_limit_7d_micros: number
+  ip_whitelist: string[]
+  ip_blacklist: string[]
 }
 
 interface ApiKeyUpdatePatch {
@@ -85,13 +90,17 @@ interface ApiKeyUpdatePatch {
   rate_limit_7d_micros?: number
   reset_quota?: boolean
   reset_rate_limit_usage?: boolean
+  ip_whitelist?: string[]
+  ip_blacklist?: string[]
 }
+
+const API_KEY_BODY_LIMIT_BYTES = 16 * 1024
 
 export async function createAdminApiKey(context: Context<ControlBindings>): Promise<Response> {
   try {
     const userId = requireResourceId(context.req.param('id'), 'user')
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
-    const input = parseCreateApiKey(await readJsonObject(context.req.raw))
+    const input = parseCreateApiKey(await readJsonObject(context.req.raw, API_KEY_BODY_LIMIT_BYTES))
     const idempotency = await controlIdempotency(
       'admin.api_keys.create.v1',
       idempotencyKey,
@@ -161,6 +170,8 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
       window_7d_start_ms: null,
       quota_reset_epoch: 0,
       rate_limit_reset_epoch: 0,
+      ip_allowlist_json: JSON.stringify(input.ip_whitelist),
+      ip_denylist_json: JSON.stringify(input.ip_blacklist),
     }
     const safe = publicApiKey(row, authorization.group)
     try {
@@ -172,10 +183,11 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
              last_used_at_ms, created_at_ms, updated_at_ms,
              group_id, key_prefix, auth_version, revoked_at_ms,
              quota_micros, rate_limit_5h_micros,
-             rate_limit_1d_micros, rate_limit_7d_micros
+             rate_limit_1d_micros, rate_limit_7d_micros,
+             ip_allowlist_json, ip_denylist_json
            ) SELECT ?, ?, ?,
              CASE WHEN ${adminApiKeyGroupAuthorizationPredicate('g')} THEN ? ELSE NULL END,
-             1, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?`,
+             1, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?, ?`,
         ).bind(
           row.id,
           row.user_id,
@@ -195,6 +207,8 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
           input.rate_limit_5h_micros,
           input.rate_limit_1d_micros,
           input.rate_limit_7d_micros,
+          row.ip_allowlist_json,
+          row.ip_denylist_json,
         ),
         controlIdempotencyInsert(context.env, idempotency, 'api_key', row.id, safe, now),
       ])
@@ -302,7 +316,7 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
   try {
     const keyId = requireResourceId(context.req.param('id'), 'api_key')
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
-    const body = await readJsonObject(context.req.raw)
+    const body = await readJsonObject(context.req.raw, API_KEY_BODY_LIMIT_BYTES)
     const patch = parseApiKeyUpdatePatch(body)
     const expectedControlVersion = requireExpectedControlVersion(context.req.raw, body)
     const idempotency = await controlIdempotency(
@@ -343,6 +357,10 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
     const rateLimit7dMicros = patch.rate_limit_7d_micros ?? monetaryValue(row.rate_limit_7d_micros)
     const resetQuota = patch.reset_quota === true
     const resetRateLimitUsage = patch.reset_rate_limit_usage === true
+    const currentIpWhitelist = storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json')
+    const currentIpBlacklist = storedPolicy(row.ip_denylist_json, 'ip_denylist_json')
+    const ipWhitelist = patch.ip_whitelist ?? currentIpWhitelist
+    const ipBlacklist = patch.ip_blacklist ?? currentIpBlacklist
     assertResetEpochAvailable(monetaryValue(row.quota_reset_epoch), resetQuota, 'quota_reset_epoch')
     assertResetEpochAvailable(
       monetaryValue(row.rate_limit_reset_epoch),
@@ -352,7 +370,9 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
     const authChanged =
       groupId !== row.group_id ||
       enabled !== (row.enabled === 1) ||
-      expiresAtMs !== row.expires_at_ms
+      expiresAtMs !== row.expires_at_ms ||
+      !samePolicy(ipWhitelist, currentIpWhitelist) ||
+      !samePolicy(ipBlacklist, currentIpBlacklist)
     const monetaryChanged =
       quotaMicros !== monetaryValue(row.quota_micros) ||
       rateLimit5hMicros !== monetaryValue(row.rate_limit_5h_micros) ||
@@ -386,6 +406,7 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
                 window_7d_start_ms = CASE WHEN ? THEN NULL ELSE window_7d_start_ms END,
                 quota_reset_epoch = CASE WHEN ? THEN quota_reset_epoch + 1 ELSE quota_reset_epoch END,
                 rate_limit_reset_epoch = CASE WHEN ? THEN rate_limit_reset_epoch + 1 ELSE rate_limit_reset_epoch END,
+                ip_allowlist_json = ?, ip_denylist_json = ?,
                 control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                 updated_at_ms = ?
           WHERE id = ?`
@@ -405,6 +426,7 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
                 window_7d_start_ms = CASE WHEN ? THEN NULL ELSE window_7d_start_ms END,
                 quota_reset_epoch = CASE WHEN ? THEN quota_reset_epoch + 1 ELSE quota_reset_epoch END,
                 rate_limit_reset_epoch = CASE WHEN ? THEN rate_limit_reset_epoch + 1 ELSE rate_limit_reset_epoch END,
+                ip_allowlist_json = ?, ip_denylist_json = ?,
                 control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                 updated_at_ms = ?
           WHERE id = ?`)
@@ -434,6 +456,8 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
           resetRateLimitUsage ? 1 : 0,
           resetQuota ? 1 : 0,
           resetRateLimitUsage ? 1 : 0,
+          JSON.stringify(ipWhitelist),
+          JSON.stringify(ipBlacklist),
           row.control_version,
           controlVersion,
           now,
@@ -462,6 +486,8 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
         quota_reset_epoch: monetaryValue(row.quota_reset_epoch) + (resetQuota ? 1 : 0),
         rate_limit_reset_epoch:
           monetaryValue(row.rate_limit_reset_epoch) + (resetRateLimitUsage ? 1 : 0),
+        ip_allowlist_json: JSON.stringify(ipWhitelist),
+        ip_denylist_json: JSON.stringify(ipBlacklist),
       }
       const result = adminApiKeyUpdateResult(row, group, autoGrantedGroupAccess)
       try {
@@ -520,6 +546,13 @@ export async function updateAdminApiKey(context: Context<ControlBindings>): Prom
 }
 
 function parseCreateApiKey(body: Record<string, unknown>): CreateApiKeyInput {
+  if (Object.hasOwn(body, 'custom_key')) {
+    throw new GatewayError(
+      400,
+      'admin_custom_key_not_supported',
+      'Administrators cannot choose API key plaintext; create a random key instead',
+    )
+  }
   rejectLegacyMonetaryFields(body)
   rejectServerManagedMonetaryFields(body)
   const groupId = requireResourceId(requireString(body, 'group_id', 128), 'group')
@@ -535,10 +568,15 @@ function parseCreateApiKey(body: Record<string, unknown>): CreateApiKeyInput {
     rate_limit_5h_micros: optionalMonetaryLimit(body, 'rate_limit_5h_micros'),
     rate_limit_1d_micros: optionalMonetaryLimit(body, 'rate_limit_1d_micros'),
     rate_limit_7d_micros: optionalMonetaryLimit(body, 'rate_limit_7d_micros'),
+    ip_whitelist: optionalIpPolicy(body, 'ip_whitelist'),
+    ip_blacklist: optionalIpPolicy(body, 'ip_blacklist'),
   }
 }
 
 function parseApiKeyUpdatePatch(body: Record<string, unknown>): ApiKeyUpdatePatch {
+  if (Object.hasOwn(body, 'custom_key')) {
+    throw new GatewayError(400, 'custom_key_create_only', 'custom_key cannot replace an existing API key')
+  }
   rejectLegacyMonetaryFields(body)
   rejectServerManagedMonetaryFields(body)
   const patch: ApiKeyUpdatePatch = {}
@@ -567,6 +605,12 @@ function parseApiKeyUpdatePatch(body: Record<string, unknown>): ApiKeyUpdatePatc
     patch.expires_at_ms = body.expires_at_ms === null
       ? null
       : requireSafeInteger(body, 'expires_at_ms', Date.now() + 1_000)
+  }
+  if (Object.hasOwn(body, 'ip_whitelist')) {
+    patch.ip_whitelist = normalizeIpPolicyList(body.ip_whitelist, 'ip_whitelist')
+  }
+  if (Object.hasOwn(body, 'ip_blacklist')) {
+    patch.ip_blacklist = normalizeIpPolicyList(body.ip_blacklist, 'ip_blacklist')
   }
   for (const field of MONETARY_LIMIT_FIELDS) {
     if (Object.hasOwn(body, field)) patch[field] = requireSafeInteger(body, field)
@@ -666,6 +710,7 @@ function apiKeySelect(): string {
                  k.usage_5h_micros, k.usage_1d_micros, k.usage_7d_micros,
                  k.window_5h_start_ms, k.window_1d_start_ms, k.window_7d_start_ms,
                  k.quota_reset_epoch, k.rate_limit_reset_epoch,
+                 k.ip_allowlist_json, k.ip_denylist_json,
                  g.name AS group_name, g.description AS group_description,
                  g.platform AS group_platform, g.enabled AS group_enabled,
                  g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
@@ -778,8 +823,30 @@ function publicApiKey(
     created_at: new Date(row.created_at_ms).toISOString(),
     updated_at: new Date(row.updated_at_ms).toISOString(),
     revoked_at: nullableIso(row.revoked_at_ms),
+    ip_whitelist: storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json'),
+    ip_blacklist: storedPolicy(row.ip_denylist_json, 'ip_denylist_json'),
+    last_used_ip: null,
     ...(group === null ? {} : { group: publicAdminApiKeyGroup(group) }),
   }
+}
+
+function optionalIpPolicy(
+  body: Record<string, unknown>,
+  field: 'ip_whitelist' | 'ip_blacklist',
+): string[] {
+  return Object.hasOwn(body, field) ? normalizeIpPolicyList(body[field], field) : []
+}
+
+function storedPolicy(
+  value: string | undefined,
+  field: 'ip_allowlist_json' | 'ip_denylist_json',
+): string[] {
+  if (value === undefined) return []
+  return parseStoredIpPolicy(value, field).map((rule) => rule.canonical)
+}
+
+function samePolicy(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((rule, index) => rule === right[index])
 }
 
 async function requireAdminApiKeyGroupAuthorization(

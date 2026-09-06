@@ -242,6 +242,180 @@ describe('provider request adapters', () => {
     expect(input[6]?.call_id.length).toBeLessThanOrEqual(64)
   })
 
+  it('keeps Codex call, output and item-reference IDs paired across tool families', () => {
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        stream: true,
+        input: [
+          { type: 'custom_tool_call', id: 'ctc_item', call_id: 'call_custom', name: 'apply_patch' },
+          { type: 'custom_tool_call_output', call_id: 'call_custom', output: 'done' },
+          { type: 'item_reference', id: 'call_custom' },
+          { type: 'tool_search_call', id: 'tsc_item', call_id: 'call_search' },
+          { type: 'tool_search_output', call_id: 'call_search', output: { tools: [] } },
+          { type: 'item_reference', id: 'call_search' },
+          { type: 'function_call', id: 'fc_item', call_id: 'call_shell', name: 'shell' },
+          { type: 'function_call_output', call_id: 'call_shell', output: 'ok' },
+          { type: 'item_reference', id: 'call_shell' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<Record<string, unknown>> }).input
+
+    expect(input.map((item) => item.call_id ?? item.id)).toEqual([
+      'ctc_custom',
+      'ctc_custom',
+      'ctc_custom',
+      'tsc_search',
+      'tsc_search',
+      'tsc_search',
+      'fc_shell',
+      'fc_shell',
+      'fc_shell',
+    ])
+    expect(input[0]?.id).toBe('ctc_item')
+    expect(input[3]?.id).toBe('tsc_item')
+    expect(input[6]?.id).toBe('fc_item')
+  })
+
+  it('normalizes only unambiguous legacy Codex item references', () => {
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        input: [
+          { type: 'custom_tool_call', call_id: 'call_shared', name: 'apply_patch' },
+          { type: 'tool_search_call', call_id: 'call_shared' },
+          { type: 'item_reference', id: 'call_shared' },
+          { type: 'custom_tool_call', call_id: 'call_item_collision', name: 'exec' },
+          { type: 'function_call_output', id: 'call_item_collision', call_id: 'call_other', output: 'done' },
+          { type: 'item_reference', id: 'call_item_collision' },
+          { type: 'item_reference', id: 'call_previous_turn' },
+          { type: 'item_reference', id: 'fc_remote' },
+          { type: 'item_reference', id: 'vendor_remote' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<Record<string, unknown>> }).input
+
+    expect(input[2]?.id).toBe('call_shared')
+    expect(input[5]?.id).toBe('call_item_collision')
+    expect(input[6]?.id).toBe('fc_previous_turn')
+    expect(input[7]?.id).toBe('fc_remote')
+    expect(input[8]?.id).toBe('vendor_remote')
+  })
+
+  it('sanitizes replay item IDs that the Codex Responses backend rejects', () => {
+    const originalReasoning = {
+      type: 'reasoning',
+      id: 'rs_remote',
+      call_id: 'call_private',
+      encrypted_content: 'enc-context',
+    }
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        stream: false,
+        input: [
+          { type: 'message', id: 'item_bad', role: 'user', content: 'bad id' },
+          { type: 'message', id: 'msg_valid', call_id: 'call_leak', role: 'user', content: 'valid id' },
+          { type: 'function_call', id: 'item_bad', call_id: 'call_fn', name: 'shell' },
+          { type: 'function_call', id: 'fc_valid', call_id: 'call_fn2', name: 'shell' },
+          { type: 'custom_tool_call', id: 'fc_wrong', call_id: 'call_custom', name: 'apply_patch' },
+          { type: 'custom_tool_call', id: 'ctc_valid', call_id: 'call_custom2', name: 'apply_patch' },
+          { type: 'tool_search_call', id: 'fc_wrong', call_id: 'call_search' },
+          { type: 'tool_search_call', id: 'tsc_valid', call_id: 'call_search2' },
+          { type: 'function_call_output', id: 'o1', call_id: 'call_fn', output: 'done' },
+          originalReasoning,
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<Record<string, unknown>> }).input
+
+    expect(input.map((item) => item.id)).toEqual([
+      undefined,
+      'msg_valid',
+      undefined,
+      'fc_valid',
+      undefined,
+      'ctc_valid',
+      undefined,
+      'tsc_valid',
+      'o1',
+      undefined,
+    ])
+    expect(input[1]).not.toHaveProperty('call_id')
+    expect(input[9]).toEqual({
+      type: 'reasoning',
+      encrypted_content: 'enc-context',
+      summary: [],
+    })
+    expect(originalReasoning).toEqual({
+      type: 'reasoning',
+      id: 'rs_remote',
+      call_id: 'call_private',
+      encrypted_content: 'enc-context',
+    })
+  })
+
+  it('repairs representable Codex tool-call identity fields without inventing a call ID', () => {
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        input: [
+          { type: 'function_call', id: 'fc_from_item', call_id: ' ', arguments: '{}' },
+          { type: 'custom_tool_call', call_id: 'call_custom', tool_name: 'apply_patch' },
+          { type: 'mcp_tool_call', call_id: 'call_mcp', function: { name: 'remote_tool' } },
+          { type: 'function_call', arguments: '{}' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<Record<string, unknown>> }).input
+
+    expect(input[0]).toMatchObject({ id: 'fc_from_item', call_id: 'fc_from_item', name: 'tool' })
+    expect(input[1]).toMatchObject({ call_id: 'ctc_custom', name: 'apply_patch' })
+    expect(input[2]).toMatchObject({ call_id: 'fc_mcp', name: 'remote_tool' })
+    expect(input[3]).toMatchObject({ name: 'tool' })
+    expect(input[3]).not.toHaveProperty('call_id')
+  })
+
+  it('preserves arbitrary item IDs on Codex tool-call outputs', () => {
+    const plan = buildProviderRequest({
+      account: account('codex'),
+      credential,
+      operation: 'responses',
+      body: {
+        input: [
+          { type: 'function_call_output', id: 'output_fn', call_id: 'call_fn', output: 'done' },
+          { type: 'custom_tool_call_output', id: 'output_custom', call_id: 'call_custom', output: 'done' },
+          { type: 'tool_search_output', id: 'output_search', call_id: 'call_search', output: [] },
+          { type: 'mcp_tool_call_output', id: 'output_mcp', call_id: 'call_mcp', output: 'done' },
+        ],
+      },
+    })
+    const input = (plan.body as { input: Array<Record<string, unknown>> }).input
+
+    expect(input.map((item) => item.id)).toEqual([
+      'output_fn',
+      'output_custom',
+      'output_search',
+      'output_mcp',
+    ])
+    expect(input.map((item) => item.call_id)).toEqual([
+      'fc_fn',
+      'ctc_custom',
+      'tsc_search',
+      'fc_mcp',
+    ])
+  })
+
   it('preserves custom proxy prefixes without duplicating provider path segments', () => {
     const anthropic = buildProviderRequest({
       account: account('anthropic', { base_url: 'https://relay.test/anthropic/v1' }),

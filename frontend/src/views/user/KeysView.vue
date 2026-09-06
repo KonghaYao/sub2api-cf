@@ -510,11 +510,12 @@
         </div>
 
         <!-- Custom Key Section (only for create) -->
-        <div v-if="legacyKeyControlsAvailable && !showEditModal" class="space-y-3">
+        <div v-if="!showEditModal" class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.customKeyLabel') }}</label>
             <button
               type="button"
+              data-testid="custom-key-toggle"
               @click="formData.use_custom_key = !formData.use_custom_key"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -532,6 +533,7 @@
           <div v-if="formData.use_custom_key">
             <input
               v-model="formData.custom_key"
+              data-testid="custom-key-input"
               type="text"
               class="input font-mono"
               :placeholder="t('keys.customKeyPlaceholder')"
@@ -552,11 +554,12 @@
         </div>
 
         <!-- IP Restriction Section -->
-        <div v-if="legacyKeyControlsAvailable" class="space-y-3">
+        <div class="space-y-3">
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.ipRestriction') }}</label>
             <button
               type="button"
+              data-testid="ip-policy-toggle"
               @click="formData.enable_ip_restriction = !formData.enable_ip_restriction"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -577,6 +580,7 @@
               <label class="input-label">{{ t('keys.ipWhitelist') }}</label>
               <textarea
                 v-model="formData.ip_whitelist"
+                data-testid="ip-whitelist-input"
                 rows="3"
                 class="input font-mono text-sm"
                 :placeholder="t('keys.ipWhitelistPlaceholder')"
@@ -588,6 +592,7 @@
               <label class="input-label">{{ t('keys.ipBlacklist') }}</label>
               <textarea
                 v-model="formData.ip_blacklist"
+                data-testid="ip-blacklist-input"
                 rows="3"
                 class="input font-mono text-sm"
                 :placeholder="t('keys.ipBlacklistPlaceholder')"
@@ -1171,7 +1176,6 @@ import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
-import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1201,7 +1205,6 @@ interface GroupOption {
 const appStore = useAppStore()
 const onboardingStore = useOnboardingStore()
 const { copyToClipboard: clipboardCopy } = useClipboard()
-const legacyKeyControlsAvailable = !isCloudflareWorkerContractActive()
 
 const allColumns = computed<Column[]>(() => [
   { key: 'name', label: t('common.name'), sortable: true },
@@ -1385,12 +1388,18 @@ const customKeyError = computed(() => {
     return ''
   }
   const key = formData.value.custom_key
-  if (key.length < 16) {
+  if (key.length < 24) {
     return t('keys.customKeyTooShort')
+  }
+  if (key.length > 128) {
+    return t('keys.customKeyTooLong')
   }
   // 检查字符：只允许字母、数字、下划线、连字符
   if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
     return t('keys.customKeyInvalidChars')
+  }
+  if (new Set(key).size < 8) {
+    return t('keys.customKeyLowEntropy')
   }
   return ''
 })
@@ -1696,7 +1705,7 @@ const handleSubmit = async () => {
   }
 
   // Validate custom key if enabled
-  if (legacyKeyControlsAvailable && !showEditModal.value && formData.value.use_custom_key) {
+  if (!showEditModal.value && formData.value.use_custom_key) {
     if (!formData.value.custom_key) {
       appStore.showError(t('keys.customKeyRequired'))
       return
@@ -1709,12 +1718,12 @@ const handleSubmit = async () => {
 
   const parseIPList = (text: string): string[] =>
     text.split('\n').map((ip) => ip.trim()).filter((ip) => ip.length > 0)
-  const ipWhitelist = legacyKeyControlsAvailable && formData.value.enable_ip_restriction
+  const ipWhitelist = formData.value.enable_ip_restriction
     ? parseIPList(formData.value.ip_whitelist)
-    : legacyKeyControlsAvailable ? [] : undefined
-  const ipBlacklist = legacyKeyControlsAvailable && formData.value.enable_ip_restriction
+    : showEditModal.value ? [] : undefined
+  const ipBlacklist = formData.value.enable_ip_restriction
     ? parseIPList(formData.value.ip_blacklist)
-    : legacyKeyControlsAvailable ? [] : undefined
+    : showEditModal.value ? [] : undefined
   // The Worker persists integer micros. The adapter performs the exact conversion
   // and rejects values that cannot be represented without rounding.
   const amountOrUnlimited = (value: number | null): number =>
@@ -1753,9 +1762,8 @@ const handleSubmit = async () => {
       const updates: UpdateApiKeyRequest = {
         name: formData.value.name,
         group_id: formData.value.group_id,
-        ...(legacyKeyControlsAvailable
-          ? { ip_whitelist: ipWhitelist, ip_blacklist: ipBlacklist }
-          : {}),
+        ip_whitelist: ipWhitelist,
+        ip_blacklist: ipBlacklist,
         quota,
         expires_at: expiresAt,
         rate_limit_5h: rateLimitData.rate_limit_5h,
@@ -1778,7 +1786,7 @@ const handleSubmit = async () => {
       const created = await keysAPI.create(
         formData.value.name,
         String(formData.value.group_id),
-        legacyKeyControlsAvailable && formData.value.use_custom_key
+        formData.value.use_custom_key
           ? formData.value.custom_key
           : undefined,
         ipWhitelist,

@@ -553,6 +553,64 @@ describe('user KeysView column settings', () => {
     )
   })
 
+  it('exposes Worker custom-token and IP policy controls and submits them through the key API', async () => {
+    const groupID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    getAvailableGroups.mockResolvedValueOnce([{ id: groupID, name: 'OpenAI' }])
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('restricted')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')
+    groupSelect!.vm.$emit('update:modelValue', groupID)
+    await nextTick()
+    await wrapper.get('[data-testid="custom-key-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="custom-key-input"]').setValue('Customer_Key-2026_abcdefgh')
+    await wrapper.get('[data-testid="ip-policy-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="ip-whitelist-input"]').setValue('10.2.3.4/8\n2001:db8::/32')
+    await wrapper.get('[data-testid="ip-blacklist-input"]').setValue('10.9.0.0/16')
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(createKey).toHaveBeenCalledWith(
+      'restricted',
+      groupID,
+      'Customer_Key-2026_abcdefgh',
+      ['10.2.3.4/8', '2001:db8::/32'],
+      ['10.9.0.0/16'],
+      0,
+      undefined,
+      { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
+    )
+  })
+
+  it('submits an edited Worker IP policy with the loaded control version', async () => {
+    const key = createApiKey({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      control_version: 7,
+      ip_whitelist: ['10.0.0.0/8'],
+      ip_blacklist: ['10.9.0.0/16'],
+    })
+    listKeys.mockResolvedValueOnce({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    const wrapper = await mountView()
+
+    await getButtonByText(wrapper, 'Edit').trigger('click')
+    await wrapper.get('[data-testid="ip-whitelist-input"]').setValue('192.0.2.0/24')
+    await wrapper.get('[data-testid="ip-blacklist-input"]').setValue('')
+    await wrapper.get('form#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(
+      key.id,
+      expect.objectContaining({
+        ip_whitelist: ['192.0.2.0/24'],
+        ip_blacklist: [],
+      }),
+      { expectedControlVersion: 7, monetaryBaseline: key }
+    )
+  })
+
   it('submits zero for disabled quota and rate-limit controls when creating', async () => {
     const groupID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
     getAvailableGroups.mockResolvedValueOnce([{ id: groupID, name: 'OpenAI' }])

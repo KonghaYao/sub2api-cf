@@ -30,6 +30,10 @@ import {
   isAccountHealthProbeEvent,
 } from '../control/account-lifecycle'
 import {
+  consumeAccountSyntheticProbe,
+  isAccountSyntheticProbeEvent,
+} from '../control/account-synthetic-probes'
+import {
   consumeObservabilityPayloadRetry,
   isObservabilityPayloadRetryMessage,
 } from '../observability/recorder'
@@ -118,6 +122,11 @@ export async function consumeEvents(
       }
       if (isAccountHealthProbeEvent(message.body)) {
         await consumeAccountHealthProbe(message.body, env)
+        message.ack()
+        continue
+      }
+      if (isAccountSyntheticProbeEvent(message.body)) {
+        await consumeAccountSyntheticProbe(message.body, env)
         message.ack()
         continue
       }

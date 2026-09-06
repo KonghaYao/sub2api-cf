@@ -791,8 +791,11 @@ export interface CreateApiKeyRequest {
   name: string
   group_id: string | number
   expires_at_ms?: number | null
-  custom_key?: string // Optional custom API Key
+  /** Create-only plaintext; Worker requires 24–128 safe characters and never returns it after create. */
+  custom_key?: string
+  /** Canonical IPv4/IPv6 address or CIDR rules. Empty allowlist means unrestricted. */
   ip_whitelist?: string[]
+  /** Canonical IPv4/IPv6 deny rules, evaluated before the allowlist. */
   ip_blacklist?: string[]
   quota?: number // Quota limit in USD (0 = unlimited)
   expires_in_days?: number // Days until expiry (null = never expires)
