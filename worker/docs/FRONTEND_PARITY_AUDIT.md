@@ -53,6 +53,13 @@ explicit typed error. It must never silently discard a submitted field or return
 6. Run focused contract/parity tests once per changed slice. Reserve full browser journeys
    for cross-cutting changes; normal releases use typechecks, a SPA build, and health/version smoke.
 
+## v0.42.24 incremental release — 2026-09-07
+
+- Restored `UsersView` template/style parity with `origin/main@5097b3145` and added a source-template guard.
+- User edits now carry the displayed `control_version`; the Worker rejects stale edits with
+  `412 user_version_conflict` before any mutation.
+- Validation is limited to the Users Worker contract, modal/API tests, and the standard typecheck/build release path.
+
 ## Account compatibility storage contract
 
 - D1 stores only non-secret UI configuration and normalized searchable/sortable fields.

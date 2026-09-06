@@ -668,6 +668,40 @@ describe('admin users', () => {
     })
   })
 
+  it('rejects an edit based on a stale control version before mutating user state', async () => {
+    const { database, env } = harness()
+    database.users.set('user-1', {
+      id: 'user-1',
+      email: 'alice@example.com',
+      display_name: 'Alice',
+      role: 'user',
+      status: 'active',
+      balance_micros: 2_000_000,
+      state_version: 3,
+      control_version: 2,
+      created_at_ms: 100,
+      updated_at_ms: 200,
+    })
+
+    const response = await createApp().request('/api/v1/admin/users/user-1', {
+      method: 'PUT',
+      headers: { ...adminHeaders, 'idempotency-key': 'stale-user-version-0001' },
+      body: JSON.stringify({
+        display_name: 'Stale Rename',
+        expected_control_version: 1,
+      }),
+    }, env)
+
+    expect(response.status).toBe(412)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'user_version_conflict' },
+    })
+    expect(database.users.get('user-1')).toMatchObject({
+      display_name: 'Alice',
+      control_version: 2,
+    })
+  })
+
   it('conditionally compensates a DO status change when the D1 metadata batch loses CAS', async () => {
     const { database, env, state } = harness()
     database.users.set('user-1', {

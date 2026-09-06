@@ -147,12 +147,17 @@ const handleUpdateUser = async () => {
     return
   }
   const userId = props.user.id
+  const expectedControlVersion = props.user.control_version
   submitting.value = true
   try {
     const data: any = { email: form.email, username: form.username, notes: form.notes, role: form.role, concurrency: form.concurrency, rpm_limit: form.rpm_limit }
     if (form.password.trim()) data.password = form.password.trim()
     // 提升为管理员属敏感操作：后端返回 STEP_UP_REQUIRED 时弹 TOTP 验证并重试
-    const updatedUser = await stepUp.run(() => adminAPI.users.update(userId, data))
+    const updatedUser = await stepUp.run(() => adminAPI.users.update(
+      userId,
+      data,
+      expectedControlVersion,
+    ))
     if (Object.keys(form.customAttributes).length > 0) {
       await adminAPI.userAttributes.updateUserAttributeValues(
         userId,

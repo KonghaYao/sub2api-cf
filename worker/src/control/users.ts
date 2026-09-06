@@ -52,6 +52,7 @@ interface CreateUserInput {
 }
 
 interface UserUpdatePatch {
+  expected_control_version?: number
   email?: string
   display_name?: string
   role?: UserRow['role']
@@ -455,6 +456,12 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
     }
     const user = await findUserById(context.env, userId)
     if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
+    if (
+      patch.expected_control_version !== undefined &&
+      patch.expected_control_version !== user.control_version
+    ) {
+      throw new GatewayError(412, 'user_version_conflict', 'User changed; reload it and retry')
+    }
     const next = applyUserUpdatePatch(patch, user)
     if (
       user.role === 'admin' &&
@@ -663,6 +670,7 @@ function parseCreateUser(body: Record<string, unknown>): CreateUserInput {
 
 function parseUserUpdatePatch(body: Record<string, unknown>): UserUpdatePatch {
   const patch: UserUpdatePatch = {}
+  patch.expected_control_version = optionalSafeInteger(body, 'expected_control_version')
   if (body.email !== undefined) {
     const email = requireString(body, 'email', 320).toLowerCase()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {

@@ -151,8 +151,14 @@ function workerCreatePayload(userData: {
   return payload
 }
 
-function workerUpdatePayload(updates: UpdateUserRequest): Record<string, unknown> {
+function workerUpdatePayload(
+  updates: UpdateUserRequest,
+  expectedControlVersion?: number,
+): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
+  if (expectedControlVersion !== undefined) {
+    payload.expected_control_version = expectedControlVersion
+  }
   if (updates.email !== undefined) payload.email = updates.email
   if (updates.password?.trim()) payload.password = updates.password
   if (updates.username?.trim()) payload.display_name = updates.username.trim()
@@ -326,11 +332,15 @@ export async function create(userData: {
  * @param updates - Fields to update
  * @returns Updated user
  */
-export async function update(id: AdminUserId, updates: UpdateUserRequest): Promise<AdminUser> {
+export async function update(
+  id: AdminUserId,
+  updates: UpdateUserRequest,
+  expectedControlVersion?: number,
+): Promise<AdminUser> {
   if (isCloudflareWorkerContractActive()) {
     const { data } = await apiClient.put<AdminUser>(
       `/admin/users/${id}`,
-      workerUpdatePayload(updates),
+      workerUpdatePayload(updates, expectedControlVersion),
       { headers: { 'Idempotency-Key': operationKey('admin-user-update', id) } }
     )
     return adaptUser(data)

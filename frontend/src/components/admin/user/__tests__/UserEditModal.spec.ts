@@ -75,7 +75,7 @@ describe('UserEditModal concurrency', () => {
     await flushPromises()
 
     expect(showError).not.toHaveBeenCalled()
-    expect(update).toHaveBeenCalledWith(7, expect.objectContaining({ concurrency: 0 }))
+    expect(update).toHaveBeenCalledWith(7, expect.objectContaining({ concurrency: 0 }), 7)
     expect(wrapper.emitted('success')).toBeTruthy()
   })
 

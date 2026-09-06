@@ -164,9 +164,10 @@ describe('admin users Cloudflare Worker contract', () => {
       allowed_groups: [4],
       restrict_public_groups: true,
       group_rates: { 4: 1.25 },
-    })
+    }, 3)
 
     expect(put).toHaveBeenCalledWith(`/admin/users/${WORKER_USER_ID}`, {
+      expected_control_version: 3,
       email: 'updated@example.com',
       password: 'new-safe-password',
       display_name: 'Alice Updated',

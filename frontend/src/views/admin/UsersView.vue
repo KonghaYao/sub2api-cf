@@ -240,15 +240,6 @@
                 <Icon name="cog" size="sm" class="md:mr-1.5" />
                 <span class="hidden md:inline">{{ t('admin.users.attributes.configButton') }}</span>
               </button>
-              <button
-                class="btn btn-secondary px-2 md:px-3"
-                data-test="edit-platform-quota-defaults"
-                :title="t('admin.users.platformQuotaDefaults.action')"
-                @click="showPlatformQuotaDefaultsModal = true"
-              >
-                <Icon name="cog" size="sm" class="md:mr-1.5" />
-                <span class="hidden md:inline">{{ t('admin.users.platformQuotaDefaults.action') }}</span>
-              </button>
             </div>
 
             <button
@@ -771,10 +762,6 @@
       @close="closePlatformQuotaModal"
       @success="loadUsers"
     />
-    <PlatformQuotaDefaultsModal
-      :show="showPlatformQuotaDefaultsModal"
-      @close="showPlatformQuotaDefaultsModal = false"
-    />
     <UserApiKeysModal :show="showApiKeysModal" :user="viewingUser" @close="closeApiKeysModal" />
     <UserAllowedGroupsModal :show="showAllowedGroupsModal" :user="allowedGroupsUser" @close="closeAllowedGroupsModal" @success="loadUsers" />
     <UserBalanceModal :show="showBalanceModal" :user="balanceUser" :operation="balanceOperation" @close="closeBalanceModal" @success="loadUsers" />
@@ -818,7 +805,6 @@ import UserCreateModal from '@/components/admin/user/UserCreateModal.vue'
 import UserEditModal from '@/components/admin/user/UserEditModal.vue'
 import BulkEditUserModal from '@/components/admin/user/BulkEditUserModal.vue'
 import UserPlatformQuotaModal from '@/components/admin/user/UserPlatformQuotaModal.vue'
-import PlatformQuotaDefaultsModal from '@/components/admin/user/PlatformQuotaDefaultsModal.vue'
 import UserApiKeysModal from '@/components/admin/user/UserApiKeysModal.vue'
 import UserAllowedGroupsModal from '@/components/admin/user/UserAllowedGroupsModal.vue'
 import UserBalanceModal from '@/components/admin/user/UserBalanceModal.vue'
@@ -1339,7 +1325,6 @@ const showDeleteDialog = ref(false)
 const showApiKeysModal = ref(false)
 const showAttributesModal = ref(false)
 const showPlatformQuotaModal = ref(false)
-const showPlatformQuotaDefaultsModal = ref(false)
 const editingUser = ref<AdminUser | null>(null)
 const deletingUser = ref<AdminUser | null>(null)
 const viewingUser = ref<AdminUser | null>(null)
