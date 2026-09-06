@@ -50,7 +50,8 @@ explicit typed error. It must never silently discard a submitted field or return
 4. Restore Settings, Ops, Usage, Groups, Channels, routes, and sidebar to their original templates.
 5. Implement the Worker contracts behind those restored pages, simplifying internals only where the
    observable behavior and data contract remain correct.
-6. Add template/style parity gates and browser CRUD journeys before each deployment.
+6. Run focused contract/parity tests once per changed slice. Reserve full browser journeys
+   for cross-cutting changes; normal releases use typechecks, a SPA build, and health/version smoke.
 
 ## Account compatibility storage contract
 
@@ -64,3 +65,15 @@ explicit typed error. It must never silently discard a submitted field or return
 - Fields not yet used by a runtime executor are identified as stored configuration, not presented as
   active runtime behavior.
 
+
+## v0.41 incremental release — 2026-09-06
+
+- Restored seven account templates/styles and retained full account DTOs in API adapters.
+- Migration 0064 adds non-secret account UI configuration; full credentials stay encrypted.
+- Validation: 25 Worker account tests, 36 frontend adapter/parity tests, Worker typecheck
+  and Cloudflare SPA build passed. Full suites were not repeated.
+- Production pre-migration D1 Time Travel bookmark:
+  `00000029-000003ab-000050de-481778af4738c0904c314ea16e8a062a`.
+- Release commands now typecheck/build/migrate/deploy without automatically running full
+  unit and binding suites. `pnpm run check` remains available explicitly.
+- Next slice: account list type/privacy filtering and retained sorting contracts.
