@@ -1195,6 +1195,11 @@ export interface Account {
   // 改为通过 credentials_status.has_<key> 暴露存在性。
   credentials?: Record<string, unknown>
   credentials_status?: Record<string, boolean>
+  provider_account_metadata?: {
+    quota: { status: 'unknown' | 'unsupported'; value: unknown | null }
+    tier: { status: 'unknown' | 'unsupported'; value: unknown | null }
+    privacy: { status: 'unknown' | 'unsupported'; value: unknown | null }
+  }
   ollama_cloud_usage?: OllamaCloudUsageState
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {

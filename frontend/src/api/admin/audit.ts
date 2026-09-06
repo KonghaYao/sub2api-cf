@@ -2,7 +2,7 @@
 
 import { apiClient } from '../client'
 
-export type AuditCategory = 'settings' | 'rbac' | 'auth' | 'payment'
+export type AuditCategory = 'settings' | 'rbac' | 'account' | 'auth' | 'payment'
 export type AuditOutcome = 'succeeded' | 'failed' | 'blocked' | 'recorded'
 
 export interface AuditLog {

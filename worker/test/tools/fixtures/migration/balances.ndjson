@@ -1,0 +1,2 @@
+{"user_id":"user-admin","balance_micros":5000,"spend_debt_micros":0,"enabled":true,"state_version":1,"updated_at_ms":1700000001000}
+{"user_id":"user-regular","balance_micros":1000,"spend_debt_micros":125,"enabled":true,"state_version":1,"updated_at_ms":1700000001000}

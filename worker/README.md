@@ -180,6 +180,28 @@ local directory. It does not execute remote D1 imports, Durable Object writes,
 or R2 object synchronization. Production restore remains gated on explicit
 environment adapters and an empty-environment drill.
 
+`backup:remote-plan` and `backup:remote-restore-plan` add allow-listed
+staging/production plans around that bundle. D1 steps use Wrangler argument
+arrays; Durable Object and R2 steps remain explicit adapter contracts. The CLI
+never applies a plan. Programmatic execution rejects remaining contract-only
+steps before probing an executor; executable steps require an injected executor
+with an independent read-back verifier, manifest revalidation, a fresh empty
+target proof plus exact restore confirmation, and an atomic prefix journal in
+D1-to-DO-to-R2 order.
+
+### Production cutover artifacts
+
+`tools/migration/cutover.mjs` validates a versioned export manifest containing
+users, keys, balances, ledgers, subscriptions, orders, accounts and R2 objects.
+NDJSON is processed incrementally through a temporary SQLite index, with exact
+byte/row/full-domain digests, integer-micros, runtime credential decryption and
+cross-domain routing checks. It emits digest-bound D1 SQL, Durable Object
+initialization NDJSON, an R2 copy plan, dependency artifacts, deterministic
+reconciliation, and single-writer cohort plans for
+`internal → 1 → 5 → 25 → 50 → 100`. The tool creates a ready-to-activate
+artifact only after its evidence chain passes; the separate deployment process
+remains responsible for changing production traffic.
+
 ## Durable Object state contracts
 
 `UserStateDO` stores money only as safe integer micro-units. Its internal

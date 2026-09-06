@@ -1,0 +1,111 @@
+{
+  "schema": "sub2api-cutover-d1-dependencies",
+  "version": 1,
+  "groups": [
+    {
+      "id": "group-subscription",
+      "name": "Fixture subscription",
+      "platform": "openai",
+      "group_type": "subscription",
+      "enabled": true,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "models": [
+    {
+      "id": "model-fixture",
+      "platform": "openai",
+      "public_name": "fixture-model",
+      "upstream_name": "fixture-upstream-model",
+      "endpoint": "both",
+      "enabled": true,
+      "embeddings": false,
+      "image_generation": false,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "group_models": [
+    {
+      "group_id": "group-subscription",
+      "model_id": "model-fixture",
+      "upstream_name_override": null,
+      "enabled": true,
+      "sort_order": 0,
+      "max_output_tokens": 16384,
+      "default_max_output_tokens": 4096,
+      "catalog_visible": true,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "account_groups": [
+    {
+      "account_id": "account-1",
+      "group_id": "group-subscription",
+      "priority": 0,
+      "weight": 1,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "account_models": [
+    {
+      "account_id": "account-1",
+      "model_id": "model-fixture",
+      "chat_completions": true,
+      "responses": true,
+      "embeddings": false,
+      "image_generation": false,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "subscription_plans": [
+    {
+      "id": "plan-fixture",
+      "group_id": "group-subscription",
+      "name": "Fixture plan",
+      "description": "Cutover fixture",
+      "validity_days": 30,
+      "price_micros": 1000000,
+      "currency": "USD",
+      "daily_quota_micros": null,
+      "weekly_quota_micros": null,
+      "monthly_quota_micros": 1000000,
+      "enabled": true,
+      "sort_order": 0,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "payment_provider_instances": [
+    {
+      "id": "payment-provider-existing",
+      "provider_key": "fixture-provider",
+      "provider_type": "stripe",
+      "display_name": "Fixture",
+      "config_ciphertext": "JybV+ezAsCLIRvWTgddJXDz2xPq8+LgIjnL2UEZYvnruuH+r2m91TuSOxxzqBNcC",
+      "config_nonce": "qrvM3e7/ABEiM0RV",
+      "config_key_id": "payment-key-id",
+      "enabled": true,
+      "version": 1,
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ],
+  "account_secrets": [
+    {
+      "id": "account-secret-1",
+      "account_id": "account-1",
+      "purpose": "upstream_auth",
+      "algorithm": "AES-256-GCM",
+      "key_version": 1,
+      "nonce_b64": "ABEiM0RVZneImaq7",
+      "ciphertext_b64": "rwzWkWHfuT/f+7xYx8mKHme2i/67LS+YOqWOI3W88a1am4eHD1HGA3BhVs/a8QaLWXA=",
+      "created_at_ms": 1,
+      "updated_at_ms": 1
+    }
+  ]
+}

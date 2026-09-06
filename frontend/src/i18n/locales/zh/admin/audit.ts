@@ -16,6 +16,7 @@ export default {
     categories: {
       settings: '系统设置',
       rbac: '权限管理',
+      account: '账号',
       auth: '认证安全',
       payment: '支付'
     },

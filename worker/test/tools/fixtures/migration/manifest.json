@@ -1,0 +1,32 @@
+{
+  "schema": "sub2api-production-cutover",
+  "version": 1,
+  "snapshot_id": "fixture-2026-09-06",
+  "created_at": "2026-09-06T00:00:00.000Z",
+  "source_high_watermark": "watermark-fixture",
+  "target_environment": "production",
+  "d1_schema_version": 58,
+  "do_schema_version": 1,
+  "r2_source_root": "r2-source",
+  "dependency_manifest": {
+    "path": "dependencies.json",
+    "bytes": 2797,
+    "sha256": "27e35d4d9a2d36750a06e9359fcc124c98980de1cf6d102f3eb248f0c9144edf"
+  },
+  "limits": {
+    "max_total_bytes": 1000000,
+    "max_file_bytes": 200000,
+    "max_line_bytes": 16384,
+    "max_rows_per_domain": 100
+  },
+  "domains": {
+    "users": { "path": "users.ndjson", "format": "ndjson", "bytes": 327, "rows": 2, "sha256": "9d438e2b9a1aae87f4d47e97533246de0c7a9d87bb64dace391841c69f221c9e" },
+    "keys": { "path": "keys.ndjson", "format": "ndjson", "bytes": 270, "rows": 1, "sha256": "b3a340adb668153fbed130435120546777cadc70fdc2ea6c59a7146a5ca5f745" },
+    "balances": { "path": "balances.ndjson", "format": "ndjson", "bytes": 268, "rows": 2, "sha256": "a5a6c861894bc31311f18082f98b289dc0897950d6711b5cc46a05bd55703330" },
+    "ledgers": { "path": "ledgers.ndjson", "format": "ndjson", "bytes": 713, "rows": 2, "sha256": "c66b15d8ae279a493023b4ae850904b0f2438023425b6ee69f5e4d0bfa7a3eae" },
+    "subscriptions": { "path": "subscriptions.ndjson", "format": "ndjson", "bytes": 456, "rows": 1, "sha256": "6ae16858fe674ca8890299705c7f880a5be04a76b0c7b0504e9df9db1ed27841" },
+    "orders": { "path": "orders.ndjson", "format": "ndjson", "bytes": 434, "rows": 1, "sha256": "a780b3e64e07df1e19e2b99bbc321fadd624d5cf2559aba208e02c9014e330f8" },
+    "accounts": { "path": "accounts.ndjson", "format": "ndjson", "bytes": 266, "rows": 1, "sha256": "dd25786e936b034efa2adceaafb82e5d803206462b3d2283bce677295f5f47b5" },
+    "r2_objects": { "path": "r2_objects.ndjson", "format": "ndjson", "bytes": 176, "rows": 1, "sha256": "9d9ee3d0e9803dbb85f7905d342ea2bc1d1546717627f8b6f45d3b78f736e85e" }
+  }
+}

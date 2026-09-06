@@ -5,7 +5,7 @@ import { controlError, controlSuccess, queryInteger } from './http'
 
 type ControlBindings = { Bindings: Env }
 
-const AUDIT_CATEGORIES = ['settings', 'rbac', 'channel', 'auth', 'payment', 'financial_history'] as const
+const AUDIT_CATEGORIES = ['settings', 'rbac', 'channel', 'account', 'auth', 'payment', 'financial_history'] as const
 const AUDIT_OUTCOMES = ['succeeded', 'failed', 'blocked', 'recorded'] as const
 const MAX_CURSOR_BYTES = 2_048
 
@@ -259,6 +259,12 @@ function auditSelect(category?: AuditCategory): string {
              resource_id, resource_version, changed_fields_json AS metadata_json,
              occurred_at_ms
         FROM admin_channel_audit_events`,
+    account: `
+      SELECT 'account' AS category, id AS event_id, action,
+             'succeeded' AS outcome, actor_user_id, actor_session_id,
+             'admin' AS origin, 'account' AS resource_type,
+             resource_id, resource_version, metadata_json, occurred_at_ms
+        FROM admin_account_audit_events`,
     auth: `
       SELECT 'auth' AS category, id AS event_id, event_type AS action,
              outcome, user_id AS actor_user_id, session_id AS actor_session_id,
@@ -414,6 +420,8 @@ function sanitizeMetadata(category: AuditCategory, raw: string): Record<string, 
       return sanitizeRbacMetadata(value)
     case 'channel':
       return { changed_fields: sanitizeChannelChangedFields(value) }
+    case 'account':
+      return sanitizeAccountMetadata(value)
     case 'auth':
       return sanitizeAuthMetadata(value)
     case 'payment':
@@ -421,6 +429,19 @@ function sanitizeMetadata(category: AuditCategory, raw: string): Record<string, 
     case 'financial_history':
       return sanitizeFinancialHistoryMetadata(value)
   }
+}
+
+function sanitizeAccountMetadata(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) return {}
+  const result: Record<string, unknown> = {}
+  if (typeof value.enabled === 'boolean') result.enabled = value.enabled
+  if (safeInteger(value.generation)) result.generation = value.generation
+  if (
+    typeof value.job_id === 'string' &&
+    value.job_id.length > 0 && value.job_id.length <= 512 &&
+    !/[\u0000-\u001f\u007f]/.test(value.job_id)
+  ) result.job_id = value.job_id
+  return result
 }
 
 function sanitizeFinancialHistoryMetadata(value: unknown): Record<string, unknown> {

@@ -80,6 +80,11 @@ describe('admin accounts Worker transport capabilities', () => {
           auth_scheme: authScheme,
           base_url: `https://${platform}.example.test`,
           provider_config: platform === 'codex' ? { account_id: 'acct_codex' } : {},
+          provider_account_metadata: {
+            quota: { status: 'unsupported', value: null },
+            tier: { status: 'unsupported', value: null },
+            privacy: { status: 'unsupported', value: null },
+          },
           enabled: true,
           max_concurrency: 6,
           rate_multiplier: 1.25,
@@ -108,7 +113,13 @@ describe('admin accounts Worker transport capabilities', () => {
         priority: 2,
         status: 'active',
         group_ids: [`${platform}-group`],
+        provider_account_metadata: {
+          quota: { status: 'unsupported', value: null },
+          tier: { status: 'unsupported', value: null },
+          privacy: { status: 'unsupported', value: null },
+        },
       })
+      expect(account).not.toHaveProperty('quota_limit')
     }
   )
 
@@ -245,6 +256,60 @@ describe('admin accounts Worker transport capabilities', () => {
     }, {
       headers: { 'If-Match': '"7"' },
     })
+  })
+
+  it('does not expose the absent per-account schedulable route in Worker mode', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { setSchedulable } = await import('@/api/admin/accounts')
+
+    await expect(setSchedulable(7, false)).rejects.toThrow('not supported by the Worker contract')
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('sends versioned Worker bulk status and health probe operations with idempotency keys', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkSetEnabled, queueHealthProbes } = await import('@/api/admin/accounts')
+    post.mockResolvedValue({ data: { results: [] } })
+    const accounts = [
+      { id: 'account-a', control_version: 2 },
+      { id: 'account-b', control_version: 4 },
+    ]
+
+    await bulkSetEnabled(accounts, false)
+    await queueHealthProbes(accounts)
+
+    expect(post).toHaveBeenNthCalledWith(1, '/admin/accounts/bulk-update', {
+      accounts: [
+        { id: 'account-a', expected_control_version: 2 },
+        { id: 'account-b', expected_control_version: 4 },
+      ],
+      enabled: false,
+    }, { headers: { 'Idempotency-Key': 'admin-account-bulk-status-33333333-3333-4333-8333-333333333333' } })
+    expect(post).toHaveBeenNthCalledWith(2, '/admin/accounts/health-probes', {
+      accounts: [
+        { id: 'account-a', expected_control_version: 2 },
+        { id: 'account-b', expected_control_version: 4 },
+      ],
+    }, { headers: { 'Idempotency-Key': 'admin-account-health-probes-33333333-3333-4333-8333-333333333333' } })
+  })
+
+  it('reuses the Worker batch operation key after an ambiguous failure', async () => {
+    vi.mocked(globalThis.crypto.randomUUID)
+      .mockReturnValueOnce('11111111-1111-4111-8111-111111111111')
+      .mockReturnValueOnce('22222222-2222-4222-8222-222222222222')
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkSetEnabled } = await import('@/api/admin/accounts')
+    const accounts = [{ id: 'account-a', control_version: 2 }]
+    post.mockRejectedValueOnce(new Error('response lost'))
+    post.mockResolvedValueOnce({ data: { results: [] } })
+
+    await expect(bulkSetEnabled(accounts, false)).rejects.toThrow('response lost')
+    await bulkSetEnabled(accounts, false)
+
+    expect(post.mock.calls[0]?.[2]).toEqual(post.mock.calls[1]?.[2])
   })
 
   it('preserves the public decimal account billing multiplier on Worker update', async () => {

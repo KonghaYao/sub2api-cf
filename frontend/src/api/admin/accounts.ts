@@ -75,6 +75,29 @@ async function workerCreateOperationKey(payload: unknown): Promise<string> {
   return key
 }
 
+const pendingWorkerOperationKeys = new Map<string, string>()
+
+async function workerOperationKey(prefix: string, payload: unknown): Promise<{ cacheKey: string; key: string }> {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(canonicalJson(payload))
+  )
+  const fingerprint = Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, '0')
+  ).join('')
+  const cacheKey = `${prefix}:${fingerprint}`
+  const pending = pendingWorkerOperationKeys.get(cacheKey)
+  if (pending) return { cacheKey, key: pending }
+  const key = operationKey(prefix)
+  if (pendingWorkerOperationKeys.size >= 32) {
+    const oldest = pendingWorkerOperationKeys.keys().next().value
+    if (oldest !== undefined) pendingWorkerOperationKeys.delete(oldest)
+  }
+  pendingWorkerOperationKeys.set(cacheKey, key)
+  return { cacheKey, key }
+}
+
 function workerAccountListParams(
   page: number,
   pageSize: number,
@@ -732,6 +755,91 @@ export async function bulkUpdate(
   return data
 }
 
+export interface WorkerAccountOperationTarget {
+  id: number | string
+  control_version: number
+}
+
+export interface WorkerAccountOperationError {
+  code: 'account_not_found' | 'account_version_conflict' | 'account_disabled'
+  message: string
+}
+
+export interface WorkerAccountBulkStatusResult {
+  total: number
+  success: number
+  failed: number
+  success_ids: string[]
+  failed_ids: string[]
+  results: Array<{
+    account_id: string
+    success: boolean
+    control_version?: number
+    enabled?: boolean
+    error?: WorkerAccountOperationError
+  }>
+}
+
+export interface WorkerAccountHealthProbeBatchResult {
+  total: number
+  queued: number
+  failed: number
+  queued_ids: string[]
+  failed_ids: string[]
+  results: Array<{
+    account_id: string
+    success: boolean
+    control_version?: number
+    job_id?: string
+    generation?: number
+    error?: WorkerAccountOperationError
+  }>
+}
+
+function workerOperationAccounts(accounts: WorkerAccountOperationTarget[]) {
+  if (accounts.length === 0 || accounts.length > 25) {
+    throw new Error('Worker account operations require between 1 and 25 accounts')
+  }
+  const seen = new Set<string>()
+  return accounts.map((account) => {
+    const id = String(account.id)
+    if (!id || seen.has(id) || !Number.isSafeInteger(account.control_version) || account.control_version < 0) {
+      throw new Error('Worker account operation targets must have unique ids and control versions')
+    }
+    seen.add(id)
+    return { id, expected_control_version: account.control_version }
+  })
+}
+
+export async function bulkSetEnabled(
+  accounts: WorkerAccountOperationTarget[],
+  enabled: boolean
+): Promise<WorkerAccountBulkStatusResult> {
+  const payload = { accounts: workerOperationAccounts(accounts), enabled }
+  const operation = await workerOperationKey('admin-account-bulk-status', payload)
+  const { data } = await apiClient.post<WorkerAccountBulkStatusResult>(
+    '/admin/accounts/bulk-update',
+    payload,
+    { headers: { 'Idempotency-Key': operation.key } }
+  )
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
+export async function queueHealthProbes(
+  accounts: WorkerAccountOperationTarget[]
+): Promise<WorkerAccountHealthProbeBatchResult> {
+  const payload = { accounts: workerOperationAccounts(accounts) }
+  const operation = await workerOperationKey('admin-account-health-probes', payload)
+  const { data } = await apiClient.post<WorkerAccountHealthProbeBatchResult>(
+    '/admin/accounts/health-probes',
+    payload,
+    { headers: { 'Idempotency-Key': operation.key } }
+  )
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
 /**
  * Get account today statistics
  * @param id - Account ID
@@ -765,6 +873,9 @@ export async function getBatchTodayStats(accountIds: number[]): Promise<BatchTod
  * @returns Updated account
  */
 export async function setSchedulable(id: number, schedulable: boolean): Promise<Account> {
+  if (isCloudflareWorkerContractActive()) {
+    throw new Error('Per-account schedulable changes are not supported by the Worker contract')
+  }
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/schedulable`, {
     schedulable
   })
@@ -1282,6 +1393,8 @@ export const accountsAPI = {
   batchCreate,
   batchUpdateCredentials,
   bulkUpdate,
+  bulkSetEnabled,
+  queueHealthProbes,
   previewFromCrs,
   syncFromCrs,
   exportData,

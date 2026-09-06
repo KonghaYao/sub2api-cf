@@ -58,6 +58,48 @@ interface Fixture {
   pool: CapturingPoolNamespace
 }
 
+function countD1Queries(test: Fixture): { readonly count: number; reset(): void } {
+  const original = test.env.DB
+  const originals = new WeakMap<object, D1PreparedStatement>()
+  let count = 0
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => {
+    const wrapped = {
+      bind: (...values: unknown[]) => wrap(statement.bind(...values)),
+      first: async <T>(columnName?: string) => {
+        count += 1
+        return columnName === undefined
+          ? await statement.first<T>()
+          : await statement.first<T>(columnName)
+      },
+      all: async <T>() => {
+        count += 1
+        return await statement.all<T>()
+      },
+      run: async () => {
+        count += 1
+        return await statement.run()
+      },
+      raw: async <T>(options?: { columnNames?: boolean }) => {
+        count += 1
+        return await (statement.raw as (value?: unknown) => Promise<T>)(options)
+      },
+    } as D1PreparedStatement
+    originals.set(wrapped, statement)
+    return wrapped
+  }
+  test.env.DB = {
+    prepare: (sql: string) => wrap(original.prepare(sql)),
+    batch: async <T>(statements: D1PreparedStatement[]) => {
+      count += statements.length
+      return await original.batch<T>(statements.map((statement) => originals.get(statement) ?? statement))
+    },
+  } as D1Database
+  return {
+    get count() { return count },
+    reset() { count = 0 },
+  }
+}
+
 function fixture(): Fixture {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
@@ -168,6 +210,39 @@ function linkResponsePool(
   linkExistingResponsePool(test, accountId, platform)
 }
 
+function linkManyResponsePools(test: Fixture, accountId: string, count: number): void {
+  test.raw.prepare(
+    `INSERT INTO "groups" (
+       id, name, platform, enabled, created_at_ms, updated_at_ms
+     ) VALUES ('group-many', 'Many targets', 'openai', 1, ?, ?)`,
+  ).run(NOW, NOW)
+  test.raw.prepare(
+    `INSERT INTO account_groups (
+       account_id, group_id, priority, weight, created_at_ms, updated_at_ms
+     ) VALUES (?, 'group-many', 1, 1, ?, ?)`,
+  ).run(accountId, NOW, NOW)
+  for (let index = 0; index < count; index += 1) {
+    const modelId = `model-many-${String(index).padStart(3, '0')}`
+    test.raw.prepare(
+      `INSERT INTO models (
+         id, platform, public_name, upstream_name, endpoint, embeddings,
+         enabled, created_at_ms, updated_at_ms
+       ) VALUES (?, 'openai', ?, ?, 'responses', 0, 1, ?, ?)`,
+    ).run(modelId, modelId, modelId, NOW, NOW)
+    test.raw.prepare(
+      `INSERT INTO group_models (
+         group_id, model_id, enabled, catalog_visible, created_at_ms, updated_at_ms
+       ) VALUES ('group-many', ?, 1, 1, ?, ?)`,
+    ).run(modelId, NOW, NOW)
+    test.raw.prepare(
+      `INSERT INTO account_models (
+         account_id, model_id, chat_completions, responses, embeddings,
+         created_at_ms, updated_at_ms
+       ) VALUES (?, ?, 0, 1, 0, ?, ?)`,
+    ).run(accountId, modelId, NOW, NOW)
+  }
+}
+
 function linkExistingResponsePool(
   test: Fixture,
   accountId: string,
@@ -209,6 +284,33 @@ afterEach(() => {
 })
 
 describe('scheduled account health lifecycle', () => {
+  it('drops a non-canonical Queue job identity without changing the referenced job', async () => {
+    const test = fixture()
+    const accountId = await seedAccount(test, 'openai', 'canonical-job')
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+    const legitimate = structuredClone(test.queue.messages[0]) as AccountHealthProbeEvent
+    const beforeJob = job(test, accountId)
+    const beforeAccount = account(test, accountId)
+    const forged = {
+      ...legitimate,
+      aggregate_id: 'account-forged',
+      event_id: `account-health:${legitimate.payload.job_id}`,
+      payload: {
+        ...legitimate.payload,
+        account_id: 'account-forged',
+      },
+    } as AccountHealthProbeEvent
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await consumeAccountHealthProbe(forged, test.env, NOW + 1)
+
+    expect(job(test, accountId)).toEqual(beforeJob)
+    expect(account(test, accountId)).toEqual(beforeAccount)
+    expect(fetchMock).not.toHaveBeenCalled()
+    test.raw.close()
+  })
+
   it('paginates due accounts, skips disabled accounts, and does not duplicate active jobs', async () => {
     const test = fixture()
     for (let index = 0; index < 5; index += 1) {
@@ -405,6 +507,79 @@ describe('scheduled account health lifecycle', () => {
     expect(job(test, accountId)).toMatchObject({
       status: 'completed', account_health_revision: 1, pool_revision: after,
     })
+    test.raw.close()
+  })
+
+  it('continues 1000 Pool targets past eight dispatches across budgeted Queue invocations', async () => {
+    const test = fixture()
+    const accountId = await seedAccount(test, 'openai', 'many-targets')
+    linkManyResponsePools(test, accountId, 1_000)
+    const fetchMock = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetchMock)
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+    const queries = countD1Queries(test)
+    let messageIndex = 0
+
+    while (job(test, accountId).status !== 'completed' && messageIndex < 110) {
+      queries.reset()
+      const event = test.queue.messages[messageIndex] as AccountHealthProbeEvent | undefined
+      expect(event).toBeDefined()
+      const message = {
+        id: `large-pool-${messageIndex}`,
+        timestamp: new Date(NOW),
+        body: event,
+        attempts: 1,
+        ack: vi.fn(),
+        retry: vi.fn(),
+      }
+      await consumeEvents(
+        { queue: 'events', messages: [message] } as unknown as MessageBatch<unknown>,
+        test.env,
+      )
+      expect(message.ack).toHaveBeenCalledOnce()
+      expect(message.retry).not.toHaveBeenCalled()
+      expect(queries.count).toBeLessThanOrEqual(50)
+      messageIndex += 1
+    }
+
+    expect(job(test, accountId)).toMatchObject({ status: 'completed' })
+    expect(test.pool.calls).toHaveLength(1_000)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(messageIndex).toBe(100)
+    test.raw.close()
+  })
+
+  it('restarts the persisted Pool cursor and converges after a routing revision change', async () => {
+    const test = fixture()
+    const accountId = await seedAccount(test, 'openai', 'revision-cursor')
+    linkManyResponsePools(test, accountId, 15)
+    const fetchMock = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetchMock)
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+
+    await consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
+    expect(test.pool.calls).toHaveLength(10)
+    expect(job(test, accountId).pool_sync_cursor_json).not.toBeNull()
+    test.raw.prepare(
+      `UPDATE gateway_config_revision SET revision = revision + 1 WHERE singleton = 1`,
+    ).run()
+    const stableRevision = test.raw.prepare(
+      `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
+    ).get().revision
+
+    await consumeAccountHealthProbe(test.queue.messages[1] as AccountHealthProbeEvent, test.env, NOW)
+    expect(test.pool.calls).toHaveLength(10)
+    expect(job(test, accountId)).toMatchObject({
+      status: 'probed', pool_revision: stableRevision, pool_sync_cursor_json: null,
+    })
+    await consumeAccountHealthProbe(test.queue.messages[2] as AccountHealthProbeEvent, test.env, NOW)
+    await consumeAccountHealthProbe(test.queue.messages[3] as AccountHealthProbeEvent, test.env, NOW)
+
+    expect(job(test, accountId)).toMatchObject({
+      status: 'completed', pool_revision: stableRevision, pool_sync_cursor_json: null,
+    })
+    expect(test.pool.calls).toHaveLength(25)
+    expect(fetchMock).toHaveBeenCalledOnce()
     test.raw.close()
   })
 

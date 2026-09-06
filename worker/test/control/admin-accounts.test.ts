@@ -240,6 +240,12 @@ describe('admin account control plane', () => {
     expect(JSON.stringify([account, secret])).not.toContain(input.api_key)
     expect((await decryptCredential(secret.nonce_b64, secret.ciphertext_b64, 'm'.repeat(32), credentialAad('test', account.id, secret.id, 1))).api_key).toBe(input.api_key)
     expect(payload.data).toMatchObject({ base_url: 'https://api.example.com/v1', status: 'active', config_version: 1, control_version: 0, credentials_status: { has_api_key: true } })
+    expect(payload.data.provider_account_metadata).toEqual({
+      quota: { status: 'unsupported', value: null },
+      tier: { status: 'unsupported', value: null },
+      privacy: { status: 'unsupported', value: null },
+    })
+    expect(payload.data).not.toHaveProperty('quota_limit')
     expect(payload.data.model_capabilities).toEqual([
       expect.objectContaining({ model_id: 'model-a', embeddings: false, image_generation: false }),
     ])

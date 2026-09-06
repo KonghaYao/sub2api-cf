@@ -151,6 +151,20 @@ describe('production admin route permission matrix', () => {
     })
   })
 
+  it('requires operations permission in addition to catalog permission for queued batch probes', async () => {
+    grantRole('batch-probe-catalog-writer', ['admin.catalog.write'])
+
+    const response = await request('/api/v1/admin/accounts/health-probes', 'POST')
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
+    })
+  })
+
   it('requires operations permission in addition to commerce permission for order cancellation', async () => {
     grantRole('commerce-writer', ['admin.commerce.write'])
 

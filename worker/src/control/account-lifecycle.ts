@@ -25,7 +25,7 @@ const MAX_DISPATCH_ATTEMPTS = 8
 // future paid-plan configuration without changing the state machine.
 const DEFAULT_PAGE_SIZE = 5
 const DEFAULT_MAX_PAGES = 1
-const MAX_POOL_SYNC_PASSES = 3
+const POOL_TARGET_PAGE_SIZE = 10
 
 export interface AccountHealthProbePayload {
   job_id: string
@@ -77,6 +77,7 @@ interface ProbeJobRow {
   health_status: 'healthy' | 'unhealthy' | null
   account_health_revision: number | null
   pool_revision: number | null
+  pool_sync_cursor_json: string | null
 }
 
 interface ProbeAccountRow {
@@ -224,6 +225,7 @@ export async function consumeAccountHealthProbe(
   nowMs = Date.now(),
 ): Promise<void> {
   assertTimestamp(nowMs)
+  if (event.payload.job_id !== healthJobId(event.payload.account_id, event.payload.generation)) return
   let job = await findJob(env, event.payload.job_id)
   if (job === null || terminalStatus(job.status)) return
   if (
@@ -327,6 +329,7 @@ export function isAccountHealthProbeEvent(value: unknown): value is AccountHealt
     !Number.isSafeInteger(payload.generation) || (payload.generation as number) <= 0
   ) return false
   return event.aggregate_id === payload.account_id &&
+    payload.job_id === healthJobId(payload.account_id, payload.generation as number) &&
     event.event_id === `account-health:${payload.job_id}`
 }
 
@@ -344,6 +347,59 @@ function createHealthEvent(job: DispatchJobRow, nowMs: number): AccountHealthPro
       generation: job.generation,
     },
   }
+}
+
+/**
+ * Best-effort immediate delivery for a probe job already committed to the D1
+ * outbox. A failed send remains recoverable by the normal Cron dispatcher.
+ */
+export async function dispatchAccountHealthProbeJobs(
+  env: Env,
+  jobs: Array<{ job_id: string; account_id: string; generation: number }>,
+  nowMs = Date.now(),
+): Promise<number> {
+  assertTimestamp(nowMs)
+  if (jobs.length === 0) return 0
+  if (jobs.length > 25) throw new Error('Account health dispatch batch is too large')
+  const outcomes: Array<{ id: string; error: string | null }> = []
+  let sent = 0
+  for (const job of jobs) {
+    if (
+      !positiveSafeInteger(job.generation) ||
+      job.job_id !== healthJobId(job.account_id, job.generation)
+    ) throw new Error('Account health job identity is invalid')
+    let error: string | null = null
+    try {
+      await env.EVENTS_QUEUE.send(createHealthEvent({
+        id: job.job_id,
+        account_id: job.account_id,
+        generation: job.generation,
+        status: 'queued',
+        dispatch_attempts: 0,
+        created_at_ms: nowMs,
+      }, nowMs))
+      sent += 1
+    } catch {
+      error = 'Queue dispatch failed'
+    }
+    outcomes.push({ id: job.job_id, error })
+  }
+  const errorCases = outcomes.map(() => 'WHEN ? THEN ?').join(' ')
+  const ids = outcomes.map(() => '?').join(', ')
+  await env.DB.prepare(
+    `UPDATE account_health_probes
+        SET dispatch_attempts = dispatch_attempts + 1,
+            next_dispatch_at_ms = ?, updated_at_ms = ?,
+            last_internal_error = CASE id ${errorCases} ELSE last_internal_error END
+      WHERE id IN (${ids}) AND status = 'queued'
+        AND dispatch_attempts = 0 AND dispatch_attempts < ?`,
+  ).bind(
+    addTimestamp(nowMs, dispatchBackoffMs(1)), nowMs,
+    ...outcomes.flatMap((outcome) => [outcome.id, outcome.error]),
+    ...outcomes.map((outcome) => outcome.id),
+    MAX_DISPATCH_ATTEMPTS,
+  ).run()
+  return sent
 }
 
 async function recoverAbandonedJobs(env: Env, nowMs: number): Promise<number> {
@@ -636,56 +692,100 @@ async function syncAffectedPools(env: Env, job: ProbeJobRow): Promise<void> {
   if (job.account_health_revision === null || job.pool_revision === null) {
     throw new Error('Account health probe result is incomplete')
   }
-  for (let pass = 0; pass < MAX_POOL_SYNC_PASSES; pass += 1) {
-    const targets = await loadPoolTargets(env, job)
-    if (targets === null) {
-      await markJobStale(env, job.id, null, Date.now())
-      return
-    }
-    const statements = [
-      env.DB.prepare('SELECT revision FROM gateway_config_revision WHERE singleton = 1'),
-      ...targets.map((target) => poolMembersStatement(env, target)),
-    ]
-    const snapshot = await env.DB.batch(statements)
-    const revision = snapshot[0]?.results[0] as RevisionRow | undefined
-    if (!positiveSafeInteger(revision?.revision)) throw new Error('Gateway config revision is invalid')
-    const poolRevision = revision.revision
-    await env.DB.prepare(
-      `UPDATE account_health_probes SET pool_revision = ?, updated_at_ms = MAX(updated_at_ms, ?)
-        WHERE id = ? AND status = 'probed'`,
-    ).bind(poolRevision, Date.now(), job.id).run()
-
-    for (const [index, target] of targets.entries()) {
-      const members = snapshot[index + 1]?.results as unknown as PoolMemberRow[]
-      validatePoolMembers(members)
-      await syncPoolSnapshot(env, target, poolRevision, members)
-    }
-    const after = await env.DB.prepare(
-      `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
-    ).first<RevisionRow>()
-    if (after?.revision !== poolRevision) continue
-    const completed = await env.DB.prepare(
-      `UPDATE account_health_probes
-          SET status = 'completed', next_dispatch_at_ms = ?, updated_at_ms = ?,
-              last_internal_error = NULL
-        WHERE id = ? AND status = 'probed' AND pool_revision = ?
-          AND EXISTS (
-            SELECT 1 FROM accounts a
-             WHERE a.id = account_health_probes.account_id AND a.enabled = 1
-               AND a.config_version = account_health_probes.config_version
-               AND a.credential_ref = account_health_probes.credential_ref
-               AND a.health_probe_generation = account_health_probes.generation
-               AND a.health_revision = account_health_probes.account_health_revision
-          )`,
-    ).bind(Date.now(), Date.now(), job.id, poolRevision).run()
-    if (completed.meta.changes === 1) return
-    await markJobStale(env, job.id, null, Date.now())
+  const nowMs = Date.now()
+  const cursor = parsePoolSyncCursor(job.pool_sync_cursor_json)
+  const page = await loadPoolTargetPage(env, job, cursor)
+  if (page === null) {
+    await markJobStale(env, job.id, null, nowMs)
     return
   }
-  throw new Error('Gateway config changed throughout Pool synchronization')
+  const statements = [
+    env.DB.prepare('SELECT revision FROM gateway_config_revision WHERE singleton = 1'),
+    ...page.targets.map((target) => poolMembersStatement(env, target)),
+  ]
+  const snapshot = await env.DB.batch(statements)
+  const revision = snapshot[0]?.results[0] as RevisionRow | undefined
+  if (!positiveSafeInteger(revision?.revision)) throw new Error('Gateway config revision is invalid')
+  const poolRevision = revision.revision
+
+  // A prior page belongs to an older routing snapshot. Restart from the first
+  // target in a later Queue invocation rather than multiplying work here.
+  if (cursor !== null && job.pool_revision !== poolRevision) {
+    if (await persistPoolProgress(env, job.id, poolRevision, null, nowMs)) {
+      await dispatchPoolContinuation(env, job, nowMs)
+    }
+    return
+  }
+
+  for (const [index, target] of page.targets.entries()) {
+    const members = snapshot[index + 1]?.results as unknown as PoolMemberRow[]
+    validatePoolMembers(members)
+    await syncPoolSnapshot(env, target, poolRevision, members)
+  }
+  const after = await env.DB.prepare(
+    `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
+  ).first<RevisionRow>()
+  if (!positiveSafeInteger(after?.revision)) throw new Error('Gateway config revision is invalid')
+  if (after.revision !== poolRevision) {
+    if (await persistPoolProgress(env, job.id, after.revision, null, nowMs)) {
+      await dispatchPoolContinuation(env, job, nowMs)
+    }
+    return
+  }
+  if (page.hasMore) {
+    const nextCursor = page.targets.at(-1)
+    if (nextCursor === undefined) throw new Error('Pool target page is empty')
+    if (await persistPoolProgress(env, job.id, poolRevision, nextCursor, nowMs)) {
+      await dispatchPoolContinuation(env, job, nowMs)
+    }
+    return
+  }
+
+  const completed = await env.DB.prepare(
+    `UPDATE account_health_probes
+        SET status = 'completed', pool_revision = ?, pool_sync_cursor_json = NULL,
+            next_dispatch_at_ms = ?, updated_at_ms = ?, last_internal_error = NULL
+      WHERE id = ? AND status = 'probed'
+        AND ? = (SELECT revision FROM gateway_config_revision WHERE singleton = 1)
+        AND EXISTS (
+          SELECT 1 FROM accounts a
+           WHERE a.id = account_health_probes.account_id AND a.enabled = 1
+             AND a.config_version = account_health_probes.config_version
+             AND a.credential_ref = account_health_probes.credential_ref
+             AND a.health_probe_generation = account_health_probes.generation
+             AND a.health_revision = account_health_probes.account_health_revision
+        )`,
+  ).bind(poolRevision, nowMs, nowMs, job.id, poolRevision).run()
+  if (completed.meta.changes === 1) return
+  const restarted = await env.DB.prepare(
+    `UPDATE account_health_probes
+        SET pool_revision = (
+              SELECT revision FROM gateway_config_revision WHERE singleton = 1
+            ),
+            pool_sync_cursor_json = NULL, next_dispatch_at_ms = ?,
+            updated_at_ms = MAX(updated_at_ms, ?)
+      WHERE id = ? AND status = 'probed'
+        AND EXISTS (
+          SELECT 1 FROM accounts a
+           WHERE a.id = account_health_probes.account_id AND a.enabled = 1
+             AND a.config_version = account_health_probes.config_version
+             AND a.credential_ref = account_health_probes.credential_ref
+             AND a.health_probe_generation = account_health_probes.generation
+             AND a.health_revision = account_health_probes.account_health_revision
+        )`,
+  ).bind(nowMs, nowMs, job.id).run()
+  if (restarted.meta.changes === 1) {
+    await dispatchPoolContinuation(env, job, nowMs)
+    return
+  }
+  await markJobStale(env, job.id, null, nowMs)
 }
 
-async function loadPoolTargets(env: Env, job: ProbeJobRow): Promise<PoolTargetRow[] | null> {
+async function loadPoolTargetPage(
+  env: Env,
+  job: ProbeJobRow,
+  cursor: PoolTargetRow | null,
+): Promise<{ targets: PoolTargetRow[]; hasMore: boolean } | null> {
   const current = await env.DB.prepare(
     `SELECT 1 AS current
        FROM accounts a
@@ -723,11 +823,71 @@ async function loadPoolTargets(env: Env, job: ProbeJobRow): Promise<PoolTargetRo
       WHERE a.id = ? AND a.enabled = 1 AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND (am.endpoint <> 'images' OR m.image_generation = 1)
-      ORDER BY ag.group_id ASC, am.model_id ASC, am.endpoint ASC`,
-  ).bind(job.account_id).all<PoolTargetRow>()
-  if (result.results.length > 1_000) throw new Error('Account has too many Pool targets')
+        AND (? IS NULL OR (ag.group_id, am.model_id, am.endpoint) > (?, ?, ?))
+      ORDER BY ag.group_id ASC, am.model_id ASC, am.endpoint ASC
+      LIMIT ?`,
+  ).bind(
+    job.account_id,
+    cursor?.group_id ?? null,
+    cursor?.group_id ?? '',
+    cursor?.model_id ?? '',
+    cursor?.endpoint ?? '',
+    POOL_TARGET_PAGE_SIZE + 1,
+  ).all<PoolTargetRow>()
   for (const target of result.results) validatePoolTarget(target)
-  return result.results
+  return {
+    targets: result.results.slice(0, POOL_TARGET_PAGE_SIZE),
+    hasMore: result.results.length > POOL_TARGET_PAGE_SIZE,
+  }
+}
+
+async function persistPoolProgress(
+  env: Env,
+  jobId: string,
+  revision: number,
+  cursor: PoolTargetRow | null,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE account_health_probes
+        SET pool_revision = ?, pool_sync_cursor_json = ?, next_dispatch_at_ms = ?,
+            updated_at_ms = MAX(updated_at_ms, ?), last_internal_error = NULL
+      WHERE id = ? AND status = 'probed'`,
+  ).bind(
+    revision, cursor === null ? null : JSON.stringify(cursor), nowMs, nowMs, jobId,
+  ).run()
+  return result.meta.changes === 1
+}
+
+async function dispatchPoolContinuation(env: Env, job: ProbeJobRow, nowMs: number): Promise<void> {
+  let sent = false
+  try {
+    await env.EVENTS_QUEUE.send(createHealthEvent({
+      id: job.id,
+      account_id: job.account_id,
+      generation: job.generation,
+      status: 'probed',
+      dispatch_attempts: 0,
+      created_at_ms: nowMs,
+    }, nowMs))
+    sent = true
+  } catch {
+    // The probed job remains a due outbox row for the normal Cron dispatcher.
+  }
+  await env.DB.prepare(
+    `UPDATE account_health_probes
+        SET dispatch_attempts = CASE WHEN ? = 1 THEN 0 ELSE MIN(dispatch_attempts + 1, ?) END,
+            next_dispatch_at_ms = ?, updated_at_ms = MAX(updated_at_ms, ?),
+            last_internal_error = CASE WHEN ? = 1 THEN NULL ELSE 'Queue dispatch failed' END
+      WHERE id = ? AND status = 'probed'`,
+  ).bind(
+    sent ? 1 : 0,
+    MAX_DISPATCH_ATTEMPTS,
+    addTimestamp(nowMs, dispatchBackoffMs(sent ? 1 : job.dispatch_attempts + 1)),
+    nowMs,
+    sent ? 1 : 0,
+    job.id,
+  ).run()
 }
 
 function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatement {
@@ -836,7 +996,7 @@ async function findJob(env: Env, jobId: string): Promise<ProbeJobRow | null> {
     `SELECT id, account_id, generation, config_version, credential_ref, status,
             processing_attempts, dispatch_attempts, next_dispatch_at_ms,
             run_token, run_lease_until_ms, health_status,
-            account_health_revision, pool_revision
+            account_health_revision, pool_revision, pool_sync_cursor_json
        FROM account_health_probes WHERE id = ?`,
   ).bind(jobId).first<ProbeJobRow>()
 }
@@ -905,6 +1065,29 @@ function validatePoolTarget(row: PoolTargetRow): void {
     typeof row.model_id !== 'string' || row.model_id.length === 0 ||
     !['chat_completions', 'responses', 'embeddings', 'images'].includes(row.endpoint)
   ) throw new Error('Pool target projection is invalid')
+}
+
+function parsePoolSyncCursor(value: string | null): PoolTargetRow | null {
+  if (value === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('Pool synchronization cursor is invalid')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Pool synchronization cursor is invalid')
+  }
+  const cursor = parsed as Record<string, unknown>
+  if (
+    Object.keys(cursor).some((key) => !['group_id', 'model_id', 'endpoint'].includes(key)) ||
+    typeof cursor.group_id !== 'string' ||
+    typeof cursor.model_id !== 'string' ||
+    typeof cursor.endpoint !== 'string'
+  ) throw new Error('Pool synchronization cursor is invalid')
+  const target = cursor as unknown as PoolTargetRow
+  validatePoolTarget(target)
+  return target
 }
 
 function validatePoolMembers(rows: PoolMemberRow[]): void {

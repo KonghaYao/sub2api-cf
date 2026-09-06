@@ -538,6 +538,9 @@ export default {
       bulkSchedulableDisabled: '成功停止 {count} 个账号的调度',
       bulkSchedulablePartial: '部分调度更新成功：成功 {success} 个，失败 {failed} 个',
       bulkSchedulableResultUnknown: '批量调度结果不完整，请稍后重试或刷新列表',
+      workerBatchLimit: 'Worker 账号操作一次仅支持 1 到 25 个当前可见账号',
+      workerHealthProbeQueued: '已为 {count} 个账号提交健康检查',
+      workerHealthProbePartial: '部分健康检查已提交：成功 {queued} 个，失败 {failed} 个',
       bulkActions: {
         selected: '已选择 {count} 个账号',
         selectedAll: '已选择全部 {count} 个账号',

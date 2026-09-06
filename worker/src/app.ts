@@ -46,6 +46,10 @@ import {
   testAdminAccount,
   updateAdminAccount,
 } from './control/accounts'
+import {
+  bulkUpdateAdminAccounts,
+  queueAdminAccountHealthProbes,
+} from './control/account-operations'
 import { getAdminAuditEvent, listAdminAuditEvents } from './control/audit'
 import {
   recoverAdminSession,
@@ -611,6 +615,8 @@ export function createApp() {
   app.delete('/api/v1/admin/channels/:id', deleteAdminChannel)
   app.get('/api/v1/admin/accounts', listAdminAccounts)
   app.post('/api/v1/admin/accounts', createAdminAccount)
+  app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
+  app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
   app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)

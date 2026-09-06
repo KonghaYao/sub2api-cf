@@ -451,6 +451,9 @@ export default {
       bulkSchedulableDisabled: 'Successfully disabled scheduling for {count} account(s)',
       bulkSchedulablePartial: 'Scheduling updated partially: {success} succeeded, {failed} failed',
       bulkSchedulableResultUnknown: 'Bulk scheduling result incomplete. Please retry or refresh.',
+      workerBatchLimit: 'Worker account operations require 1 to 25 visible accounts.',
+      workerHealthProbeQueued: 'Queued health checks for {count} account(s)',
+      workerHealthProbePartial: 'Health checks queued partially: {queued} queued, {failed} failed',
       bulkActions: {
         selected: '{count} account(s) selected',
         selectedAll: 'All {count} account(s) selected',

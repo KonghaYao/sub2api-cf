@@ -14,6 +14,7 @@ const {
   testAccount,
   probeUpstreamBilling,
   probeUpstreamBillingBatch,
+  setSchedulable,
   showError,
   showSuccess
 } = vi.hoisted(() => ({
@@ -27,6 +28,7 @@ const {
   testAccount: vi.fn(),
   probeUpstreamBilling: vi.fn(),
   probeUpstreamBillingBatch: vi.fn(),
+  setSchedulable: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn()
 }))
@@ -50,7 +52,7 @@ vi.mock('@/api/admin', () => ({
       batchRefresh: vi.fn(),
       probeUpstreamBilling,
       probeUpstreamBillingBatch,
-      toggleSchedulable: vi.fn()
+      setSchedulable
     },
     proxies: {
       getAll: getAllProxies
@@ -112,6 +114,7 @@ const DataTableStub = {
         <span data-test="account-identity">{{ row.id }}|{{ row.name }}|{{ row.platform }}|{{ row.protocol }}</span>
         <span data-test="account-health">{{ row.health_status }}|{{ row.last_latency_ms }}|{{ row.control_version }}|{{ row.updated_at }}</span>
         <div data-test="select-row"><slot name="cell-select" :row="row" /></div>
+        <div data-test="schedulable-row"><slot name="cell-schedulable" :row="row" /></div>
         <slot name="cell-created_at" :value="row.created_at" :row="row" />
         <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
         <div data-test="account-actions"><slot name="cell-actions" :row="row" /></div>
@@ -204,6 +207,7 @@ describe('admin AccountsView bulk edit scope', () => {
     testAccount.mockReset()
     probeUpstreamBilling.mockReset()
     probeUpstreamBillingBatch.mockReset()
+    setSchedulable.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
     workerSettings.cloudflareWorkerContract = false
@@ -256,6 +260,25 @@ describe('admin AccountsView bulk edit scope', () => {
       'created_at',
       'actions',
     ])
+  })
+
+  it('does not render or call the absent per-account schedulable action in Worker mode', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    listAccounts.mockResolvedValueOnce({
+      items: [{
+        id: 'account-uuid', name: 'Worker account', platform: 'openai', protocol: 'openai',
+        type: 'apikey', status: 'active', schedulable: true, enabled: true,
+        created_at: '2026-09-05T00:00:00.000Z', updated_at: '2026-09-05T00:00:00.000Z',
+        control_version: 1,
+      }],
+      total: 1, page: 1, page_size: 20, pages: 1,
+    })
+
+    const wrapper = mountWorkerView()
+    await flushPromises()
+
+    expect(wrapper.find('[title="admin.accounts.schedulableEnabled"]').exists()).toBe(false)
+    expect(setSchedulable).not.toHaveBeenCalled()
   })
 
   it('runs a Worker account health check from the row action', async () => {

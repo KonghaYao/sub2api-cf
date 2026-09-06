@@ -177,15 +177,17 @@
       </template>
       <template #table>
         <AccountBulkActionsBar
-          v-if="!cloudflareWorkerContract"
+          v-if="!cloudflareWorkerContract || selIds.length > 0"
           :selected-ids="selIds"
           :total-results="pagination.total"
           :selecting-all="selectingAllResults"
           :all-results-selected="allResultsSelected"
+          :cloudflare-worker="cloudflareWorkerContract"
           @delete="handleBulkDelete"
           @reset-status="handleBulkResetStatus"
           @refresh-token="handleBulkRefreshToken"
           @probe-upstream-billing="handleBulkProbeUpstreamBilling"
+          @health-probe="handleWorkerBulkHealthProbe"
           @edit-selected="openBulkEditSelected"
           @edit-filtered="openBulkEditFiltered"
           @clear="clearSelection"
@@ -294,7 +296,7 @@
             </div>
           </template>
           <template #cell-schedulable="{ row }">
-            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button v-if="!cloudflareWorkerContract" @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -2076,9 +2078,81 @@ const normalizeBulkSchedulableResult = (
     hasCounts: hasExplicitCounts
   }
 }
+const selectedWorkerOperationAccounts = () => {
+  if (selIds.value.length === 0 || selIds.value.length > 25) {
+    throw new Error(t('admin.accounts.workerBatchLimit'))
+  }
+  const selected = new Set(selIds.value.map(id => String(id)))
+  const targets = accounts.value
+    .filter(account => selected.has(String(account.id)))
+    .map(account => ({
+      id: account.id,
+      control_version: (account as unknown as { control_version?: number }).control_version
+    }))
+  if (
+    targets.length !== selected.size ||
+    targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)
+  ) {
+    throw new Error(t('admin.accounts.bulkSchedulableResultUnknown'))
+  }
+  return targets as Array<{ id: number | string; control_version: number }>
+}
+
+const handleWorkerBulkHealthProbe = async () => {
+  try {
+    const result = await adminAPI.accounts.queueHealthProbes(selectedWorkerOperationAccounts())
+    if (result.failed > 0) {
+      appStore.showError(t('admin.accounts.workerHealthProbePartial', {
+        queued: result.queued,
+        failed: result.failed
+      }))
+      setSelectedIds(result.failed_ids as unknown as number[])
+    } else {
+      appStore.showSuccess(t('admin.accounts.workerHealthProbeQueued', { count: result.queued }))
+      clearSelection()
+    }
+    await load()
+  } catch (error) {
+    console.error('Failed to queue Worker account health probes:', error)
+    appStore.showError(error instanceof Error ? error.message : t('common.error'))
+  }
+}
+
 const handleBulkToggleSchedulable = async (schedulable: boolean) => {
   const accountIds = [...selIds.value]
   try {
+    if (cloudflareWorkerContract.value) {
+      const result = await adminAPI.accounts.bulkSetEnabled(
+        selectedWorkerOperationAccounts(), schedulable
+      )
+      const successful = new Map(result.results
+        .filter(item => item.success && Number.isSafeInteger(item.control_version))
+        .map(item => [item.account_id, item]))
+      accounts.value = accounts.value.map(account => {
+        const updated = successful.get(String(account.id))
+        return updated === undefined ? account : {
+          ...account,
+          enabled: schedulable,
+          schedulable,
+          status: schedulable ? 'active' : 'inactive',
+          control_version: updated.control_version
+        } as Account
+      })
+      if (result.failed > 0) {
+        appStore.showError(t('admin.accounts.bulkSchedulablePartial', {
+          success: result.success,
+          failed: result.failed
+        }))
+        setSelectedIds(result.failed_ids as unknown as number[])
+      } else {
+        appStore.showSuccess(schedulable
+          ? t('admin.accounts.bulkSchedulableEnabled', { count: result.success })
+          : t('admin.accounts.bulkSchedulableDisabled', { count: result.success }))
+        clearSelection()
+      }
+      await load()
+      return
+    }
     const result = await adminAPI.accounts.bulkUpdate(accountIds, { schedulable })
     const { successIds, failedIds, successCount, failedCount, hasIds, hasCounts } = normalizeBulkSchedulableResult(result, accountIds)
     if (!hasIds && !hasCounts) {

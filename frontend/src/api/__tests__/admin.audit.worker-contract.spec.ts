@@ -40,4 +40,13 @@ describe('admin audit Cloudflare Worker contract', () => {
     expect(get).toHaveBeenCalledWith('/admin/audit/events/payment/refund%2Fevent%201')
     expect(api.auditAPI).not.toHaveProperty('clear')
   })
+
+  it('supports Worker account operation audit details', async () => {
+    get.mockResolvedValueOnce({ data: { category: 'account', event_id: 'account:event/1' } })
+    const api = await import('@/api/admin/audit')
+
+    await api.get('account', 'account:event/1')
+
+    expect(get).toHaveBeenCalledWith('/admin/audit/events/account/account%3Aevent%2F1')
+  })
 })

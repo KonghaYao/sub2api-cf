@@ -275,6 +275,7 @@ const categoryOptions = computed(() => [
   { value: '', label: t('admin.audit.filters.all') },
   { value: 'settings', label: t('admin.audit.categories.settings') },
   { value: 'rbac', label: t('admin.audit.categories.rbac') },
+  { value: 'account', label: t('admin.audit.categories.account') },
   { value: 'auth', label: t('admin.audit.categories.auth') },
   { value: 'payment', label: t('admin.audit.categories.payment') }
 ])

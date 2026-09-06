@@ -1644,6 +1644,11 @@ function accountResponse(value: {
     enabled: value.enabled,
     status: value.enabled ? 'active' as const : 'inactive' as const,
     credentials_status: { has_api_key: true },
+    provider_account_metadata: {
+      quota: { status: 'unsupported' as const, value: null },
+      tier: { status: 'unsupported' as const, value: null },
+      privacy: { status: 'unsupported' as const, value: null },
+    },
   }
 }
 

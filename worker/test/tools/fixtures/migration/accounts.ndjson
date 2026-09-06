@@ -1,0 +1,1 @@
+{"id":"account-1","platform":"openai","name":"fixture","credential_ref":"account-secret-1","enabled":true,"max_concurrency":2,"base_url":"https://api.openai.com/v1","config_version":1,"provider_config":{},"created_at_ms":1700000000000,"updated_at_ms":1700000001000}

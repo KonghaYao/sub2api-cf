@@ -1,0 +1,24 @@
+{
+  "schema": "sub2api-cloudflare-empty-target-proof",
+  "version": 1,
+  "environment": "staging",
+  "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "checked_at": "2026-09-06T00:00:00.000Z",
+  "d1": {
+    "binding": "DB",
+    "database_name": "sub2api-staging",
+    "user_table_count": 0
+  },
+  "durable_objects": [
+    {
+      "namespace": "USER_STATE",
+      "object_id": "user-1",
+      "storage_entry_count": 0
+    }
+  ],
+  "r2": {
+    "binding": "OBJECTS",
+    "bucket_name": "sub2api-staging",
+    "object_count": 0
+  }
+}

@@ -16,6 +16,7 @@ export default {
     categories: {
       settings: 'Settings',
       rbac: 'RBAC',
+      account: 'Accounts',
       auth: 'Authentication',
       payment: 'Payment'
     },

@@ -1,6 +1,6 @@
 {
   "name": "sub2api-worker",
-  "version": "0.35.0",
+  "version": "0.36.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,7 +21,14 @@
     "backup:bundle": "node scripts/backup-restore.mjs create",
     "backup:verify": "node scripts/backup-restore.mjs verify",
     "backup:restore-plan": "node scripts/backup-restore.mjs restore-plan",
-    "backup:restore-local": "node scripts/backup-restore.mjs restore"
+    "backup:restore-local": "node scripts/backup-restore.mjs restore",
+    "backup:remote-plan": "node scripts/backup-restore-remote.mjs backup-plan",
+    "backup:remote-restore-plan": "node scripts/backup-restore-remote.mjs restore-plan",
+    "migration:validate": "node tools/migration/cutover.mjs validate",
+    "migration:build": "node tools/migration/cutover.mjs build",
+    "migration:reconcile": "node tools/migration/cutover.mjs reconcile",
+    "migration:advance": "node tools/migration/cutover.mjs advance",
+    "test:migration": "vitest run test/tools/migration-cutover.test.ts"
   },
   "engines": {
     "node": ">=22"

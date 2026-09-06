@@ -90,6 +90,25 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   remains separate while retry, terminal replay and lost-lease behavior cannot
   drift between the three flows.
 
+## Completed locally in v0.36
+
+- The production cutover tool validates a versioned eight-domain export using
+  streaming NDJSON plus a disk-backed SQLite index, emits D1/DO/R2 artifacts,
+  validates runtime credentials and routing dependencies, produces deterministic
+  full-domain digest reconciliation, and generates a chained single-writer
+  ownership plan for the internal/1/5/25/50/100 cohorts.
+- Remote backup/restore planning now hard-allowlists staging and production,
+  uses argument-array D1 commands, verifies manifests and fresh empty-target
+  proofs, rejects contract-only steps before execution, and verifies executable
+  steps through independent read-back evidence and an atomic resumable journal.
+  DO and R2 transports remain contract-only until their privileged adapters and
+  a real empty-environment drill exist.
+- Migration 0058 adds guarded, bounded account bulk enable/disable and durable
+  Queue health-probe APIs with CAS, idempotency, immutable unified audit and
+  stale-generation rejection. The Worker frontend exposes only these retained
+  operations; unavailable provider quota, tier and privacy facts are explicit
+  `unsupported`/`null`, never zero or guessed.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
@@ -97,15 +116,15 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Frontend/Worker contract closure | Local route guards and reachable-page contracts are closed; browser-level deployed proof remains. | Keep the Worker route inventory authoritative and expose new controls only with a complete Worker contract. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
 | Channel customer pricing | Text and synchronous-image channel pricing are complete locally; deployed proof remains. Video routes and pricing are deferred together. | Keep frozen token/request/image decisions independent from provider account-cost facts; add video only with its Worker route. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
 | Core provider and protocol closure | The four Worker providers cover the main text paths, but retained legacy protocol variants and upstream credential lifecycles are incomplete. | Worker streaming codecs and provider adapters; D1 encrypted credential generations; DO leases/refresh serialization; Queue/Cron health recovery. | Every retained Go compatibility fixture is mapped; OpenAI, Anthropic, Gemini and Codex run authenticated binding and deployed smoke tests with exact settlement and no lease leaks. |
-| Production data cutover | Local binding tests exist, but PostgreSQL/Redis state has not been fully imported and reconciled with D1/DO/R2. | Versioned D1 import, R2 manifests, DO initialization commands and Queue projection catch-up. | Users, keys, balances, ledgers, subscriptions, orders and provider accounts reconcile by row count and sampled digest before staged traffic reaches 100%. |
-| Backup, restore and rollback | The local cross-store bundle, integrity verifier and deterministic restore plan pass; remote D1/DO/R2 adapters and drills remain. | Add explicit environment-selected exports/imports, per-DO restore commands, R2 reconciliation and Worker Versions rollback notes around the v0.34 bundle core. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
+| Production data cutover | Versioned conversion/reconciliation and ownership-cohort artifacts pass locally; the real PostgreSQL/Redis export, Queue catch-up and staged import have not run. | Execute the validated D1/DO/R2 artifacts under the generated single-writer cohort plan. | Users, keys, balances, ledgers, subscriptions, orders, provider accounts, runtime dependencies and R2 objects reconcile by row count and full-domain digest before staged traffic reaches 100%. |
+| Backup, restore and rollback | Local bundles and strict remote plans pass; privileged DO/R2 executors and real drills remain. | Implement the contract-only per-DO and R2 adapters, then exercise the allow-listed journaled plan with Worker Versions rollback notes. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
 | Production identity delivery | Queue/D1 delivery behavior and Cloudflare binding adapters pass locally, but no sender is committed in environment config and deployed flows are not proven. | Configure a verified `SEND_EMAIL` sender or an idempotent bounded mail Worker separately in every environment. | Registration verification, password reset, account binding, TOTP and notification-mail verification pass deployed E2E without leaking challenge data. |
 
 ## P1: commercial and operational completeness
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
-| Account operations | Batch actions, provider quota/tier/privacy sync and per-model probes are incomplete. | D1 control state, Pool DO cooldown, Queue/Cron probes and versioned health projections. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota is `unknown`, never zero. |
+| Account operations | Guarded bulk enable/disable and Queue health probes are complete locally; per-model synthetic probes remain. Provider quota/tier/privacy are explicitly unsupported until stable APIs exist. | Extend the existing versioned Queue/Cron probe path only for documented provider facts and retained per-model checks. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota/tier/privacy is `unsupported` with `null`, never zero. |
 | Admin usage and finance | Immutable per-user balance/debt history and bounded operator-driven batch coordination now exist; automatic discovery, broader aggregates and correction/export workflows are incomplete. | Add scheduled discovery, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |

@@ -1,0 +1,2 @@
+{"id":"user-admin","email":"admin@example.com","display_name":"Admin","role":"admin","status":"active","created_at_ms":1700000000000,"updated_at_ms":1700000001000}
+{"id":"user-regular","email":"user@example.com","display_name":"User","role":"user","status":"active","created_at_ms":1700000000000,"updated_at_ms":1700000001000}
