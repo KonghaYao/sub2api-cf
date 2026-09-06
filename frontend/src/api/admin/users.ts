@@ -445,16 +445,16 @@ export async function batchUpdateLimits(
     if (request.concurrency === undefined && request.rpm_limit === undefined) {
       return { affected: 0 }
     }
-    const uniqueIds = [...new Map(
-      request.user_ids.map((id) => [String(id), id] as const)
-    ).values()]
-    for (const id of uniqueIds) {
-      await update(id, {
+    const { data } = await apiClient.post<BatchUpdateUserLimitsResponse>(
+      '/admin/users/batch-limits',
+      {
+        user_ids: request.user_ids.map(String),
         ...(request.concurrency === undefined ? {} : { concurrency: request.concurrency }),
         ...(request.rpm_limit === undefined ? {} : { rpm_limit: request.rpm_limit }),
-      })
-    }
-    return { affected: uniqueIds.length }
+      },
+      { headers: { 'Idempotency-Key': operationKey('admin-user-batch-limits') } },
+    )
+    return data
   }
   const { data } = await apiClient.post<BatchUpdateUserLimitsResponse>(
     '/admin/users/batch-limits',

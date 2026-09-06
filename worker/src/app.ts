@@ -96,6 +96,7 @@ import {
 import {
   adjustAdminUserBalance,
   createAdminUser,
+  batchUpdateAdminUserLimits,
   getAdminUser,
   listAdminUserBalanceHistory,
   listAdminUsers,
@@ -619,6 +620,7 @@ export function createApp() {
   app.post('/api/v1/admin/oauth-providers/:provider/disable', disableAdminOAuthProvider)
   app.get('/api/v1/admin/users', listAdminUsers)
   app.post('/api/v1/admin/users', createAdminUser)
+  app.post('/api/v1/admin/users/batch-limits', batchUpdateAdminUserLimits)
   app.get('/api/v1/admin/users/:id', getAdminUser)
   app.get('/api/v1/admin/users/:id/balance-history', listAdminUserBalanceHistory)
   app.post('/api/v1/admin/users/:id/balance-history/backfill', backfillAdminUserFinancialHistory)

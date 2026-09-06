@@ -732,6 +732,61 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
   }
 }
 
+export async function batchUpdateAdminUserLimits(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const key = requireIdempotencyKey(context.req.raw)
+    const input = parseBatchUserLimits(await readJsonObject(context.req.raw, 128 * 1024))
+    const idempotency = await controlIdempotency('admin.users.batch-limits.v1', key, input)
+    const previous = await findControlIdempotency(context.env, idempotency)
+    if (previous !== null) {
+      return controlSuccess(parseIdempotentResponse(previous, 'user_limits_batch'))
+    }
+    const now = Date.now()
+    const placeholders = input.user_ids.map(() => '?').join(', ')
+    const countGuard = `(SELECT COUNT(*) FROM users WHERE id IN (${placeholders})) = ?`
+    const response = { affected: input.user_ids.length }
+    const updated = context.env.DB.prepare(
+      `UPDATE users
+          SET concurrency = COALESCE(?, concurrency),
+              rpm_limit = COALESCE(?, rpm_limit),
+              control_version = control_version + 1,
+              updated_at_ms = ?
+        WHERE id IN (${placeholders}) AND ${countGuard}`,
+    ).bind(
+      input.concurrency ?? null,
+      input.rpm_limit ?? null,
+      now,
+      ...input.user_ids,
+      ...input.user_ids,
+      input.user_ids.length,
+    )
+    const idempotencyInsert = context.env.DB.prepare(
+      `INSERT INTO control_idempotency (
+         scope, key_hash, request_hash, resource_type, resource_id,
+         response_json, created_at_ms, expires_at_ms
+       ) SELECT ?, ?, ?, 'user_limits_batch', ?, ?, ?, ?
+         WHERE ${countGuard}`,
+    ).bind(
+      idempotency.scope,
+      idempotency.key_hash,
+      idempotency.request_hash,
+      input.user_ids.join(','),
+      JSON.stringify(response),
+      now,
+      now + 7 * 24 * 60 * 60 * 1_000,
+      ...input.user_ids,
+      input.user_ids.length,
+    )
+    const result = await context.env.DB.batch([updated, idempotencyInsert])
+    if (result[0].meta.changes !== input.user_ids.length) {
+      throw new GatewayError(409, 'user_batch_conflict', 'A selected user no longer exists; reload and retry')
+    }
+    return controlSuccess(response)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 function parseCreateUser(body: Record<string, unknown>): CreateUserInput {
   const email = requireString(body, 'email', 320).toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -789,6 +844,38 @@ function parseUserUpdatePatch(body: Record<string, unknown>): UserUpdatePatch {
   patch.restrict_public_groups = optionalBoolean(body, 'restrict_public_groups')
   patch.group_rates = parseOptionalGroupRates(body)
   return patch
+}
+
+function parseBatchUserLimits(body: Record<string, unknown>): {
+  user_ids: string[]
+  concurrency?: number
+  rpm_limit?: number
+} {
+  const allowed = new Set(['user_ids', 'all', 'concurrency', 'rpm_limit'])
+  const unknown = Object.keys(body).find((key) => !allowed.has(key))
+  if (unknown !== undefined) throw new GatewayError(400, 'unsupported_batch_limits_field', `${unknown} is not supported`)
+  if (body.all === true) {
+    throw new GatewayError(422, 'worker_batch_all_not_supported', 'Worker batch limit updates require explicit user IDs')
+  }
+  if (body.all !== undefined && body.all !== false) {
+    throw new GatewayError(400, 'invalid_all', 'all must be boolean')
+  }
+  if (!Array.isArray(body.user_ids) || body.user_ids.length === 0 || body.user_ids.length > 500) {
+    throw new GatewayError(400, 'invalid_user_ids', 'user_ids must contain between 1 and 500 user IDs')
+  }
+  const userIds = body.user_ids.map((value) => requireResourceId(
+    typeof value === 'string' || typeof value === 'number' ? String(value) : undefined,
+    'user',
+  ))
+  if (new Set(userIds).size !== userIds.length) {
+    throw new GatewayError(400, 'duplicate_user_id', 'user_ids must not contain duplicates')
+  }
+  const concurrency = optionalSafeInteger(body, 'concurrency')
+  const rpmLimit = optionalSafeInteger(body, 'rpm_limit')
+  if (concurrency === undefined && rpmLimit === undefined) {
+    throw new GatewayError(400, 'empty_batch_limits_update', 'Provide concurrency or rpm_limit')
+  }
+  return { user_ids: userIds, ...(concurrency === undefined ? {} : { concurrency }), ...(rpmLimit === undefined ? {} : { rpm_limit: rpmLimit }) }
 }
 
 function parseOptionalGroupIds(body: Record<string, unknown>, field: string): string[] | undefined {

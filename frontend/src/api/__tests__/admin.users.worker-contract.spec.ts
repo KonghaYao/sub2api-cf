@@ -377,13 +377,9 @@ describe('admin users Cloudflare Worker contract', () => {
     )
   })
 
-  it('degrades batch limits to one idempotent Worker update per UUID', async () => {
+  it('uses the atomic Worker batch-limits contract for explicit UUIDs', async () => {
     const secondId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-    put
-      .mockResolvedValueOnce({ data: { ...WORKER_USER, concurrency: 4, rpm_limit: 0 } })
-      .mockResolvedValueOnce({
-        data: { ...WORKER_USER, id: secondId, concurrency: 4, rpm_limit: 0 },
-      })
+    post.mockResolvedValueOnce({ data: { affected: 2 } })
     const { batchUpdateLimits } = await import('@/api/admin/users')
 
     const result = await batchUpdateLimits({
@@ -392,21 +388,14 @@ describe('admin users Cloudflare Worker contract', () => {
       rpm_limit: 0,
     })
 
-    expect(post).not.toHaveBeenCalled()
-    expect(put).toHaveBeenNthCalledWith(1, `/admin/users/${WORKER_USER_ID}`, {
+    expect(put).not.toHaveBeenCalled()
+    expect(post).toHaveBeenCalledWith('/admin/users/batch-limits', {
+      user_ids: [WORKER_USER_ID, secondId],
       concurrency: 4,
       rpm_limit: 0,
     }, {
       headers: {
-        'Idempotency-Key': `admin-user-update-${WORKER_USER_ID}-11111111-1111-4111-8111-111111111111`,
-      },
-    })
-    expect(put).toHaveBeenNthCalledWith(2, `/admin/users/${secondId}`, {
-      concurrency: 4,
-      rpm_limit: 0,
-    }, {
-      headers: {
-        'Idempotency-Key': `admin-user-update-${secondId}-11111111-1111-4111-8111-111111111111`,
+        'Idempotency-Key': 'admin-user-batch-limits-11111111-1111-4111-8111-111111111111',
       },
     })
     expect(result).toEqual({ affected: 2 })

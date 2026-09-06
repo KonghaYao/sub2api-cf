@@ -476,3 +476,9 @@ explicit typed error. It must never silently discard a submitted field or return
 - Account status filters now map `active`, `inactive`, and `error` to the
   Worker enabled and health projections. Runtime-only status choices remain in
   the original filter UI and return a typed unsupported-filter error.
+
+## v0.42.29 Users atomic batch limits — 2026-09-07
+
+- The original bulk limits dialog now uses one Worker transaction for its
+  explicit user selection. The batch has an idempotency record and rejects the
+  whole operation if any selected user is no longer present.
