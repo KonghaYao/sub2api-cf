@@ -266,4 +266,36 @@ describe('feature route guard', () => {
     expect(next).toHaveBeenCalledOnce()
     expect(next).toHaveBeenCalledWith()
   })
+
+  it.each([
+    ['/payment/airwallex', '/payment/result'],
+    ['/auth/wechat/payment/callback', '/payment/result'],
+    ['/payment/qrcode', '/purchase'],
+    ['/monitor', '/dashboard'],
+  ])('redirects unsupported Worker-only route %s to %s', async (path, target) => {
+    adminSettingsStore.cloudflareWorkerContract = true
+
+    const { navigation, next } = runGuard(
+      { requiresAuth: path === '/payment/qrcode' },
+      path
+    )
+    await navigation
+
+    expect(next).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledWith(target)
+  })
+
+  it.each([
+    '/payment/stripe',
+    '/payment/result',
+    '/payment/stripe-popup',
+  ])('keeps supported Stripe route %s reachable in Worker mode', async (path) => {
+    adminSettingsStore.cloudflareWorkerContract = true
+
+    const { navigation, next } = runGuard({ requiresAuth: false }, path)
+    await navigation
+
+    expect(next).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledWith()
+  })
 })

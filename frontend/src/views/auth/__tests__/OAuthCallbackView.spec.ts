@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import OAuthCallbackView from '@/views/auth/OAuthCallbackView.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const {
   routeState,
@@ -78,6 +79,7 @@ vi.mock('@/composables/useClipboard', () => ({
 
 describe('OAuthCallbackView', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     routeState.path = '/auth/callback'
     routeState.query = {}
     locationState.current = {
@@ -136,6 +138,17 @@ describe('OAuthCallbackView', () => {
     expect(wrapper.text()).toContain('auth.oauth.invalidCallbackTitle')
     expect(wrapper.text()).toContain('auth.oauth.invalidCallbackHint')
     expect(wrapper.find('input[readonly]').exists()).toBe(false)
+  })
+
+  it('rejects a bare callback locally in Worker mode without calling legacy pending exchange', async () => {
+    routeState.path = '/auth/oauth/callback'
+    setCloudflareWorkerContractActive(true)
+
+    const wrapper = mount(OAuthCallbackView)
+    await vi.dynamicImportSettled()
+
+    expect(exchangePendingOAuthCompletionMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('auth.oauth.invalidCallbackTitle')
   })
 
   it('forwards frontend email oauth provider callbacks back to the backend callback endpoint', async () => {

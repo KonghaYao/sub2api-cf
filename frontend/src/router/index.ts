@@ -776,6 +776,12 @@ const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/wechat/payment/callback',
 ]
 const BACKEND_MODE_PENDING_AUTH_PATHS = ['/register', '/email-verify']
+const CLOUDFLARE_REMOVED_ROUTE_REDIRECTS: Readonly<Record<string, string>> = {
+  '/payment/airwallex': '/payment/result',
+  '/auth/wechat/payment/callback': '/payment/result',
+  '/payment/qrcode': '/purchase',
+  '/monitor': '/dashboard',
+}
 
 function isBackendModePublicRouteAllowed(path: string, hasPendingAuthSession: boolean): boolean {
   if (BACKEND_MODE_ALLOWED_PATHS.some((allowedPath) => path === allowedPath || path.startsWith(allowedPath))) {
@@ -817,6 +823,14 @@ router.beforeEach(async (to, _from, next) => {
   // Check if route requires authentication
   const requiresAuth = to.meta.requiresAuth !== false // Default to true
   const requiresAdmin = to.meta.requiresAdmin === true
+
+  const removedWorkerRouteRedirect = adminSettingsStore.cloudflareWorkerContract
+    ? CLOUDFLARE_REMOVED_ROUTE_REDIRECTS[to.path]
+    : undefined
+  if (removedWorkerRouteRedirect) {
+    next(removedWorkerRouteRedirect)
+    return
+  }
 
   // If route doesn't require auth, allow access
   if (!requiresAuth) {

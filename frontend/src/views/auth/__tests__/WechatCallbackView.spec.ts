@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import WechatCallbackView from '@/views/auth/WechatCallbackView.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const {
   exchangePendingOAuthCompletionMock,
@@ -152,6 +153,7 @@ vi.mock('@/api/auth', async () => {
 
 describe('WechatCallbackView', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     exchangePendingOAuthCompletionMock.mockReset()
     completeWeChatOAuthRegistrationMock.mockReset()
     login2FAMock.mockReset()
@@ -192,6 +194,26 @@ describe('WechatCallbackView', () => {
       turnstile_enabled: false,
       turnstile_site_key: '',
     })
+  })
+
+  it('rejects a bare callback locally in Worker mode without calling legacy pending exchange', async () => {
+    setCloudflareWorkerContractActive(true)
+
+    const wrapper = mount(WechatCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(exchangePendingOAuthCompletionMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledWith('auth.oauth.invalidCallbackHint')
+    expect(wrapper.text()).toContain('Callback hint')
   })
 
   it('overrides an incompatible query mode with the configured open capability during bind recovery', async () => {

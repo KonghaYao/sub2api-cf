@@ -1,6 +1,12 @@
 import type { Env, PlatformEvent, SubscriptionStateChangedPayload } from '../env'
 import { isProviderPlatform } from '../gateway/platform'
 import {
+  exportSubscriptionStateBackup,
+  inspectSubscriptionStateBackup,
+  readSubscriptionStateBackupIdentity,
+  restoreSubscriptionStateBackup,
+} from '../backup/subscription-state-backup'
+import {
   errorResponse,
   json,
   readJsonObject,
@@ -125,6 +131,20 @@ export class SubscriptionStateDO {
       const url = new URL(request.url)
       if (request.method === 'GET' && url.pathname === '/health') return this.health()
       if (request.method === 'GET' && url.pathname === '/snapshot') return this.snapshot()
+      if (request.method === 'GET' && url.pathname === '/backup/verify') {
+        return await inspectSubscriptionStateBackup(this.state.storage, readSubscriptionStateBackupIdentity(request))
+      }
+      if (request.method === 'POST' && url.pathname === '/backup/export') {
+        return await exportSubscriptionStateBackup(this.state.storage, readSubscriptionStateBackupIdentity(request))
+      }
+      if (request.method === 'POST' && url.pathname === '/backup/restore') {
+        const response = await restoreSubscriptionStateBackup(
+          this.state.storage, request, readSubscriptionStateBackupIdentity(request),
+        )
+        await this.state.storage.deleteAlarm()
+        await this.scheduleNextAlarm()
+        return response
+      }
       if (request.method !== 'POST') {
         throw new StateApiError(404, 'route_not_found', 'Durable object route was not found')
       }

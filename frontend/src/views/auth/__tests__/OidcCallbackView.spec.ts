@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import OidcCallbackView from '../OidcCallbackView.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const replace = vi.fn()
 const showSuccess = vi.fn()
@@ -77,6 +78,7 @@ vi.mock('@/api/auth', async () => {
 
 describe('OidcCallbackView', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(false)
     replace.mockReset()
     showSuccess.mockReset()
     showError.mockReset()
@@ -98,6 +100,26 @@ describe('OidcCallbackView', () => {
     window.location.hash = ''
     localStorage.clear()
     sessionStorage.clear()
+  })
+
+  it('rejects a bare callback locally in Worker mode without calling legacy pending exchange', async () => {
+    setCloudflareWorkerContractActive(true)
+
+    const wrapper = mount(OidcCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(exchangePendingOAuthCompletion).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('auth.oauth.invalidCallbackHint')
+    expect(wrapper.text()).toContain('auth.oidc.callbackHint')
   })
 
   it('accepts the legacy fragment token success callback without pending-session exchange', async () => {

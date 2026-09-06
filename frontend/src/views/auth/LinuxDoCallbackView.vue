@@ -260,6 +260,7 @@ import {
   loadOAuthAffiliateCode,
   oauthAffiliatePayload
 } from '@/utils/oauthAffiliate'
+import { canResumeLegacyPendingOAuth } from '@/utils/oauthCallback'
 
 const route = useRoute()
 const router = useRouter()
@@ -777,6 +778,12 @@ onMounted(async () => {
 
     if (error) {
       errorMessage.value = errorDesc || error
+      isProcessing.value = false
+      return
+    }
+
+    if (!canResumeLegacyPendingOAuth()) {
+      errorMessage.value = t('auth.oauth.invalidCallbackHint')
       isProcessing.value = false
       return
     }

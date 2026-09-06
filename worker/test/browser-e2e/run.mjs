@@ -12,12 +12,15 @@ const workerDirectory = resolve(scriptDirectory, '../..')
 const repositoryDirectory = resolve(workerDirectory, '..')
 const frontendDirectory = join(repositoryDirectory, 'frontend')
 const configPath = join(workerDirectory, 'wrangler.browser-e2e.jsonc')
+const playwrightTestArguments = process.argv.slice(2)
 const persistenceDirectory = await mkdtemp(join(tmpdir(), 'sub2api-browser-e2e-'))
 const portReservation = await reserveLoopbackPort()
 const { origin, port } = portReservation
 
 let worker
 let shuttingDown = false
+const stripeSessions = new Map()
+const stripeSecretKey = 'sk_test_browser_e2e_checkout'
 
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -34,8 +37,123 @@ function run(command, args, options = {}) {
   })
 }
 
-function upstreamResponse(request) {
+function stripeProtocolError(message, details = {}) {
+  console.error('[browser-e2e] Stripe protocol violation', { message, details })
+  return Response.json({ error: message, ...details }, { status: 422 })
+}
+
+function stripeSessionResponse(session, status = session.status) {
+  return Response.json({
+    id: session.id,
+    object: 'checkout.session',
+    status,
+    payment_status: 'unpaid',
+    amount_total: session.amountTotal,
+    currency: session.currency,
+    url: session.url,
+    payment_intent: null,
+  })
+}
+
+async function stripeResponse(request, url) {
+  if (request.headers.get('authorization') !== `Bearer ${stripeSecretKey}`) {
+    return stripeProtocolError('unexpected Stripe authorization')
+  }
+
+  if (url.pathname === '/v1/checkout/sessions') {
+    if (request.method !== 'POST') return stripeProtocolError('unexpected Stripe checkout method')
+    if (!request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) {
+      return stripeProtocolError('unexpected Stripe checkout content type')
+    }
+    const form = new URLSearchParams(await request.text())
+    const orderId = form.get('client_reference_id') ?? ''
+    const successUrl = new URL(form.get('success_url') ?? 'https://invalid.local')
+    const cancelUrl = new URL(form.get('cancel_url') ?? 'https://invalid.local')
+    const expiresAt = Number(form.get('expires_at'))
+    const expected = {
+      mode: 'payment',
+      metadataOrder: orderId,
+      paymentIntentOrder: orderId,
+      currency: 'usd',
+      amount: '1234',
+      product: 'Browser:Browser E2E Stripe Monthly:subscription',
+      quantity: '1',
+    }
+    const actual = {
+      mode: form.get('mode'),
+      metadataOrder: form.get('metadata[order_id]'),
+      paymentIntentOrder: form.get('payment_intent_data[metadata][order_id]'),
+      currency: form.get('line_items[0][price_data][currency]'),
+      amount: form.get('line_items[0][price_data][unit_amount]'),
+      product: form.get('line_items[0][price_data][product_data][name]'),
+      quantity: form.get('line_items[0][quantity]'),
+    }
+    if (!/^[0-9a-f-]{36}$/i.test(orderId)) {
+      return stripeProtocolError('invalid Stripe checkout order id', { orderId })
+    }
+    if (request.headers.get('idempotency-key') !== `checkout-${orderId}`) {
+      return stripeProtocolError('unexpected Stripe checkout idempotency key')
+    }
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      return stripeProtocolError('unexpected Stripe checkout form', { expected, actual })
+    }
+    if (
+      successUrl.origin !== origin || successUrl.pathname !== '/payment/result' ||
+      successUrl.searchParams.get('order_id') !== orderId ||
+      cancelUrl.origin !== origin || cancelUrl.pathname !== '/purchase' ||
+      cancelUrl.searchParams.get('cancelled_order_id') !== orderId ||
+      !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1_000)
+    ) {
+      return stripeProtocolError('unexpected Stripe checkout redirect contract')
+    }
+
+    const id = `cs_test_${orderId}`
+    const session = {
+      id,
+      status: 'open',
+      amountTotal: 1_234,
+      currency: 'usd',
+      url: `${origin}/payment/result?stripe_checkout=${encodeURIComponent(id)}`,
+    }
+    stripeSessions.set(id, session)
+    return stripeSessionResponse(session)
+  }
+
+  const expireMatch = /^\/v1\/checkout\/sessions\/([^/]+)\/expire$/.exec(url.pathname)
+  if (expireMatch !== null) {
+    const id = decodeURIComponent(expireMatch[1])
+    if (request.method !== 'POST' || request.headers.get('idempotency-key') !== `expire-${id}`) {
+      return stripeProtocolError('unexpected Stripe expire request')
+    }
+    if (await request.text() !== '') return stripeProtocolError('unexpected Stripe expire body')
+    const session = stripeSessions.get(id)
+    if (!session) return Response.json({ error: { message: 'session not found' } }, { status: 404 })
+    session.status = 'expired'
+    return stripeSessionResponse(session)
+  }
+
+  const retrieveMatch = /^\/v1\/checkout\/sessions\/([^/]+)$/.exec(url.pathname)
+  if (retrieveMatch !== null) {
+    if (request.method !== 'GET' || request.headers.has('idempotency-key')) {
+      return stripeProtocolError('unexpected Stripe retrieve request')
+    }
+    const id = decodeURIComponent(retrieveMatch[1])
+    const session = stripeSessions.get(id)
+    if (!session) return Response.json({ error: { message: 'session not found' } }, { status: 404 })
+    return stripeSessionResponse(session)
+  }
+
+  return stripeProtocolError('unexpected Stripe browser E2E endpoint', {
+    method: request.method,
+    path: url.pathname,
+  })
+}
+
+async function upstreamResponse(request) {
   const url = new URL(request.url)
+  if (url.origin === 'https://api.stripe.com') {
+    return stripeResponse(request, url)
+  }
   if (
     url.origin !== 'https://upstream.browser-e2e.invalid' ||
     url.pathname !== '/v1/chat/completions' ||
@@ -44,26 +162,25 @@ function upstreamResponse(request) {
     return Response.json({ error: 'unexpected browser E2E outbound request' }, { status: 502 })
   }
 
-  return request.json().then((body) => {
-    if (
-      body?.model !== 'gpt-browser-e2e-upstream' ||
-      body?.stream !== false ||
-      body?.messages?.[0]?.content !== 'Say browser-gateway-ok.'
-    ) {
-      return Response.json({ error: 'unexpected Chat request', body }, { status: 422 })
-    }
-    return Response.json({
-      id: 'chatcmpl-browser-e2e',
-      object: 'chat.completion',
-      created: 1_700_000_000,
-      model: 'gpt-browser-e2e-upstream',
-      choices: [{
-        index: 0,
-        message: { role: 'assistant', content: 'browser-gateway-ok' },
-        finish_reason: 'stop',
-      }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-    })
+  const body = await request.json()
+  if (
+    body?.model !== 'gpt-browser-e2e-upstream' ||
+    body?.stream !== false ||
+    body?.messages?.[0]?.content !== 'Say browser-gateway-ok.'
+  ) {
+    return Response.json({ error: 'unexpected Chat request', body }, { status: 422 })
+  }
+  return Response.json({
+    id: 'chatcmpl-browser-e2e',
+    object: 'chat.completion',
+    created: 1_700_000_000,
+    model: 'gpt-browser-e2e-upstream',
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content: 'browser-gateway-ok' },
+      finish_reason: 'stop',
+    }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
   })
 }
 
@@ -139,7 +256,14 @@ try {
   await waitForReady()
 
   console.log('[browser-e2e] running Playwright')
-  await run('pnpm', ['exec', 'playwright', 'test', '--config', 'playwright.config.ts'], {
+  await run('pnpm', [
+    'exec',
+    'playwright',
+    'test',
+    ...playwrightTestArguments,
+    '--config',
+    'playwright.config.ts',
+  ], {
     cwd: frontendDirectory,
     env: { WORKER_BROWSER_E2E_ORIGIN: origin },
   })

@@ -147,7 +147,7 @@ describe('remote Cloudflare adapter plans', () => {
     ))).toMatchObject({ transport: 'worker-http' })
     expect(mixedPlan.steps.find(({ phase, resource }) => (
       phase === 'durable-objects' && resource.namespace === 'SUBSCRIPTION_STATE'
-    ))).toMatchObject({ transport: 'api-contract', contract_only: true })
+    ))).toMatchObject({ transport: 'worker-http' })
 
     expect(() => createRemoteBackupPlan({
       environment: 'development' as 'staging',
@@ -339,7 +339,7 @@ describe('remote Cloudflare adapter plans', () => {
     expect(plan.steps.find(({ resource }) => resource.namespace === 'USER_STATE'))
       .toMatchObject({ transport: 'worker-http' })
     expect(plan.steps.find(({ resource }) => resource.namespace === 'SUBSCRIPTION_STATE'))
-      .toMatchObject({ transport: 'api-contract', contract_only: true })
+      .toMatchObject({ transport: 'worker-http' })
   })
 })
 

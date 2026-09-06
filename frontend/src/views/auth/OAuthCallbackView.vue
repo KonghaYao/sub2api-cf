@@ -163,6 +163,7 @@ import {
   loadOAuthAffiliateCode,
   oauthAffiliatePayload
 } from '@/utils/oauthAffiliate'
+import { canResumeLegacyPendingOAuth } from '@/utils/oauthCallback'
 
 const route = useRoute()
 const router = useRouter()
@@ -379,6 +380,10 @@ onMounted(async () => {
       const pendingEmailOAuthProvider = readPendingEmailOAuthProvider()
       if (pendingEmailOAuthProvider && code.value && state.value) {
         redirectProviderCallbackToBackend(pendingEmailOAuthProvider)
+        return
+      }
+      if (!canResumeLegacyPendingOAuth()) {
+        invalidCallback.value = true
         return
       }
       await resumePendingEmailOAuth()

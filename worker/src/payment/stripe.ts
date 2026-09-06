@@ -191,7 +191,7 @@ export class StripeClient {
     assertHeaderValue(options.secretKey, 'secretKey')
     this.secretKey = options.secretKey
     this.apiBase = normalizeApiBase(options.apiBase ?? DEFAULT_API_BASE)
-    this.fetchImplementation = options.fetch ?? fetch
+    this.fetchImplementation = options.fetch ?? globalThis.fetch.bind(globalThis)
   }
 
   async createCheckoutSession(

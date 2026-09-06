@@ -14,7 +14,9 @@ export async function handleDurableObjectBackup(
   if (authenticated !== null) return authenticated
 
   const namespace = context.req.param('namespace')
-  if (namespace !== 'USER_STATE') return backupError(404, 'backup_namespace_not_found')
+  if (namespace !== 'USER_STATE' && namespace !== 'SUBSCRIPTION_STATE') {
+    return backupError(404, 'backup_namespace_not_found')
+  }
   const objectId = context.req.param('objectId')
   if (typeof objectId !== 'string' || !OBJECT_ID.test(objectId)) {
     return backupError(400, 'invalid_backup_object_id')
@@ -41,8 +43,12 @@ export async function handleDurableObjectBackup(
     init.body = body
     init.duplex = 'half'
   }
-  const stub = context.env.USER_STATE.get(context.env.USER_STATE.idFromName(objectId))
-  return stub.fetch(new Request(`https://user-state.internal/backup/${action}`, init))
+  const binding = namespace === 'USER_STATE'
+    ? context.env.USER_STATE
+    : context.env.SUBSCRIPTION_STATE
+  if (binding === undefined) return backupError(503, 'backup_namespace_not_configured')
+  const stub = binding.get(binding.idFromName(objectId))
+  return stub.fetch(new Request(`https://durable-state.internal/backup/${action}`, init))
 }
 
 function authenticate(context: Context<BackupBindings>): Response | null {

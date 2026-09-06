@@ -191,7 +191,7 @@ export function createRemoteBackupPlan(options) {
   }]
   for (const durableObject of durableObjects) {
     const output = join(workingDirectory, durableObject.logicalName)
-    const hasWorkerHttpTransport = durableObject.namespace === 'USER_STATE'
+    const hasWorkerHttpTransport = ['USER_STATE', 'SUBSCRIPTION_STATE'].includes(durableObject.namespace)
     steps.push({
       sequence: steps.length + 1,
       id: `backup:do:${durableObject.namespace}:${durableObject.objectId}`,
@@ -406,7 +406,7 @@ export async function createRemoteRestorePlan(options) {
     }
     if (artifact.kind === 'do-ndjson') {
       const { namespace, objectId } = parseDurableObjectSource(artifact.source, resources.durableObjectNamespaces)
-      const hasWorkerHttpTransport = namespace === 'USER_STATE'
+      const hasWorkerHttpTransport = ['USER_STATE', 'SUBSCRIPTION_STATE'].includes(namespace)
       return {
         ...common,
         id: `restore:do:${namespace}:${objectId}:${artifact.logical_name}`,

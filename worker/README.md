@@ -127,12 +127,23 @@ This command proves local binding compatibility only. It does not replace a
 staging/production smoke run against deployed bindings, Cloudflare routing, or
 a real provider account.
 
-Run `pnpm --dir ../frontend run test:e2e:worker` for the real-browser core-user
-slice. It builds the SPA, migrates an isolated local D1, starts Wrangler with
-local D1/KV/R2/Queue/Durable Object bindings and drives system Chrome through
-registration, funding, API-key creation, Chat settlement, Usage and avatar
-persistence. It never reads production bindings. This is one vertical slice;
-it does not yet cover every reachable Vue route.
+Run `pnpm --dir ../frontend run test:e2e:worker` for the local real-browser
+Worker suites. They build the SPA, migrate an isolated local D1, start Wrangler
+with local D1/KV/R2/Queue/Durable Object bindings and drive system Chrome. The
+route patrol covers all 30 reachable public and ordinary-user Vue routes; the
+vertical slices cover registration, funding, API-key creation, Chat settlement,
+Usage, R2 avatar persistence, subscription-code redemption and entitlement UI,
+plus Stripe order creation and cancellation. The browser runner also preserves
+the required receiver when invoking the Worker global `fetch`, so the same
+outbound service seam works under Workerd. The complete local browser suite
+passes; administrator routes remain outside this patrol, and deployed
+staging/production smoke has not run.
+
+The Worker product surface retains Stripe as its only payment provider.
+Airwallex, standalone Alipay, standalone WeChat Pay and EasyPay routes and UI
+are removed, as are the legacy `/monitor` page and the legacy pending-OAuth
+account chooser. The current bounded account/model probe history is a separate
+Worker-native operations feature and remains supported.
 
 ## Deployment
 
@@ -194,15 +205,22 @@ environment adapters and an empty-environment drill.
 
 `backup:remote-plan` and `backup:remote-restore-plan` add allow-listed
 staging/production plans around that bundle. D1 steps use Wrangler argument
-arrays. USER_STATE now has a privileged Worker HTTP transport and the
-`createUserStateBackupRemoteAdapter` Node adapter; its canonical NDJSON covers
-all six SQLite tables, is limited to 4 MiB/25,000 rows, and restores only an
-empty object (or accepts an identical replay). Other Durable Object namespaces
-and R2 remain explicit contract-only adapters. The CLI never applies a plan.
-Programmatic execution rejects any remaining contract-only step before side
-effects; executable steps require an injected executor with an independent
-read-back verifier, manifest revalidation, a fresh empty-target proof plus exact
-restore confirmation, and an atomic prefix journal in D1-to-DO-to-R2 order.
+arrays. USER_STATE and SUBSCRIPTION_STATE now have privileged Worker HTTP
+transports and strict Node adapters. USER_STATE canonical NDJSON covers its six
+SQLite tables. SUBSCRIPTION_STATE covers all seven of
+`subscription_profile`, `subscription_windows`, `subscription_requests`,
+`subscription_term_windows`, `subscription_schema_migrations`,
+`subscription_outbox` and `subscription_mutations`. Both contracts require the
+exact v1 schema, enforce the shared 4 MiB/25,000-row bound, restore only a
+logically empty object (or accept an identical replay), and independently
+verify the read-back digests. POOL_STATE, AUTH_RATE_LIMIT,
+API_KEY_LIMIT_STATE and R2 remain explicit contract-only adapters. The CLI
+never applies a plan. Programmatic
+execution rejects any remaining contract-only step before side effects;
+executable steps require an injected executor with an independent read-back
+verifier, manifest revalidation, a fresh empty-target proof plus exact restore
+confirmation, and an atomic prefix journal in D1-to-DO-to-R2 order. A real
+remote empty-environment restore drill has not yet run.
 
 ### Production cutover artifacts
 

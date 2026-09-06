@@ -259,6 +259,7 @@ import {
   loadOAuthAffiliateCode,
   oauthAffiliatePayload
 } from '@/utils/oauthAffiliate'
+import { canResumeLegacyPendingOAuth } from '@/utils/oauthCallback'
 
 const route = useRoute()
 const router = useRouter()
@@ -780,6 +781,12 @@ onMounted(async () => {
     if (error) {
       const i18nKey = `auth.dingtalk.error.${error}`
       errorMessage.value = te(i18nKey) ? t(i18nKey) : (errorDesc || error)
+      isProcessing.value = false
+      return
+    }
+
+    if (!canResumeLegacyPendingOAuth()) {
+      errorMessage.value = t('auth.oauth.invalidCallbackHint')
       isProcessing.value = false
       return
     }

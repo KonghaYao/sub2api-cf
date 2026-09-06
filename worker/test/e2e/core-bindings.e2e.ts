@@ -298,5 +298,95 @@ describe('Cloudflare binding E2E', () => {
       inventory_digest: backupHeader.inventory_digest,
       state_digest: backupHeader.state_digest,
     })
+
+    const subscriptionId = 'subscription-backup-e2e'
+    const subscriptionStub = env.SUBSCRIPTION_STATE!.get(
+      env.SUBSCRIPTION_STATE!.idFromName(subscriptionId),
+    )
+    const startsAt = Date.now() - 86_400_000
+    const configuredSubscription = await subscriptionStub.fetch(new Request(
+      'https://subscription-state.internal/configure',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          schema_version: 1,
+          subscription_id: subscriptionId,
+          user_id: registered.user.id,
+          group_id: bootstrapped.group_id,
+          starts_at_ms: startsAt,
+          expires_at_ms: startsAt + 31 * 86_400_000,
+          daily_quota_micros: 100_000,
+          weekly_quota_micros: 500_000,
+          monthly_quota_micros: 1_000_000,
+          daily_used_micros: 27,
+          weekly_used_micros: 27,
+          monthly_used_micros: 27,
+          daily_anchor_ms: 0,
+          daily_window_start_ms: null,
+          weekly_window_start_ms: null,
+          monthly_window_start_ms: null,
+          control_version: 0,
+          quota_reset_epoch: 0,
+          quota_reset_generation: 0,
+        }),
+      },
+    ))
+    expect(configuredSubscription.status).toBe(200)
+
+    const subscriptionBackup = await workerRequest(
+      `/internal/backup/durable-objects/SUBSCRIPTION_STATE/${subscriptionId}/export`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.BACKUP_OPERATOR_TOKEN}`,
+          'x-sub2api-backup-environment': 'e2e',
+        },
+      },
+    )
+    expect(subscriptionBackup.status).toBe(200)
+    const subscriptionArtifact = await subscriptionBackup.text()
+    const subscriptionHeader = JSON.parse(subscriptionArtifact.split('\n')[0])
+    expect(subscriptionHeader).toMatchObject({
+      schema: 'sub2api-subscription-state-backup',
+      version: 1,
+      environment: 'e2e',
+      namespace: 'SUBSCRIPTION_STATE',
+      object_id: subscriptionId,
+    })
+    const replayedSubscription = await workerRequest(
+      `/internal/backup/durable-objects/SUBSCRIPTION_STATE/${subscriptionId}/restore`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.BACKUP_OPERATOR_TOKEN}`,
+          'x-sub2api-backup-environment': 'e2e',
+          'content-type': 'application/x-ndjson',
+        },
+        body: subscriptionArtifact,
+      },
+    )
+    expect(replayedSubscription.status).toBe(200)
+    await expect(replayedSubscription.json()).resolves.toMatchObject({
+      restored: true,
+      idempotent: true,
+      inventory_digest: subscriptionHeader.inventory_digest,
+      state_digest: subscriptionHeader.state_digest,
+    })
+    const verifiedSubscription = await workerRequest(
+      `/internal/backup/durable-objects/SUBSCRIPTION_STATE/${subscriptionId}/verify`,
+      {
+        headers: {
+          authorization: `Bearer ${env.BACKUP_OPERATOR_TOKEN}`,
+          'x-sub2api-backup-environment': 'e2e',
+        },
+      },
+    )
+    expect(verifiedSubscription.status).toBe(200)
+    await expect(verifiedSubscription.json()).resolves.toMatchObject({
+      inventory_digest: subscriptionHeader.inventory_digest,
+      state_digest: subscriptionHeader.state_digest,
+      logical_empty: false,
+    })
   })
 })

@@ -71,4 +71,10 @@ describe('AppSidebar Worker capabilities', () => {
       'featureFlag: adminSettingsStore.cloudflareWorkerContract ? undefined : flagOpsMonitoring'
     )
   })
+
+  it('hides the legacy channel-monitor user entry in Worker mode', () => {
+    expect(componentSource).toContain(
+      'featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagChannelMonitor'
+    )
+  })
 })

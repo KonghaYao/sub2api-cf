@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
+import { ensureBootstrapAdminPermissions } from './support/admin-session'
 
 const ADMIN_TOKEN = 'browser-e2e-admin-token-32-bytes-minimum'
 const EMAIL = 'alice@browser-e2e.test'
@@ -47,11 +48,18 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
   const setup = await expectData<{
     admin_session: string
     group_id: string
+    user_id: string
   }>(bootstrap)
+  const adminSession = await ensureBootstrapAdminPermissions(
+    request,
+    ADMIN_TOKEN,
+    setup,
+    'browser-e2e-promote-admin-0001',
+  )
 
   await expectData(await request.put(`/api/v1/admin/groups/${setup.group_id}`, {
     headers: {
-      authorization: `Bearer ${setup.admin_session}`,
+      authorization: `Bearer ${adminSession}`,
       'idempotency-key': 'browser-e2e-publish-group-0001',
       'if-match': '"0"',
     },
@@ -59,12 +67,12 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
   }))
 
   const settingsResponse = await request.get('/api/v1/admin/settings', {
-    headers: { authorization: `Bearer ${setup.admin_session}` },
+    headers: { authorization: `Bearer ${adminSession}` },
   })
   await expectData(settingsResponse)
   await expectData(await request.put('/api/v1/admin/settings', {
     headers: {
-      authorization: `Bearer ${setup.admin_session}`,
+      authorization: `Bearer ${adminSession}`,
       'idempotency-key': 'browser-e2e-enable-registration-0001',
       'if-match': settingsResponse.headers()['etag'] ?? '"0"',
     },
@@ -81,7 +89,7 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
     },
   }))
 
-  return { adminSession: setup.admin_session, groupId: setup.group_id }
+  return { adminSession, groupId: setup.group_id }
 }
 
 test('user registers, logs in, creates a key, completes Chat billing into Usage, and persists an R2 avatar', async ({ page, request }) => {
