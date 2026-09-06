@@ -162,7 +162,6 @@ describe('admin provider account control plane on D1', () => {
 
   it.each([
     [{ image_adapter: 'responses_image_tool', credential_kind: 'setup_token' }],
-    [{ image_adapter: 'direct_images', credential_kind: 'oauth' }],
     [{ platform: 'codex', protocol: 'codex', base_url: 'https://chatgpt.test',
       provider_config: { account_id: 'workspace_123' }, image_adapter: 'direct_images', credential_kind: 'api_key' }],
   ])('rejects an account execution tuple that no runtime executor can serve', async (execution) => {
@@ -630,6 +629,38 @@ describe('admin provider account control plane on D1', () => {
       MASTER_KEY,
       credentialAad('test', secret.id, secret.credential_ref, 2),
     )).resolves.toEqual({ api_key: 'rotated-codex-secret' })
+  })
+
+  it('persists a typed OpenAI OAuth subscription plan and rejects other account kinds', async () => {
+    const test = fixture()
+    const created = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'openai-oauth-subscription' },
+      body: JSON.stringify({
+        name: 'openai-oauth-subscription',
+        platform: 'openai', type: 'oauth', credential_kind: 'oauth',
+        base_url: 'https://api.openai.test/v1', api_key: 'oauth-access-token', subscription_plan: 'chatgptpro',
+      }),
+    }, test.env)
+    const createdPayload = await created.json() as any
+    const account = createdPayload.data
+    expect(created.status, JSON.stringify(createdPayload)).toBe(201)
+    expect(account.provider_config).toEqual({ subscription_plan: 'pro' })
+
+    const cleared = await test.app.request(`/accounts/${account.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ subscription_plan: null }),
+    }, test.env)
+    expect(cleared.status).toBe(200)
+    await expect(cleared.json()).resolves.toMatchObject({ data: { provider_config: {}, control_version: 1 } })
+
+    const unsupported = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'apikey-subscription' },
+      body: JSON.stringify({ name: 'apikey-subscription', base_url: 'https://api.openai.test/v1', api_key: 'sk-test', subscription_plan: 'plus' }),
+    }, test.env)
+    expect(unsupported.status).toBe(409)
+    await expect(unsupported.json()).resolves.toMatchObject({ error: { code: 'subscription_plan_not_supported' } })
   })
 
   it('rejects provider contract mismatches and secret-like provider config fields', async () => {

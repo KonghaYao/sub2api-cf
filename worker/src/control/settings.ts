@@ -61,6 +61,7 @@ export interface PublicSystemSettings {
   promo_code_enabled: boolean
   invitation_code_enabled: boolean
   affiliate_enabled: boolean
+  openai_advanced_scheduler_subscription_priority_enabled: boolean
 }
 
 export interface AdminSystemSettings {
@@ -93,6 +94,7 @@ interface PublicSettingsPatch {
   promo_code_enabled?: boolean
   invitation_code_enabled?: boolean
   affiliate_enabled?: boolean
+  openai_advanced_scheduler_subscription_priority_enabled?: boolean
 }
 
 interface SecretSettingsPatch {
@@ -481,7 +483,9 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     (settings.model_plaza_description !== undefined && typeof settings.model_plaza_description !== 'string') ||
     (settings.promo_code_enabled !== undefined && typeof settings.promo_code_enabled !== 'boolean') ||
     (settings.invitation_code_enabled !== undefined && typeof settings.invitation_code_enabled !== 'boolean') ||
-    (settings.affiliate_enabled !== undefined && typeof settings.affiliate_enabled !== 'boolean')
+    (settings.affiliate_enabled !== undefined && typeof settings.affiliate_enabled !== 'boolean') ||
+    (settings.openai_advanced_scheduler_subscription_priority_enabled !== undefined &&
+      typeof settings.openai_advanced_scheduler_subscription_priority_enabled !== 'boolean')
   ) return null
   let registrationEmailSuffixWhitelist: string[]
   try {
@@ -507,6 +511,8 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     promo_code_enabled: settings.promo_code_enabled === true,
     invitation_code_enabled: settings.invitation_code_enabled === true,
     affiliate_enabled: settings.affiliate_enabled === true,
+    openai_advanced_scheduler_subscription_priority_enabled:
+      settings.openai_advanced_scheduler_subscription_priority_enabled === true,
   }
 }
 
@@ -556,6 +562,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'promo_code_enabled',
       'invitation_code_enabled',
       'affiliate_enabled',
+      'openai_advanced_scheduler_subscription_priority_enabled',
     ])
     const publicPatch: PublicSettingsPatch = {}
     if (value.site_name !== undefined) {
@@ -618,6 +625,12 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     }
     if (value.affiliate_enabled !== undefined) {
       publicPatch.affiliate_enabled = settingBoolean(value.affiliate_enabled, 'affiliate_enabled')
+    }
+    if (value.openai_advanced_scheduler_subscription_priority_enabled !== undefined) {
+      publicPatch.openai_advanced_scheduler_subscription_priority_enabled = settingBoolean(
+        value.openai_advanced_scheduler_subscription_priority_enabled,
+        'openai_advanced_scheduler_subscription_priority_enabled',
+      )
     }
     if (Object.keys(publicPatch).length > 0) patch.public = publicPatch
   }

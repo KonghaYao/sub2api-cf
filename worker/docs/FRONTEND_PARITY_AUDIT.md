@@ -257,3 +257,18 @@ explicit typed error. It must never silently discard a submitted field or return
   profit controls, media pricing, and Claude Code/MCP configuration.
 - Validation: targeted CRUD/configuration and gateway routing tests (46 tests),
   Worker and frontend typechecks passed. No schema migration was required.
+
+## v0.42.9 Accounts OpenAI OAuth subscription priority — 2026-09-07
+
+- The original OpenAI OAuth subscription-tier field remains in its existing
+  Accounts form. Its save path now sends a typed `subscription_plan`, normalized
+  and stored with the account provider configuration; only OpenAI OAuth accounts
+  may set it.
+- The retained Settings subscription-priority toggle is now persisted. When it
+  is enabled, non-free/non-abnormal OpenAI OAuth plans are placed ahead of the
+  regular account pool while retaining each pool's original priority and weight.
+  D1 0070 validates the configuration and advances the gateway revision so DO
+  pool snapshots refresh coherently.
+- The Accounts template/style/class parity fixture passed unchanged. Validation:
+  59 targeted Worker SQLite/control/gateway tests, Worker/frontend typechecks,
+  58 frontend account parity/modal tests and the SPA build passed.

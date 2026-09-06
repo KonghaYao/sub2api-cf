@@ -5001,6 +5001,7 @@ const handleSubmit = async () => {
       const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
         ((props.account.credentials as Record<string, unknown>) || {})
       updatePayload.credentials = applyPlanType({ ...currentCredentials }, editPlanType.value)
+      updatePayload.subscription_plan = editPlanType.value || null
     }
 
     // Antigravity: persist model mapping to credentials (applies to all antigravity types)

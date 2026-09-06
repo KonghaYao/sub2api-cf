@@ -1531,6 +1531,7 @@ export interface CreateAccountRequest {
   auto_pause_on_expired?: boolean
   upstream_billing_probe_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
+  subscription_plan?: string | null
 }
 
 export interface UpdateAccountRequest {
@@ -1552,6 +1553,7 @@ export interface UpdateAccountRequest {
   upstream_billing_probe_enabled?: boolean
   upstream_billing_rate_sync_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
+  subscription_plan?: string | null
 }
 
 export interface CheckMixedChannelRequest {

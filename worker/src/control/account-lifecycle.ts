@@ -899,17 +899,23 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
         ? 'am.embeddings'
         : 'am.image_generation'
   return env.DB.prepare(
-    `SELECT a.id AS account_id, a.max_concurrency, ag.priority, ag.weight
+    `SELECT a.id AS account_id, a.max_concurrency,
+            CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
+                    AND a.platform = 'openai' AND a.credential_kind = 'oauth'
+                    AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
+                 THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority,
+            ag.weight
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
        JOIN account_models am ON am.account_id = a.id AND am.model_id = ?
        JOIN "groups" g ON g.id = ag.group_id
        JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = am.model_id
+       CROSS JOIN system_settings settings
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1 AND ${capability} = 1
-      ORDER BY ag.priority ASC, a.id ASC`,
+      ORDER BY priority ASC, a.id ASC`,
   ).bind(target.model_id, target.group_id)
 }
 

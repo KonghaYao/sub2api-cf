@@ -126,6 +126,7 @@ interface AccountPatch {
   credential_kind?: AccountCredentialKind
   billing_rate_multiplier_ppm?: number
   ui_config?: Record<string, unknown>
+  subscription_plan?: string | null
 }
 
 type StoredAccountCredential = UpstreamCredential & Record<string, unknown>
@@ -822,7 +823,12 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
     const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
     const now = Date.now()
     const baseUrl = patch.base_url ?? account.base_url
-    const providerConfig = patch.provider_config ?? parseProviderConfigProjection(account.provider_config_json)
+    const providerConfig = applySubscriptionPlan(
+      patch.provider_config ?? parseProviderConfigProjection(account.provider_config_json),
+      patch.subscription_plan,
+      account.platform,
+      patch.credential_kind ?? account.credential_kind,
+    )
     const resetHealth = patch.base_url !== undefined ||
       patch.credential_patch !== undefined ||
       patch.provider_config !== undefined ||
@@ -1273,7 +1279,12 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     protocol,
     base_url: baseUrl,
     auth_scheme: authScheme,
-    provider_config: parseProviderConfig(body.provider_config, platform),
+    provider_config: applySubscriptionPlan(
+      parseProviderConfig(body.provider_config, platform),
+      body.subscription_plan,
+      platform,
+      credentialKind,
+    ),
     image_adapter: imageAdapter,
     credential_kind: credentialKind,
     credential,
@@ -1322,11 +1333,17 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.credential_kind !== undefined) {
     patch.credential_kind = requireAccountCredentialKind(body.credential_kind)
   }
+  if (body.subscription_plan !== undefined) {
+    patch.subscription_plan = parseSubscriptionPlan(body.subscription_plan)
+  }
   validateAccountExecution(
     account.platform,
     patch.image_adapter ?? account.image_adapter,
     patch.credential_kind ?? account.credential_kind,
   )
+  if (patch.subscription_plan !== undefined) {
+    assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
+  }
   if (body.enabled !== undefined || body.status !== undefined || body.schedulable !== undefined) {
     if (body.status === 'error') {
       throw new GatewayError(409, 'status_not_supported', 'Worker accounts cannot be placed in error status manually')
@@ -1368,7 +1385,7 @@ const CREATE_ACCOUNT_FIELDS = new Set([
   'rate_multiplier', 'credentials', 'notes', 'extra', 'proxy_id', 'concurrency',
   'load_factor', 'priority', 'group_ids', 'expires_at', 'auto_pause_on_expired',
   'upstream_billing_probe_enabled', 'upstream_billing_rate_sync_enabled',
-  'schedulable', 'confirm_mixed_channel_risk',
+  'schedulable', 'confirm_mixed_channel_risk', 'subscription_plan',
 ])
 const UPDATE_ACCOUNT_FIELDS = new Set([
   ...CREATE_ACCOUNT_FIELDS,
@@ -1391,7 +1408,7 @@ function validateAccountType(
   const expected = credentialKind === 'api_key'
     ? 'apikey'
     : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'
-  if (body.type !== expected || (platform !== 'codex' && body.type !== 'apikey')) {
+  if (body.type !== expected || (platform !== 'codex' && platform !== 'openai' && body.type !== 'apikey')) {
     throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
   }
 }
@@ -1399,7 +1416,7 @@ function validateAccountType(
 function credentialKindForType(value: unknown, platform: ProviderPlatform): AccountCredentialKind {
   if (value === undefined) return defaultCredentialKind(platform)
   if (value === 'apikey') return 'api_key'
-  if (platform === 'codex' && value === 'oauth') return 'oauth'
+  if ((platform === 'codex' || platform === 'openai') && value === 'oauth') return 'oauth'
   if (platform === 'codex' && value === 'setup-token') return 'setup_token'
   throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
 }
@@ -1626,7 +1643,9 @@ function validateAccountExecution(
   const supported = platform === 'codex'
     ? imageAdapter === 'responses_image_tool' &&
       (credentialKind === 'oauth' || credentialKind === 'setup_token')
-    : imageAdapter === 'direct_images' && credentialKind === 'api_key'
+    : platform === 'openai'
+      ? imageAdapter === 'direct_images' && (credentialKind === 'api_key' || credentialKind === 'oauth')
+      : imageAdapter === 'direct_images' && credentialKind === 'api_key'
   if (!supported) {
     throw new GatewayError(
       409,
@@ -1653,19 +1672,61 @@ function parseProviderConfig(value: unknown, platform: ProviderPlatform): Provid
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
   }
   const raw = value as Record<string, unknown>
-  const unsupported = Object.keys(raw).find((key) => key !== 'account_id')
+  const unsupported = Object.keys(raw).find((key) => key !== 'account_id' && key !== 'subscription_plan')
   if (unsupported !== undefined) {
     throw new GatewayError(400, 'invalid_provider_config', `provider_config field '${unsupported}' is not supported`)
   }
-  if (raw.account_id === undefined) return {}
-  if (platform !== 'codex') {
+  if (raw.account_id !== undefined && platform !== 'codex') {
     throw new GatewayError(400, 'invalid_provider_config', 'account_id is supported only for Codex')
   }
-  const accountId = requireString(raw, 'account_id', 256)
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(accountId)) {
-    throw new GatewayError(400, 'invalid_provider_config', 'Codex account_id is invalid')
+  const config: ProviderConfig = {}
+  if (raw.account_id !== undefined) {
+    const accountId = requireString(raw, 'account_id', 256)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(accountId)) {
+      throw new GatewayError(400, 'invalid_provider_config', 'Codex account_id is invalid')
+    }
+    config.account_id = accountId
   }
-  return { account_id: accountId }
+  if (raw.subscription_plan !== undefined) {
+    if (platform !== 'openai') {
+      throw new GatewayError(400, 'invalid_provider_config', 'subscription_plan is supported only for OpenAI')
+    }
+    config.subscription_plan = parseSubscriptionPlan(raw.subscription_plan) ?? undefined
+  }
+  return config
+}
+
+function parseSubscriptionPlan(value: unknown): string | null {
+  if (value === null || value === '') return null
+  if (typeof value !== 'string') {
+    throw new GatewayError(400, 'invalid_subscription_plan', 'subscription_plan must be a string or null')
+  }
+  const normalized = value.trim().toLowerCase()
+  if (normalized === '' || normalized.length > 64 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new GatewayError(400, 'invalid_subscription_plan', 'subscription_plan is invalid')
+  }
+  return normalized === 'chatgptpro' ? 'pro' : normalized
+}
+
+function assertSubscriptionPlanEligible(platform: ProviderPlatform, credentialKind: AccountCredentialKind): void {
+  if (platform !== 'openai' || credentialKind !== 'oauth') {
+    throw new GatewayError(409, 'subscription_plan_not_supported', 'subscription_plan is supported only for OpenAI OAuth accounts')
+  }
+}
+
+function applySubscriptionPlan(
+  providerConfig: ProviderConfig,
+  value: unknown,
+  platform: ProviderPlatform,
+  credentialKind: AccountCredentialKind,
+): ProviderConfig {
+  if (value === undefined) return providerConfig
+  assertSubscriptionPlanEligible(platform, credentialKind)
+  const subscriptionPlan = parseSubscriptionPlan(value)
+  const next = { ...providerConfig }
+  if (subscriptionPlan === null) delete next.subscription_plan
+  else next.subscription_plan = subscriptionPlan
+  return next
 }
 
 function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boolean {

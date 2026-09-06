@@ -430,6 +430,7 @@ function defaultPublicSettings() {
     promo_code_enabled: false,
     invitation_code_enabled: false,
     affiliate_enabled: false,
+    openai_advanced_scheduler_subscription_priority_enabled: false,
     payment_enabled: false,
   }
 }

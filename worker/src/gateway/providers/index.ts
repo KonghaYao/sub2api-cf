@@ -20,6 +20,8 @@ export type ProviderOperation =
 
 export interface ProviderConfig {
   account_id?: string
+  /** OpenAI OAuth subscription tier used only by the account scheduler. */
+  subscription_plan?: string
 }
 
 export interface ProviderAccount {
@@ -153,7 +155,7 @@ function validateProviderConfig(platform: ProviderPlatform, config: ProviderConf
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
   }
   const keys = Object.keys(config)
-  if (keys.some((key) => key !== 'account_id')) {
+  if (keys.some((key) => key !== 'account_id' && key !== 'subscription_plan')) {
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config contains an unsupported field')
   }
   if (platform !== 'codex' && config.account_id !== undefined) {
@@ -164,6 +166,15 @@ function validateProviderConfig(platform: ProviderPlatform, config: ProviderConf
     (typeof config.account_id !== 'string' || !CODEX_ACCOUNT_ID.test(config.account_id))
   ) {
     throw new GatewayError(400, 'invalid_provider_config', 'Codex account_id is invalid')
+  }
+  if (platform !== 'openai' && config.subscription_plan !== undefined) {
+    throw new GatewayError(400, 'invalid_provider_config', 'subscription_plan is supported only for OpenAI')
+  }
+  if (
+    config.subscription_plan !== undefined &&
+    (typeof config.subscription_plan !== 'string' || config.subscription_plan.length === 0 || config.subscription_plan.length > 64)
+  ) {
+    throw new GatewayError(400, 'invalid_provider_config', 'OpenAI subscription_plan is invalid')
   }
 }
 

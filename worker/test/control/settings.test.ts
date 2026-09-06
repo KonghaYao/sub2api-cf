@@ -163,6 +163,7 @@ describe('admin system settings', () => {
           promo_code_enabled: false,
           invitation_code_enabled: false,
           affiliate_enabled: false,
+          openai_advanced_scheduler_subscription_priority_enabled: false,
         },
         security: {
           step_up_enabled: false,
@@ -449,6 +450,7 @@ describe('admin system settings', () => {
       promo_code_enabled: true,
       invitation_code_enabled: true,
       affiliate_enabled: true,
+      openai_advanced_scheduler_subscription_priority_enabled: false,
     }
     expect(subject.kv.puts).toEqual([{
       key: publicSettingsKey('test'),

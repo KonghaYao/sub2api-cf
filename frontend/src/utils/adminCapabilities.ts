@@ -89,6 +89,7 @@ const WORKER_ACCOUNT_CREATE_FIELDS = new Set([
   'max_concurrency',
   'rate_multiplier',
   'provider_config',
+  'subscription_plan',
   'group_links',
   'model_capabilities',
 ])
@@ -101,6 +102,7 @@ const WORKER_ACCOUNT_UPDATE_FIELDS = new Set([
   'max_concurrency',
   'rate_multiplier',
   'provider_config',
+  'subscription_plan',
   'group_links',
   'model_capabilities',
   'expected_control_version',

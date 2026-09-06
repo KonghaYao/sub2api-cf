@@ -1178,7 +1178,10 @@ function externalAliasCandidatesStatement(
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency,
-            ag.priority, ag.weight, a.config_version,
+            CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
+                    AND a.platform = 'openai' AND a.credential_kind = 'oauth'
+                    AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
+                 THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
             revision.revision AS config_revision, am.model_id
        FROM resolved_alias resolved
        JOIN account_models am ON am.model_id = resolved.model_id
@@ -1186,12 +1189,13 @@ function externalAliasCandidatesStatement(
        JOIN account_groups ag ON ag.account_id = a.id AND ag.group_id = resolved.group_id
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
+       CROSS JOIN system_settings settings
       WHERE resolved.match_count = 1 AND a.enabled = 1 AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1
         ${platformPredicate}
-      ORDER BY ag.priority ASC, a.id ASC`,
+      ORDER BY priority ASC, a.id ASC`,
   ).bind(...cte.bindings)
 }
 
@@ -1614,7 +1618,10 @@ function accountCandidatesStatement(
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency,
-            ag.priority, ag.weight, a.config_version,
+            CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
+                    AND a.platform = 'openai' AND a.credential_kind = 'oauth'
+                    AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
+                 THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
             revision.revision AS config_revision, am.model_id
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
@@ -1623,12 +1630,13 @@ function accountCandidatesStatement(
          ON resolved.model_id = am.model_id AND resolved.platform = a.platform
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
+       CROSS JOIN system_settings settings
       WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1
         ${platformPredicate}
-      ORDER BY ag.priority ASC, a.id ASC`,
+      ORDER BY priority ASC, a.id ASC`,
   )
     .bind(...modelBindings, groupId)
 }

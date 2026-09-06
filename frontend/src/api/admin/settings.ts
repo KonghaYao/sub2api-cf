@@ -1093,6 +1093,7 @@ interface WorkerAdminSettings {
     promo_code_enabled: boolean;
     invitation_code_enabled: boolean;
     affiliate_enabled: boolean;
+    openai_advanced_scheduler_subscription_priority_enabled: boolean;
   };
   security?: {
     step_up_enabled: boolean;
@@ -1170,6 +1171,8 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     promo_code_enabled: settings.public.promo_code_enabled ?? false,
     invitation_code_enabled: settings.public.invitation_code_enabled ?? false,
     affiliate_enabled: settings.public.affiliate_enabled ?? false,
+    openai_advanced_scheduler_subscription_priority_enabled:
+      settings.public.openai_advanced_scheduler_subscription_priority_enabled ?? false,
     passkey_configured: settings.security?.passkey_configured ?? false,
     passkey_rp_id: settings.security?.passkey_rp_id ?? "",
     passkey_rp_origins: settings.security?.passkey_rp_origins ?? [],
@@ -1255,6 +1258,10 @@ export async function updateSettings(
   }
   if (settings.affiliate_enabled !== undefined) {
     publicPatch.affiliate_enabled = settings.affiliate_enabled;
+  }
+  if (settings.openai_advanced_scheduler_subscription_priority_enabled !== undefined) {
+    publicPatch.openai_advanced_scheduler_subscription_priority_enabled =
+      settings.openai_advanced_scheduler_subscription_priority_enabled;
   }
 
   const patch: WorkerSettingsPatch = {};
