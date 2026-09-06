@@ -27,6 +27,11 @@ const COLUMNS = `id, request_id, client_request_id, bucket_day, occurred_at_ms, 
   payload_lease_expires_at_ms, payload_last_error, updated_at_ms,
   (SELECT COUNT(*) FROM request_observation_resolution_audit AS resolution_event
     WHERE resolution_event.observation_id = request_observations.id) AS resolution_version`
+const ADMIN_COLUMNS = `${COLUMNS},
+  (SELECT email FROM users WHERE users.id=request_observations.user_id) AS user_email,
+  (SELECT name FROM api_keys WHERE api_keys.id=request_observations.api_key_id) AS api_key_name,
+  (SELECT name FROM accounts WHERE accounts.id=request_observations.account_id) AS account_name,
+  (SELECT name FROM "groups" WHERE "groups".id=request_observations.group_id) AS group_name`
 
 interface ListFilters {
   limit: number
@@ -42,6 +47,10 @@ interface ListFilters {
   model?: string
   statusCode?: number
   requestId?: string
+  errorPhase?: string
+  errorCategory?: string
+  sortColumn?: 'occurred_at_ms' | 'status_code' | 'requested_model'
+  sortDirection?: 'ASC' | 'DESC'
   family: Family
 }
 
@@ -62,10 +71,108 @@ interface ResolutionAuditRow {
 
 export const listOwnerRequests = (context: Context<Bindings>) => listFor(context, 'owner', 'all', 'usage')
 export const listOwnerErrors = (context: Context<Bindings>) => listFor(context, 'owner', 'errors', 'usage')
-export const listAdminUsage = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'usage', true)
+export const listAdminUsage = (context: Context<Bindings>) => {
+  if (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined) {
+    return listAdminUsageProjection(context)
+  }
+  return listFor(context, 'admin', 'all', 'usage')
+}
 export const listAdminRequests = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'ops')
-export const listAdminRequestErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'errors', 'ops')
+export const listAdminRequestErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'errors', 'ops', true)
 export const listAdminUpstreamErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'upstream', 'ops')
+
+export async function getAdminUsageStats(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    const { clauses, values } = adminUsageClauses(context)
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
+    const [summary, endpoints] = await context.env.DB.batch([
+      context.env.DB.prepare(`SELECT COUNT(*) total_requests,
+        COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
+        COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,COALESCE(SUM(amount_micros),0) amount_micros,
+        COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros,
+        CAST(ROUND(AVG(duration_ms)) AS INTEGER) average_duration_ms
+        FROM usage_projection u ${where}`).bind(...values),
+      context.env.DB.prepare(`SELECT inbound_endpoint endpoint,COUNT(*) requests,
+        COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) tokens,
+        COALESCE(SUM(amount_micros),0) amount_micros
+        FROM usage_projection u ${where}${where === '' ? 'WHERE' : ' AND'} inbound_endpoint <> ''
+        GROUP BY inbound_endpoint ORDER BY amount_micros DESC,inbound_endpoint ASC LIMIT 100`).bind(...values),
+    ])
+    const row = (summary.results[0] ?? {}) as Record<string, unknown>
+    const input = safeInteger(row.input_tokens)
+    const output = safeInteger(row.output_tokens)
+    const cache = safeInteger(row.cache_read_tokens)
+    return controlSuccess({
+      total_requests: safeInteger(row.total_requests),
+      total_input_tokens: input,
+      total_output_tokens: output,
+      total_cache_tokens: cache,
+      total_cache_creation_tokens: 0,
+      total_cache_read_tokens: cache,
+      total_tokens: safeSum(input, output, cache),
+      total_cost: usdValue(row.amount_micros),
+      total_actual_cost: usdValue(row.amount_micros),
+      total_account_cost: usdValue(row.account_micros),
+      average_duration_ms: safeInteger(row.average_duration_ms),
+      endpoints: endpoints.results.map((item: any) => ({
+        endpoint: item.endpoint,
+        requests: safeInteger(item.requests),
+        total_tokens: safeInteger(item.tokens),
+        cost: usdValue(item.amount_micros),
+        actual_cost: usdValue(item.amount_micros),
+      })),
+    })
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function searchAdminUsageUsers(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    const query = searchQuery(context.req.query('q'))
+    const rows = await context.env.DB.prepare(
+      `SELECT id,email,status FROM users WHERE email LIKE ? ESCAPE '\\' ORDER BY email COLLATE NOCASE,id LIMIT 30`,
+    ).bind(`%${query}%`).all<any>()
+    return controlSuccess(rows.results.map((row) => ({ id: row.id, email: row.email, deleted: false })))
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function searchAdminUsageApiKeys(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    const clauses: string[] = []
+    const values: unknown[] = []
+    const userId = context.req.query('user_id')?.trim()
+    if (userId) { clauses.push('user_id = ?'); values.push(userId) }
+    const query = searchQuery(context.req.query('q'), true)
+    if (query !== '') { clauses.push(`name LIKE ? ESCAPE '\\'`); values.push(`%${query}%`) }
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
+    const rows = await context.env.DB.prepare(
+      `SELECT id,name,user_id FROM api_keys ${where} ORDER BY name COLLATE NOCASE,id LIMIT 30`,
+    ).bind(...values).all<any>()
+    return controlSuccess(rows.results.map((row) => ({ id: row.id, name: row.name, user_id: row.user_id })))
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function unsupportedAdminUsageCleanup(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    throw new GatewayError(501, 'usage_cleanup_not_migrated', 'Usage cleanup is not available on the Worker yet')
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function unsupportedAdminUsageAnalytics(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    throw new GatewayError(501, 'admin_usage_analytics_not_migrated', 'Admin usage analytics are not available on the Worker yet')
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+function searchQuery(value: string | undefined, allowEmpty = false): string {
+  const query = value?.trim() ?? ''
+  if ((!allowEmpty && query === '') || query.length > 200) throw new GatewayError(400, 'invalid_search_query', 'Search query is invalid')
+  return query.replace(/[\\%_]/g, (character) => `\\${character}`)
+}
 
 export const getOwnerRequestDetail = (context: Context<Bindings>) => ownerDetail(context, 'all')
 export const getOwnerErrorDetail = (context: Context<Bindings>) => ownerDetail(context, 'errors')
@@ -190,6 +297,234 @@ async function listFor(
   }
 }
 
+const ADMIN_USAGE_COLUMNS = `u.event_id,u.request_id,u.user_id,u.api_key_id,u.account_id,
+  COALESCE(u.requested_model,u.model) model,u.upstream_model,u.group_id,u.subscription_id,
+  u.input_tokens,u.output_tokens,u.cache_read_tokens,u.input_amount_micros,u.output_amount_micros,
+  u.cache_amount_micros,u.base_amount_micros,u.amount_micros,u.billing_type,u.outcome,u.stream,
+  u.duration_ms,u.occurred_at_ms,u.platform,u.request_type,u.inbound_endpoint,u.upstream_endpoint,
+  u.billing_mode,u.native_compaction_v2,u.dimensions_version,u.image_count,u.image_size,
+  u.image_input_size,u.image_output_size,u.image_size_source,u.image_size_breakdown,
+  u.standard_cost_micros,u.account_stats_cost_micros,u.account_rate_multiplier_ppm,u.account_cost_micros,
+  users.email user_email,api_keys.name api_key_name,accounts.name account_name,"groups".name group_name`
+
+async function listAdminUsageProjection(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    if (context.req.query('cursor') !== undefined || context.req.query('limit') !== undefined) {
+      throw new GatewayError(400, 'pagination_mode_conflict', 'Offset pagination cannot be combined with a cursor')
+    }
+    const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
+    const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+    const { clauses, values } = adminUsageClauses(context)
+    const order = adminUsageOrder(context)
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
+    const [count, rows] = await context.env.DB.batch([
+      context.env.DB.prepare(`SELECT COUNT(*) total FROM usage_projection u ${where}`).bind(...values),
+      context.env.DB.prepare(`SELECT ${ADMIN_USAGE_COLUMNS}
+        FROM usage_projection u
+        LEFT JOIN users ON users.id=u.user_id
+        LEFT JOIN api_keys ON api_keys.id=u.api_key_id
+        LEFT JOIN accounts ON accounts.id=u.account_id
+        LEFT JOIN "groups" ON "groups".id=u.group_id
+        ${where}
+        ORDER BY ${order.column} ${order.direction}, u.event_id ${order.direction}
+        LIMIT ? OFFSET ?`).bind(...values, pageSize, (page - 1) * pageSize),
+    ])
+    const total = safeInteger((count.results[0] as Record<string, unknown> | undefined)?.total)
+    return controlSuccess({
+      items: rows.results.map(adminUsageRow),
+      total,
+      page,
+      page_size: pageSize,
+      pages: total === 0 ? 0 : Math.ceil(total / pageSize),
+    })
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; values: unknown[] } {
+  const clauses: string[] = []
+  const values: unknown[] = []
+  const exact = (name: string, column: string) => {
+    const value = context.req.query(name)?.trim()
+    if (!value) return
+    if (value.length > 200) throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+    clauses.push(`${column} = ?`)
+    values.push(value)
+  }
+  exact('user_id', 'u.user_id')
+  exact('api_key_id', 'u.api_key_id')
+  exact('account_id', 'u.account_id')
+  exact('group_id', 'u.group_id')
+  const model = context.req.query('model')?.trim()
+  if (model) {
+    if (model.length > 200) throw new GatewayError(400, 'invalid_model', 'model is invalid')
+    clauses.push('COALESCE(u.requested_model,u.model) = ?')
+    values.push(model)
+  }
+  const start = parseDate(context.req.query('start_date'), false)
+  const end = parseDate(context.req.query('end_date'), true)
+  if (start !== undefined) { clauses.push('u.occurred_at_ms >= ?'); values.push(start) }
+  if (end !== undefined) { clauses.push('u.occurred_at_ms < ?'); values.push(end) }
+  if (start !== undefined && end !== undefined && start >= end) {
+    throw new GatewayError(400, 'invalid_time_range', 'Time range is invalid')
+  }
+  const requestType = context.req.query('request_type')?.trim()
+  const stream = context.req.query('stream')?.trim()
+  if (requestType) {
+    const requestTypes: Record<string, number> = { unknown: 0, sync: 1, stream: 2, ws_v2: 3, cyber: 4, live: 5 }
+    if (!Object.hasOwn(requestTypes, requestType)) throw new GatewayError(400, 'invalid_request_type', 'request_type is invalid')
+    const value = requestTypes[requestType]!
+    if (value === 1 || value === 2) {
+      clauses.push('(u.request_type = ? OR (u.request_type = 0 AND u.dimensions_version = 0 AND u.stream = ?))')
+      values.push(value, value === 2 ? 1 : 0)
+    } else {
+      clauses.push('u.request_type = ?')
+      values.push(value)
+    }
+  } else if (stream) {
+    const value = queryBooleanValue(stream, 'stream')
+    clauses.push('u.stream = ?')
+    values.push(value ? 1 : 0)
+  }
+  const compact = context.req.query('native_compaction_v2')?.trim()
+  if (compact) {
+    clauses.push('u.native_compaction_v2 = ?')
+    values.push(queryBooleanValue(compact, 'native_compaction_v2') ? 1 : 0)
+  }
+  const billingType = context.req.query('billing_type')?.trim()
+  if (billingType) {
+    if (!['0', '1', 'balance', 'subscription'].includes(billingType)) throw new GatewayError(400, 'invalid_billing_type', 'billing_type is invalid')
+    clauses.push('u.billing_type = ?')
+    values.push(billingType === '1' ? 'subscription' : billingType === '0' ? 'balance' : billingType)
+  }
+  const billingMode = context.req.query('billing_mode')?.trim()
+  if (billingMode) {
+    if (!['token', 'per_request', 'image', 'video'].includes(billingMode)) throw new GatewayError(400, 'invalid_billing_mode', 'billing_mode is invalid')
+    clauses.push('u.billing_mode = ?')
+    values.push(billingMode)
+  }
+  const mismatch = context.req.query('upstream_model_mismatch')?.trim()
+  if (mismatch) {
+    const expected = queryBooleanValue(mismatch, 'upstream_model_mismatch')
+    clauses.push(expected
+      ? `COALESCE(NULLIF(u.upstream_model,''),COALESCE(u.requested_model,u.model)) <> COALESCE(u.requested_model,u.model)`
+      : `COALESCE(NULLIF(u.upstream_model,''),COALESCE(u.requested_model,u.model)) = COALESCE(u.requested_model,u.model)`)
+  }
+  const exactTotal = context.req.query('exact_total')?.trim()
+  if (exactTotal) queryBooleanValue(exactTotal, 'exact_total')
+  return { clauses, values }
+}
+
+function adminUsageOrder(context: Context<Bindings>): { column: string; direction: 'ASC' | 'DESC' } {
+  const key = context.req.query('sort_by') ?? 'created_at'
+  const direction = context.req.query('sort_order') ?? 'desc'
+  const columns: Record<string, string> = {
+    created_at: 'u.occurred_at_ms',
+    model: 'COALESCE(u.requested_model,u.model)',
+  }
+  if (!Object.hasOwn(columns, key)) throw new GatewayError(400, 'unsupported_usage_sort', 'sort_by is not supported')
+  if (direction !== 'asc' && direction !== 'desc') throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+  return { column: columns[key]!, direction: direction.toUpperCase() as 'ASC' | 'DESC' }
+}
+
+function queryBooleanValue(value: string, name: string): boolean {
+  if (value === 'true' || value === '1') return true
+  if (value === 'false' || value === '0') return false
+  throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+}
+
+function adminUsageRow(value: unknown): Record<string, unknown> {
+  const row = value as Record<string, any>
+  const componentMicros = safeSum(row.input_amount_micros, row.output_amount_micros, row.cache_amount_micros, row.base_amount_micros)
+  const amountMicros = safeInteger(row.amount_micros)
+  const requestedModel = String(row.model ?? '')
+  const upstreamModel = typeof row.upstream_model === 'string' && row.upstream_model !== '' ? row.upstream_model : requestedModel
+  return {
+    id: row.event_id,
+    user_id: row.user_id,
+    api_key_id: row.api_key_id,
+    account_id: row.account_id,
+    request_id: row.request_id,
+    model: requestedModel,
+    upstream_model: upstreamModel,
+    upstream_model_mismatch: upstreamModel !== requestedModel,
+    group_id: row.group_id,
+    subscription_id: row.subscription_id,
+    input_tokens: safeInteger(row.input_tokens),
+    output_tokens: safeInteger(row.output_tokens),
+    cache_creation_tokens: 0,
+    cache_read_tokens: safeInteger(row.cache_read_tokens),
+    cache_creation_5m_tokens: 0,
+    cache_creation_1h_tokens: 0,
+    input_cost: usdValue(row.input_amount_micros),
+    output_cost: usdValue(row.output_amount_micros),
+    cache_creation_cost: 0,
+    cache_read_cost: usdValue(row.cache_amount_micros),
+    total_cost: componentMicros / 1_000_000,
+    actual_cost: amountMicros / 1_000_000,
+    rate_multiplier: componentMicros === 0 ? 1 : amountMicros / componentMicros,
+    account_rate_multiplier: row.account_rate_multiplier_ppm == null ? null : safeInteger(row.account_rate_multiplier_ppm) / 1_000_000,
+    account_stats_cost: row.account_stats_cost_micros == null ? null : usdValue(row.account_stats_cost_micros),
+    long_context_billing_applied: false,
+    billing_type: row.billing_type === 'subscription' ? 1 : 0,
+    request_type: requestTypeName(row.request_type, row.stream, row.dimensions_version),
+    stream: row.stream === 1,
+    native_compaction_v2: row.native_compaction_v2 === 1,
+    duration_ms: row.duration_ms,
+    first_token_ms: null,
+    image_count: safeInteger(row.image_count),
+    image_size: nullableText(row.image_size),
+    image_input_size: nullableText(row.image_input_size),
+    image_output_size: nullableText(row.image_output_size),
+    image_size_source: nullableText(row.image_size_source),
+    image_size_breakdown: imageBreakdown(row.image_size_breakdown),
+    image_input_tokens: 0,
+    image_input_cost: 0,
+    image_output_tokens: 0,
+    image_output_cost: 0,
+    user_agent: null,
+    ip_address: null,
+    cache_ttl_overridden: false,
+    billing_mode: row.billing_mode || 'token',
+    inbound_endpoint: nullableText(row.inbound_endpoint),
+    upstream_endpoint: nullableText(row.upstream_endpoint),
+    created_at: new Date(safeInteger(row.occurred_at_ms)).toISOString(),
+    user: row.user_id == null ? undefined : { id: row.user_id, email: row.user_email ?? '', deleted: false },
+    api_key: row.api_key_id == null ? undefined : { id: row.api_key_id, name: row.api_key_name ?? '', user_id: row.user_id },
+    account: row.account_id == null ? undefined : { id: row.account_id, name: row.account_name ?? '' },
+    group: row.group_id == null ? undefined : { id: row.group_id, name: row.group_name ?? '' },
+  }
+}
+
+function safeInteger(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0
+}
+
+function safeSum(...values: unknown[]): number {
+  const sum = values.reduce<number>((total, value) => total + safeInteger(value), 0)
+  if (!Number.isSafeInteger(sum)) throw new GatewayError(503, 'invalid_usage_projection', 'Usage information is unavailable', 'server_error')
+  return sum
+}
+
+function usdValue(value: unknown): number { return safeInteger(value) / 1_000_000 }
+function nullableText(value: unknown): string | null { return typeof value === 'string' && value !== '' ? value : null }
+function requestTypeName(value: unknown, stream: unknown, dimensionsVersion: unknown): string {
+  const names = ['unknown', 'sync', 'stream', 'ws_v2', 'cyber', 'live']
+  if (value === 0 && dimensionsVersion === 0) return stream === 1 ? 'stream' : 'sync'
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) < names.length ? names[Number(value)]! : 'unknown'
+}
+function imageBreakdown(value: unknown): Record<string, number> | null {
+  if (typeof value !== 'string' || value === '') return null
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>
+    const result: Record<string, number> = {}
+    for (const tier of ['1K', '2K', '4K']) if (Number.isSafeInteger(parsed[tier]) && Number(parsed[tier]) > 0) result[tier] = Number(parsed[tier])
+    return Object.keys(result).length === 0 ? null : result
+  } catch { return null }
+}
+
 async function listResponse(
   env: ObservabilityEnv,
   filters: ListFilters,
@@ -197,17 +532,20 @@ async function listResponse(
   values: unknown[],
   view: View,
 ): Promise<Response> {
+  const columns = view === 'admin' ? ADMIN_COLUMNS : COLUMNS
   const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
   if (filters.page !== undefined) {
+    const sortColumn = filters.sortColumn ?? 'occurred_at_ms'
+    const sortDirection = filters.sortDirection ?? 'DESC'
     const [count, rows] = await env.DB.batch([
       env.DB.prepare(`SELECT COUNT(*) AS total FROM request_observations ${where}`).bind(...values),
-      env.DB.prepare(`SELECT ${COLUMNS} FROM request_observations ${where} ORDER BY occurred_at_ms DESC, id DESC LIMIT ? OFFSET ?`).bind(...values, filters.limit, (filters.page - 1) * filters.limit),
+      env.DB.prepare(`SELECT ${columns} FROM request_observations ${where} ORDER BY ${sortColumn} ${sortDirection}, id ${sortDirection} LIMIT ? OFFSET ?`).bind(...values, filters.limit, (filters.page - 1) * filters.limit),
     ])
     const total = Number((count.results[0] as { total?: unknown } | undefined)?.total ?? 0)
     return controlSuccess({ items: (rows.results as ObservationRow[]).map((row) => projectRow(row, view)), total, page: filters.page, page_size: filters.limit, pages: total === 0 ? 0 : Math.ceil(total / filters.limit) })
   }
   const result = await env.DB.prepare(
-    `SELECT ${COLUMNS} FROM request_observations ${where}
+    `SELECT ${columns} FROM request_observations ${where}
       ORDER BY occurred_at_ms DESC, id DESC LIMIT ?`,
   ).bind(...values, filters.limit + 1).all<ObservationRow>()
   const hasMore = result.results.length > filters.limit
@@ -233,8 +571,10 @@ async function parseFilters(
   defaultOpsRange = true,
   legacyOffset = false,
 ): Promise<ListFilters> {
+  const offsetRequested =
+    legacyOffset && (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined)
   for (const legacy of ['page', 'page_size', 'sort_by', 'sort_order', 'q', 'user_query']) {
-    if (legacyOffset && (legacy === 'page' || legacy === 'page_size') && context.req.query(legacy) !== undefined) continue
+    if (offsetRequested && ['page', 'page_size', 'sort_by', 'sort_order'].includes(legacy) && context.req.query(legacy) !== undefined) continue
     if (context.req.query(legacy) !== undefined) {
       throw new GatewayError(
         400,
@@ -245,9 +585,18 @@ async function parseFilters(
   }
   const limit = queryInteger(context.req.query('limit'), 'limit', 20, 1, 100)
   const filters: ListFilters = { limit, family }
-  if (legacyOffset && (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined)) {
+  if (offsetRequested) {
     filters.page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     filters.limit = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+    const sortBy = context.req.query('sort_by') ?? 'created_at'
+    const sortOrder = context.req.query('sort_order') ?? 'desc'
+    const sortColumns: Record<string, ListFilters['sortColumn']> = {
+      created_at: 'occurred_at_ms', status: 'status_code', status_code: 'status_code', model: 'requested_model',
+    }
+    if (!Object.hasOwn(sortColumns, sortBy)) throw new GatewayError(400, 'unsupported_error_sort', 'sort_by is not supported')
+    if (sortOrder !== 'asc' && sortOrder !== 'desc') throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+    filters.sortColumn = sortColumns[sortBy]
+    filters.sortDirection = sortOrder.toUpperCase() as 'ASC' | 'DESC'
   }
   const rawCursor = context.req.query('cursor')
   const cursor = rawCursor === undefined ? undefined : await decodeCursor(context.env, rawCursor)
@@ -264,6 +613,8 @@ async function parseFilters(
   filters.platform = exact('platform', 64)
   filters.model = exact('model', 200)
   filters.requestId = exact('request_id', 128)
+  filters.errorPhase = exact('phase', 32)
+  filters.errorCategory = exact('category', 32)
   if (forcedUserId !== undefined) filters.userId = forcedUserId
   const status = exact('status_code', 3)
   if (status !== undefined) {
@@ -320,12 +671,33 @@ function addSharedClauses(filters: ListFilters, clauses: string[], values: unkno
     clauses.push(`${column} = ?`)
     values.push(value)
   }
+  if (filters.errorPhase !== undefined) {
+    clauses.push('error_phase = ?')
+    values.push(filters.errorPhase)
+  }
+  if (filters.errorCategory !== undefined) addErrorCategoryClause(filters.errorCategory, clauses)
   if (filters.startMs !== undefined) { clauses.push('occurred_at_ms >= ?'); values.push(filters.startMs) }
   if (filters.endMs !== undefined) { clauses.push('occurred_at_ms < ?'); values.push(filters.endMs) }
   if (filters.cursor !== undefined) {
     clauses.push('(occurred_at_ms < ? OR (occurred_at_ms = ? AND id < ?))')
     values.push(filters.cursor.occurred_at_ms, filters.cursor.occurred_at_ms, filters.cursor.id)
   }
+}
+
+function addErrorCategoryClause(category: string, clauses: string[]): void {
+  const categoryClauses: Record<string, string> = {
+    auth: `error_phase = 'auth'`,
+    rate_limit: `error_type = 'rate_limit_error'`,
+    quota: `error_type IN ('billing_error','subscription_error')`,
+    invalid_request: `error_type = 'invalid_request_error'`,
+    service_unavailable: `error_phase = 'routing'`,
+    upstream: `error_phase IN ('account_auth','upstream','network')`,
+    internal: `error_phase = 'internal'`,
+    cyber: `error_type = 'cyber_policy'`,
+  }
+  const clause = categoryClauses[category]
+  if (clause === undefined) throw new GatewayError(400, 'invalid_category', 'category is invalid')
+  clauses.push(clause)
 }
 
 async function findObservation(
@@ -403,6 +775,10 @@ function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
     resolved_at: row.resolved_at_ms === null ? null : new Date(row.resolved_at_ms).toISOString(),
     resolved_by_user_id: row.resolved_by_user_id,
     control_version: row.resolution_version,
+    user_email: (row as any).user_email ?? undefined,
+    api_key_name: (row as any).api_key_name ?? undefined,
+    account_name: (row as any).account_name ?? undefined,
+    group_name: (row as any).group_name ?? undefined,
   })
   return base
 }
@@ -436,6 +812,7 @@ async function filterHash(filters: ListFilters): Promise<string> {
     accountId: filters.accountId ?? null, groupId: filters.groupId ?? null,
     platform: filters.platform ?? null, model: filters.model ?? null,
     statusCode: filters.statusCode ?? null, requestId: filters.requestId ?? null,
+    errorPhase: filters.errorPhase ?? null, errorCategory: filters.errorCategory ?? null,
   }))
 }
 

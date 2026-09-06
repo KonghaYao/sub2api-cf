@@ -1090,6 +1090,8 @@ export async function getOpenAITokenStats(
 export type OpsErrorListQueryParams = {
   limit?: number
   cursor?: string
+  page?: number
+  page_size?: number
   start_time?: string
   end_time?: string
   platform?: string
@@ -1102,10 +1104,23 @@ export type OpsErrorListQueryParams = {
 
   request_id?: string
   status_code?: number
+  phase?: string
+  category?: string
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
 }
 
-export async function listRequestErrors(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse> {
-  const { data } = await apiClient.get<OpsErrorLogsResponse>('/admin/ops/request-errors', { params })
+export interface OpsErrorOffsetQueryParams extends OpsErrorListQueryParams {
+  page: number
+  page_size: number
+}
+
+export function listRequestErrors(params: OpsErrorOffsetQueryParams): Promise<PaginatedResponse<OpsErrorLog>>
+export function listRequestErrors(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse>
+export async function listRequestErrors(
+  params: OpsErrorListQueryParams,
+): Promise<OpsErrorLogsResponse | PaginatedResponse<OpsErrorLog>> {
+  const { data } = await apiClient.get<OpsErrorLogsResponse | PaginatedResponse<OpsErrorLog>>('/admin/ops/request-errors', { params })
   return data
 }
 

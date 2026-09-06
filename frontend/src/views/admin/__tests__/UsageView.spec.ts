@@ -279,7 +279,7 @@ describe('admin UsageView route filters', () => {
     expect(wrapper.find('[data-test="user-filter-label"]').text()).toBe('42')
   })
 
-  it('uses only the Worker usage explorer route in Worker mode', async () => {
+  it('keeps the original stats and chart requests active in Worker mode', async () => {
     setCloudflareWorkerContractActive(true)
 
     mountRouteFilteredUsageView()
@@ -287,9 +287,9 @@ describe('admin UsageView route filters', () => {
     await flushPromises()
 
     expect(list).toHaveBeenCalledTimes(1)
-    expect(getStats).not.toHaveBeenCalled()
-    expect(getModelStats).not.toHaveBeenCalled()
-    expect(getSnapshotV2).not.toHaveBeenCalled()
+    expect(getStats).toHaveBeenCalledTimes(1)
+    expect(getModelStats).toHaveBeenCalledTimes(1)
+    expect(getSnapshotV2).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -315,7 +315,7 @@ describe('admin UsageView native compaction filter', () => {
     vi.useRealTimers()
   })
 
-  it('keeps legacy aggregate filters out of the Worker Explorer list contract', async () => {
+  it('sends the original compaction filter to the Worker list and aggregates', async () => {
     const wrapper = mountRouteFilteredUsageView()
     vi.advanceTimersByTime(120)
     await flushPromises()
@@ -330,7 +330,7 @@ describe('admin UsageView native compaction filter', () => {
     await flushPromises()
 
     expect((wrapper.vm as any).breakdownFilters.native_compaction_v2).toBe(true)
-    expect(list.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
+    expect(list.mock.calls.at(-1)?.[0]).toMatchObject({ native_compaction_v2: true })
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getModelStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
     expect(getSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: true }))
@@ -345,7 +345,7 @@ describe('admin UsageView native compaction filter', () => {
 
     expect((wrapper.vm as any).filters.native_compaction_v2).toBeNull()
     expect((wrapper.vm as any).breakdownFilters).not.toHaveProperty('native_compaction_v2')
-    expect(list.mock.calls.at(-1)?.[0]).not.toHaveProperty('native_compaction_v2')
+    expect(list.mock.calls.at(-1)?.[0]).toMatchObject({ native_compaction_v2: null })
     expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getModelStats).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
     expect(getSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
@@ -530,14 +530,18 @@ describe('admin UsageView request ID column visibility', () => {
     await wrapper.vm.$nextTick()
 
     await flushPromises()
-    expect(wrapper.find('[data-testid="admin-usage-request-id"]').exists()).toBe(false)
+    expect(wrapper.findComponent(UsageTableStub).props('columns')).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'request_id' })]),
+    )
 
     await wrapper.get('button[title="admin.users.columnSettings"]').trigger('click')
     const requestIdToggle = wrapper.findAll('button').find((button) => button.text() === 'Request ID')
     expect(requestIdToggle).toBeDefined()
     await requestIdToggle!.trigger('click')
 
-    expect(wrapper.get('[data-testid="admin-usage-request-id"]').text()).toBe('req_opaque')
+    expect(wrapper.findComponent(UsageTableStub).props('columns')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'request_id' })]),
+    )
     expect(localStorage.setItem).toHaveBeenCalledWith(
       'usage-hidden-columns-version',
       'request-id-hidden-by-default',
@@ -604,10 +608,10 @@ describe('admin UsageView handleUserClick', () => {
     vi.advanceTimersByTime(120)
     await flushPromises()
 
-    await wrapper.get('[data-testid="admin-usage-user"]').trigger('click')
+    await wrapper.get('[data-test="usage-table"] .user-click').trigger('click')
     await flushPromises()
 
-    expect(getById).toHaveBeenCalledWith('2', true)
+    expect(getById).toHaveBeenCalledWith(2, true)
   })
 })
 
@@ -650,8 +654,8 @@ describe('admin UsageView ranking tab', () => {
     expect(wrapper.find('[data-test="ranking"]').exists()).toBe(false)
 
     const tabs = wrapper.findAll('[data-testid="usage-detail-tab"]')
-    expect(tabs).toHaveLength(2)
-    await tabs[1].trigger('click')
+    expect(tabs).toHaveLength(3)
+    await tabs[2].trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-test="ranking"]').exists()).toBe(true)
 
@@ -662,13 +666,13 @@ describe('admin UsageView ranking tab', () => {
 
     expect((wrapper.vm as any).activeTab).toBe('usage')
     expect((wrapper.vm as any).filters.user_id).toBe(5)
-    expect(list).toHaveBeenCalledWith(expect.objectContaining({ user_id: '5' }), expect.anything())
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ user_id: 5 }), expect.anything())
   })
 })
 
-describe('admin UsageView Worker capability reduction', () => {
-  it('does not expose unbounded export or cleanup actions', async () => {
-    list.mockReset().mockResolvedValue({ items: [], has_more: false, next_cursor: null })
+describe('admin UsageView original actions', () => {
+  it('keeps export and cleanup actions available', async () => {
+    list.mockReset().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
     getStats.mockResolvedValue({ total_requests: 0 })
     getSnapshotV2.mockResolvedValue({ trend: [], groups: [] })
     getModelStats.mockResolvedValue({ models: [] })
@@ -676,7 +680,9 @@ describe('admin UsageView Worker capability reduction', () => {
     const wrapper = mountRouteFilteredUsageView()
     await flushPromises()
 
-    expect((wrapper.vm as any).exportToExcel).toBeUndefined()
-    expect((wrapper.vm as any).openCleanupDialog).toBeUndefined()
+    expect((wrapper.vm as any).exportToExcel).toEqual(expect.any(Function))
+    expect((wrapper.vm as any).openCleanupDialog).toEqual(expect.any(Function))
+    ;(wrapper.vm as any).openCleanupDialog()
+    expect((wrapper.vm as any).cleanupDialogVisible).toBe(true)
   })
 })

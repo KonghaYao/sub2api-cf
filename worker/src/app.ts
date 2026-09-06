@@ -345,6 +345,7 @@ import {
   actOnAdminRequestError,
   actOnAdminUpstreamError,
   getAdminErrorAggregation,
+  getAdminUsageStats,
   getAdminRequestErrorDetail,
   getAdminUpstreamErrorDetail,
   getOwnerErrorDetail,
@@ -354,6 +355,10 @@ import {
   listAdminUsage,
   listOwnerErrors,
   listRelatedUpstreamErrors,
+  searchAdminUsageApiKeys,
+  searchAdminUsageUsers,
+  unsupportedAdminUsageCleanup,
+  unsupportedAdminUsageAnalytics,
 } from './observability'
 import {
   createPaymentProvider,
@@ -594,6 +599,15 @@ export function createApp() {
   app.get('/api/v1/admin/compliance', getAdminComplianceStatus)
   app.post('/api/v1/admin/compliance/accept', acceptAdminCompliance)
   app.get('/api/v1/admin/usage', listAdminUsage)
+  app.get('/api/v1/admin/usage/stats', getAdminUsageStats)
+  app.get('/api/v1/admin/usage/search-users', searchAdminUsageUsers)
+  app.get('/api/v1/admin/usage/search-api-keys', searchAdminUsageApiKeys)
+  app.get('/api/v1/admin/usage/cleanup-tasks', unsupportedAdminUsageCleanup)
+  app.post('/api/v1/admin/usage/cleanup-tasks', unsupportedAdminUsageCleanup)
+  app.post('/api/v1/admin/usage/cleanup-tasks/:id/cancel', unsupportedAdminUsageCleanup)
+  app.get('/api/v1/admin/dashboard/models', unsupportedAdminUsageAnalytics)
+  app.get('/api/v1/admin/dashboard/snapshot-v2', unsupportedAdminUsageAnalytics)
+  app.get('/api/v1/admin/dashboard/user-breakdown', unsupportedAdminUsageAnalytics)
   app.get('/api/v1/admin/ops/requests', listAdminRequests)
   app.get('/api/v1/admin/ops/request-errors', listAdminRequestErrors)
   app.get('/api/v1/admin/ops/upstream-errors', listAdminUpstreamErrors)

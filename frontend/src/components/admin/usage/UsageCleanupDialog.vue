@@ -124,12 +124,12 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import UsageFilters from '@/components/admin/usage/UsageFilters.vue'
 import { adminUsageAPI } from '@/api/admin/usage'
-import type { AdminUsageQueryParams, UsageCleanupTask, CreateUsageCleanupTaskRequest } from '@/api/admin/usage'
+import type { AdminUsageListParams, UsageCleanupTask, CreateUsageCleanupTaskRequest } from '@/api/admin/usage'
 import { requestTypeToLegacyStream } from '@/utils/usageRequestType'
 
 interface Props {
   show: boolean
-  filters: AdminUsageQueryParams
+  filters: AdminUsageListParams
   startDate: string
   endDate: string
 }
@@ -140,7 +140,7 @@ const emit = defineEmits(['close'])
 const { t } = useI18n()
 const appStore = useAppStore()
 
-const localFilters = ref<AdminUsageQueryParams>({})
+const localFilters = ref<AdminUsageListParams>({})
 const localStartDate = ref('')
 const localEndDate = ref('')
 
@@ -296,16 +296,16 @@ const buildPayload = (): CreateUsageCleanupTaskRequest | null => {
     timezone: getUserTimezone()
   }
 
-  if (localFilters.value.user_id && localFilters.value.user_id > 0) {
+  if (typeof localFilters.value.user_id === 'number' && localFilters.value.user_id > 0) {
     payload.user_id = localFilters.value.user_id
   }
-  if (localFilters.value.api_key_id && localFilters.value.api_key_id > 0) {
+  if (typeof localFilters.value.api_key_id === 'number' && localFilters.value.api_key_id > 0) {
     payload.api_key_id = localFilters.value.api_key_id
   }
-  if (localFilters.value.account_id && localFilters.value.account_id > 0) {
+  if (typeof localFilters.value.account_id === 'number' && localFilters.value.account_id > 0) {
     payload.account_id = localFilters.value.account_id
   }
-  if (localFilters.value.group_id && localFilters.value.group_id > 0) {
+  if (typeof localFilters.value.group_id === 'number' && localFilters.value.group_id > 0) {
     payload.group_id = localFilters.value.group_id
   }
   if (localFilters.value.model) {

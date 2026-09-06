@@ -117,6 +117,97 @@ async function seed(test: Awaited<ReturnType<typeof fixture>>, input: {
 }
 
 describe('request explorer HTTP contracts', () => {
+  it('serves the original admin Usage table from the billing projection with exact filters and stable offset pagination', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    test.raw.prepare(`INSERT INTO api_keys (id,user_id,key_hash,name,created_at_ms,updated_at_ms) VALUES ('key-alice','alice',?,'Alice key',?,?)`)
+      .run('a'.repeat(64), now, now)
+    test.raw.prepare(`INSERT INTO "groups" (id,name,platform,created_at_ms,updated_at_ms) VALUES ('group-a','Premium','openai',?,?)`)
+      .run(now, now)
+    test.raw.prepare(`INSERT INTO accounts (id,platform,name,credential_ref,created_at_ms,updated_at_ms) VALUES ('account-a','openai','Primary','vault:a',?,?)`)
+      .run(now, now)
+    const insert = test.raw.prepare(`INSERT INTO usage_projection (
+      event_id,request_id,user_id,api_key_id,account_id,model,requested_model,upstream_model,
+      group_id,input_tokens,output_tokens,cache_read_tokens,input_amount_micros,output_amount_micros,
+      cache_amount_micros,base_amount_micros,amount_micros,billing_type,outcome,stream,duration_ms,
+      occurred_at_ms,projected_at_ms,platform,request_type,inbound_endpoint,upstream_endpoint,
+      billing_mode,native_compaction_v2,dimensions_version,standard_cost_micros,
+      account_stats_cost_micros,account_rate_multiplier_ppm,account_cost_micros
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    insert.run('usage-z','request-z','alice','key-alice','account-a','zeta','zeta','zeta-upstream',
+      'group-a',10,2,3,100,200,300,0,900,'subscription','completed',1,50,
+      now,now,'openai',2,'/v1/responses','/responses','image',1,1,600,700,1250000,875)
+    insert.run('usage-a','request-a','alice','key-alice','account-a','alpha','alpha','alpha',
+      'group-a',1,2,0,100,200,0,0,300,'balance','completed',0,25,
+      now,now,'openai',1,'/v1/chat/completions','/chat/completions','token',0,1,300,300,1000000,300)
+
+    const response = await app().request(
+      '/admin/usage?page=1&page_size=1&sort_by=model&sort_order=desc&user_id=alice&api_key_id=key-alice&account_id=account-a&group_id=group-a&model=zeta&request_type=stream&native_compaction_v2=true&billing_type=1&billing_mode=image&upstream_model_mismatch=true',
+      { headers: { authorization: test.auth.admin! } },
+      test.env,
+    )
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        total: 1, page: 1, page_size: 1, pages: 1,
+        items: [{
+          id: 'usage-z', user_id: 'alice', model: 'zeta', upstream_model: 'zeta-upstream',
+          input_tokens: 10, cache_read_tokens: 3, actual_cost: 0.0009,
+          account_stats_cost: 0.0007, account_rate_multiplier: 1.25,
+          user: { email: 'alice@example.test' }, api_key: { name: 'Alice key' },
+          account: { name: 'Primary' }, group: { name: 'Premium' },
+          request_type: 'stream', billing_type: 1, billing_mode: 'image', native_compaction_v2: true,
+        }],
+      },
+    })
+    const production = createApp()
+    const stats = await production.request('/api/v1/admin/usage/stats?user_id=alice&billing_type=subscription', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    await expect(stats.json()).resolves.toMatchObject({ data: { total_requests: 1, total_actual_cost: 0.0009 } })
+    const users = await production.request('/api/v1/admin/usage/search-users?q=alice', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    await expect(users.json()).resolves.toMatchObject({ data: [{ id: 'alice', email: 'alice@example.test' }] })
+    const keys = await production.request('/api/v1/admin/usage/search-api-keys?user_id=alice&q=Alice', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    await expect(keys.json()).resolves.toMatchObject({ data: [{ id: 'key-alice', name: 'Alice key' }] })
+    const cleanup = await production.request('/api/v1/admin/usage/cleanup-tasks', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(cleanup.status).toBe(501)
+    await expect(cleanup.json()).resolves.toMatchObject({ code: 'usage_cleanup_not_migrated' })
+    const analytics = await production.request('/api/v1/admin/dashboard/models', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(analytics.status).toBe(501)
+    await expect(analytics.json()).resolves.toMatchObject({ code: 'admin_usage_analytics_not_migrated' })
+    test.raw.close()
+  })
+
+  it('supports the original admin Usage error tab filters, sorting, and exact offset count', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    await seed(test, { requestId: 'req-client', userId: 'alice', at: now - 2, status: 400 })
+    await seed(test, { requestId: 'req-provider', userId: 'alice', at: now - 1, status: 502, owner: 'provider' })
+    const response = await app().request(
+      `/admin/ops/request-errors?page=1&page_size=1&user_id=alice&phase=upstream&category=upstream&status_code=502&sort_by=status&sort_order=asc&start_time=${encodeURIComponent(new Date(now - 1000).toISOString())}&end_time=${encodeURIComponent(new Date(now + 1000).toISOString())}`,
+      { headers: { authorization: test.auth.admin! } },
+      test.env,
+    )
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: { total: 1, page: 1, page_size: 1, pages: 1, items: [{ request_id: 'req-provider' }] },
+    })
+    const cursorSort = await app().request('/admin/ops/request-errors?sort_by=status', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(cursorSort.status).toBe(400)
+    await expect(cursorSort.json()).resolves.toMatchObject({ code: 'unsupported_pagination_or_search' })
+    test.raw.close()
+  })
+
   it('resolves a failed observation using an explicit version and server-derived actor', async () => {
     const test = await fixture()
     const failed = await seed(test, {

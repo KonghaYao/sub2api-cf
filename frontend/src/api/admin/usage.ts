@@ -4,7 +4,7 @@
  */
 
 import { apiClient } from '../client'
-import type { CursorPage, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
+import type { AdminUsageLog, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
 import type { EndpointStat } from '@/types'
 
 // ==================== Types ====================
@@ -80,11 +80,19 @@ export interface CreateUsageCleanupTaskRequest {
   timezone?: string
 }
 
-export interface AdminUsageQueryParams extends Omit<UsageQueryParams, 'page' | 'page_size' | 'sort_by' | 'sort_order'> {
+export interface AdminUsageQueryParams extends UsageQueryParams {
   limit?: number
   cursor?: string
+  exact_total?: boolean
   billing_mode?: string
   upstream_model_mismatch?: boolean
+}
+
+export type AdminUsageListParams = Omit<AdminUsageQueryParams, 'user_id' | 'api_key_id' | 'account_id' | 'group_id'> & {
+  user_id?: string | number
+  api_key_id?: string | number
+  account_id?: string | number
+  group_id?: string | number
 }
 
 export interface AdminUsageExplorerQuery {
@@ -133,10 +141,10 @@ export interface WorkerAdminUsageItem {
  * @returns Paginated list of usage logs
  */
 export async function list(
-  params: AdminUsageExplorerQuery,
+  params: AdminUsageListParams,
   options?: { signal?: AbortSignal }
-): Promise<CursorPage<WorkerAdminUsageItem>> {
-  const { data } = await apiClient.get<CursorPage<WorkerAdminUsageItem>>('/admin/usage', {
+): Promise<PaginatedResponse<AdminUsageLog>> {
+  const { data } = await apiClient.get<PaginatedResponse<AdminUsageLog>>('/admin/usage', {
     params,
     signal: options?.signal
   })
@@ -188,7 +196,7 @@ export async function searchUsers(keyword: string): Promise<SimpleUser[]> {
  * @param keyword - Optional keyword to search in key name
  * @returns List of matching API keys (max 30)
  */
-export async function searchApiKeys(userId?: number, keyword?: string): Promise<SimpleApiKey[]> {
+export async function searchApiKeys(userId?: string | number, keyword?: string): Promise<SimpleApiKey[]> {
   const params: Record<string, unknown> = {}
   if (userId !== undefined) {
     params.user_id = userId
