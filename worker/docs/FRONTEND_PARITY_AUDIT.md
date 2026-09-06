@@ -188,3 +188,24 @@ explicit typed error. It must never silently discard a submitted field or return
   multipliers and advanced configuration execution.
 - Worker typecheck and SPA build passed. D1 0067 pre-migration bookmark:
   `00000029-0000048f-000050de-3a9f1845c7e1921cd9aad86ae7df8791`.
+
+## v0.42.5 Groups user rate multipliers — 2026-09-06
+
+- Restored the original per-user multiplier endpoint behind the retained modal.
+  The list keeps legacy entry fields, including companion RPM overrides; optional
+  search and bounded paging are available to direct clients without changing the
+  modal's array response.
+- A save replaces the group's rate-multiplier set: users omitted from the request
+  return to the group default. RPM overrides remain intact. The explicit clear
+  operation removes both rate and RPM overrides, matching the original combined
+  persistence model.
+- Rate inputs are converted once to deterministic integer ppm before D1 writes.
+  Gateway route resolution already selects the user ppm before calculating the
+  reservation and settled usage amount. The frontend now also carries opaque
+  Worker user IDs through both rate and RPM dialogs.
+- Group control versions and idempotency keys protect writes. D1 0068 adds the
+  group-first lookup index used by list/search and clear operations.
+- Validation: 3 new rate administration SQLite journeys plus 2 gateway billing
+  override tests passed; Worker typecheck, frontend typecheck and Cloudflare SPA
+  build passed. Full suites were intentionally not repeated.
+- Production D1 pre-migration bookmark: `00000029-000004db-000050de-fff18bb107b7c0685ec925059274e09f`.

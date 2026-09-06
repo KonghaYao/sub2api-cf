@@ -147,6 +147,11 @@ import {
   putAdminGroupRpmOverrides,
 } from './control/group-rpm'
 import {
+  clearAdminGroupRateMultipliers,
+  listAdminGroupRateMultipliers,
+  putAdminGroupRateMultipliers,
+} from './control/group-rate'
+import {
   createAdminInvitationCode,
   createAdminPromotionCode,
   deleteAdminInvitationCode,
@@ -630,6 +635,9 @@ export function createApp() {
   app.post('/api/v1/admin/groups', createAdminGroup)
   app.post('/api/v1/admin/groups/:id/duplicate', duplicateAdminGroup)
   app.put('/api/v1/admin/groups/sort-order', updateAdminGroupSortOrder)
+  app.get('/api/v1/admin/groups/:id/rate-multipliers', listAdminGroupRateMultipliers)
+  app.put('/api/v1/admin/groups/:id/rate-multipliers', putAdminGroupRateMultipliers)
+  app.delete('/api/v1/admin/groups/:id/rate-multipliers', clearAdminGroupRateMultipliers)
   app.get('/api/v1/admin/groups/:id/rpm-overrides', listAdminGroupRpmOverrides)
   app.put('/api/v1/admin/groups/:id/rpm-overrides', putAdminGroupRpmOverrides)
   app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)

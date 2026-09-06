@@ -355,14 +355,14 @@ const handleAddLocal = () => {
   adjustPage()
 }
 
-const updateLocalRpm = (userId: number, value: string) => {
+const updateLocalRpm = (userId: string | number, value: string) => {
   const num = parseInt(value, 10)
   if (isNaN(num) || num < 0) return
   const entry = localEntries.value.find(e => e.user_id === userId)
   if (entry) entry.rpm_override = num
 }
 
-const removeLocal = (userId: number) => {
+const removeLocal = (userId: string | number) => {
   localEntries.value = localEntries.value.filter(e => e.user_id !== userId)
   adjustPage()
 }

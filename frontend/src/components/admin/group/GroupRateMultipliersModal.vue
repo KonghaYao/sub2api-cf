@@ -410,7 +410,7 @@ const handleAddLocal = () => {
 }
 
 // 本地修改倍率
-const updateLocalRate = (userId: number, value: string) => {
+const updateLocalRate = (userId: string | number, value: string) => {
   const entry = localEntries.value.find(e => e.user_id === userId)
   if (!entry) return
   if (value.trim() === '') {
@@ -423,7 +423,7 @@ const updateLocalRate = (userId: number, value: string) => {
 }
 
 // 本地删除
-const removeLocal = (userId: number) => {
+const removeLocal = (userId: string | number) => {
   localEntries.value = localEntries.value.filter(e => e.user_id !== userId)
   adjustPage()
 }

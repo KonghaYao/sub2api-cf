@@ -632,13 +632,14 @@ export async function previewCompositeRoute(
  * Rate multiplier entry for a user in a group
  */
 export interface GroupRateMultiplierEntry {
-  user_id: number
+  user_id: string | number
   user_name: string
   user_email: string
   user_notes: string
   user_status: string
   rate_multiplier?: number | null
   rpm_override?: number | null
+  control_version?: number
 }
 
 /**
@@ -646,8 +647,7 @@ export interface GroupRateMultiplierEntry {
  * @param id - Group ID
  * @returns List of user rate multiplier entries
  */
-export async function getGroupRateMultipliers(id: number): Promise<GroupRateMultiplierEntry[]> {
-  requireLegacyGroupFeature('Per-user group rate multipliers')
+export async function getGroupRateMultipliers(id: string | number): Promise<GroupRateMultiplierEntry[]> {
   const { data } = await apiClient.get<GroupRateMultiplierEntry[]>(
     `/admin/groups/${id}/rate-multipliers`
   )
@@ -682,9 +682,20 @@ export async function updateSortOrder(
  * @param id - Group ID
  * @returns Success confirmation
  */
-export async function clearGroupRateMultipliers(id: number): Promise<{ message: string }> {
-  requireLegacyGroupFeature('Per-user group rate multipliers')
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/groups/${id}/rate-multipliers`)
+export async function clearGroupRateMultipliers(id: string | number): Promise<{ message: string }> {
+  const workerContract = isCloudflareWorkerContractActive()
+  const { data } = await apiClient.delete<{ message: string; control_version?: number }>(
+    `/admin/groups/${id}/rate-multipliers`,
+    workerContract
+      ? {
+          data: { expected_control_version: requireGroupControlVersion(id) },
+          headers: { 'Idempotency-Key': newControlOperationKey('admin-group-rate-clear') }
+        }
+      : undefined
+  )
+  if (workerContract && Number.isSafeInteger(data.control_version)) {
+    groupControlVersions.set(String(id), data.control_version!)
+  }
   return data
 }
 
@@ -693,14 +704,25 @@ export async function clearGroupRateMultipliers(id: number): Promise<{ message: 
  * Only touches rate_multiplier column; preserves rpm_override on existing rows.
  */
 export async function batchSetGroupRateMultipliers(
-  id: number,
-  entries: Array<{ user_id: number; rate_multiplier: number }>
+  id: string | number,
+  entries: Array<{ user_id: string | number; rate_multiplier: number }>
 ): Promise<{ message: string }> {
-  requireLegacyGroupFeature('Per-user group rate multipliers')
-  const { data } = await apiClient.put<{ message: string }>(
+  const workerContract = isCloudflareWorkerContractActive()
+  const { data } = await apiClient.put<{ message: string; control_version?: number }>(
     `/admin/groups/${id}/rate-multipliers`,
-    { entries }
+    workerContract
+      ? {
+          entries: entries.map((entry) => ({ ...entry, user_id: String(entry.user_id) })),
+          expected_control_version: requireGroupControlVersion(id)
+        }
+      : { entries },
+    workerContract
+      ? { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-rate-put') } }
+      : undefined
   )
+  if (workerContract && Number.isSafeInteger(data.control_version)) {
+    groupControlVersions.set(String(id), data.control_version!)
+  }
   return data
 }
 
@@ -708,7 +730,7 @@ export async function batchSetGroupRateMultipliers(
  * RPM override entry for a user in a group
  */
 export interface GroupRPMOverrideEntry {
-  user_id: number
+  user_id: string | number
   user_name: string
   user_email: string
   user_notes: string
@@ -747,8 +769,8 @@ export async function getGroupRPMOverrides(id: number): Promise<GroupRPMOverride
  * collection clears it. The legacy endpoint still preserves rate_multiplier.
  */
 export async function batchSetGroupRPMOverrides(
-  id: number,
-  entries: Array<{ user_id: number; rpm_override: number }>
+  id: string | number,
+  entries: Array<{ user_id: string | number; rpm_override: number }>
 ): Promise<{ message: string }> {
   const workerContract = isCloudflareWorkerContractActive()
   const { data } = await apiClient.put<{ message: string }>(
@@ -768,7 +790,7 @@ export async function batchSetGroupRPMOverrides(
 /**
  * Clear all RPM overrides for a group (preserves rate_multiplier).
  */
-export async function clearGroupRPMOverrides(id: number): Promise<{ message: string }> {
+export async function clearGroupRPMOverrides(id: string | number): Promise<{ message: string }> {
   const workerContract = isCloudflareWorkerContractActive()
   const { data } = await apiClient.delete<{ message: string }>(
     `/admin/groups/${id}/rpm-overrides`,
