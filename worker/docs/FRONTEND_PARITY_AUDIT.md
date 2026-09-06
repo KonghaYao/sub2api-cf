@@ -461,3 +461,12 @@ explicit typed error. It must never silently discard a submitted field or return
   return a typed error instead of being silently dropped.
 - Validation: Settings Worker SQLite control tests (11), Settings template
   parity test, and Worker/frontend typechecks passed. No D1 migration.
+
+## v0.42.27 Users group-access audit — 2026-09-07
+
+- User group-permission, public-group restriction, and per-group rate changes
+  now append a same-transaction immutable audit event with the acting admin,
+  session, control version, and idempotency-key hash.
+- Permission and rate rows still cascade when a user or group is deleted; the
+  audit preserves the deleted target ID so administrative history remains
+  available.

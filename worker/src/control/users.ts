@@ -3,7 +3,7 @@ import type { Env } from '../env'
 import { hashPassword, PasswordValidationError, validateNewPassword } from '../auth/password'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { authenticateAdminSession } from './admin-auth'
+import { authenticateAdminSession, type AdminActor } from './admin-auth'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -120,6 +120,10 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
     const passwordCredential = input.password === undefined
       ? null
       : await hashPassword(input.password)
+    const groupAccessChanged = hasGroupAccessPatch(input)
+    const actor = groupAccessChanged
+      ? await authenticateAdminSession(context.req.raw, context.env)
+      : null
     const user: UserRow = {
       id: userId,
       email: input.email,
@@ -161,6 +165,16 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
           user.restrict_public_groups,
         ),
         ...userGroupConfigStatements(context.env, user.id, input.allowed_groups, input.group_rates, now),
+        ...(actor === null ? [] : [userGroupAccessAuditStatement(
+          context.env,
+          actor,
+          'user.group_access.create',
+          user.id,
+          user.control_version,
+          idempotency.key_hash,
+          input,
+          now,
+        )]),
         controlIdempotencyInsert(context.env, idempotency, 'user', user.id, user, now),
       ])
     } catch (error) {
@@ -500,6 +514,10 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       throw new GatewayError(412, 'user_version_conflict', 'User changed; reload it and retry')
     }
     await assertEditableUserGroups(context.env, patch.allowed_groups, patch.group_rates)
+    const groupAccessChanged = hasGroupAccessPatch(patch)
+    const actor = groupAccessChanged
+      ? await authenticateAdminSession(context.req.raw, context.env)
+      : null
     const next = applyUserUpdatePatch(patch, user)
     if (
       user.role === 'admin' &&
@@ -600,6 +618,19 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
         ).bind(updatedAtMs, user.id))
       }
       controlVersion += 1
+    }
+
+    if (actor !== null) {
+      statements.push(userGroupAccessAuditStatement(
+        context.env,
+        actor,
+        'user.group_access.replace',
+        user.id,
+        controlVersion,
+        idempotency.key_hash,
+        patch,
+        updatedAtMs,
+      ))
     }
 
     if (patch.status !== undefined) {
@@ -850,6 +881,47 @@ function userGroupConfigStatements(
     }
   }
   return statements
+}
+
+function hasGroupAccessPatch(input: Pick<
+  CreateUserInput | UserUpdatePatch,
+  'allowed_groups' | 'restrict_public_groups' | 'group_rates'
+>): boolean {
+  return input.allowed_groups !== undefined ||
+    input.restrict_public_groups !== undefined ||
+    input.group_rates !== undefined
+}
+
+function userGroupAccessAuditStatement(
+  env: Env,
+  actor: AdminActor,
+  action: 'user.group_access.create' | 'user.group_access.replace',
+  targetUserId: string,
+  controlVersion: number,
+  idempotencyKeyHash: string,
+  patch: Pick<CreateUserInput | UserUpdatePatch, 'allowed_groups' | 'restrict_public_groups' | 'group_rates'>,
+  now: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO admin_user_group_access_audit_events (
+       id, actor_user_id, actor_session_id, action, target_user_id, control_version,
+       idempotency_key_hash, metadata_json, occurred_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    actor.user_id,
+    actor.session_id,
+    action,
+    targetUserId,
+    controlVersion,
+    idempotencyKeyHash,
+    JSON.stringify({
+      allowed_group_ids: patch.allowed_groups ?? null,
+      group_rates_ppm: patch.group_rates ?? null,
+      restrict_public_groups: patch.restrict_public_groups ?? null,
+    }),
+    now,
+  )
 }
 
 async function readUserGroupConfig(
