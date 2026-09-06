@@ -251,10 +251,10 @@ const balanceHistoryUser = ref<AdminUser | null>(null)
 
 const breakdownFilters = computed(() => {
   const f: Record<string, any> = {}
-  if (typeof filters.value.user_id === 'number') f.user_id = filters.value.user_id
-  if (typeof filters.value.api_key_id === 'number') f.api_key_id = filters.value.api_key_id
-  if (typeof filters.value.account_id === 'number') f.account_id = filters.value.account_id
-  if (typeof filters.value.group_id === 'number') f.group_id = filters.value.group_id
+  if (filters.value.user_id != null) f.user_id = filters.value.user_id
+  if (filters.value.api_key_id != null) f.api_key_id = filters.value.api_key_id
+  if (filters.value.account_id != null) f.account_id = filters.value.account_id
+  if (filters.value.group_id != null) f.group_id = filters.value.group_id
   if (filters.value.request_type != null) f.request_type = filters.value.request_type
   if (filters.value.native_compaction_v2 != null) f.native_compaction_v2 = filters.value.native_compaction_v2
   if (filters.value.billing_type != null) f.billing_type = filters.value.billing_type
@@ -321,9 +321,6 @@ const getSingleQueryValue = (value: string | null | Array<string | null> | undef
 }
 
 const getOpaqueQueryValue = getSingleQueryValue
-
-const legacyNumericId = (value: string | number | undefined): number | undefined =>
-  typeof value === 'number' ? value : undefined
 
 const applyRouteQueryFilters = () => {
   const queryStartDate = getSingleQueryValue(route.query.start_date)
@@ -407,7 +404,12 @@ const loadLogs = async () => {
       usageLogs.value = res.items
       pagination.total = res.total
     }
-  } catch (error: any) { if(error?.name !== 'AbortError') console.error('Failed to load usage logs:', error) } finally { if(abortController === c) loading.value = false }
+  } catch (error: any) {
+    if(error?.name !== 'AbortError') {
+      console.error('Failed to load usage logs:', error)
+      appStore.showError(error?.message || t('usage.failedToLoad'))
+    }
+  } finally { if(abortController === c) loading.value = false }
 }
 const loadStats = async (force = false) => {
   const seq = ++statsReqSeq
@@ -417,10 +419,6 @@ const loadStats = async (force = false) => {
     const legacyStream = requestType ? requestTypeToLegacyStream(requestType) : filters.value.stream
     const s = await adminAPI.usage.getStats({
       ...filters.value,
-      user_id: legacyNumericId(filters.value.user_id),
-      api_key_id: legacyNumericId(filters.value.api_key_id),
-      account_id: legacyNumericId(filters.value.account_id),
-      group_id: legacyNumericId(filters.value.group_id),
       stream: legacyStream === null ? undefined : legacyStream,
       ...(force ? { nocache: 1 } : {}),
     })
@@ -460,11 +458,11 @@ const loadModelStats = async (source: ModelDistributionSource, force = false) =>
     const baseParams = {
       start_date: filters.value.start_date || startDate.value,
       end_date: filters.value.end_date || endDate.value,
-      user_id: legacyNumericId(filters.value.user_id),
+      user_id: filters.value.user_id,
       model: filters.value.model,
-      api_key_id: legacyNumericId(filters.value.api_key_id),
-      account_id: legacyNumericId(filters.value.account_id),
-      group_id: legacyNumericId(filters.value.group_id),
+      api_key_id: filters.value.api_key_id,
+      account_id: filters.value.account_id,
+      group_id: filters.value.group_id,
       request_type: requestType,
       stream: legacyStream === null ? undefined : legacyStream,
       native_compaction_v2: filters.value.native_compaction_v2,
@@ -511,11 +509,11 @@ const loadChartData = async () => {
       start_date: filters.value.start_date || startDate.value,
       end_date: filters.value.end_date || endDate.value,
       granularity: granularity.value,
-      user_id: legacyNumericId(filters.value.user_id),
+      user_id: filters.value.user_id,
       model: filters.value.model,
-      api_key_id: legacyNumericId(filters.value.api_key_id),
-      account_id: legacyNumericId(filters.value.account_id),
-      group_id: legacyNumericId(filters.value.group_id),
+      api_key_id: filters.value.api_key_id,
+      account_id: filters.value.account_id,
+      group_id: filters.value.group_id,
       request_type: requestType,
       stream: legacyStream === null ? undefined : legacyStream,
       native_compaction_v2: filters.value.native_compaction_v2,

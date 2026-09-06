@@ -346,6 +346,7 @@ import {
   actOnAdminUpstreamError,
   getAdminErrorAggregation,
   getAdminUsageStats,
+  getAdminUsageModels,
   getAdminRequestErrorDetail,
   getAdminUpstreamErrorDetail,
   getOwnerErrorDetail,
@@ -605,7 +606,7 @@ export function createApp() {
   app.get('/api/v1/admin/usage/cleanup-tasks', unsupportedAdminUsageCleanup)
   app.post('/api/v1/admin/usage/cleanup-tasks', unsupportedAdminUsageCleanup)
   app.post('/api/v1/admin/usage/cleanup-tasks/:id/cancel', unsupportedAdminUsageCleanup)
-  app.get('/api/v1/admin/dashboard/models', unsupportedAdminUsageAnalytics)
+  app.get('/api/v1/admin/dashboard/models', getAdminUsageModels)
   app.get('/api/v1/admin/dashboard/snapshot-v2', unsupportedAdminUsageAnalytics)
   app.get('/api/v1/admin/dashboard/user-breakdown', unsupportedAdminUsageAnalytics)
   app.get('/api/v1/admin/ops/requests', listAdminRequests)

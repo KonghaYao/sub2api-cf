@@ -48,11 +48,11 @@ export interface TrendParams {
   start_date?: string
   end_date?: string
   granularity?: 'day' | 'hour'
-  user_id?: number
-  api_key_id?: number
+  user_id?: string | number
+  api_key_id?: string | number
   model?: string
-  account_id?: number
-  group_id?: number
+  account_id?: string | number
+  group_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null
@@ -80,12 +80,12 @@ export async function getUsageTrend(params?: TrendParams): Promise<TrendResponse
 export interface ModelStatsParams {
   start_date?: string
   end_date?: string
-  user_id?: number
-  api_key_id?: number
+  user_id?: string | number
+  api_key_id?: string | number
   model?: string
   model_source?: 'requested' | 'upstream' | 'mapping'
-  account_id?: number
-  group_id?: number
+  account_id?: string | number
+  group_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null
@@ -112,10 +112,10 @@ export async function getModelStats(params?: ModelStatsParams): Promise<ModelSta
 export interface GroupStatsParams {
   start_date?: string
   end_date?: string
-  user_id?: number
-  api_key_id?: number
-  account_id?: number
-  group_id?: number
+  user_id?: string | number
+  api_key_id?: string | number
+  account_id?: string | number
+  group_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null
@@ -167,7 +167,7 @@ export async function getGroupStats(params?: GroupStatsParams): Promise<GroupSta
 export interface UserBreakdownParams {
   start_date?: string
   end_date?: string
-  group_id?: number
+  group_id?: string | number
   model?: string
   model_source?: 'requested' | 'upstream' | 'mapping'
   endpoint?: string
@@ -176,9 +176,9 @@ export interface UserBreakdownParams {
   // Sort column for the ranking (allowlisted server-side; falls back to actual_cost)
   sort_by?: 'total_tokens' | 'input_tokens' | 'output_tokens' | 'cache_tokens' | 'requests' | 'cost' | 'actual_cost'
   // Additional filter conditions
-  user_id?: number
-  api_key_id?: number
-  account_id?: number
+  user_id?: string | number
+  api_key_id?: string | number
+  account_id?: string | number
   request_type?: UsageRequestType
   stream?: boolean
   native_compaction_v2?: boolean | null

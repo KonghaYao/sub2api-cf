@@ -9,6 +9,12 @@ import {
 } from '../control/http'
 import { apiKeyDigest, constantTimeEqual, sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import {
+  addCalendarDays,
+  parseDate as parseCalendarDate,
+  parseTimezone,
+  zonedDayStart,
+} from '../gateway/info'
 import { observabilityBucket } from './recorder'
 import type { ObservationRow, ObservabilityEnv, PayloadProjection } from './types'
 
@@ -89,12 +95,15 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
     const [summary, endpoints] = await context.env.DB.batch([
       context.env.DB.prepare(`SELECT COUNT(*) total_requests,
         COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
-        COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,COALESCE(SUM(amount_micros),0) amount_micros,
+        COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,
+        COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
+        COALESCE(SUM(amount_micros),0) amount_micros,
         COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros,
         CAST(ROUND(AVG(duration_ms)) AS INTEGER) average_duration_ms
         FROM usage_projection u ${where}`).bind(...values),
       context.env.DB.prepare(`SELECT inbound_endpoint endpoint,COUNT(*) requests,
         COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) tokens,
+        COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
         COALESCE(SUM(amount_micros),0) amount_micros
         FROM usage_projection u ${where}${where === '' ? 'WHERE' : ' AND'} inbound_endpoint <> ''
         GROUP BY inbound_endpoint ORDER BY amount_micros DESC,inbound_endpoint ASC LIMIT 100`).bind(...values),
@@ -111,7 +120,7 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
       total_cache_creation_tokens: 0,
       total_cache_read_tokens: cache,
       total_tokens: safeSum(input, output, cache),
-      total_cost: usdValue(row.amount_micros),
+      total_cost: usdValue(row.standard_micros),
       total_actual_cost: usdValue(row.amount_micros),
       total_account_cost: usdValue(row.account_micros),
       average_duration_ms: safeInteger(row.average_duration_ms),
@@ -119,9 +128,52 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
         endpoint: item.endpoint,
         requests: safeInteger(item.requests),
         total_tokens: safeInteger(item.tokens),
-        cost: usdValue(item.amount_micros),
+        cost: usdValue(item.standard_micros),
         actual_cost: usdValue(item.amount_micros),
       })),
+    })
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function getAdminUsageModels(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    const source = context.req.query('model_source')?.trim() || 'requested'
+    const expressions: Record<string, string> = {
+      requested: `COALESCE(NULLIF(TRIM(u.requested_model),''),u.model)`,
+      upstream: `COALESCE(NULLIF(TRIM(u.upstream_model),''),COALESCE(NULLIF(TRIM(u.requested_model),''),u.model))`,
+      mapping: `(COALESCE(NULLIF(TRIM(u.requested_model),''),u.model) || ' -> ' || COALESCE(NULLIF(TRIM(u.upstream_model),''),COALESCE(NULLIF(TRIM(u.requested_model),''),u.model)))`,
+    }
+    if (!Object.hasOwn(expressions, source)) {
+      throw new GatewayError(400, 'invalid_model_source', 'model_source must be requested, upstream, or mapping')
+    }
+    const { clauses, values } = adminUsageClauses(context)
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
+    const model = expressions[source]!
+    const rows = await context.env.DB.prepare(`SELECT ${model} model,COUNT(*) requests,
+      COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
+      0 cache_creation_tokens,COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,
+      COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) total_tokens,
+      COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
+      COALESCE(SUM(amount_micros),0) amount_micros,
+      COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros
+      FROM usage_projection u ${where}
+      GROUP BY ${model} ORDER BY total_tokens DESC,model ASC LIMIT 500`).bind(...values).all<any>()
+    return controlSuccess({
+      models: rows.results.map((row) => ({
+        model: row.model,
+        requests: safeInteger(row.requests),
+        input_tokens: safeInteger(row.input_tokens),
+        output_tokens: safeInteger(row.output_tokens),
+        cache_creation_tokens: 0,
+        cache_read_tokens: safeInteger(row.cache_read_tokens),
+        total_tokens: safeInteger(row.total_tokens),
+        cost: usdValue(row.standard_micros),
+        actual_cost: usdValue(row.amount_micros),
+        account_cost: usdValue(row.account_micros),
+      })),
+      start_date: context.req.query('start_date') ?? '',
+      end_date: context.req.query('end_date') ?? '',
     })
   } catch (error) { return controlError(asGatewayError(error)) }
 }
@@ -363,8 +415,9 @@ function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; val
     clauses.push('COALESCE(u.requested_model,u.model) = ?')
     values.push(model)
   }
-  const start = parseDate(context.req.query('start_date'), false)
-  const end = parseDate(context.req.query('end_date'), true)
+  const timezone = parseTimezone(context.req.query('timezone'))
+  const start = parseUsageDate(context.req.query('start_date'), timezone, false)
+  const end = parseUsageDate(context.req.query('end_date'), timezone, true)
   if (start !== undefined) { clauses.push('u.occurred_at_ms >= ?'); values.push(start) }
   if (end !== undefined) { clauses.push('u.occurred_at_ms < ?'); values.push(end) }
   if (start !== undefined && end !== undefined && start >= end) {
@@ -407,10 +460,8 @@ function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; val
   }
   const mismatch = context.req.query('upstream_model_mismatch')?.trim()
   if (mismatch) {
-    const expected = queryBooleanValue(mismatch, 'upstream_model_mismatch')
-    clauses.push(expected
-      ? `COALESCE(NULLIF(u.upstream_model,''),COALESCE(u.requested_model,u.model)) <> COALESCE(u.requested_model,u.model)`
-      : `COALESCE(NULLIF(u.upstream_model,''),COALESCE(u.requested_model,u.model)) = COALESCE(u.requested_model,u.model)`)
+    queryBooleanValue(mismatch, 'upstream_model_mismatch')
+    throw new GatewayError(501, 'upstream_model_audit_not_migrated', 'Upstream response model evidence is not retained by this Worker')
   }
   const exactTotal = context.req.query('exact_total')?.trim()
   if (exactTotal) queryBooleanValue(exactTotal, 'exact_total')
@@ -437,8 +488,8 @@ function queryBooleanValue(value: string, name: string): boolean {
 
 function adminUsageRow(value: unknown): Record<string, unknown> {
   const row = value as Record<string, any>
-  const componentMicros = safeSum(row.input_amount_micros, row.output_amount_micros, row.cache_amount_micros, row.base_amount_micros)
   const amountMicros = safeInteger(row.amount_micros)
+  const standardMicros = row.standard_cost_micros == null ? amountMicros : safeInteger(row.standard_cost_micros)
   const requestedModel = String(row.model ?? '')
   const upstreamModel = typeof row.upstream_model === 'string' && row.upstream_model !== '' ? row.upstream_model : requestedModel
   return {
@@ -449,7 +500,8 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     request_id: row.request_id,
     model: requestedModel,
     upstream_model: upstreamModel,
-    upstream_model_mismatch: upstreamModel !== requestedModel,
+    upstream_response_model: null,
+    upstream_model_mismatch: null,
     group_id: row.group_id,
     subscription_id: row.subscription_id,
     input_tokens: safeInteger(row.input_tokens),
@@ -462,9 +514,9 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     output_cost: usdValue(row.output_amount_micros),
     cache_creation_cost: 0,
     cache_read_cost: usdValue(row.cache_amount_micros),
-    total_cost: componentMicros / 1_000_000,
+    total_cost: standardMicros / 1_000_000,
     actual_cost: amountMicros / 1_000_000,
-    rate_multiplier: componentMicros === 0 ? 1 : amountMicros / componentMicros,
+    rate_multiplier: standardMicros === 0 ? 1 : amountMicros / standardMicros,
     account_rate_multiplier: row.account_rate_multiplier_ppm == null ? null : safeInteger(row.account_rate_multiplier_ppm) / 1_000_000,
     account_stats_cost: row.account_stats_cost_micros == null ? null : usdValue(row.account_stats_cost_micros),
     long_context_billing_applied: false,
@@ -687,13 +739,13 @@ function addSharedClauses(filters: ListFilters, clauses: string[], values: unkno
 function addErrorCategoryClause(category: string, clauses: string[]): void {
   const categoryClauses: Record<string, string> = {
     auth: `error_phase = 'auth'`,
-    rate_limit: `error_type = 'rate_limit_error'`,
-    quota: `error_type IN ('billing_error','subscription_error')`,
-    invalid_request: `error_type = 'invalid_request_error'`,
+    rate_limit: `error_phase = 'request' AND error_type = 'rate_limit_error'`,
+    quota: `error_phase = 'request' AND error_type IN ('billing_error','subscription_error')`,
+    invalid_request: `error_phase = 'request' AND error_type = 'invalid_request_error'`,
     service_unavailable: `error_phase = 'routing'`,
     upstream: `error_phase IN ('account_auth','upstream','network')`,
     internal: `error_phase = 'internal'`,
-    cyber: `error_type = 'cyber_policy'`,
+    cyber: `error_phase = 'request' AND error_type = 'cyber_policy'`,
   }
   const clause = categoryClauses[category]
   if (clause === undefined) throw new GatewayError(400, 'invalid_category', 'category is invalid')
@@ -881,6 +933,12 @@ function parseDate(raw: string | undefined, endExclusive: boolean): number | und
     throw new GatewayError(400, 'invalid_date', 'Date is invalid')
   }
   return endExclusive ? value + 86_400_000 : value
+}
+
+function parseUsageDate(raw: string | undefined, timezone: string, endExclusive: boolean): number | undefined {
+  if (raw === undefined || raw === '') return undefined
+  const date = parseCalendarDate(raw)
+  return zonedDayStart(endExclusive ? addCalendarDays(date, 1) : date, timezone)
 }
 
 function parseTimestamp(raw: string | undefined): number | undefined {

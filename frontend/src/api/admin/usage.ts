@@ -157,10 +157,10 @@ export async function list(
  * @returns Usage statistics
  */
 export async function getStats(params: {
-  user_id?: number
-  api_key_id?: number
-  account_id?: number
-  group_id?: number
+  user_id?: string | number
+  api_key_id?: string | number
+  account_id?: string | number
+  group_id?: string | number
   model?: string
   request_type?: UsageRequestType
   stream?: boolean

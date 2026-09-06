@@ -119,7 +119,7 @@ async function seed(test: Awaited<ReturnType<typeof fixture>>, input: {
 describe('request explorer HTTP contracts', () => {
   it('serves the original admin Usage table from the billing projection with exact filters and stable offset pagination', async () => {
     const test = await fixture()
-    const now = Date.now()
+    const now = Date.parse('2026-09-01T16:30:00.000Z')
     test.raw.prepare(`INSERT INTO api_keys (id,user_id,key_hash,name,created_at_ms,updated_at_ms) VALUES ('key-alice','alice',?,'Alice key',?,?)`)
       .run('a'.repeat(64), now, now)
     test.raw.prepare(`INSERT INTO "groups" (id,name,platform,created_at_ms,updated_at_ms) VALUES ('group-a','Premium','openai',?,?)`)
@@ -142,7 +142,7 @@ describe('request explorer HTTP contracts', () => {
       now,now,'openai',1,'/v1/chat/completions','/chat/completions','token',0,1,300,300,1000000,300)
 
     const response = await app().request(
-      '/admin/usage?page=1&page_size=1&sort_by=model&sort_order=desc&user_id=alice&api_key_id=key-alice&account_id=account-a&group_id=group-a&model=zeta&request_type=stream&native_compaction_v2=true&billing_type=1&billing_mode=image&upstream_model_mismatch=true',
+      '/admin/usage?page=1&page_size=1&sort_by=model&sort_order=desc&user_id=alice&api_key_id=key-alice&account_id=account-a&group_id=group-a&model=zeta&request_type=stream&native_compaction_v2=true&billing_type=1&billing_mode=image',
       { headers: { authorization: test.auth.admin! } },
       test.env,
     )
@@ -152,7 +152,8 @@ describe('request explorer HTTP contracts', () => {
         total: 1, page: 1, page_size: 1, pages: 1,
         items: [{
           id: 'usage-z', user_id: 'alice', model: 'zeta', upstream_model: 'zeta-upstream',
-          input_tokens: 10, cache_read_tokens: 3, actual_cost: 0.0009,
+          input_tokens: 10, cache_read_tokens: 3, total_cost: 0.0006, actual_cost: 0.0009,
+          rate_multiplier: 1.5, upstream_model_mismatch: null, upstream_response_model: null,
           account_stats_cost: 0.0007, account_rate_multiplier: 1.25,
           user: { email: 'alice@example.test' }, api_key: { name: 'Alice key' },
           account: { name: 'Primary' }, group: { name: 'Premium' },
@@ -164,7 +165,19 @@ describe('request explorer HTTP contracts', () => {
     const stats = await production.request('/api/v1/admin/usage/stats?user_id=alice&billing_type=subscription', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
-    await expect(stats.json()).resolves.toMatchObject({ data: { total_requests: 1, total_actual_cost: 0.0009 } })
+    await expect(stats.json()).resolves.toMatchObject({ data: { total_requests: 1, total_cost: 0.0006, total_actual_cost: 0.0009 } })
+    const localDay = await production.request(
+      '/api/v1/admin/usage?page=1&page_size=10&start_date=2026-09-02&end_date=2026-09-02&timezone=Asia%2FShanghai&model=zeta',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    await expect(localDay.json()).resolves.toMatchObject({ data: { total: 1, items: [{ id: 'usage-z' }] } })
+    const models = await production.request(
+      '/api/v1/admin/dashboard/models?user_id=alice&model=zeta&start_date=2026-09-02&end_date=2026-09-02&timezone=Asia%2FShanghai&model_source=requested',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    await expect(models.json()).resolves.toMatchObject({
+      data: { models: [{ model: 'zeta', requests: 1, cost: 0.0006, actual_cost: 0.0009 }] },
+    })
     const users = await production.request('/api/v1/admin/usage/search-users?q=alice', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
@@ -178,7 +191,12 @@ describe('request explorer HTTP contracts', () => {
     }, test.env)
     expect(cleanup.status).toBe(501)
     await expect(cleanup.json()).resolves.toMatchObject({ code: 'usage_cleanup_not_migrated' })
-    const analytics = await production.request('/api/v1/admin/dashboard/models', {
+    const mismatch = await production.request('/api/v1/admin/usage?page=1&page_size=20&upstream_model_mismatch=true', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(mismatch.status).toBe(501)
+    await expect(mismatch.json()).resolves.toMatchObject({ code: 'upstream_model_audit_not_migrated' })
+    const analytics = await production.request('/api/v1/admin/dashboard/snapshot-v2', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
     expect(analytics.status).toBe(501)
@@ -199,6 +217,13 @@ describe('request explorer HTTP contracts', () => {
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
       data: { total: 1, page: 1, page_size: 1, pages: 1, items: [{ request_id: 'req-provider' }] },
+    })
+    const requestCategory = await app().request(
+      '/admin/ops/request-errors?page=1&page_size=10&category=invalid_request',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    await expect(requestCategory.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ request_id: 'req-client' }] },
     })
     const cursorSort = await app().request('/admin/ops/request-errors?sort_by=status', {
       headers: { authorization: test.auth.admin! },

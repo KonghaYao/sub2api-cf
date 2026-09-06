@@ -309,7 +309,7 @@ function usageRange(
   }
 }
 
-function parseTimezone(raw: string | undefined): string {
+export function parseTimezone(raw: string | undefined): string {
   const timezone = raw?.trim() || 'UTC'
   if (timezone.length > 64) {
     throw new GatewayError(400, 'invalid_timezone', 'timezone is invalid')
@@ -322,7 +322,7 @@ function parseTimezone(raw: string | undefined): string {
   return timezone
 }
 
-function parseDate(raw: string): string {
+export function parseDate(raw: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw)
   if (match === null) throw new GatewayError(400, 'invalid_date_range', 'Dates must use YYYY-MM-DD')
   const year = Number(match[1])
@@ -350,7 +350,7 @@ export function calendarDayBoundaries(now: number, timezone: string) {
   }
 }
 
-function addCalendarDays(date: string, days: number): string {
+export function addCalendarDays(date: string, days: number): string {
   return new Date((calendarDayNumber(date) + days) * DAY_MS).toISOString().slice(0, 10)
 }
 
@@ -367,7 +367,7 @@ function localDate(timestamp: number, timezone: string): string {
   return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
 }
 
-function zonedDayStart(date: string, timezone: string): number {
+export function zonedDayStart(date: string, timezone: string): number {
   const [year, month, day] = date.split('-').map(Number) as [number, number, number]
   const target = Date.UTC(year, month - 1, day)
   let candidate = target

@@ -217,6 +217,8 @@ describe('admin UsageView route filters', () => {
 
     expect(getById).toHaveBeenCalledWith('42', true)
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ user_id: '42' }), expect.anything())
+    expect(getStats).toHaveBeenCalledWith(expect.objectContaining({ user_id: '42' }))
+    expect(getModelStats).toHaveBeenCalledWith(expect.objectContaining({ user_id: '42' }))
     expect(wrapper.find('[data-test="user-filter-label"]').text()).toBe('route-user@test.com')
   })
 
