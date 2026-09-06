@@ -353,6 +353,18 @@ const adminHeaders = {
 }
 
 describe('admin users', () => {
+  it('rejects a list sort that has no Worker projection', async () => {
+    const { env } = harness()
+    const response = await createApp().request('/api/v1/admin/users?sort_by=last_active_at', {
+      headers: adminHeaders,
+    }, env)
+
+    expect(response.status).toBe(422)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_user_sort' },
+    })
+  })
+
   it('creates a gateway user idempotently in D1 and UserStateDO', async () => {
     const { database, env, state, stateNames } = harness()
     const request = {

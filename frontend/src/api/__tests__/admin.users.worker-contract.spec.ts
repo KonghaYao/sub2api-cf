@@ -68,6 +68,8 @@ describe('admin users Cloudflare Worker contract', () => {
         status: 'active',
         role: 'user',
         search: 'alice',
+        sort_by: 'balance',
+        sort_order: 'desc',
       },
       signal: undefined,
     })

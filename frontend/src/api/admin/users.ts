@@ -30,6 +30,8 @@ function workerUserListParams(
     status?: 'active' | 'disabled'
     role?: 'admin' | 'user'
     search?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
   }
 ): Record<string, string | number> {
   const params: Record<string, string | number> = { page, page_size: pageSize }
@@ -37,6 +39,8 @@ function workerUserListParams(
   if (filters?.role) params.role = filters.role
   const search = filters?.search?.trim()
   if (search) params.search = search
+  if (filters?.sort_by) params.sort_by = filters.sort_by
+  if (filters?.sort_order) params.sort_order = filters.sort_order
   return params
 }
 

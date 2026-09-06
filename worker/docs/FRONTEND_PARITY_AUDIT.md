@@ -60,6 +60,11 @@ explicit typed error. It must never silently discard a submitted field or return
   `412 user_version_conflict` before any mutation.
 - Validation is limited to the Users Worker contract, modal/API tests, and the standard typecheck/build release path.
 
+## v0.42.25 incremental release — 2026-09-07
+
+- User-list sort fields now reach the Worker and are applied in D1 with a stable ID tie-breaker.
+- Sorts without a Worker projection return `unsupported_user_sort` instead of being silently ignored.
+
 ## Account compatibility storage contract
 
 - D1 stores only non-secret UI configuration and normalized searchable/sortable fields.

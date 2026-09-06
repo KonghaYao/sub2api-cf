@@ -179,6 +179,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
   try {
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+    const orderBy = parseUserListOrder(context.req.query('sort_by'), context.req.query('sort_order'))
     const conditions: string[] = []
     const values: unknown[] = []
     const status = context.req.query('status')
@@ -215,7 +216,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
               state_version, control_version, created_at_ms, updated_at_ms
          FROM users
          ${where}
-        ORDER BY created_at_ms DESC, id DESC
+        ORDER BY ${orderBy}
         LIMIT ? OFFSET ?`,
     ).bind(...values, pageSize, (page - 1) * pageSize)
     const [countResult, rowsResult] = await context.env.DB.batch([countStatement, rowsStatement])
@@ -234,6 +235,28 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
   } catch (error) {
     return controlError(asGatewayError(error))
   }
+}
+
+function parseUserListOrder(sortBy: string | undefined, sortOrder: string | undefined): string {
+  const columns: Record<string, string> = {
+    id: 'id',
+    email: 'email COLLATE NOCASE',
+    username: 'display_name COLLATE NOCASE',
+    role: 'role',
+    balance: 'balance_micros',
+    concurrency: 'concurrency',
+    status: 'status',
+    created_at: 'created_at_ms',
+  }
+  const key = sortBy ?? 'created_at'
+  const column = columns[key]
+  if (column === undefined) {
+    throw new GatewayError(422, 'unsupported_user_sort', `User sort ${key} is not supported`)
+  }
+  if (sortOrder !== undefined && sortOrder !== 'asc' && sortOrder !== 'desc') {
+    throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+  }
+  return `${column} ${(sortOrder ?? 'desc').toUpperCase()}, id DESC`
 }
 
 export async function getAdminUser(context: Context<ControlBindings>): Promise<Response> {
