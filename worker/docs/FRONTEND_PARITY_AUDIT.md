@@ -305,3 +305,22 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: 20 focused Worker SQLite tests, 38 frontend adapter/parity tests,
   Worker/frontend typechecks and Cloudflare SPA build passed. No schema or
   template/style/class change.
+
+## v0.42.13 Accounts OpenAI OAuth credential refresh — 2026-09-07
+
+- The retained Accounts refresh action now calls the official OpenAI OAuth token
+  endpoint for OpenAI OAuth accounts. The Worker retains a rotated refresh token
+  when supplied, updates access/id tokens and expiry atomically in the AES-GCM
+  vault, and never returns or logs those secrets.
+- Requests require an account control-version CAS header and idempotency key.
+  Concurrent or stale refreshes cannot overwrite newer credentials; the account
+  projection, vault update, health reset and gateway revision update share one
+  D1 transaction. Unsupported account kinds remain visible and return typed
+  errors.
+- A fresh ID token fills missing email, ChatGPT account/user, plan and default
+  organization metadata without replacing values explicitly maintained in the
+  account. Upstream 4xx, 5xx, transport and timeout failures leave credentials
+  untouched.
+- Validation: 24 focused Worker SQLite tests, 39 frontend adapter/template
+  parity tests, Worker typecheck and Cloudflare SPA build passed. No schema or
+  template/style/class change.

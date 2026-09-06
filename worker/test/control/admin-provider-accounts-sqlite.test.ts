@@ -8,6 +8,7 @@ import {
   getAdminAccount,
   listAdminAccounts,
   putAdminAccountModelCapability,
+  refreshAdminAccountCredentials,
   testAdminAccount,
   updateAdminAccount,
 } from '../../src/control/accounts'
@@ -33,6 +34,7 @@ function fixture(): Fixture {
   app.post('/accounts', createAdminAccount)
   app.post('/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/accounts/batch-delete', batchDeleteAdminAccounts)
+  app.post('/accounts/:id/refresh', refreshAdminAccountCredentials)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
   app.put('/accounts/:id/models/:model_id', putAdminAccountModelCapability)
@@ -726,6 +728,120 @@ describe('admin provider account control plane on D1', () => {
     expect(aborted.status).toBeGreaterThanOrEqual(500)
     expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
     expect(test.raw.prepare('SELECT COUNT(*) AS total FROM account_secrets').get()).toEqual({ total: 2 })
+  })
+
+  it('refreshes an OpenAI OAuth vault credential with rotation and safe idempotent replay', async () => {
+    const test = fixture()
+    const create = await test.app.request('/accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-refresh-create' },
+      body: JSON.stringify({
+        name: 'oauth-refresh', platform: 'openai', type: 'oauth', credential_kind: 'oauth',
+        base_url: 'https://api.openai.test/v1', api_key: 'old-access', credentials: {
+          access_token: 'old-access', refresh_token: 'old-refresh', client_id: 'custom-client', profile: 'preserved',
+        },
+      }),
+    }, test.env)
+    const account = (await create.json() as any).data
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      access_token: 'new-access', refresh_token: 'new-refresh',
+      id_token: `header.eyJlbWFpbCI6Im5ld0BleGFtcGxlLnRlc3QiLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1uZXciLCJjaGF0Z3B0X3VzZXJfaWQiOiJ1c2VyLW5ldyIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwib3JnYW5pemF0aW9ucyI6W3siaWQiOiJvcmctb3RoZXIifSx7ImlkIjoib3JnLWRlZmF1bHQiLCJpc19kZWZhdWx0Ijp0cnVlfV19fQ.signature`,
+      expires_in: 3600,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const request = () => test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-account' }, body: '{}',
+    }, test.env)
+    const refreshed = await request()
+    expect(refreshed.status, await refreshed.clone().text()).toBe(200)
+    const safe = (await refreshed.json() as any).data
+    expect(JSON.stringify(safe)).not.toContain('new-access')
+    expect(fetchMock).toHaveBeenCalledWith('https://auth.openai.com/oauth/token', expect.objectContaining({ method: 'POST' }))
+    const stored = test.raw.prepare('SELECT id, key_version, nonce_b64, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)
+    await expect(decryptCredential(
+      stored.nonce_b64, stored.ciphertext_b64, MASTER_KEY, credentialAad('test', account.id, stored.id, 2),
+    )).resolves.toMatchObject({
+      access_token: 'new-access', refresh_token: 'new-refresh', client_id: 'custom-client', profile: 'preserved',
+      email: 'new@example.test', chatgpt_account_id: 'acct-new', chatgpt_user_id: 'user-new',
+      plan_type: 'pro', organization_id: 'org-default',
+    })
+    const replay = await request()
+    expect(replay.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not modify credentials when OAuth refresh cannot run or the provider rejects it', async () => {
+    const test = fixture()
+    const account = await createProvider(test, 'openai')
+    const before = test.raw.prepare('SELECT ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)
+    const missing = await test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-missing' }, body: '{}',
+    }, test.env)
+    expect(missing.status).toBe(409)
+    expect(test.raw.prepare('SELECT ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)).toEqual(before)
+    const oauth = await test.app.request('/accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-refresh-rejected-create' },
+      body: JSON.stringify({ name: 'oauth-refresh-rejected', platform: 'openai', type: 'oauth', credential_kind: 'oauth', base_url: 'https://api.openai.test/v1', api_key: 'old', credentials: { access_token: 'old', refresh_token: 'refresh' } }),
+    }, test.env)
+    const oauthAccount = (await oauth.json() as any).data
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"bad"}', { status: 401 })))
+    const rejected = await test.app.request(`/accounts/${oauthAccount.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-rejected' }, body: '{}',
+    }, test.env)
+    expect(rejected.status).toBe(401)
+    const persisted = test.raw.prepare('SELECT key_version FROM account_secrets WHERE account_id = ?').get(oauthAccount.id)
+    expect(persisted).toEqual({ key_version: 1 })
+  })
+
+  it('rejects stale refreshes before calling OpenAI and preserves credentials for upstream failures', async () => {
+    const test = fixture()
+    const create = await test.app.request('/accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-refresh-errors-create' },
+      body: JSON.stringify({ name: 'oauth-refresh-errors', platform: 'openai', type: 'oauth', credential_kind: 'oauth', base_url: 'https://api.openai.test/v1', api_key: 'old', credentials: { access_token: 'old', refresh_token: 'refresh' } }),
+    }, test.env)
+    const account = (await create.json() as any).data
+    const before = test.raw.prepare('SELECT key_version, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)
+    const fetchMock = vi.fn(async () => new Response('{"error":"unavailable"}', { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stale = await test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"1"', 'idempotency-key': 'oauth-refresh-stale' }, body: '{}',
+    }, test.env)
+    expect(stale.status).toBe(412)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const upstream = await test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-upstream' }, body: '{}',
+    }, test.env)
+    expect(upstream.status).toBe(502)
+    expect(test.raw.prepare('SELECT key_version, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)).toEqual(before)
+
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('timed out', 'TimeoutError') }))
+    const timedOut = await test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-timeout' }, body: '{}',
+    }, test.env)
+    expect(timedOut.status).toBe(504)
+    expect(test.raw.prepare('SELECT key_version, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)).toEqual(before)
+  })
+
+  it('rolls the account refresh back when the vault write fails', async () => {
+    const test = fixture()
+    const create = await test.app.request('/accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-refresh-rollback-create' },
+      body: JSON.stringify({ name: 'oauth-refresh-rollback', platform: 'openai', type: 'oauth', credential_kind: 'oauth', base_url: 'https://api.openai.test/v1', api_key: 'old', credentials: { access_token: 'old', refresh_token: 'refresh' } }),
+    }, test.env)
+    const account = (await create.json() as any).data
+    const beforeAccount = test.raw.prepare('SELECT control_version, config_version FROM accounts WHERE id = ?').get(account.id)
+    const beforeSecret = test.raw.prepare('SELECT key_version, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ access_token: 'new', expires_in: 3600 }), { status: 200 })))
+    test.raw.exec(`CREATE TRIGGER abort_oauth_refresh_secret BEFORE UPDATE ON account_secrets
+      WHEN OLD.account_id = '${account.id}' BEGIN SELECT RAISE(ABORT, 'forced_refresh_vault_failure'); END;`)
+
+    const response = await test.app.request(`/accounts/${account.id}/refresh`, {
+      method: 'POST', headers: { 'if-match': '"0"', 'idempotency-key': 'oauth-refresh-rollback' }, body: '{}',
+    }, test.env)
+    expect(response.status).toBeGreaterThanOrEqual(500)
+    expect(test.raw.prepare('SELECT control_version, config_version FROM accounts WHERE id = ?').get(account.id)).toEqual(beforeAccount)
+    expect(test.raw.prepare('SELECT key_version, ciphertext_b64 FROM account_secrets WHERE account_id = ?').get(account.id)).toEqual(beforeSecret)
   })
 
   it('persists a typed OpenAI OAuth subscription plan and rejects other account kinds', async () => {

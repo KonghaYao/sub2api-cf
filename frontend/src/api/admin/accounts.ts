@@ -499,9 +499,22 @@ export async function testAccount(id: number | string): Promise<AccountTestResul
  * @param id - Account ID
  * @returns Updated account
  */
-export async function refreshCredentials(id: number): Promise<Account> {
-  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`)
-  return data
+export async function refreshCredentials(
+  id: number | string,
+  expectedControlVersion?: number,
+): Promise<Account> {
+  const workerContract = isCloudflareWorkerContractActive()
+  if (workerContract && !Number.isSafeInteger(expectedControlVersion)) {
+    throw new Error('Worker credential refresh requires an account control version')
+  }
+  const operation = workerContract
+    ? await workerOperationKey('admin-account-oauth-refresh', { id: String(id), expected_control_version: expectedControlVersion })
+    : null
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`, workerContract ? {} : undefined, workerContract
+    ? { headers: { 'If-Match': `"${expectedControlVersion}"`, 'Idempotency-Key': operation!.key } }
+    : undefined)
+  if (operation) pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return adaptAccount(data)
 }
 
 /**

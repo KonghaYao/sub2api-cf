@@ -660,6 +660,23 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
+  it('sends Worker OAuth refresh with account CAS and an idempotency key', async () => {
+    post.mockResolvedValueOnce({ data: { id: 'account-oauth', enabled: true, max_concurrency: 1, group_links: [] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { refreshCredentials } = await import('@/api/admin/accounts')
+
+    await refreshCredentials('account-oauth', 4)
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/account-oauth/refresh',
+      {},
+      { headers: {
+        'If-Match': '"4"',
+        'Idempotency-Key': 'admin-account-oauth-refresh-33333333-3333-4333-8333-333333333333',
+      } },
+    )
+  })
+
   it('rejects unversioned or duplicate Worker batch-delete targets before transport', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)

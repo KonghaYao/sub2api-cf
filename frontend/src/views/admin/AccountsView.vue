@@ -2443,11 +2443,15 @@ const handleDuplicateAccount = async (a: Account) => {
 }
 const handleRefresh = async (a: Account) => {
   try {
-    const updated = await adminAPI.accounts.refreshCredentials(a.id)
+    const updated = await adminAPI.accounts.refreshCredentials(
+      a.id,
+      (a as unknown as { control_version?: number }).control_version,
+    )
     patchAccountInList(updated)
     enterAutoRefreshSilentWindow()
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to refresh credentials:', error)
+    appStore.showError(error?.message || t('admin.accounts.oauth.authFailed'))
   }
 }
 const handleRecoverState = async (a: Account) => {

@@ -930,6 +930,84 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
   }
 }
 
+export async function refreshAdminAccountCredentials(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    if (Object.keys(body).length !== 0) {
+      throw new GatewayError(400, 'invalid_oauth_refresh_request', 'OAuth refresh does not accept a request body')
+    }
+    const expectedVersion = requireExpectedControlVersion(context.req.raw, body)
+    const idempotency = await controlIdempotency('admin.accounts.oauth-refresh.v1', requireIdempotencyKey(context.req.raw), {
+      account_id: requireResourceId(context.req.param('id'), 'account'), expected_control_version: expectedVersion,
+    })
+    const existing = await findControlIdempotency(context.env, idempotency)
+    if (existing !== null) return controlSuccess(parseIdempotentResponse(existing, 'account'))
+
+    const account = await requireAccount(context.env, context.req.param('id'))
+    assertVersion(account, expectedVersion)
+    if (account.platform !== 'openai' || account.credential_kind !== 'oauth') {
+      throw new GatewayError(409, 'oauth_refresh_not_supported', 'Credential refresh is currently supported only for OpenAI OAuth accounts')
+    }
+    const currentCredential = await decryptCredential(
+      account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
+      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+    ) as StoredAccountCredential
+    const refreshToken = typeof currentCredential.refresh_token === 'string' ? currentCredential.refresh_token.trim() : ''
+    if (!refreshToken) {
+      throw new GatewayError(409, 'oauth_refresh_token_missing', 'OpenAI OAuth account has no refresh token; re-authorize the account')
+    }
+    const refreshed = await refreshOpenAIOAuthToken(refreshToken, currentCredential.client_id)
+    const nextCredential = mergeOpenAIRefreshCredential(currentCredential, refreshed)
+    const nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
+    const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
+    const nextControlVersion = incrementVersion(account.control_version, 'control_version')
+    const now = Date.now()
+    const encrypted = await encryptCredential(
+      nextCredential, requireCredentialsMasterKey(context.env),
+      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
+    )
+    const uiConfig = {
+      ...parseUiConfig(account.ui_config_json),
+      credentials: publicCredentials(nextCredential),
+      credentials_status: credentialStatus(nextCredential),
+    }
+    const safe = accountResponse({
+      id: account.id, platform: account.platform, name: account.name, enabled: account.enabled === 1,
+      max_concurrency: account.max_concurrency, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+      protocol: account.protocol, base_url: account.base_url, auth_scheme: account.auth_scheme,
+      image_adapter: account.image_adapter, credential_kind: account.credential_kind,
+      provider_config: accountProviderConfig(account), config_version: nextConfigVersion,
+      control_version: nextControlVersion, health_status: 'unknown', last_checked_at_ms: null,
+      last_latency_ms: null, last_health_error: null, created_at_ms: account.created_at_ms,
+      updated_at_ms: now, credential_key_version: nextKeyVersion, ui_config: uiConfig,
+      group_links: parseGroupLinksProjection(account.group_links_json),
+      model_capabilities: parseModelCapabilitiesProjection(account.model_capabilities_json),
+    })
+    try {
+      await runAccountBatch(context.env, [
+        accountCasStatement(context.env, account.id, account.control_version, {
+          name: account.name, enabled: account.enabled === 1, max_concurrency: account.max_concurrency,
+          base_url: account.base_url, provider_config: accountProviderConfig(account), image_adapter: account.image_adapter,
+          credential_kind: account.credential_kind, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+          ui_config: uiConfig, config_version: nextConfigVersion, control_version: nextControlVersion, now, reset_health: true,
+        }),
+        context.env.DB.prepare(
+          `UPDATE account_secrets SET key_version = CASE WHEN key_version = ? THEN ? ELSE 0 END,
+             nonce_b64 = ?, ciphertext_b64 = ?, updated_at_ms = ? WHERE id = ? AND account_id = ?`,
+        ).bind(account.key_version, nextKeyVersion, encrypted.nonce_b64, encrypted.ciphertext_b64, now, account.secret_id, account.id),
+        controlIdempotencyInsert(context.env, idempotency, 'account', account.id, safe, now),
+      ], account.id, account.control_version)
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idempotency)
+      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'account'))
+      throw mapAccountWriteError(error)
+    }
+    return controlSuccess(safe)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 export async function duplicateAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
@@ -1949,6 +2027,127 @@ function applySubscriptionPlan(
   return next
 }
 
+const OPENAI_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token'
+const OPENAI_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
+const OPENAI_OAUTH_REFRESH_SCOPE = 'openid profile email'
+
+interface OpenAIRefreshResponse {
+  access_token: string
+  refresh_token?: string
+  id_token?: string
+  expires_in?: number
+  token_type?: string
+}
+
+async function refreshOpenAIOAuthToken(refreshToken: string, clientId: unknown): Promise<OpenAIRefreshResponse> {
+  const form = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: typeof clientId === 'string' && clientId.trim() ? clientId.trim() : OPENAI_OAUTH_CLIENT_ID,
+    scope: OPENAI_OAUTH_REFRESH_SCOPE,
+  })
+  let response: Response
+  try {
+    response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'user-agent': 'codex_cli_rs/0.82.0',
+        originator: 'codex_cli_rs',
+      },
+      body: form.toString(),
+      signal: AbortSignal.timeout(20_000),
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new GatewayError(504, 'oauth_refresh_timeout', 'OpenAI OAuth token refresh timed out', 'api_error')
+    }
+    throw new GatewayError(502, 'oauth_refresh_transport_failed', 'OpenAI OAuth token refresh could not reach the provider', 'api_error')
+  }
+  if (!response.ok) {
+    const code = response.status >= 500 ? 'oauth_refresh_upstream_error' : 'oauth_refresh_rejected'
+    const status = response.status >= 500 ? 502 : 401
+    throw new GatewayError(status, code, 'OpenAI OAuth token refresh was rejected by the provider', 'api_error')
+  }
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned invalid JSON', 'api_error')
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>).access_token !== 'string') {
+    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned no access token', 'api_error')
+  }
+  const result = value as Record<string, unknown>
+  const expiresIn = result.expires_in
+  if (expiresIn !== undefined && (typeof expiresIn !== 'number' || !Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > 31_536_000)) {
+    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned an invalid expiry', 'api_error')
+  }
+  return {
+    access_token: result.access_token as string,
+    ...(typeof result.refresh_token === 'string' && result.refresh_token.trim() ? { refresh_token: result.refresh_token } : {}),
+    ...(typeof result.id_token === 'string' && result.id_token.trim() ? { id_token: result.id_token } : {}),
+    ...(typeof expiresIn === 'number' ? { expires_in: expiresIn } : {}),
+    ...(typeof result.token_type === 'string' ? { token_type: result.token_type } : {}),
+  }
+}
+
+function mergeOpenAIRefreshCredential(
+  current: StoredAccountCredential,
+  refreshed: OpenAIRefreshResponse,
+): StoredAccountCredential {
+  const next: StoredAccountCredential = { ...current, access_token: refreshed.access_token }
+  if (refreshed.refresh_token !== undefined) next.refresh_token = refreshed.refresh_token
+  if (refreshed.id_token !== undefined) {
+    next.id_token = refreshed.id_token
+    enrichOpenAIOAuthCredentialFromIdToken(next, refreshed.id_token)
+  }
+  if (refreshed.expires_in !== undefined) next.expires_at = new Date(Date.now() + refreshed.expires_in * 1_000).toISOString()
+  if (refreshed.token_type !== undefined) next.token_type = refreshed.token_type
+  return next
+}
+
+/**
+ * The token endpoint does not separately return the account profile.  Keep this
+ * best-effort and non-authoritative: these claims only complete missing display
+ * and routing metadata, and a malformed token must never make a credential
+ * refresh fail or replace a user-maintained value.
+ */
+function enrichOpenAIOAuthCredentialFromIdToken(credential: StoredAccountCredential, idToken: string): void {
+  try {
+    const payload = idToken.split('.')[1]
+    if (!payload) return
+    const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '='))
+    const claims: unknown = JSON.parse(decoded)
+    if (claims === null || typeof claims !== 'object' || Array.isArray(claims)) return
+    const values = claims as Record<string, unknown>
+    const auth = values['https://api.openai.com/auth']
+    const authValues = auth !== null && typeof auth === 'object' && !Array.isArray(auth)
+      ? auth as Record<string, unknown>
+      : {}
+    setMissingCredentialString(credential, 'email', values.email)
+    setMissingCredentialString(credential, 'chatgpt_account_id', authValues.chatgpt_account_id)
+    setMissingCredentialString(credential, 'chatgpt_user_id', authValues.chatgpt_user_id)
+    setMissingCredentialString(credential, 'plan_type', authValues.chatgpt_plan_type)
+    const organizations = authValues.organizations
+    if (Array.isArray(organizations)) {
+      const selected = organizations.find((organization) => organization !== null && typeof organization === 'object'
+        && !Array.isArray(organization) && (organization as Record<string, unknown>).is_default === true) ?? organizations[0]
+      if (selected !== null && typeof selected === 'object' && !Array.isArray(selected)) {
+        setMissingCredentialString(credential, 'organization_id', (selected as Record<string, unknown>).id)
+      }
+    }
+  } catch {
+    // ID-token claims are metadata only. The newly issued tokens remain valid.
+  }
+}
+
+function setMissingCredentialString(credential: StoredAccountCredential, key: string, value: unknown): void {
+  if (typeof credential[key] !== 'string' || !credential[key].trim()) {
+    if (typeof value === 'string' && value.trim()) credential[key] = value.trim()
+  }
+}
+
 function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boolean {
   if (body.enabled !== undefined && body.status !== undefined) {
     throw new GatewayError(400, 'ambiguous_status', 'Provide enabled or status, not both')
@@ -2331,6 +2530,46 @@ function parseProviderConfigProjection(raw: string): ProviderConfig {
     return value as ProviderConfig
   } catch {
     throw new GatewayError(500, 'invalid_account_projection', 'Account provider config projection is invalid', 'server_error')
+  }
+}
+
+function parseGroupLinksProjection(raw: string): GroupLink[] {
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (!Array.isArray(value)) throw new Error('not an array')
+    return value.map((item) => {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) throw new Error('not an object')
+      const row = item as Record<string, unknown>
+      return {
+        group_id: requireResourceId(row.group_id as string | undefined, 'group'),
+        priority: requireSafeInteger(row, 'priority', -1_000, 1_000),
+        weight: requireSafeInteger(row, 'weight', 1, 1_000),
+        control_version: requireSafeInteger(row, 'control_version', 0, Number.MAX_SAFE_INTEGER),
+      }
+    })
+  } catch {
+    throw new GatewayError(500, 'invalid_account_projection', 'Account group projection is invalid', 'server_error')
+  }
+}
+
+function parseModelCapabilitiesProjection(raw: string): ModelCapability[] {
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (!Array.isArray(value)) throw new Error('not an array')
+    return value.map((item) => {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) throw new Error('not an object')
+      const row = item as Record<string, unknown>
+      return {
+        model_id: requireResourceId(row.model_id as string | undefined, 'model'),
+        chat_completions: row.chat_completions === true,
+        responses: row.responses === true,
+        embeddings: row.embeddings === true,
+        image_generation: row.image_generation === true,
+        control_version: requireSafeInteger(row, 'control_version', 0, Number.MAX_SAFE_INTEGER),
+      }
+    })
+  } catch {
+    throw new GatewayError(500, 'invalid_account_projection', 'Account model projection is invalid', 'server_error')
   }
 }
 
