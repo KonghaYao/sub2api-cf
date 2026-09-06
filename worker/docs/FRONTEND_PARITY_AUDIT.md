@@ -109,3 +109,17 @@ explicit typed error. It must never silently discard a submitted field or return
   authenticated CRUD verification. This is a storage/UI slice, not Groups completion.
 - Worker typecheck and Cloudflare SPA build passed. Production D1 pre-migration
   bookmark: `00000029-000003f3-000050de-c8e62995ffcefe18eb6015357dcce68f`.
+
+## v0.42.1 Groups sort action — 2026-09-06
+
+- The original sort dialog now calls a native Worker route for 1–100 groups.
+  Opaque IDs, per-group control versions and a request idempotency key are preserved.
+- D1 applies the complete sort batch and replay record atomically. A stale version,
+  including a race after the read, rolls back the whole batch with HTTP 412.
+- Validation: 15 SQLite group tests and 11 frontend adapter/parity tests passed;
+  the race regression proves no partial sorting. No schema change.
+- Still missing: group duplication, statistics and API-key listing, usage/capacity
+  summaries, live discovery, composite route operations, per-user rate multipliers,
+  account copying, and execution of the advanced stored-only configuration fields.
+- v0.42.0 deployment version: `2a765763-e7a7-4e36-88ab-0aa13789c65b`.
+  D1 0065 applied successfully; current-machine HTTPS smoke timed out.

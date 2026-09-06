@@ -227,6 +227,61 @@ export async function allAdminGroups(context: Context<ControlBindings>): Promise
   }
 }
 
+export async function updateAdminGroupSortOrder(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const key = requireIdempotencyKey(context.req.raw)
+    const body = await readJsonObject(context.req.raw)
+    if (!Array.isArray(body.updates) || body.updates.length === 0 || body.updates.length > 100) {
+      throw new GatewayError(400, 'invalid_sort_updates', 'updates must contain 1 to 100 groups')
+    }
+    const seen = new Set<string>()
+    const updates = body.updates.map((entry: unknown) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new GatewayError(400, 'invalid_sort_updates', 'Each update must be an object')
+      }
+      const value = entry as Record<string, unknown>
+      if (typeof value.id !== 'string') throw new GatewayError(400, 'invalid_group_id', 'Group ID must be a string')
+      const id = requireResourceId(value.id, 'group')
+      if (seen.has(id)) throw new GatewayError(400, 'duplicate_group', 'Group IDs must be unique')
+      seen.add(id)
+      return { id, sort_order: requireSafeInteger(value, 'sort_order', 0, 1_000_000),
+        control_version: requireSafeInteger(value, 'control_version', 0, Number.MAX_SAFE_INTEGER - 1) }
+    })
+    const idem = await controlIdempotency('admin.groups.sort.v1', key, updates)
+    const previous = await findControlIdempotency(context.env, idem)
+    if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group_sort'))
+    const rows = await context.env.DB.prepare(
+      `SELECT id, control_version FROM "groups" WHERE id IN (${updates.map(() => '?').join(', ')})`,
+    ).bind(...updates.map(update => update.id)).all<{ id: string; control_version: number }>()
+    const versions = new Map(rows.results.map(row => [row.id, row.control_version]))
+    for (const update of updates) {
+      const version = versions.get(update.id)
+      if (version === undefined) throw new GatewayError(404, 'group_not_found', 'Group was not found')
+      assertControlVersion(version, update.control_version)
+    }
+    const now = Date.now()
+    const response = { message: 'Group sort order updated', updates: updates.map(update => ({
+      ...update, control_version: update.control_version + 1,
+    })) }
+    try {
+      await context.env.DB.batch([
+        ...updates.map(update => context.env.DB.prepare(
+          `UPDATE "groups" SET sort_order = ?, updated_at_ms = ?,
+           control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END WHERE id = ?`,
+        ).bind(update.sort_order, now, update.control_version, update.control_version + 1, update.id)),
+        controlIdempotencyInsert(context.env, idem, 'group_sort', updates[0].id, response, now),
+      ])
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idem)
+      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'group_sort'))
+      throw mapCatalogWriteError(error)
+    }
+    return controlSuccess(response)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 export async function createAdminGroup(context: Context<ControlBindings>): Promise<Response> {
   try {
     const key = requireIdempotencyKey(context.req.raw)

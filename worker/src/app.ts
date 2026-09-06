@@ -103,6 +103,7 @@ import {
 import {
   allAdminGroups,
   createAdminGroup,
+  updateAdminGroupSortOrder,
   createAdminModel,
   deleteAdminGroup,
   deleteAdminGroupModel,
@@ -622,6 +623,7 @@ export function createApp() {
   app.get('/api/v1/admin/groups', listAdminGroups)
   app.get('/api/v1/admin/groups/all', allAdminGroups)
   app.post('/api/v1/admin/groups', createAdminGroup)
+  app.put('/api/v1/admin/groups/sort-order', updateAdminGroupSortOrder)
   app.get('/api/v1/admin/groups/:id/rpm-overrides', listAdminGroupRpmOverrides)
   app.put('/api/v1/admin/groups/:id/rpm-overrides', putAdminGroupRpmOverrides)
   app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)

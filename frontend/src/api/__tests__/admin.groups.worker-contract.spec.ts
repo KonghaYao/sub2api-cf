@@ -283,6 +283,17 @@ describe('admin groups Cloudflare Worker contract', () => {
     })
   })
 
+  it('sorts opaque IDs with loaded versions and remembers the returned versions', async () => {
+    const groups = await import('@/api/admin/groups')
+    post.mockResolvedValueOnce({ data: { id: 'opaque-group', name: 'Sort', control_version: 3 } })
+    await groups.create({ name: 'Sort' })
+    put.mockResolvedValue({ data: { message: 'saved', updates: [{ id: 'opaque-group', control_version: 4 }] } })
+    await groups.updateSortOrder([{ id: 'opaque-group' as unknown as number, sort_order: 2 }])
+    expect(put.mock.calls[0][1]).toEqual({ updates: [{ id: 'opaque-group', sort_order: 2, control_version: 3 }] })
+    await groups.updateSortOrder([{ id: 'opaque-group' as unknown as number, sort_order: 1 }])
+    expect(put.mock.calls[1][1]).toEqual({ updates: [{ id: 'opaque-group', sort_order: 1, control_version: 4 }] })
+  })
+
   it('blocks every legacy-only group route before an HTTP request is sent', async () => {
     const groups = await import('@/api/admin/groups')
 
@@ -298,7 +309,6 @@ describe('admin groups Cloudflare Worker contract', () => {
     await expect(groups.getGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.clearGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.batchSetGroupRateMultipliers(1, [])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.updateSortOrder([])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getUsageSummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getCapacitySummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
 

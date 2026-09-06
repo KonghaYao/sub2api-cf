@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createAdminGroup,
+  updateAdminGroupSortOrder,
   listAdminGroups,
   deleteAdminGroup,
   getAdminGroup,
@@ -21,6 +22,7 @@ function fixture(): { app: Hono<{ Bindings: Env }>; env: Env; raw: any } {
   applyMigrations(raw)
   const app = new Hono<{ Bindings: Env }>()
   app.post('/groups', createAdminGroup)
+  app.put('/groups/sort-order', updateAdminGroupSortOrder)
   app.get('/groups', listAdminGroups)
   app.delete('/groups/:id', deleteAdminGroup)
   app.get('/groups/:id', getAdminGroup)
@@ -49,6 +51,33 @@ function fixture(): { app: Hono<{ Bindings: Env }>; env: Env; raw: any } {
 }
 
 describe('group RPM administration on D1', () => {
+  it('atomically sorts groups, replays idempotently and rejects stale batches', async () => {
+    const test = fixture()
+    for (const id of ['sort-a', 'sort-b']) test.raw.prepare(
+      `INSERT INTO "groups" (id, name, platform, enabled, created_at_ms, updated_at_ms) VALUES (?, ?, 'openai', 1, 1, 1)`,
+    ).run(id, id)
+    const request = (key: string, updates: unknown[]) => test.app.request('/groups/sort-order', {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'idempotency-key': key },
+      body: JSON.stringify({ updates }),
+    }, test.env)
+    const updates = [{ id: 'sort-a', sort_order: 20, control_version: 0 }, { id: 'sort-b', sort_order: 10, control_version: 0 }]
+    const saved = await request('group-sort-success', updates)
+    expect(saved.status, await saved.clone().text()).toBe(200)
+    const replay = await request('group-sort-success', updates)
+    expect(await replay.json()).toEqual(await saved.json())
+    const stale = await request('group-sort-stale', updates)
+    expect(stale.status).toBe(412)
+    const originalBatch = test.env.DB.batch.bind(test.env.DB)
+    test.env.DB.batch = async statements => {
+      test.raw.exec(`UPDATE "groups" SET control_version = 2 WHERE id = 'sort-b'`)
+      return originalBatch(statements)
+    }
+    const raced = await request('group-sort-race', updates.map(update => ({ ...update, sort_order: 99, control_version: 1 })))
+    expect(raced.status).toBe(412)
+    const rows = test.raw.prepare('SELECT id, sort_order FROM "groups" ORDER BY sort_order').all()
+    expect(rows).toEqual([{ id: 'sort-b', sort_order: 10 }, { id: 'sort-a', sort_order: 20 }])
+  })
+
   it('preserves group UI configuration through CRUD, filtering and CAS updates', async () => {
     const test = fixture()
     const headers = (key: string, version?: number) => ({

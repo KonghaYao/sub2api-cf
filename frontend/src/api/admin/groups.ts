@@ -661,7 +661,15 @@ export async function getGroupRateMultipliers(id: number): Promise<GroupRateMult
 export async function updateSortOrder(
   updates: Array<{ id: number; sort_order: number }>
 ): Promise<{ message: string }> {
-  requireLegacyGroupFeature('Group sort order updates')
+  if (isCloudflareWorkerContractActive()) {
+    const { data } = await apiClient.put<{ message: string; updates: Array<{ id: string; control_version: number }> }>(
+      '/admin/groups/sort-order',
+      { updates: updates.map(update => ({ ...update, id: String(update.id), control_version: requireGroupControlVersion(update.id) })) },
+      { headers: { 'Idempotency-Key': newControlOperationKey('group-sort') } },
+    )
+    for (const update of data.updates) groupControlVersions.set(update.id, update.control_version)
+    return { message: data.message }
+  }
   const { data } = await apiClient.put<{ message: string }>('/admin/groups/sort-order', {
     updates
   })
