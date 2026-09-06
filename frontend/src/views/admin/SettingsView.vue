@@ -11108,6 +11108,18 @@ async function saveSettings() {
         custom_endpoints: form.custom_endpoints,
         registration_enabled: form.registration_enabled,
         email_verify_enabled: form.email_verify_enabled,
+        registration_email_suffix_whitelist: registrationEmailSuffixWhitelistTags.value.map((suffix) =>
+          suffix.startsWith("*.") ? suffix : `@${suffix}`,
+        ),
+        auth_source_defaults: Object.fromEntries(
+          Object.entries(authSourceDefaults).map(([source, value]) => [source, {
+            ...value,
+            subscriptions: value.subscriptions.map((item) => ({
+              ...item,
+              group_id: String(item.group_id),
+            })),
+          }]),
+        ) as never,
         turnstile_enabled: form.turnstile_enabled,
         turnstile_site_key: form.turnstile_site_key,
         turnstile_secret_key: form.turnstile_secret_key || undefined,
