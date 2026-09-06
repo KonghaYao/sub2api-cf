@@ -9,6 +9,7 @@ export interface PoolAccountState {
   max_concurrency: number;
   priority: number;
   weight: number;
+  recovery_revision: number;
   consecutive_failures: number;
   cooldown_until_ms: number;
   updated_at_ms: number;
@@ -58,6 +59,8 @@ export type PoolCommand = PoolCommandEnvelope &
           max_concurrency: number;
           priority: number;
           weight: number;
+          /** Absent only for callers predating account recovery support. */
+          recovery_revision?: number;
         }>;
       }
     | {
@@ -195,7 +198,10 @@ function syncAccounts(
     if (!Number.isSafeInteger(configured.weight) || configured.weight <= 0) {
       throw new PoolStateMachineError("invalid_weight", "weight must be a positive safe integer");
     }
+    const recoveryRevision = configured.recovery_revision ?? 0;
+    assertNonNegativeSafeInteger(recoveryRevision, "recovery_revision");
     const existing = state.accounts[configured.account_id];
+    const recovered = (existing?.recovery_revision ?? 0) < recoveryRevision;
     accounts[configured.account_id] = {
       schema_version: POOL_SCHEMA_VERSION,
       account_id: configured.account_id,
@@ -203,8 +209,9 @@ function syncAccounts(
       max_concurrency: configured.max_concurrency,
       priority: configured.priority,
       weight: configured.weight,
-      consecutive_failures: existing?.consecutive_failures ?? 0,
-      cooldown_until_ms: existing?.cooldown_until_ms ?? 0,
+      recovery_revision: recoveryRevision,
+      consecutive_failures: recovered ? 0 : (existing?.consecutive_failures ?? 0),
+      cooldown_until_ms: recovered ? 0 : (existing?.cooldown_until_ms ?? 0),
       updated_at_ms: nowMs,
     };
   }
@@ -292,6 +299,7 @@ function upsertAccount(
     max_concurrency: command.max_concurrency,
     priority,
     weight,
+    recovery_revision: existing?.recovery_revision ?? 0,
     consecutive_failures: existing?.consecutive_failures ?? 0,
     cooldown_until_ms: existing?.cooldown_until_ms ?? 0,
     updated_at_ms: nowMs,

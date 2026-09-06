@@ -6,6 +6,7 @@ import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import {
   bulkUpdateAdminAccounts,
   queueAdminAccountHealthProbes,
+  resetAdminAccountStatuses,
 } from '../../src/control/account-operations'
 import { consumeAccountHealthProbe, type AccountHealthProbeEvent } from '../../src/control/account-lifecycle'
 import type { Env, PlatformEvent } from '../../src/env'
@@ -84,6 +85,7 @@ async function fixture(): Promise<Fixture> {
   const app = new Hono<{ Bindings: Env }>()
   app.post('/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/accounts/health-probes', queueAdminAccountHealthProbes)
+  app.post('/accounts/batch-clear-error', resetAdminAccountStatuses)
   return { raw, env, queue, app }
 }
 
@@ -262,6 +264,136 @@ describe('admin account operations', () => {
       expect(test.raw.prepare(
         `SELECT enabled, config_version, control_version FROM accounts WHERE id = 'account-a'`,
       ).get()).toEqual({ enabled: 0, config_version: 2, control_version: 3 })
+    } finally {
+      vi.useRealTimers()
+      test.raw.close()
+    }
+  })
+
+  it('atomically resets recoverable state while preserving a manual disable', async () => {
+    const test = await fixture()
+    try {
+      seedAccount(test, 'account-enabled', 2)
+      seedAccount(test, 'account-disabled', 3, false)
+      test.raw.exec(`
+        UPDATE accounts SET health_status = 'unhealthy', last_checked_at_ms = ${NOW - 1_000},
+          last_latency_ms = 42, last_health_error = 'rate limited', consecutive_health_failures = 4,
+          health_probe_generation = 8, health_probe_lease_until_ms = ${NOW + 60_000},
+          next_health_probe_at_ms = ${NOW + 60_000}, recovery_revision = 2
+        WHERE id IN ('account-enabled', 'account-disabled');
+        INSERT INTO account_health_probes (
+          id, account_id, generation, config_version, credential_ref, status,
+          next_dispatch_at_ms, created_at_ms, updated_at_ms
+        ) VALUES ('account-enabled:health:8', 'account-enabled', 8, 1,
+          'secret-account-enabled', 'queued', ${NOW}, ${NOW}, ${NOW});
+      `)
+      const beforeGateway = test.raw.prepare(
+        `SELECT revision FROM gateway_config_revision WHERE singleton = 1`,
+      ).get() as { revision: number }
+      const body = { accounts: [
+        { id: 'account-enabled', expected_control_version: 2 },
+        { id: 'account-disabled', expected_control_version: 3 },
+      ] }
+      const response = await request(test, '/accounts/batch-clear-error', body, 'account-status-reset-1')
+      expect(response.status).toBe(200)
+      const payload = await response.json()
+      expect(payload).toMatchObject({ data: {
+        total: 2, success: 2, failed: 0,
+        success_ids: ['account-enabled', 'account-disabled'],
+      } })
+      expect(test.raw.prepare(`
+        SELECT enabled, config_version, control_version, health_status, last_checked_at_ms,
+               last_latency_ms, last_health_error, consecutive_health_failures,
+               health_probe_generation, health_probe_lease_until_ms, next_health_probe_at_ms,
+               recovery_revision
+          FROM accounts WHERE id = 'account-disabled'
+      `).get()).toEqual({
+        enabled: 0, config_version: 2, control_version: 4, health_status: 'unknown',
+        last_checked_at_ms: null, last_latency_ms: null, last_health_error: null,
+        consecutive_health_failures: 0, health_probe_generation: 9,
+        health_probe_lease_until_ms: null, next_health_probe_at_ms: NOW, recovery_revision: 3,
+      })
+      expect(test.raw.prepare(`SELECT status FROM account_health_probes WHERE id = 'account-enabled:health:8'`).get())
+        .toEqual({ status: 'stale' })
+      expect((test.raw.prepare(`SELECT revision FROM gateway_config_revision WHERE singleton = 1`).get() as { revision: number }).revision)
+        .toBeGreaterThan(beforeGateway.revision)
+
+      const replay = await request(test, '/accounts/batch-clear-error', body, 'account-status-reset-1')
+      expect(await replay.json()).toEqual(payload)
+      expect(test.raw.prepare(`SELECT recovery_revision FROM accounts WHERE id = 'account-disabled'`).get())
+        .toEqual({ recovery_revision: 3 })
+    } finally {
+      vi.useRealTimers()
+      test.raw.close()
+    }
+  })
+
+  it('prevalidates every reset target and rolls all account writes back on failure', async () => {
+    const test = await fixture()
+    try {
+      seedAccount(test, 'account-a', 1)
+      seedAccount(test, 'account-b', 2)
+      const original = test.raw.prepare(
+        `SELECT config_version, control_version, recovery_revision FROM accounts WHERE id = 'account-a'`,
+      ).get()
+      const missing = await request(test, '/accounts/batch-clear-error', { accounts: [
+        { id: 'account-a', expected_control_version: 1 },
+        { id: 'absent', expected_control_version: 0 },
+      ] }, 'account-status-reset-missing')
+      expect(missing.status).toBe(404)
+      expect(test.raw.prepare(`SELECT config_version, control_version, recovery_revision FROM accounts WHERE id = 'account-a'`).get())
+        .toEqual(original)
+
+      const stale = await request(test, '/accounts/batch-clear-error', { accounts: [
+        { id: 'account-a', expected_control_version: 0 },
+        { id: 'account-b', expected_control_version: 2 },
+      ] }, 'account-status-reset-stale')
+      expect(stale.status).toBe(409)
+      expect(test.raw.prepare(`SELECT config_version, control_version, recovery_revision FROM accounts WHERE id = 'account-b'`).get())
+        .toEqual({ config_version: 1, control_version: 2, recovery_revision: 0 })
+
+      test.raw.exec(`CREATE TRIGGER abort_account_status_reset BEFORE UPDATE ON accounts
+        WHEN NEW.id = 'account-b' BEGIN SELECT RAISE(ABORT, 'forced reset rollback'); END;`)
+      const failed = await request(test, '/accounts/batch-clear-error', { accounts: [
+        { id: 'account-a', expected_control_version: 1 },
+        { id: 'account-b', expected_control_version: 2 },
+      ] }, 'account-status-reset-rollback')
+      expect(failed.status).toBe(500)
+      expect(test.raw.prepare(`SELECT config_version, control_version, recovery_revision FROM accounts WHERE id = 'account-a'`).get())
+        .toEqual(original)
+      expect(test.raw.prepare(`SELECT COUNT(*) AS total FROM admin_account_audit_events`).get()).toEqual({ total: 0 })
+    } finally {
+      vi.useRealTimers()
+      test.raw.close()
+    }
+  })
+
+  it('does not partially reset when a selected account wins the CAS race', async () => {
+    const test = await fixture()
+    try {
+      seedAccount(test, 'account-a', 1)
+      seedAccount(test, 'account-b', 2)
+      const original = test.env.DB
+      let injected = false
+      test.env.DB = {
+        prepare: original.prepare.bind(original),
+        batch: async <T>(statements: D1PreparedStatement[]) => {
+          if (!injected && (statements[0] as unknown as { sql?: string }).sql?.includes('admin_account_operation_guards')) {
+            injected = true
+            test.raw.prepare(`UPDATE accounts SET control_version = 3 WHERE id = 'account-b'`).run()
+          }
+          return await original.batch<T>(statements)
+        },
+      } as D1Database
+      const response = await request(test, '/accounts/batch-clear-error', { accounts: [
+        { id: 'account-a', expected_control_version: 1 },
+        { id: 'account-b', expected_control_version: 2 },
+      ] }, 'account-status-reset-race')
+      expect(response.status).toBe(409)
+      expect(test.raw.prepare(`SELECT control_version, recovery_revision FROM accounts WHERE id = 'account-a'`).get())
+        .toEqual({ control_version: 1, recovery_revision: 0 })
+      expect(test.raw.prepare(`SELECT control_version, recovery_revision FROM accounts WHERE id = 'account-b'`).get())
+        .toEqual({ control_version: 3, recovery_revision: 0 })
     } finally {
       vi.useRealTimers()
       test.raw.close()

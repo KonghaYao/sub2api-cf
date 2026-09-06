@@ -1907,14 +1907,16 @@ const handleBulkDelete = async () => {
 const handleBulkResetStatus = async () => {
   if (!confirm(t('common.confirm'))) return
   try {
-    const result = await adminAPI.accounts.batchClearError(selIds.value)
+    const result = await adminAPI.accounts.batchClearError(
+      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts() : selIds.value,
+    )
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', { success: result.success, failed: result.failed }))
     } else {
       appStore.showSuccess(t('admin.accounts.bulkActions.resetStatusSuccess', { count: result.success }))
       clearSelection()
     }
-    reload()
+    await reload()
   } catch (error) {
     console.error('Failed to bulk reset status:', error)
     appStore.showError(String(error))

@@ -694,6 +694,23 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
+  it('sends Worker batch status reset with opaque IDs, CAS, and idempotency', async () => {
+    post.mockResolvedValueOnce({ data: { total: 2, success: 2, failed: 0 } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchClearError } = await import('@/api/admin/accounts')
+
+    await batchClearError([{ id: 'account-a', control_version: 2 }, { id: 'account-b', control_version: 5 }])
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/batch-clear-error',
+      { accounts: [
+        { id: 'account-a', expected_control_version: 2 },
+        { id: 'account-b', expected_control_version: 5 },
+      ] },
+      { headers: { 'Idempotency-Key': 'admin-account-batch-clear-status-33333333-3333-4333-8333-333333333333' } },
+    )
+  })
+
   it('rejects unversioned or duplicate Worker batch-delete targets before transport', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)

@@ -31,6 +31,7 @@ interface PoolAccountRow {
   max_concurrency: number;
   priority: number;
   weight: number;
+  recovery_revision: number;
   consecutive_failures: number;
   cooldown_until_ms: number;
   updated_at_ms: number;
@@ -230,6 +231,7 @@ export class PoolStateDO {
         max_concurrency INTEGER NOT NULL CHECK (max_concurrency > 0),
         priority INTEGER NOT NULL DEFAULT 50 CHECK (priority >= 0),
         weight INTEGER NOT NULL DEFAULT 1 CHECK (weight > 0),
+        recovery_revision INTEGER NOT NULL DEFAULT 0 CHECK (recovery_revision >= 0),
         consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
         cooldown_until_ms INTEGER NOT NULL CHECK (cooldown_until_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
@@ -248,6 +250,11 @@ export class PoolStateDO {
     if (!accountColumns.has("weight")) {
       this.state.storage.sql.exec(
         "ALTER TABLE pool_accounts ADD COLUMN weight INTEGER NOT NULL DEFAULT 1 CHECK (weight > 0)",
+      );
+    }
+    if (!accountColumns.has("recovery_revision")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE pool_accounts ADD COLUMN recovery_revision INTEGER NOT NULL DEFAULT 0 CHECK (recovery_revision >= 0)",
       );
     }
     this.state.storage.sql.exec(`
@@ -338,7 +345,7 @@ export class PoolStateDO {
     state.config_revision = config!.config_revision as number;
     state.config_fingerprint = config!.config_fingerprint as string;
     for (const value of this.state.storage.sql.exec(
-      `SELECT schema_version, account_id, enabled, max_concurrency, priority, weight, consecutive_failures,
+      `SELECT schema_version, account_id, enabled, max_concurrency, priority, weight, recovery_revision, consecutive_failures,
               cooldown_until_ms, updated_at_ms
          FROM pool_accounts`,
     )) {
@@ -461,15 +468,16 @@ export class PoolStateDO {
   private persistAccount(account: PoolAccountState): void {
     this.state.storage.sql.exec(
       `INSERT INTO pool_accounts (
-         account_id, schema_version, enabled, max_concurrency, priority, weight, consecutive_failures,
-         cooldown_until_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         account_id, schema_version, enabled, max_concurrency, priority, weight, recovery_revision,
+         consecutive_failures, cooldown_until_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id) DO UPDATE SET
          schema_version = excluded.schema_version,
          enabled = excluded.enabled,
          max_concurrency = excluded.max_concurrency,
          priority = excluded.priority,
          weight = excluded.weight,
+         recovery_revision = excluded.recovery_revision,
          consecutive_failures = excluded.consecutive_failures,
          cooldown_until_ms = excluded.cooldown_until_ms,
          updated_at_ms = excluded.updated_at_ms`,
@@ -479,6 +487,7 @@ export class PoolStateDO {
       account.max_concurrency,
       account.priority,
       account.weight,
+      account.recovery_revision,
       account.consecutive_failures,
       account.cooldown_until_ms,
       account.updated_at_ms,
@@ -714,6 +723,7 @@ function parseConfiguredAccounts(value: unknown): Extract<PoolCommand, { type: "
       }),
       priority: requireSafeInteger(account, "priority", { maximum: 1_000_000 }),
       weight: requireSafeInteger(account, "weight", { minimum: 1, maximum: 1_000_000 }),
+      recovery_revision: requireSafeInteger(account, "recovery_revision", { maximum: Number.MAX_SAFE_INTEGER }),
     };
   });
 }
@@ -728,6 +738,7 @@ function toAccountState(value: object): PoolAccountState {
     max_concurrency: row.max_concurrency,
     priority: row.priority,
     weight: row.weight,
+    recovery_revision: row.recovery_revision,
     consecutive_failures: row.consecutive_failures,
     cooldown_until_ms: row.cooldown_until_ms,
     updated_at_ms: row.updated_at_ms,

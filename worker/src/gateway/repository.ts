@@ -1182,6 +1182,7 @@ function externalAliasCandidatesStatement(
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
                  THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
+            a.recovery_revision,
             revision.revision AS config_revision, am.model_id
        FROM resolved_alias resolved
        JOIN account_models am ON am.model_id = resolved.model_id
@@ -1622,6 +1623,7 @@ function accountCandidatesStatement(
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
                  THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
+            a.recovery_revision,
             revision.revision AS config_revision, am.model_id
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id

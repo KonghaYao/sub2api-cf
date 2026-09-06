@@ -55,6 +55,7 @@ import {
 import {
   bulkUpdateAdminAccounts,
   queueAdminAccountHealthProbes,
+  resetAdminAccountStatuses,
 } from './control/account-operations'
 import {
   listAdminAccountSyntheticProbeHistory,
@@ -685,6 +686,7 @@ export function createApp() {
   app.post('/api/v1/admin/accounts/:id/refresh', refreshAdminAccountCredentials)
   app.post('/api/v1/admin/accounts/batch-refresh', batchRefreshAdminAccountCredentials)
   app.post('/api/v1/admin/accounts/batch-delete', batchDeleteAdminAccounts)
+  app.post('/api/v1/admin/accounts/batch-clear-error', resetAdminAccountStatuses)
   app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
   app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)

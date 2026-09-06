@@ -614,12 +614,14 @@ export async function syncPoolAccounts(
         max_concurrency: account.max_concurrency,
         priority: account.priority,
         weight: account.weight,
+        recovery_revision: account.recovery_revision,
       })))),
       accounts: candidates.map((account) => ({
         account_id: account.account_id,
         max_concurrency: account.max_concurrency,
         priority: account.priority,
         weight: account.weight,
+        recovery_revision: account.recovery_revision,
       })),
     }),
   )

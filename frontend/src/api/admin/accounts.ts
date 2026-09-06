@@ -1292,7 +1292,23 @@ export async function batchDelete(
  * @param accountIds - Array of account IDs
  * @returns Batch operation result
  */
-export async function batchClearError(accountIds: number[]): Promise<BatchOperationResult> {
+export async function batchClearError(
+  accountIds: Array<number | string> | WorkerAccountOperationTarget[],
+): Promise<BatchOperationResult> {
+  if (isCloudflareWorkerContractActive()) {
+    if (!accountIds.every((account): account is WorkerAccountOperationTarget =>
+      typeof account === 'object' && account !== null && 'control_version' in account,
+    )) {
+      throw new Error('Worker batch status reset requires account control versions')
+    }
+    const payload = { accounts: workerOperationAccounts(accountIds) }
+    const operation = await workerOperationKey('admin-account-batch-clear-status', payload)
+    const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-clear-error', payload, {
+      headers: { 'Idempotency-Key': operation.key },
+    })
+    pendingWorkerOperationKeys.delete(operation.cacheKey)
+    return data
+  }
   const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-clear-error', {
     account_ids: accountIds
   })

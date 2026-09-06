@@ -582,6 +582,36 @@ describe("pool state machine", () => {
     ).toThrowError(PoolStateMachineError);
   });
 
+  it("clears pool cooldown only when the administrative recovery revision advances", () => {
+    const failed = applyPoolCommand(
+      applyPoolCommand(
+        createPoolMachineState(),
+        { schema_version: 1, type: "sync_accounts", config_revision: 1, config_fingerprint: "1".repeat(64),
+          accounts: [{ account_id: "account-1", max_concurrency: 1, priority: 0, weight: 1, recovery_revision: 0 }] },
+        1_000,
+      ).state,
+      { schema_version: 1, type: "failure", event_id: "recovery-failure", account_id: "account-1", cooldown_ms: 5_000 },
+      2_000,
+    );
+    const unchanged = applyPoolCommand(
+      failed.state,
+      { schema_version: 1, type: "sync_accounts", config_revision: 2, config_fingerprint: "2".repeat(64),
+        accounts: [{ account_id: "account-1", max_concurrency: 1, priority: 0, weight: 1, recovery_revision: 0 }] },
+      2_100,
+    );
+    const recovered = applyPoolCommand(
+      unchanged.state,
+      { schema_version: 1, type: "sync_accounts", config_revision: 3, config_fingerprint: "3".repeat(64),
+        accounts: [{ account_id: "account-1", max_concurrency: 1, priority: 0, weight: 1, recovery_revision: 1 }] },
+      2_200,
+    );
+    expect(unchanged.state.accounts['account-1']).toMatchObject({ consecutive_failures: 1, cooldown_until_ms: 7_000 })
+    expect(recovered.state.accounts['account-1']).toMatchObject({ recovery_revision: 1, consecutive_failures: 0, cooldown_until_ms: 0 })
+    expect(applyPoolCommand(recovered.state, {
+      schema_version: 1, type: 'reserve', request_id: 'recovered-request', lease_ttl_ms: 1_000,
+    }, 2_200).lease?.account_id).toBe('account-1')
+  });
+
   it("rejects reusing a failure event for another account", () => {
     const secondAccount = applyPoolCommand(
       poolWithAccount(),

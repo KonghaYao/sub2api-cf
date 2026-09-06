@@ -338,3 +338,22 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: 25 focused Worker SQLite tests, 40 frontend adapter/template
   parity tests, Worker/frontend typechecks and Cloudflare SPA build passed. No
   schema or template/style/class change.
+
+## v0.42.15 Accounts batch runtime-status reset — 2026-09-07
+
+- The retained bulk “reset status” action now uses `batch-clear-error` on the
+  Worker. It accepts up to 25 opaque IDs with control-version CAS and performs
+  one D1 transaction: a missing, stale, concurrent, or failed target changes no
+  selected account.
+- Reset preserves an administrator's `enabled` choice while clearing recoverable
+  health/error state, probe leases and failure counts. It invalidates queued or
+  in-flight health jobs, advances gateway configuration, and records an
+  immutable `account.status_reset` audit event.
+- `recovery_revision` is projected to each pool. On its next verified config
+  sync the Pool DO clears only that account's local cooldown and failure count;
+  normal health revisions do not perform this reset. This gives cross-object
+  recovery a durable, observable lazy synchronization point without claiming a
+  cross-DO atomic write.
+- Validation: 30 focused Worker SQLite/state-machine tests, 34 frontend adapter
+  tests, Worker/frontend typechecks and Cloudflare SPA build passed. Template,
+  style, classes, and visible button labels are unchanged.

@@ -43,6 +43,7 @@ interface OperationAccountRow {
   control_version: number
   credential_ref: string
   health_probe_generation: number
+  recovery_revision: number
 }
 
 interface OperationError {
@@ -138,6 +139,82 @@ export async function queueAdminAccountHealthProbes(context: Context<Bindings>):
   }
 }
 
+/**
+ * Clears recoverable runtime state for an entire selected account set.  This is
+ * deliberately one D1 transaction: a missing or stale account leaves every
+ * selected account unchanged.
+ */
+export async function resetAdminAccountStatuses(context: Context<Bindings>): Promise<Response> {
+  try {
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    const key = requireIdempotencyKey(context.req.raw)
+    const body = await readJsonObject(context.req.raw, MAX_BODY_BYTES)
+    rejectUnknownKeys(body, ['accounts'])
+    const accounts = parseAccounts(body.accounts)
+    const idempotency = await controlIdempotency('admin.accounts.status-reset.v1', key, { accounts })
+    const replay = await findControlIdempotency(context.env, idempotency)
+    if (replay !== null) return controlSuccess(parseIdempotentResponse(replay, 'account_status_reset_batch'))
+
+    const rows = await loadAccounts(context.env, accounts)
+    if (rows.size !== accounts.length) {
+      throw new GatewayError(404, 'account_not_found', 'One or more accounts were not found')
+    }
+    const orderedRows = accounts.map((input) => rows.get(input.id)!)
+    for (const input of accounts) {
+      const row = rows.get(input.id)!
+      if (row.control_version !== input.expected_control_version) {
+        throw new GatewayError(409, 'account_version_conflict', 'Account changed; reload it and retry')
+      }
+      if (
+        row.control_version >= Number.MAX_SAFE_INTEGER ||
+        row.config_version >= Number.MAX_SAFE_INTEGER ||
+        row.health_probe_generation >= Number.MAX_SAFE_INTEGER ||
+        row.recovery_revision >= Number.MAX_SAFE_INTEGER
+      ) {
+        throw new GatewayError(409, 'account_version_exhausted', 'Account version is exhausted')
+      }
+    }
+
+    const now = Date.now()
+    const results: Array<StatusResult & { control_version: number }> = orderedRows.map((row) => ({
+      account_id: row.id,
+      success: true,
+      control_version: row.control_version + 1,
+      enabled: row.enabled === 1,
+    }))
+    const action = 'account.status_reset'
+    const response = statusResponse(results)
+    const statements: D1PreparedStatement[] = [
+      operationGuardInsert(context.env, idempotency, action, orderedRows, now),
+      resetStatusUpdate(context.env, idempotency, results, now),
+      staleHealthProbesUpdate(context.env, idempotency, results, now),
+      accountAuditBatchInsert(
+        context.env, actor, idempotency, action,
+        results.map((result) => ({
+          accountId: result.account_id,
+          version: result.control_version,
+          metadata: { recovery_revision_incremented: true },
+        })),
+        now,
+      ),
+      guardedIdempotencyInsert(
+        context.env, idempotency, 'account_status_reset_batch', response,
+        action, results.length, now,
+      ),
+    ]
+    try {
+      await context.env.DB.batch(statements)
+      return controlSuccess(response)
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idempotency)
+      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'account_status_reset_batch'))
+      throw mapWriteError(error)
+    }
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 function parseAccounts(value: unknown): AccountOperationInput[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BATCH_SIZE) {
     throw new GatewayError(
@@ -171,7 +248,7 @@ async function loadAccounts(
   const placeholders = inputs.map(() => '?').join(', ')
   const response = await env.DB.prepare(
     `SELECT id, enabled, config_version, control_version, credential_ref,
-            health_probe_generation
+            health_probe_generation, recovery_revision
        FROM accounts WHERE id IN (${placeholders})`,
   ).bind(...inputs.map((input) => input.id)).all<OperationAccountRow>()
   const rows = new Map<string, OperationAccountRow>()
@@ -393,6 +470,53 @@ function statusShardUpdate(
   )
 }
 
+function resetStatusUpdate(
+  env: Env,
+  idempotency: ControlIdempotency,
+  results: Array<StatusResult & { control_version: number }>,
+  now: number,
+): D1PreparedStatement {
+  const ids = results.map(() => '?').join(', ')
+  return env.DB.prepare(
+    `UPDATE accounts
+        SET config_version = config_version + 1,
+            control_version = control_version + 1,
+            health_status = 'unknown', last_checked_at_ms = NULL,
+            last_latency_ms = NULL, last_health_error = NULL,
+            consecutive_health_failures = 0,
+            health_probe_generation = health_probe_generation + 1,
+            health_probe_lease_until_ms = NULL,
+            next_health_probe_at_ms = ?, recovery_revision = recovery_revision + 1,
+            updated_at_ms = ?
+      WHERE id IN (${ids})
+        AND EXISTS (
+          SELECT 1 FROM admin_account_operation_guards
+           WHERE scope = ? AND idempotency_key_hash = ?
+        )`,
+  ).bind(
+    now, now, ...results.map((result) => result.account_id),
+    idempotency.scope, idempotency.key_hash,
+  )
+}
+
+function staleHealthProbesUpdate(
+  env: Env,
+  idempotency: ControlIdempotency,
+  results: Array<StatusResult & { control_version: number }>,
+  now: number,
+): D1PreparedStatement {
+  const ids = results.map(() => '?').join(', ')
+  return env.DB.prepare(
+    `UPDATE account_health_probes
+        SET status = 'stale', run_token = NULL, run_lease_until_ms = NULL, updated_at_ms = ?
+      WHERE account_id IN (${ids}) AND status IN ('queued', 'probing')
+        AND EXISTS (
+          SELECT 1 FROM admin_account_operation_guards
+           WHERE scope = ? AND idempotency_key_hash = ?
+        )`,
+  ).bind(now, ...results.map((result) => result.account_id), idempotency.scope, idempotency.key_hash)
+}
+
 function probeShardUpdate(
   env: Env,
   idempotency: ControlIdempotency,
@@ -464,25 +588,32 @@ function accountAuditBatchInsert(
   audits: Array<{ accountId: string; version: number; metadata: Record<string, unknown> }>,
   now: number,
 ): D1PreparedStatement {
-  const values = audits.map(() => '(?, ?, ?, ?)').join(', ')
+  const values = JSON.stringify(audits.map((audit) => ({
+    id: crypto.randomUUID(),
+    resource_id: audit.accountId,
+    resource_version: audit.version,
+    metadata_json: JSON.stringify(audit.metadata),
+  })))
   return env.DB.prepare(
     `INSERT INTO admin_account_audit_events (
        id, actor_user_id, actor_session_id, action, resource_id,
        resource_version, idempotency_key_hash, metadata_json, occurred_at_ms
      )
-     WITH audits(id, resource_id, resource_version, metadata_json) AS (VALUES ${values})
-     SELECT audit.id, ?, ?, ?, audit.resource_id, audit.resource_version, ?,
-            audit.metadata_json, ?
+     WITH audits AS (
+       SELECT json_extract(value, '$.id') AS id,
+              json_extract(value, '$.resource_id') AS resource_id,
+              json_extract(value, '$.resource_version') AS resource_version,
+              json_extract(value, '$.metadata_json') AS metadata_json
+         FROM json_each(?)
+     )
+     SELECT audit.id, ?, ?, ?, audit.resource_id, audit.resource_version, ?, audit.metadata_json, ?
        FROM audits audit
       WHERE EXISTS (
         SELECT 1 FROM admin_account_operation_guards
          WHERE scope = ? AND idempotency_key_hash = ?
       )`,
   ).bind(
-    ...audits.flatMap((audit) => [
-      crypto.randomUUID(), audit.accountId, audit.version, JSON.stringify(audit.metadata),
-    ]),
-    actor.user_id, actor.session_id, action, idempotency.key_hash, now,
+    values, actor.user_id, actor.session_id, action, idempotency.key_hash, now,
     idempotency.scope, idempotency.key_hash,
   )
 }
@@ -513,18 +644,17 @@ function operationGuardInsert(
   rows: OperationAccountRow[],
   now: number,
 ): D1PreparedStatement {
-  const exactRows = rows.length === 0
-    ? '1 = 1'
-    : `? = (
-        SELECT COUNT(*) FROM accounts WHERE ${rows.map(() => `(
-          id = ? AND enabled = ? AND config_version = ? AND control_version = ?
-          AND credential_ref = ? AND health_probe_generation = ?
-        )`).join(' OR ')}
-      )`
-  const snapshots = rows.flatMap((row) => [
-    row.id, row.enabled, row.config_version, row.control_version,
-    row.credential_ref, row.health_probe_generation,
-  ])
+  const snapshots = JSON.stringify(rows)
+  const exactRows = rows.length === 0 ? '1 = 1' : `? = (
+    SELECT COUNT(*) FROM accounts account
+      JOIN json_each(?) snapshot ON account.id = json_extract(snapshot.value, '$.id')
+     WHERE account.enabled = json_extract(snapshot.value, '$.enabled')
+       AND account.config_version = json_extract(snapshot.value, '$.config_version')
+       AND account.control_version = json_extract(snapshot.value, '$.control_version')
+       AND account.credential_ref = json_extract(snapshot.value, '$.credential_ref')
+       AND account.health_probe_generation = json_extract(snapshot.value, '$.health_probe_generation')
+       AND account.recovery_revision = json_extract(snapshot.value, '$.recovery_revision')
+  )`
   return env.DB.prepare(
     `INSERT INTO admin_account_operation_guards (
        scope, idempotency_key_hash, request_hash, action,
@@ -533,7 +663,7 @@ function operationGuardInsert(
   ).bind(
     value.scope, value.key_hash, value.request_hash, action,
     rows.length, now, now + IDEMPOTENCY_TTL_MS,
-    ...(rows.length === 0 ? [] : [rows.length, ...snapshots]),
+    ...(rows.length === 0 ? [] : [rows.length, snapshots]),
   )
 }
 

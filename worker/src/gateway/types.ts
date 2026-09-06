@@ -175,6 +175,8 @@ export interface AccountCandidate {
   priority: number
   weight: number
   config_version: number
+  /** Administrative recovery signal consumed by the pool on the next config sync. */
+  recovery_revision: number
   config_revision: number
 }
 
