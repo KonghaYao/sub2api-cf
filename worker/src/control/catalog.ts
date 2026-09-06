@@ -902,8 +902,8 @@ async function softDisable(context: Context<ControlBindings>, type: 'group' | 'm
   }
 }
 
-// UI configuration is preserved, except models_list_config which controls the
-// order and membership of the gateway model catalogue.
+// UI configuration is preserved, except models_list_config and model_routing,
+// which are enforced by the gateway.
 const GROUP_UI_FIELDS = new Set(["long_context_pricing_enabled", "force_openai_fast", "free_openai_fast", "model_pricing", "video_rate_independent", "video_rate_multiplier", "video_price_480p", "video_price_720p", "video_price_1080p", "video_model_prices", "web_search_price_per_call", "search_price_per_1k", "audio_realtime_price_per_min", "audio_tts_price_per_million_chars", "audio_stt_price_per_hour", "peak_rate_enabled", "peak_start", "peak_end", "peak_rate_multiplier", "profit_control_enabled", "profit_min_margin", "profit_safety_buffer", "claude_code_only", "fallback_group_id", "fallback_group_id_on_invalid_request", "mcp_xml_inject", "supported_model_scopes", "models_list_config", "allow_messages_dispatch", "allow_live", "default_mapped_model", "messages_dispatch_model_config", "model_routing", "model_routing_enabled", "max_reasoning_effort", "max_reasoning_effort_over_limit", "reasoning_effort_mappings", "require_oauth_only", "require_privacy_set"])
 const GROUP_CORE_FIELDS = new Set(["expected_control_version", "name", "description", "platform", "is_exclusive", "rpm_limit", "allow_image_generation", "allow_batch_image_generation", "image_rate_independent", "control_version", "enabled", "status", "sort_order", "catalog_mode", "group_type", "rate_multiplier_ppm", "daily_quota_micros", "weekly_quota_micros", "monthly_quota_micros", "image_rate_multiplier_ppm", "batch_image_discount_multiplier_ppm", "batch_image_hold_multiplier_ppm", "image_price_1k_micros", "image_price_2k_micros", "image_price_4k_micros"])
 function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unknown> {
@@ -914,6 +914,8 @@ function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unkno
         throw new GatewayError(409, 'group_account_copy_not_supported', 'Copying group accounts is not implemented')
       }
     } else if (field === 'models_list_config') config[field] = parseModelsListConfig(value)
+    else if (field === 'model_routing') config[field] = parseModelRouting(value)
+    else if (field === 'model_routing_enabled') config[field] = requireBoolean(value, field)
     else if (GROUP_UI_FIELDS.has(field)) config[field] = value
     else if (!GROUP_CORE_FIELDS.has(field)) {
       throw new GatewayError(400, 'unsupported_group_field', `Field '${field}' is not supported`)
@@ -951,6 +953,50 @@ function parseModelsListConfig(value: unknown): { enabled: boolean; models: stri
     models.push(model)
   }
   return { enabled: config.enabled, models }
+}
+
+function parseModelRouting(value: unknown): Record<string, string[]> | null {
+  if (value === null) return null
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayError(400, 'invalid_model_routing', 'model_routing must be an object or null')
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length > 100) {
+    throw new GatewayError(400, 'invalid_model_routing', 'model_routing supports at most 100 patterns')
+  }
+  const routing: Record<string, string[]> = {}
+  for (const [rawPattern, rawAccounts] of entries) {
+    const pattern = rawPattern.trim()
+    if (pattern.length === 0 || pattern.length > 256 || (pattern.includes('*') && !pattern.endsWith('*'))) {
+      throw new GatewayError(400, 'invalid_model_routing', 'model_routing patterns must be exact or end in a wildcard')
+    }
+    if (!Array.isArray(rawAccounts) || rawAccounts.length === 0 || rawAccounts.length > 100) {
+      throw new GatewayError(400, 'invalid_model_routing', 'Each model_routing pattern requires 1-100 accounts')
+    }
+    const accounts: string[] = []
+    const seen = new Set<string>()
+    for (const rawAccount of rawAccounts) {
+      const account = typeof rawAccount === 'string'
+        ? rawAccount.trim()
+        : Number.isSafeInteger(rawAccount) && (rawAccount as number) > 0
+          ? String(rawAccount)
+          : ''
+      if (account.length === 0 || account.length > 128 || seen.has(account)) {
+        throw new GatewayError(400, 'invalid_model_routing', 'model_routing account IDs must be unique non-empty identifiers')
+      }
+      seen.add(account)
+      accounts.push(account)
+    }
+    routing[pattern] = accounts
+  }
+  return routing
+}
+
+function requireBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must be a boolean`)
+  }
+  return value
 }
 
 function parseCreateGroup(body: Record<string, unknown>) {
@@ -1275,7 +1321,11 @@ function publicGroup(row: GroupRow) {
   return {
     ...uiConfig,
     ...normalized,
-    compatibility: { stored_only_fields: Object.keys(uiConfig).filter(field => field !== 'models_list_config') },
+    compatibility: {
+      stored_only_fields: Object.keys(uiConfig).filter(field =>
+        field !== 'models_list_config' && field !== 'model_routing' && field !== 'model_routing_enabled',
+      ),
+    },
     enabled: row.enabled === 1,
     is_exclusive: row.is_exclusive === 1,
     allow_image_generation: row.allow_image_generation === 1,

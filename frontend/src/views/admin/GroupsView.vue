@@ -5260,7 +5260,7 @@ const createForm = reactive({
 
 // 简单账号类型（用于模型路由选择）
 interface SimpleAccount {
-  id: number;
+  id: string | number;
   name: string;
 }
 
@@ -5381,7 +5381,7 @@ const selectAccount = (
 // 移除已选账号
 const removeSelectedAccount = (
   rule: ModelRoutingRule,
-  accountId: number,
+  accountId: string | number,
   _isEdit: boolean = false,
 ) => {
   if (!rule) return;
@@ -5503,15 +5503,15 @@ const moveEditModelsListItem = (fromIndex: number, toIndex: number) => {
 // 将 UI 格式的路由规则转换为 API 格式
 const convertRoutingRulesToApiFormat = (
   rules: ModelRoutingRule[],
-): Record<string, number[]> | null => {
-  const result: Record<string, number[]> = {};
+): Record<string, Array<string | number>> | null => {
+  const result: Record<string, Array<string | number>> = {};
   let hasValidRules = false;
 
   for (const rule of rules) {
     const pattern = rule.pattern.trim();
     if (!pattern) continue;
 
-    const accountIds = rule.accounts.map((a) => a.id).filter((id) => id > 0);
+    const accountIds = rule.accounts.map((a) => a.id).filter((id) => String(id).trim() !== "");
 
     if (accountIds.length > 0) {
       result[pattern] = accountIds;
@@ -5524,7 +5524,7 @@ const convertRoutingRulesToApiFormat = (
 
 // 将 API 格式的路由规则转换为 UI 格式（需要加载账号名称）
 const convertApiFormatToRoutingRules = async (
-  apiFormat: Record<string, number[]> | null,
+  apiFormat: Record<string, Array<string | number>> | null,
 ): Promise<ModelRoutingRule[]> => {
   if (!apiFormat) return [];
 

@@ -242,3 +242,18 @@ explicit typed error. It must never silently discard a submitted field or return
   and original template/style already use this same Worker-backed configuration.
 - Validation: 45 targeted SQLite control/gateway tests, Worker typecheck, frontend
   typecheck and Cloudflare SPA build passed. No schema migration was required.
+
+## v0.42.8 Groups model-to-account routing — 2026-09-07
+
+- The retained model-routing switch and account rules now constrain gateway account
+  candidates for matching group models. Exact patterns win; otherwise the longest
+  trailing-wildcard prefix wins. A configured account that is not currently an
+  eligible group candidate yields the normal `no_upstream_accounts` failure.
+- Configuration is normalized and validated on group create/update. It accepts
+  Worker opaque account IDs as well as legacy numeric IDs, preserves the original
+  form template and styles, and is covered by existing group CAS/idempotent writes.
+- Remaining visible Groups advanced fields are still: fallback/default model and
+  Messages dispatch, reasoning policy, request/live restrictions, time/price and
+  profit controls, media pricing, and Claude Code/MCP configuration.
+- Validation: targeted CRUD/configuration and gateway routing tests (46 tests),
+  Worker and frontend typechecks passed. No schema migration was required.

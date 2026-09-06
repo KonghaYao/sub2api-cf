@@ -8,6 +8,42 @@ import {
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 describe('gateway repository embeddings routing', () => {
+  it('routes a matching model only to its configured accounts, with exact patterns first', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    seedAlternateEmbeddingAccount(raw)
+    const env = { DB: d1 } as Env
+
+    raw.prepare(`UPDATE "groups" SET ui_config_json = ? WHERE id = ?`).run(
+      JSON.stringify({
+        model_routing_enabled: true,
+        model_routing: { 'embed-*': ['account-2'], 'embed-public': ['account-1'] },
+      }),
+      'group-1',
+    )
+    await expect(resolveGatewayRoute(
+      env, 'group-1', 'embed-public', 'embeddings', 'user-1',
+    )).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+
+    raw.prepare(`UPDATE "groups" SET ui_config_json = ? WHERE id = ?`).run(
+      JSON.stringify({ model_routing_enabled: true, model_routing: { 'embed-*': ['account-2'] } }),
+      'group-1',
+    )
+    await expect(resolveGatewayRoute(
+      env, 'group-1', 'embed-public', 'embeddings', 'user-1',
+    )).resolves.toMatchObject({ candidates: [{ account_id: 'account-2' }] })
+
+    raw.prepare(`UPDATE "groups" SET ui_config_json = ? WHERE id = ?`).run(
+      JSON.stringify({ model_routing_enabled: true, model_routing: { 'embed-public': ['not-in-group'] } }),
+      'group-1',
+    )
+    await expect(resolveGatewayRoute(
+      env, 'group-1', 'embed-public', 'embeddings', 'user-1',
+    )).rejects.toMatchObject({ status: 503, code: 'no_upstream_accounts' })
+    raw.close()
+  })
+
   it('honors model-list membership and order without changing direct routing', async () => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)
@@ -1224,6 +1260,20 @@ function seedSecondEmbeddingRoute(database: any): void {
     VALUES ('price-2', 'group-1', 'model-2', 1, 1, 1000, 0, 0, 0, 1, 1, 1);
     INSERT INTO account_models (account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms)
     VALUES ('account-1', 'model-2', 0, 0, 1, 1, 1);
+  `)
+}
+
+function seedAlternateEmbeddingAccount(database: any): void {
+  database.exec(`
+    INSERT INTO accounts (id, platform, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms,
+      protocol, base_url, auth_scheme, config_version)
+    VALUES ('account-2', 'openai', 'alternate', 'secret-2', 1, 4, 1, 1, 'openai', 'https://alternate.example/v1', 'bearer', 1);
+    INSERT INTO account_secrets (id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms)
+    VALUES ('secret-2', 'account-2', 1, 'nonce-2', 'ciphertext-2', 1, 1);
+    INSERT INTO account_groups (account_id, group_id, priority, weight, created_at_ms, updated_at_ms)
+    VALUES ('account-2', 'group-1', 0, 1, 1, 1);
+    INSERT INTO account_models (account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms)
+    VALUES ('account-2', 'model-1', 0, 0, 1, 1, 1);
   `)
 }
 

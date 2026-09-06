@@ -453,14 +453,12 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
   return applyModelsListConfig(result.results)
 }
 
-type ModelListRow = ModelRoute & { ui_config_json: string }
+type GroupConfiguredModelRoute = ModelRoute & { ui_config_json: string | null }
+type ModelListRow = GroupConfiguredModelRoute
 
 function applyModelsListConfig(models: ModelListRow[]): ModelRoute[] {
   const config = parseModelsListConfig(models[0]?.ui_config_json)
-  const clean = (model: ModelListRow): ModelRoute => {
-    const { ui_config_json: _uiConfig, ...route } = model
-    return route
-  }
+  const clean = withoutGroupUiConfig
   if (config === null || !config.enabled) return models.map(clean)
 
   const byName = new Map(models.map(model => [model.public_name, model]))
@@ -470,19 +468,61 @@ function applyModelsListConfig(models: ModelListRow[]): ModelRoute[] {
   })
 }
 
-function parseModelsListConfig(value: string | undefined): { enabled: boolean; models: string[] } | null {
-  if (value === undefined) return null
+function withoutGroupUiConfig(model: GroupConfiguredModelRoute): ModelRoute {
+  const { ui_config_json: _uiConfig, ...route } = model
+  return route
+}
+
+function parseGroupUiConfig(value: string | null | undefined): Record<string, unknown> {
+  if (value === null || value === undefined) return {}
   try {
-    const config = JSON.parse(value) as { models_list_config?: unknown }
-    const list = config.models_list_config
-    if (typeof list !== 'object' || list === null || Array.isArray(list)) return null
-    const { enabled, models } = list as { enabled?: unknown; models?: unknown }
-    if (enabled !== true || !Array.isArray(models)) return null
-    const names = models.filter((model): model is string => typeof model === 'string')
-    return names.length === models.length ? { enabled, models: names } : null
+    const config = JSON.parse(value)
+    return typeof config === 'object' && config !== null && !Array.isArray(config)
+      ? config as Record<string, unknown>
+      : {}
   } catch {
+    return {}
+  }
+}
+
+function parseModelsListConfig(value: string | null | undefined): { enabled: boolean; models: string[] } | null {
+  const list = parseGroupUiConfig(value).models_list_config
+  if (typeof list !== 'object' || list === null || Array.isArray(list)) return null
+  const { enabled, models } = list as { enabled?: unknown; models?: unknown }
+  if (enabled !== true || !Array.isArray(models)) return null
+  const names = models.filter((model): model is string => typeof model === 'string')
+  return names.length === models.length ? { enabled, models: names } : null
+}
+
+function resolveModelRouting(
+  value: string | null | undefined,
+  publicName: string,
+): Set<string> | null {
+  const config = parseGroupUiConfig(value)
+  if (config.model_routing_enabled !== true || typeof config.model_routing !== 'object' || config.model_routing === null || Array.isArray(config.model_routing)) {
     return null
   }
+  const matches = Object.entries(config.model_routing as Record<string, unknown>)
+    .filter(([pattern, accounts]) => Array.isArray(accounts) && (
+      pattern === publicName || (pattern.endsWith('*') && publicName.startsWith(pattern.slice(0, -1)))))
+    .sort(([left], [right]) => {
+      const leftExact = left === publicName
+      const rightExact = right === publicName
+      if (leftExact !== rightExact) return leftExact ? -1 : 1
+      return right.length - left.length || left.localeCompare(right)
+    })
+  const selected = matches[0]?.[1]
+  if (!Array.isArray(selected)) return null
+  return new Set(selected.filter((account): account is string => typeof account === 'string'))
+}
+
+function filterModelRoutingCandidates(
+  candidates: AccountCandidate[],
+  selectedAccounts: Set<string> | null,
+): AccountCandidate[] {
+  return selectedAccounts === null
+    ? candidates
+    : candidates.filter(candidate => selectedAccounts.has(candidate.account_id))
 }
 
 export async function resolveGatewayRoute(
@@ -543,8 +583,8 @@ export async function resolveGatewayRoute(
   }
   const [modelResult, channelResult, candidateResult, quotaResult, fallbackCandidateResult] =
     await env.DB.batch(statements)
-  const model = modelResult.results[0] as unknown as ModelRoute | undefined
-  if (model === undefined) {
+  const modelRow = modelResult.results[0] as unknown as GroupConfiguredModelRoute | undefined
+  if (modelRow === undefined) {
     return resolveExternalChannelAlias(
       env,
       groupId,
@@ -554,6 +594,8 @@ export async function resolveGatewayRoute(
       fallbackEndpoint,
     )
   }
+  const modelRouting = resolveModelRouting(modelRow.ui_config_json, publicName)
+  const model = withoutGroupUiConfig(modelRow)
   const channelPolicy = channelResult.results[0] as unknown as ChannelModelPolicyRow | undefined
   const routedModel = applyChannelModelPolicy(publicName, compositeUpstream === null ? model : { ...model, upstream_name: compositeUpstream }, channelPolicy)
   const customerPricing = channelPolicy === undefined
@@ -563,14 +605,14 @@ export async function resolveGatewayRoute(
   // Account eligibility and customer billing remain attached to the requested
   // catalog model. The channel policy may independently snapshot a uniquely
   // resolved mapped model's base price for provider-account cost reporting.
-  let candidates = candidateResult.results.map(parseAccountCandidate)
+  let candidates = filterModelRoutingCandidates(candidateResult.results.map(parseAccountCandidate), modelRouting)
   let upstreamEndpoint = endpoint
   if (
     candidates.length === 0 &&
     fallbackEndpoint !== undefined &&
     fallbackCandidateResult !== undefined
   ) {
-    candidates = fallbackCandidateResult.results.map(parseAccountCandidate)
+    candidates = filterModelRoutingCandidates(fallbackCandidateResult.results.map(parseAccountCandidate), modelRouting)
     upstreamEndpoint = fallbackEndpoint
   }
   if (

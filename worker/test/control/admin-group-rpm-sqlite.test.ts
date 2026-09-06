@@ -88,12 +88,14 @@ describe('group RPM administration on D1', () => {
       method: 'POST', headers: headers('groups-ui-create'),
       body: JSON.stringify({ name: 'UI Group', platform: 'openai', is_exclusive: false,
         max_reasoning_effort: 'high', supported_model_scopes: ['text'],
-        models_list_config: { enabled: true, models: ['gpt-test'] } }),
+        models_list_config: { enabled: true, models: ['gpt-test'] },
+        model_routing_enabled: true, model_routing: { 'gpt-*': [7, 'account-8'] } }),
     }, test.env)
     expect(created.status, await created.clone().text()).toBe(201)
     const group = (await created.json() as any).data
     expect(group).toMatchObject({ max_reasoning_effort: 'high', supported_model_scopes: ['text'],
-      models_list_config: { enabled: true, models: ['gpt-test'] } })
+      models_list_config: { enabled: true, models: ['gpt-test'] },
+      model_routing_enabled: true, model_routing: { 'gpt-*': ['7', 'account-8'] } })
     expect(group).not.toHaveProperty('ui_config_json')
     const updated = await test.app.request(`/groups/${group.id}`, {
       method: 'PUT', headers: headers('groups-ui-update', 0),
@@ -125,6 +127,12 @@ describe('group RPM administration on D1', () => {
     }, test.env)
     expect(invalidModelList.status).toBe(400)
     await expect(invalidModelList.json()).resolves.toMatchObject({ code: 'invalid_models_list_config' })
+    const invalidRouting = await test.app.request('/groups', {
+      method: 'POST', headers: headers('groups-ui-invalid-routing'),
+      body: JSON.stringify({ name: 'invalid routing', model_routing: { 'g*pt': ['account-1'] } }),
+    }, test.env)
+    expect(invalidRouting.status).toBe(400)
+    await expect(invalidRouting.json()).resolves.toMatchObject({ code: 'invalid_model_routing' })
   })
 
   it('round-trips exact image generation policy and rejects an underfunded hold', async () => {
