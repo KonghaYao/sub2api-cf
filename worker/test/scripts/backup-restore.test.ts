@@ -249,6 +249,29 @@ describe('versioned backup bundle', () => {
 })
 
 describe('fail-closed restore plan', () => {
+  it('rejects a restore target inside the source bundle', async () => {
+    const root = await temporaryDirectory()
+    const source = await createSourceArtifacts(root)
+    const bundleDirectory = join(root, 'backup.bundle')
+    await createBackupBundle({ outputDirectory: bundleDirectory, artifacts: artifactInputs(source) })
+    const nestedTarget = join(bundleDirectory, 'restored')
+
+    await expect(createRestorePlan({ bundleDirectory, targetDirectory: nestedTarget }))
+      .rejects.toThrow('inside the backup bundle')
+    await expect(restoreBackupBundle({ bundleDirectory, targetDirectory: nestedTarget }))
+      .rejects.toThrow('inside the backup bundle')
+    await expect(verifyBackupBundle(bundleDirectory)).resolves.toBeDefined()
+
+    const bundleAlias = join(root, 'bundle-alias')
+    await symlink(bundleDirectory, bundleAlias)
+    const aliasedTarget = join(bundleAlias, 'restored-through-alias')
+    await expect(createRestorePlan({ bundleDirectory, targetDirectory: aliasedTarget }))
+      .rejects.toThrow('inside the backup bundle')
+    await expect(restoreBackupBundle({ bundleDirectory, targetDirectory: aliasedTarget }))
+      .rejects.toThrow('inside the backup bundle')
+    await expect(verifyBackupBundle(bundleDirectory)).resolves.toBeDefined()
+  })
+
   it('orders D1, Durable Object, and R2 artifacts and restores them byte-for-byte', async () => {
     const root = await temporaryDirectory()
     const source = await createSourceArtifacts(root)

@@ -1,7 +1,7 @@
 import type { Context } from 'hono'
 
 import type { Env, UserFinancialEventPayload } from '../env'
-import { apiKeyDigest, constantTimeEqual } from '../gateway/crypto'
+import { apiKeyDigest, constantTimeEqual, sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { financialSourceForMutation } from '../shared/user-financial-event'
 import {
@@ -11,6 +11,7 @@ import {
   readOptionalJsonObject,
   requireResourceId,
 } from './http'
+import { authenticateAdminSession, type AdminActor } from './admin-auth'
 
 type ControlBindings = { Bindings: Env }
 
@@ -30,6 +31,7 @@ interface LedgerExportSnapshot {
 
 interface LedgerExportEntry {
   ledger_sequence: number
+  state_version: number
   schema_version: 1
   mutation_key: string
   mutation_id: string
@@ -69,10 +71,13 @@ interface BackfillCursorPayload {
   financial_events_verified: number
   pages_scanned: number
   previous_sequence: number
+  previous_state_version: number
   previous_balance_micros: number
   spend_debt_micros: number
   opening_state_version: number
 }
+
+type BackfillAuditResult = 'progress' | 'completed' | 'blocked' | 'failed'
 
 const EXPORT_PAGE_SIZE = 100
 const MAX_BACKFILL_CURSOR_BYTES = 8_192
@@ -85,8 +90,16 @@ const MAX_BACKFILL_CURSOR_BYTES = 8_192
 export async function backfillAdminUserFinancialHistory(
   context: Context<ControlBindings>,
 ): Promise<Response> {
+  let auditActor: AdminActor | null = null
+  let auditTargetUserId: string | null = null
+  let auditSnapshot: LedgerExportSnapshot | null = null
+  let auditLedgerEntriesScanned = 0
+  let auditFinancialEventsVerified = 0
+  let auditPagesScanned = 0
   try {
     const userId = requireResourceId(context.req.param('id'), 'user')
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    auditActor = actor
     const input = await readOptionalJsonObject(context.req.raw, MAX_BACKFILL_CURSOR_BYTES + 256)
     const cursorRaw = optionalString(input, 'cursor', MAX_BACKFILL_CURSOR_BYTES)
     const user = await context.env.DB.prepare(
@@ -95,6 +108,7 @@ export async function backfillAdminUserFinancialHistory(
         WHERE id = ?`,
     ).bind(userId).first<BackfillUserRow>()
     if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
+    auditTargetUserId = userId
     if (user.financial_history_complete === 1) {
       return controlSuccess({
         user_id: userId,
@@ -122,9 +136,14 @@ export async function backfillAdminUserFinancialHistory(
     let financialEventsVerified = progress?.financial_events_verified ?? 0
     let pagesScanned = progress?.pages_scanned ?? 0
     let previousSequence = progress?.previous_sequence ?? 0
+    let previousStateVersion = progress?.previous_state_version ?? -1
     let previousBalanceMicros = progress?.previous_balance_micros ?? 0
     let spendDebtMicros = progress?.spend_debt_micros ?? 0
     let openingStateVersion: number | null = progress?.opening_state_version ?? null
+    auditSnapshot = snapshot
+    auditLedgerEntriesScanned = ledgerEntriesScanned
+    auditFinancialEventsVerified = financialEventsVerified
+    auditPagesScanned = pagesScanned
 
     const response = await fetchLedgerExportPage(context.env, userId, progress?.do_cursor ?? null)
     if (!response.ok) {
@@ -141,8 +160,11 @@ export async function backfillAdminUserFinancialHistory(
     pagesScanned += 1
     if (snapshot === null) snapshot = page.snapshot
     else if (!sameSnapshot(snapshot, page.snapshot)) throw financialBackfillConflict()
+    auditSnapshot = snapshot
+    auditPagesScanned = pagesScanned
 
     const projected: BackfillFinancialRow[] = []
+    const nonFinancialVersions: number[] = []
     for (const entry of page.entries) {
       if (
         entry.ledger_sequence <= previousSequence ||
@@ -151,6 +173,7 @@ export async function backfillAdminUserFinancialHistory(
       previousSequence = entry.ledger_sequence
       const ordinal = ledgerEntriesScanned
       ledgerEntriesScanned += 1
+      auditLedgerEntriesScanned = ledgerEntriesScanned
 
       if (ordinal === 0) {
         if (entry.entry_type !== 'opening_balance') throw financialBackfillConflict()
@@ -159,7 +182,12 @@ export async function backfillAdminUserFinancialHistory(
         throw financialBackfillConflict()
       }
       if (openingStateVersion === null) throw financialBackfillConflict()
-      const stateVersion = checkedAdd(openingStateVersion, ordinal)
+      const stateVersion = entry.state_version
+      if (
+        stateVersion <= previousStateVersion ||
+        stateVersion !== checkedAdd(openingStateVersion, ordinal)
+      ) throw financialBackfillConflict()
+      previousStateVersion = stateVersion
       const transition = convertLedgerEntry(
         entry,
         stateVersion,
@@ -170,9 +198,12 @@ export async function backfillAdminUserFinancialHistory(
       previousBalanceMicros = transition.balance_after_micros
       spendDebtMicros = transition.spend_debt_after_micros
       if (transition.event !== null) projected.push(transition.event)
+      else nonFinancialVersions.push(stateVersion)
     }
     await verifyAndProjectFinancialRows(context.env, projected)
+    await verifyNoUnexpectedFinancialRows(context.env, userId, nonFinancialVersions)
     financialEventsVerified += projected.length
+    auditFinancialEventsVerified = financialEventsVerified
 
     if (!page.complete) {
       if (
@@ -189,10 +220,17 @@ export async function backfillAdminUserFinancialHistory(
         financial_events_verified: financialEventsVerified,
         pages_scanned: pagesScanned,
         previous_sequence: previousSequence,
+        previous_state_version: previousStateVersion,
         previous_balance_micros: previousBalanceMicros,
         spend_debt_micros: spendDebtMicros,
         opening_state_version: openingStateVersion,
       })
+      const audit = await buildBackfillAuditStatement(
+        context.env, actor, userId, snapshot, ledgerEntriesScanned,
+        financialEventsVerified, pagesScanned, 'progress',
+      )
+      const recorded = await audit.run()
+      if (recorded.meta.changes !== 1) throw auditWriteFailed()
       return controlSuccess({
         user_id: userId,
         ledger_entries_scanned: ledgerEntriesScanned,
@@ -213,20 +251,25 @@ export async function backfillAdminUserFinancialHistory(
       checkedAdd(openingStateVersion, ledgerEntriesScanned - 1) !== snapshot.state_version
     ) throw financialBackfillConflict()
 
-    const count = await context.env.DB.prepare(
-      `SELECT COUNT(*) AS count
-         FROM user_financial_events
-        WHERE user_id = ? AND state_version BETWEEN ? AND ?`,
-    ).bind(userId, openingStateVersion, snapshot.state_version).first<{ count: number }>()
-    if (count === null || count.count !== financialEventsVerified) {
-      throw financialBackfillConflict()
-    }
-    const completed = await context.env.DB.prepare(
+    const completionAudit = await buildBackfillAuditStatement(
+      context.env, actor, userId, snapshot, ledgerEntriesScanned,
+      financialEventsVerified, pagesScanned, 'completed', true,
+    )
+    const [auditRecorded, completed] = await context.env.DB.batch([
+      completionAudit,
+      context.env.DB.prepare(
       `UPDATE users
           SET financial_history_complete = 1
-        WHERE id = ? AND financial_history_complete = 0`,
-    ).bind(userId).run()
-    if (completed.meta.changes !== 1) throw financialBackfillConflict()
+        WHERE id = ? AND financial_history_complete = 0
+        RETURNING id`,
+      ).bind(userId),
+    ])
+    if (!completed.success || !auditRecorded.success) {
+      throw financialBackfillConflict()
+    }
+    const wonCompletion = completed.results.length === 1 && auditRecorded.results.length === 1
+    const convergedCompletion = completed.results.length === 0 && auditRecorded.results.length === 0
+    if (!wonCompletion && !convergedCompletion) throw financialBackfillConflict()
 
     return controlSuccess({
       user_id: userId,
@@ -234,12 +277,99 @@ export async function backfillAdminUserFinancialHistory(
       financial_events_verified: financialEventsVerified,
       pages_scanned: pagesScanned,
       history_complete: true,
-      idempotent: false,
+      idempotent: convergedCompletion,
       next_cursor: null,
     })
   } catch (error) {
-    return controlError(asGatewayError(error))
+    const failure = asGatewayError(error)
+    if (auditActor !== null && auditTargetUserId !== null) {
+      const result = failure.status === 409 ? 'blocked' : 'failed'
+      try {
+        const statement = await buildBackfillAuditStatement(
+          context.env,
+          auditActor,
+          auditTargetUserId,
+          auditSnapshot,
+          auditLedgerEntriesScanned,
+          auditFinancialEventsVerified,
+          auditPagesScanned,
+          result,
+        )
+        await statement.run()
+      } catch {
+        console.error('financial history backfill failure audit could not be recorded', {
+          code: failure.code,
+        })
+      }
+    }
+    return controlError(failure)
   }
+}
+
+async function verifyNoUnexpectedFinancialRows(
+  env: Env,
+  userId: string,
+  stateVersions: number[],
+): Promise<void> {
+  if (stateVersions.length === 0) return
+  const results = await env.DB.batch(stateVersions.map((stateVersion) => env.DB.prepare(
+    `SELECT 1 AS present
+       FROM user_financial_events
+      WHERE user_id = ? AND state_version = ?
+      LIMIT 1`,
+  ).bind(userId, stateVersion)))
+  if (results.some((result) => result.results.length !== 0)) throw financialBackfillConflict()
+}
+
+async function buildBackfillAuditStatement(
+  env: Env,
+  actor: AdminActor,
+  userId: string,
+  snapshot: LedgerExportSnapshot | null,
+  ledgerEntriesScanned: number,
+  financialEventsVerified: number,
+  pagesScanned: number,
+  result: BackfillAuditResult,
+  conditionalOnIncomplete = false,
+): Promise<D1PreparedStatement> {
+  const snapshotDigest = snapshot === null ? null : await sha256Hex(JSON.stringify({
+    user_id: snapshot.user_id,
+    state_version: snapshot.state_version,
+    balance_micros: snapshot.balance_micros,
+    spend_debt_micros: snapshot.spend_debt_micros,
+    ledger_count: snapshot.ledger_count,
+    high_water_sequence: snapshot.high_water_sequence,
+  }))
+  const action = `financial_history.backfill.${result}`
+  const outcome = result === 'completed' ? 'succeeded' : result === 'progress' ? 'recorded' : result
+  return env.DB.prepare(
+    `INSERT INTO admin_financial_history_backfill_audit_events (
+       id, actor_user_id, actor_session_id, target_user_id, action, outcome,
+       snapshot_state_version, snapshot_high_water_sequence, snapshot_ledger_count,
+       snapshot_digest, ledger_entries_scanned, financial_events_verified,
+       pages_scanned, occurred_at_ms
+     )
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE ? = 0 OR EXISTS (
+        SELECT 1 FROM users WHERE id = ? AND financial_history_complete = 0
+      )
+     RETURNING id`,
+  ).bind(
+    crypto.randomUUID(), actor.user_id, actor.session_id, userId,
+    action, outcome, snapshot?.state_version ?? null,
+    snapshot?.high_water_sequence ?? null, snapshot?.ledger_count ?? null, snapshotDigest,
+    ledgerEntriesScanned, financialEventsVerified, pagesScanned, Date.now(),
+    conditionalOnIncomplete ? 1 : 0, userId,
+  )
+}
+
+function auditWriteFailed(): GatewayError {
+  return new GatewayError(
+    503,
+    'financial_history_backfill_audit_failed',
+    'Financial history backfill audit could not be recorded',
+    'server_error',
+  )
 }
 
 function fetchLedgerExportPage(
@@ -306,6 +436,7 @@ function parseLedgerEntry(value: unknown, userId: string): LedgerExportEntry {
   const entry = value as Partial<LedgerExportEntry>
   if (
     entry.schema_version !== 1 || !isPositiveSafeInteger(entry.ledger_sequence) ||
+    !isNonNegativeSafeInteger(entry.state_version) ||
     !isIdentifier(entry.mutation_key, 256) || !isIdentifier(entry.mutation_id, 128) ||
     !['opening_balance', 'balance_adjustment', 'enabled_change', 'settlement'].includes(entry.entry_type ?? '') ||
     entry.user_id !== userId ||
@@ -328,13 +459,13 @@ function openingVersion(entry: LedgerExportEntry, snapshot: LedgerExportSnapshot
   const d1Version = /^d1-user:(0|[1-9]\d*)$/.exec(entry.mutation_id)
   if (d1Version !== null) {
     const parsed = Number(d1Version[1])
-    if (Number.isSafeInteger(parsed)) return parsed
+    if (Number.isSafeInteger(parsed) && parsed === entry.state_version) return parsed
   }
-  if (entry.mutation_id.startsWith('admin-create:')) return 0
+  if (entry.mutation_id.startsWith('admin-create:') && entry.state_version === 0) return 0
   // Any older creation flow that began at version zero is still provable from
   // the complete ledger cardinality. A deleted/superseded entry creates a gap
   // and makes this equality false, so it remains fail-closed.
-  if (snapshot.state_version === snapshot.ledger_count - 1) return 0
+  if (snapshot.state_version === snapshot.ledger_count - 1 && entry.state_version === 0) return 0
   throw financialBackfillConflict()
 }
 
@@ -554,13 +685,19 @@ function parseBackfillCursorPayload(value: unknown, userId: string): BackfillCur
     (payload.pages_scanned as number) > (payload.ledger_entries_scanned as number) ||
     !isPositiveSafeInteger(payload.previous_sequence) ||
     (payload.previous_sequence as number) > snapshot.high_water_sequence ||
+    !isNonNegativeSafeInteger(payload.previous_state_version) ||
+    (payload.previous_state_version as number) > snapshot.state_version ||
     !isNonNegativeSafeInteger(payload.previous_balance_micros) ||
     !isNonNegativeSafeInteger(payload.spend_debt_micros) ||
     !isNonNegativeSafeInteger(payload.opening_state_version) ||
     checkedAdd(
       payload.opening_state_version as number,
       (payload.ledger_entries_scanned as number) - 1,
-    ) > snapshot.state_version
+    ) > snapshot.state_version ||
+    payload.previous_state_version !== checkedAdd(
+      payload.opening_state_version as number,
+      (payload.ledger_entries_scanned as number) - 1,
+    )
   ) throw invalidBackfillCursor()
   return payload as BackfillCursorPayload
 }

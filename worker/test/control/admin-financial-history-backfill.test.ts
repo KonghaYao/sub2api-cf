@@ -62,7 +62,7 @@ class LedgerExportNamespace {
             ledger_count: this.entries.length,
             high_water_sequence: this.entries.length,
           },
-          entries: page,
+          entries: page.map((entry) => ({ ...entry, state_version: entry.ledger_sequence + 6 })),
           complete,
           next_cursor: complete ? null : `page:${nextOffset}`,
         })
@@ -94,7 +94,8 @@ describe('admin financial-history backfill', () => {
         id, name, description, active, control_version, created_at_ms, updated_at_ms
       ) VALUES ('history-writer', 'History writer', '', 1, 0, 1, 1);
       INSERT INTO admin_role_permissions (role_id, permission_key, created_at_ms)
-      VALUES ('history-writer', 'admin.users.write', 1);
+      VALUES ('history-writer', 'admin.users.write', 1),
+             ('history-writer', 'admin.audit.read', 1);
       INSERT INTO admin_user_roles (
         user_id, role_id, active, control_version, assigned_by_user_id, assigned_at_ms
       ) VALUES ('backfill-admin', 'history-writer', 1, 1, NULL, 1);
@@ -180,6 +181,48 @@ describe('admin financial-history backfill', () => {
       `SELECT COUNT(*) AS count FROM user_financial_events WHERE user_id = 'legacy-user'`,
     ).get()).toEqual({ count: 203 })
     expect(raw.prepare(`
+      SELECT actor_user_id, actor_session_id, target_user_id, action, outcome,
+             snapshot_state_version, snapshot_high_water_sequence,
+             ledger_entries_scanned, financial_events_verified, pages_scanned,
+             length(snapshot_digest) AS digest_length
+        FROM admin_financial_history_backfill_audit_events
+       ORDER BY pages_scanned DESC LIMIT 1
+    `).get()).toEqual({
+      actor_user_id: 'backfill-admin',
+      actor_session_id: 'backfill-session',
+      target_user_id: 'legacy-user',
+      action: 'financial_history.backfill.completed',
+      outcome: 'succeeded',
+      snapshot_state_version: 211,
+      snapshot_high_water_sequence: 205,
+      ledger_entries_scanned: 205,
+      financial_events_verified: 203,
+      pages_scanned: 3,
+      digest_length: 64,
+    })
+    expect(() => raw.exec(
+      `UPDATE admin_financial_history_backfill_audit_events SET outcome = 'recorded'`,
+    )).toThrow(/immutable/)
+    expect(() => raw.exec(
+      `DELETE FROM admin_financial_history_backfill_audit_events`,
+    )).toThrow(/immutable/)
+
+    const audit = await createApp().request(
+      '/api/v1/admin/audit/events?category=financial_history',
+      { headers: { authorization: `Bearer ${TOKEN}` } },
+      env,
+    )
+    expect(audit.status).toBe(200)
+    const auditBody = await audit.json() as any
+    expect(auditBody.data.items).toHaveLength(3)
+    expect(auditBody.data.items[0]).toMatchObject({
+      category: 'financial_history',
+      action: 'financial_history.backfill.completed',
+      outcome: 'succeeded',
+      resource_id: 'legacy-user',
+      resource_version: 211,
+    })
+    expect(raw.prepare(`
       SELECT state_version, event_type, amount_delta_micros, gross_amount_micros,
              balance_after_micros, spend_debt_after_micros
         FROM user_financial_events
@@ -230,6 +273,21 @@ describe('admin financial-history backfill', () => {
     expect(raw.prepare(
       `SELECT COUNT(*) AS count FROM user_financial_events WHERE user_id = 'legacy-user'`,
     ).get()).toEqual({ count: 100 })
+    expect(raw.prepare(`
+      SELECT action, outcome, actor_user_id, actor_session_id,
+             snapshot_high_water_sequence, ledger_entries_scanned, pages_scanned
+        FROM admin_financial_history_backfill_audit_events
+       WHERE action = 'financial_history.backfill.failed'
+       ORDER BY occurred_at_ms DESC LIMIT 1
+    `).get()).toEqual({
+      action: 'financial_history.backfill.failed',
+      outcome: 'failed',
+      actor_user_id: 'backfill-admin',
+      actor_session_id: 'backfill-session',
+      snapshot_high_water_sequence: 205,
+      ledger_entries_scanned: 100,
+      pages_scanned: 1,
+    })
 
     ledger.failAtCall = null
     const resumed = await backfill(firstBody.data.next_cursor)
@@ -246,6 +304,24 @@ describe('admin financial-history backfill', () => {
     expect(raw.prepare(
       `SELECT COUNT(*) AS count FROM user_financial_events WHERE user_id = 'legacy-user'`,
     ).get()).toEqual({ count: 203 })
+  })
+
+  it('lets only one concurrent final page record completion', async () => {
+    const firstBody = await (await backfill()).json() as any
+    const secondBody = await (await backfill(firstBody.data.next_cursor)).json() as any
+
+    const responses = await Promise.all([
+      backfill(secondBody.data.next_cursor),
+      backfill(secondBody.data.next_cursor),
+    ])
+    expect(responses.map((response) => response.status)).toEqual([200, 200])
+    const bodies = await Promise.all(responses.map((response) => response.json() as Promise<any>))
+    expect(bodies.map((body) => body.data.idempotent).sort()).toEqual([false, true])
+    expect(raw.prepare(`
+      SELECT COUNT(*) AS count
+        FROM admin_financial_history_backfill_audit_events
+       WHERE action = 'financial_history.backfill.completed'
+    `).get()).toEqual({ count: 1 })
   })
 
   it('fails closed on an immutable projection conflict', async () => {
@@ -273,6 +349,21 @@ describe('admin financial-history backfill', () => {
     expect(raw.prepare(
       `SELECT source_id, balance_after_micros FROM user_financial_events WHERE event_id = 'conflicting-opening'`,
     ).get()).toEqual({ source_id: 'wrong-source', balance_after_micros: 999 })
+    expect(raw.prepare(`
+      SELECT action, outcome, actor_user_id, actor_session_id,
+             snapshot_high_water_sequence, ledger_entries_scanned, pages_scanned
+        FROM admin_financial_history_backfill_audit_events
+       WHERE action = 'financial_history.backfill.blocked'
+       ORDER BY occurred_at_ms DESC LIMIT 1
+    `).get()).toEqual({
+      action: 'financial_history.backfill.blocked',
+      outcome: 'blocked',
+      actor_user_id: 'backfill-admin',
+      actor_session_id: 'backfill-session',
+      snapshot_high_water_sequence: 205,
+      ledger_entries_scanned: 100,
+      pages_scanned: 1,
+    })
   })
 
   it('does not mark history complete when the ledger cannot explain the DO state version', async () => {

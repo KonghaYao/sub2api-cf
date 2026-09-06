@@ -42,11 +42,12 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   legacy Vue modal adapts UUID event IDs without changing its sequential
   previous/next UI.
 - This ledger begins with financial state events emitted after 0055 is deployed.
-  Older Durable Object ledger entries are not backfilled from the bounded
-  `/snapshot` response, because that response exposes only the latest 100 rows
-  and would falsely imply completeness. A separate privileged, cursorized DO
-  export/backfill is still required if pre-0055 history must be retained during
-  a production data cutover.
+  Older Durable Object entries are rebuilt only through the privileged,
+  cursorized full-ledger export; the bounded `/snapshot` response remains
+  unsuitable because it exposes only the latest 100 rows. Pre-v0.34 objects
+  with contiguous rowids are provable. If an older enabled rollback already
+  deleted a ledger row, no tombstone exists and automated backfill deliberately
+  stops for manual financial reconciliation.
 
 ## Completed locally in v0.34
 
@@ -58,7 +59,9 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   environment-bound signed cursor. Each request exports at most 100 frozen DO
   ledger rows; D1 immutable rows are compared field by field, and completeness
   is recorded only after version, balance, debt, ledger and projection counts
-  reconcile.
+  reconcile. Exact state versions and same-sequence rollback tombstones keep
+  new histories reconstructable, while immutable actor audit records progress,
+  blocked/failed attempts and the single CAS winner at completion.
 - Registration, password reset, account binding, notification-email and TOTP
   delivery share one Cloudflare email boundary. Missing delivery bindings fail
   before challenge issuance, transient failures retry, permanent failures are
@@ -85,7 +88,7 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
 | Account operations | Batch actions, provider quota/tier/privacy sync and per-model probes are incomplete. | D1 control state, Pool DO cooldown, Queue/Cron probes and versioned health projections. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota is `unknown`, never zero. |
-| Admin usage and finance | Immutable per-user balance/debt history plus bounded signed pre-0055 DO backfill now exist; bulk orchestration, broader aggregates and correction/export workflows are incomplete. | Add a bounded background backfill coordinator, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
+| Admin usage and finance | Immutable per-user balance/debt history plus bounded signed pre-0055 DO backfill now exist; pre-v0.34 rollback gaps require manual reconciliation, and bulk orchestration, broader aggregates and correction/export workflows are incomplete. | Add a bounded background backfill coordinator, explicit manual-reconciliation records, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |
 | Channel monitor and alerts | Generic account health exists; model probes, alert rules, silences and reports do not. | Cron to Queue probes, D1 rules/history/silences, R2 evidence/reports and replay-safe delivery. | Duplicate schedules do not duplicate alerts; silence/recovery/DLQ behavior and per-model inference probes pass. |

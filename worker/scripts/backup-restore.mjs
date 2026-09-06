@@ -10,6 +10,7 @@ import {
   open,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   writeFile,
@@ -135,6 +136,32 @@ async function pathExists(path) {
   } catch (error) {
     if (error && typeof error === 'object' && error.code === 'ENOENT') return false
     throw error
+  }
+}
+
+/** Resolve symlinks in the nearest existing ancestor of a path that may not exist yet. @param {string} path */
+async function canonicalProspectivePath(path) {
+  let existing = resolve(path)
+  const suffix = []
+  while (!(await pathExists(existing))) {
+    const parent = dirname(existing)
+    if (parent === existing) throw new Error(`Cannot resolve path: ${path}`)
+    suffix.unshift(basename(existing))
+    existing = parent
+  }
+  return resolve(await realpath(existing), ...suffix)
+}
+
+/** @param {string} bundleDirectory @param {string} targetDirectory */
+async function requireSeparatedRestorePaths(bundleDirectory, targetDirectory) {
+  const bundleRoot = await realpath(resolve(bundleDirectory))
+  const targetRoot = await canonicalProspectivePath(targetDirectory)
+  if (
+    targetRoot === bundleRoot
+    || targetRoot.startsWith(`${bundleRoot}${sep}`)
+    || bundleRoot.startsWith(`${targetRoot}${sep}`)
+  ) {
+    throw new Error('Restore target must not be inside the backup bundle or contain it')
   }
 }
 
@@ -438,6 +465,13 @@ export async function verifyBackupBundle(bundleDirectory) {
 function restorePlanForManifest(manifest, bundleDirectory, targetDirectory) {
   const bundleRoot = resolve(bundleDirectory)
   const targetRoot = resolve(targetDirectory)
+  if (
+    targetRoot === bundleRoot
+    || targetRoot.startsWith(`${bundleRoot}${sep}`)
+    || bundleRoot.startsWith(`${targetRoot}${sep}`)
+  ) {
+    throw new Error('Restore target must not be inside the backup bundle or contain it')
+  }
   return Object.freeze({
     schema: RESTORE_PLAN_SCHEMA,
     version: RESTORE_PLAN_VERSION,
@@ -467,6 +501,7 @@ export async function createRestorePlan(options) {
     throw new Error('targetDirectory is required')
   }
   const manifest = await verifyBackupBundle(options.bundleDirectory)
+  await requireSeparatedRestorePaths(options.bundleDirectory, options.targetDirectory)
   return restorePlanForManifest(manifest, options.bundleDirectory, options.targetDirectory)
 }
 
@@ -476,6 +511,7 @@ export async function restoreBackupBundle(options) {
     throw new Error('targetDirectory is required')
   }
   const manifest = await verifyBackupBundle(options.bundleDirectory)
+  await requireSeparatedRestorePaths(options.bundleDirectory, options.targetDirectory)
   const plan = restorePlanForManifest(manifest, options.bundleDirectory, options.targetDirectory)
   if (options.dryRun === true) return plan
   const targetDirectory = resolve(options.targetDirectory)

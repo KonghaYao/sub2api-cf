@@ -5,7 +5,7 @@ import { controlError, controlSuccess, queryInteger } from './http'
 
 type ControlBindings = { Bindings: Env }
 
-const AUDIT_CATEGORIES = ['settings', 'rbac', 'channel', 'auth', 'payment'] as const
+const AUDIT_CATEGORIES = ['settings', 'rbac', 'channel', 'auth', 'payment', 'financial_history'] as const
 const AUDIT_OUTCOMES = ['succeeded', 'failed', 'blocked', 'recorded'] as const
 const MAX_CURSOR_BYTES = 2_048
 
@@ -280,6 +280,21 @@ function auditSelect(category?: AuditCategory): string {
              NULL AS resource_version, payload_json AS metadata_json,
              occurred_at_ms
         FROM payment_events`,
+    financial_history: `
+      SELECT 'financial_history' AS category, id AS event_id, action, outcome,
+             actor_user_id, actor_session_id, 'admin' AS origin,
+             'user_financial_history' AS resource_type, target_user_id AS resource_id,
+             snapshot_state_version AS resource_version,
+             json_object(
+               'snapshot_high_water_sequence', snapshot_high_water_sequence,
+               'snapshot_ledger_count', snapshot_ledger_count,
+               'snapshot_digest', snapshot_digest,
+               'ledger_entries_scanned', ledger_entries_scanned,
+               'financial_events_verified', financial_events_verified,
+               'pages_scanned', pages_scanned
+             ) AS metadata_json,
+             occurred_at_ms
+        FROM admin_financial_history_backfill_audit_events`,
   }
   return category === undefined
     ? AUDIT_CATEGORIES.map((value) => selects[value]).join('\nUNION ALL\n')
@@ -389,7 +404,24 @@ function sanitizeMetadata(category: AuditCategory, raw: string): Record<string, 
       return sanitizeAuthMetadata(value)
     case 'payment':
       return sanitizePaymentMetadata(value)
+    case 'financial_history':
+      return sanitizeFinancialHistoryMetadata(value)
   }
+}
+
+function sanitizeFinancialHistoryMetadata(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) return {}
+  const result: Record<string, unknown> = {}
+  for (const key of [
+    'snapshot_high_water_sequence', 'snapshot_ledger_count',
+    'ledger_entries_scanned', 'financial_events_verified', 'pages_scanned',
+  ]) {
+    if (safeInteger(value[key])) result[key] = value[key]
+  }
+  if (typeof value.snapshot_digest === 'string' && /^[a-f0-9]{64}$/.test(value.snapshot_digest)) {
+    result.snapshot_digest = value.snapshot_digest
+  }
+  return result
 }
 
 function sanitizeChannelChangedFields(value: unknown): string[] {

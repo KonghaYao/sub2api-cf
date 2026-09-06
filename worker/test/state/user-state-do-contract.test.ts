@@ -16,6 +16,8 @@ interface StoredProfile {
 }
 
 interface StoredLedgerEntry {
+  ledger_sequence?: number;
+  state_version?: number | null;
   mutation_key: string;
   schema_version: number;
   mutation_id: string;
@@ -59,6 +61,7 @@ class FakeUserStateStorage {
   profile: StoredProfile | null = null;
   stateVersion = 0;
   readonly ledger = new Map<string, StoredLedgerEntry>();
+  readonly tombstones = new Map<number, StoredLedgerEntry>();
   readonly requests = new Map<string, StoredRequest>();
   readonly outbox = new Map<string, StoredOutboxEvent>();
   readonly profileColumns = new Set([
@@ -70,6 +73,11 @@ class FakeUserStateStorage {
     "committed", "funded_micros", "expired", "reservation_expires_at_ms",
     "reservation_ttl_ms", "renewal_sequence", "last_renewal_ttl_ms", "authorized_at_ms",
     "updated_at_ms",
+  ]);
+  readonly ledgerColumns = new Set([
+    "mutation_key", "state_version", "schema_version", "mutation_id", "entry_type",
+    "user_id", "request_id", "amount_delta_micros", "balance_after_micros",
+    "enabled_after", "created_at_ms",
   ]);
 
   constructor(legacySchema = false) {
@@ -99,6 +107,9 @@ class FakeUserStateStorage {
     }
     if (normalized === "PRAGMA table_info(user_requests)") {
       return Array.from(this.requestColumns, (name) => ({ name }));
+    }
+    if (normalized === "PRAGMA table_info(user_ledger)") {
+      return Array.from(this.ledgerColumns, (name) => ({ name }));
     }
     if (normalized.startsWith("ALTER TABLE user_profile ADD COLUMN spend_debt_micros")) {
       this.profileColumns.add("spend_debt_micros");
@@ -140,12 +151,8 @@ class FakeUserStateStorage {
       this.ledger.delete(params[0] as string);
       return [];
     }
-    if (
-      normalized.includes("COUNT(*) AS ledger_count") &&
-      normalized.includes("MAX(rowid)") &&
-      normalized.includes("FROM user_ledger")
-    ) {
-      return [{ ledger_count: this.ledger.size, high_water_sequence: this.ledger.size }];
+    if (normalized.includes("SELECT MAX(") && normalized.includes("MAX(rowid) FROM user_ledger")) {
+      return [{ high_water_sequence: this.maximumLedgerSequence() }];
     }
     if (
       normalized.includes("COUNT(*) AS ledger_count") &&
@@ -156,23 +163,25 @@ class FakeUserStateStorage {
       return [{ ledger_count: Math.min(this.ledger.size, highWaterSequence) }];
     }
     if (
-      normalized.includes("rowid AS ledger_sequence") &&
-      normalized.includes("FROM user_ledger")
+      normalized.includes("rowid AS ledger_sequence") && normalized.includes("FROM user_ledger") &&
+      normalized.includes("ORDER BY ledger_sequence ASC")
     ) {
       const afterSequence = params[0] as number;
       const highWaterSequence = params[1] as number;
       const limit = params[2] as number;
-      return [...this.ledger.values()]
-        .map((entry, index) => ({ ...entry, ledger_sequence: index + 1 }))
+      return this.allLedgerEntries()
         .filter((entry) => (
           entry.ledger_sequence > afterSequence &&
           entry.ledger_sequence <= highWaterSequence
         ))
         .slice(0, limit);
     }
+    if (normalized.includes("WHERE ledger_sequence = ?") && normalized.includes("LIMIT 2")) {
+      return this.allLedgerEntries().filter((entry) => entry.ledger_sequence === params[0]);
+    }
     if (normalized.includes("FROM user_ledger") && normalized.includes("mutation_key = ?")) {
       const entry = this.ledger.get(params[0] as string);
-      return entry === undefined ? [] : [{ ...entry }];
+      return entry === undefined ? [] : [{ ...entry, ledger_sequence: this.sequenceOf(entry) }];
     }
     if (normalized.includes("FROM user_requests") && normalized.includes("status = 'reserved'")) {
       if (normalized.includes("MIN(reservation_expires_at_ms)")) {
@@ -252,21 +261,41 @@ class FakeUserStateStorage {
       };
       return [];
     }
-    if (normalized.startsWith("INSERT INTO user_ledger")) {
+    if (normalized.startsWith("INSERT INTO user_ledger (")) {
       const entry: StoredLedgerEntry = {
         mutation_key: params[0] as string,
-        schema_version: params[1] as number,
-        mutation_id: params[2] as string,
-        entry_type: params[3] as string,
-        user_id: params[4] as string,
-        request_id: params[5] as string | null,
-        amount_delta_micros: params[6] as number,
-        balance_after_micros: params[7] as number,
-        enabled_after: params[8] as number | null,
-        created_at_ms: params[9] as number,
+        ledger_sequence: this.maximumLedgerSequence() + 1,
+        state_version: params[1] as number,
+        schema_version: params[2] as number,
+        mutation_id: params[3] as string,
+        entry_type: params[4] as string,
+        user_id: params[5] as string,
+        request_id: params[6] as string | null,
+        amount_delta_micros: params[7] as number,
+        balance_after_micros: params[8] as number,
+        enabled_after: params[9] as number | null,
+        created_at_ms: params[10] as number,
       };
       if (this.ledger.has(entry.mutation_key)) throw new Error("duplicate mutation key");
       this.ledger.set(entry.mutation_key, entry);
+      return [];
+    }
+    if (normalized.startsWith("INSERT INTO user_ledger_tombstones")) {
+      const ledgerSequence = params[1] as number;
+      this.tombstones.set(ledgerSequence, {
+        state_version: params[0] as number,
+        ledger_sequence: ledgerSequence,
+        mutation_key: params[2] as string,
+        mutation_id: params[3] as string,
+        entry_type: "enabled_change",
+        schema_version: 1,
+        user_id: params[4] as string,
+        request_id: null,
+        amount_delta_micros: 0,
+        balance_after_micros: params[5] as number,
+        enabled_after: params[6] as number,
+        created_at_ms: params[7] as number,
+      });
       return [];
     }
     if (normalized.startsWith("INSERT INTO user_requests")) {
@@ -290,6 +319,20 @@ class FakeUserStateStorage {
       return [];
     }
     throw new Error(`Unexpected SQL in test: ${normalized}`);
+  }
+
+  private sequenceOf(entry: StoredLedgerEntry): number {
+    return entry.ledger_sequence ?? [...this.ledger.values()].indexOf(entry) + 1;
+  }
+
+  private maximumLedgerSequence(): number {
+    return Math.max(0, ...[...this.ledger.values()].map((entry) => this.sequenceOf(entry)), ...this.tombstones.keys());
+  }
+
+  private allLedgerEntries(): Array<StoredLedgerEntry & { ledger_sequence: number }> {
+    return [...this.ledger.values(), ...this.tombstones.values()]
+      .map((entry) => ({ ...entry, state_version: entry.state_version ?? null, ledger_sequence: this.sequenceOf(entry) }))
+      .sort((left, right) => left.ledger_sequence - right.ledger_sequence);
   }
 }
 
@@ -1134,6 +1177,12 @@ describe("UserStateDO balance contract", () => {
     const first = await post(object, "/enabled", disable);
     await expect(first.json()).resolves.toMatchObject({ state_version: 1 });
 
+    // Simulate a pre-state_version object whose opening mutation used the
+    // original generic identifier. Its contiguous rowids still prove the
+    // versions without a constructor-time ledger scan.
+    storage.ledger.get("balance:open-1")!.state_version = null;
+    storage.ledger.get("enabled:disable-retryable")!.state_version = null;
+
     const compensation = await post(object, "/enabled", {
       schema_version: 1,
       mutation_id: "compensate-disable-retryable-1",
@@ -1155,5 +1204,39 @@ describe("UserStateDO balance contract", () => {
       profile: { enabled: false },
     });
     expect(storage.profile?.enabled).toBe(0);
+
+    const exported = await object.fetch(
+      new Request("https://user-state.test/ledger/export?limit=100"),
+    );
+    expect(exported.status).toBe(200);
+    await expect(exported.json()).resolves.toMatchObject({
+      snapshot: {
+        state_version: 3,
+        ledger_count: 4,
+        high_water_sequence: 4,
+      },
+      complete: true,
+      entries: [
+        { ledger_sequence: 1, state_version: 0, entry_type: "opening_balance" },
+        {
+          ledger_sequence: 2,
+          state_version: 1,
+          entry_type: "enabled_change",
+          mutation_id: "disable-retryable",
+        },
+        {
+          ledger_sequence: 3,
+          state_version: 2,
+          entry_type: "enabled_change",
+          mutation_id: "compensate-disable-retryable-1",
+        },
+        {
+          ledger_sequence: 4,
+          state_version: 3,
+          entry_type: "enabled_change",
+          mutation_id: "disable-retryable",
+        },
+      ],
+    });
   });
 });

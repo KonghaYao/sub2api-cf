@@ -197,11 +197,16 @@ and settlements are appended to the immutable ledger in the same SQLite
 transaction as the profile/request mutation. `GET /snapshot` returns the latest
 100 requests and ledger entries.
 The internal `GET /ledger/export` endpoint freezes a SQLite rowid high-water
-mark and returns at most 100 immutable ledger rows per cursor page. The
-`admin.users.write` backfill route wraps that cursor in an environment-bound
-HMAC signature, verifies every projected D1 row, and marks history complete
-only after ledger count, state version, balance, spend debt, and D1 event counts
-reconcile.
+mark and returns at most 100 immutable ledger rows per cursor page. New rows
+persist their exact state version; enabled-state rollback moves the superseded
+row to an immutable same-sequence tombstone before freeing its idempotency key.
+The `admin.users.write` backfill route wraps that cursor in an environment-bound
+HMAC signature, records progress/failure/completion in immutable actor audit,
+verifies every projected D1 row, and marks history complete only after ledger
+count, state version, balance, spend debt, and D1 event counts reconcile.
+Pre-v0.34 ledgers with contiguous rowids are safely inferred; a pre-v0.34
+enabled rollback that already deleted a row has no tombstone and therefore
+fails closed for manual financial reconciliation.
 `POST /release` is canonical; `POST /cancel` remains a compatibility alias.
 
 `PoolStateDO` restores expired leases when an instance starts, schedules the

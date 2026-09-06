@@ -68,6 +68,7 @@ interface UserRequestRow {
 }
 
 interface UserLedgerRow {
+  state_version: number | null;
   schema_version: number;
   mutation_key: string;
   mutation_id: string;
@@ -84,6 +85,10 @@ interface UserLedgerExportRow extends UserLedgerRow {
   ledger_sequence: number;
 }
 
+interface UserLedgerRecord extends UserLedgerRow {
+  ledger_sequence: number;
+}
+
 interface UserLedgerExportCursor {
   v: 1;
   user_id: string;
@@ -93,6 +98,7 @@ interface UserLedgerExportCursor {
   snapshot_state_version: number;
   snapshot_balance_micros: number;
   snapshot_spend_debt_micros: number;
+  opening_state_version: number;
 }
 
 interface AuthorizationRow {
@@ -243,67 +249,67 @@ export class UserStateDO {
       }
       let cursor: UserLedgerExportCursor;
       if (suppliedCursor === null) {
-        const metadata = Array.from(this.state.storage.sql.exec(
-          `SELECT COUNT(*) AS ledger_count,
-                  COALESCE(MAX(rowid), 0) AS high_water_sequence
-             FROM user_ledger`,
-        ))[0] as { ledger_count?: unknown; high_water_sequence?: unknown } | undefined;
-        if (
-          !Number.isSafeInteger(metadata?.ledger_count) ||
-          (metadata!.ledger_count as number) < 0 ||
-          !Number.isSafeInteger(metadata?.high_water_sequence) ||
-          (metadata!.high_water_sequence as number) < 0
-        ) {
-          throw new StateMachineError(
-            "invalid_persisted_state",
-            "User ledger export metadata is invalid",
-          );
+        const highWater = this.loadLedgerHighWater();
+        const opening = this.loadLedgerExportRow(1);
+        const openingStateVersion = requireOpeningStateVersion(
+          opening,
+          this.loadStateVersion() === highWater - 1 ? 0 : null,
+        );
+        if (highWater === 0 || opening === null ||
+            checkedLedgerVersion(openingStateVersion, highWater) !== this.loadStateVersion()) {
+          throw unrecoverableLedgerStateVersion();
         }
         cursor = {
           v: 1,
           user_id: profile.user_id,
           after_sequence: 0,
-          high_water_sequence: metadata!.high_water_sequence as number,
-          ledger_count: metadata!.ledger_count as number,
+          high_water_sequence: highWater,
+          ledger_count: highWater,
           snapshot_state_version: this.loadStateVersion(),
           snapshot_balance_micros: profile.balance_micros,
           snapshot_spend_debt_micros: profile.spend_debt_micros,
+          opening_state_version: openingStateVersion,
         };
       } else {
         cursor = suppliedCursor;
         if (cursor.user_id !== profile.user_id) throw invalidLedgerExportCursor();
-        const current = Array.from(this.state.storage.sql.exec(
-          `SELECT COUNT(*) AS ledger_count
-             FROM user_ledger
-            WHERE rowid <= ?`,
-          cursor.high_water_sequence,
-        ))[0] as { ledger_count?: unknown } | undefined;
-        if (current?.ledger_count !== cursor.ledger_count) {
-          throw new StateApiError(
-            409,
-            "ledger_snapshot_changed",
-            "User ledger changed during export; restart the traversal",
-          );
-        }
       }
 
       const rows = Array.from(this.state.storage.sql.exec(
-        `SELECT rowid AS ledger_sequence,
-                schema_version, mutation_key, mutation_id, entry_type, user_id, request_id,
-                amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
-           FROM user_ledger
-          WHERE rowid > ? AND rowid <= ?
-          ORDER BY rowid ASC
+        `SELECT ledger_sequence,
+                state_version, schema_version, mutation_key, mutation_id, entry_type, user_id,
+                request_id, amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
+           FROM (
+             SELECT rowid AS ledger_sequence, state_version, schema_version,
+                    mutation_key, mutation_id, entry_type, user_id,
+                    request_id, amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
+               FROM user_ledger
+             UNION ALL
+             SELECT ledger_sequence, state_version, 1 AS schema_version, mutation_key, mutation_id,
+                    'enabled_change' AS entry_type, user_id, NULL AS request_id,
+                    0 AS amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
+               FROM user_ledger_tombstones
+           )
+          WHERE ledger_sequence > ? AND ledger_sequence <= ?
+          ORDER BY ledger_sequence ASC
           LIMIT ?`,
         cursor.after_sequence,
         cursor.high_water_sequence,
         limit + 1,
       )) as unknown as UserLedgerExportRow[];
       const hasMore = rows.length > limit;
-      const page = rows.slice(0, limit).map((row) => ({
-        ledger_sequence: requirePersistedSequence(row.ledger_sequence),
-        ...toLedgerEntry(row),
-      }));
+      const page = rows.slice(0, limit).map((row) => {
+        const ledgerSequence = requirePersistedSequence(row.ledger_sequence);
+        const derivedVersion = checkedLedgerVersion(cursor.opening_state_version, ledgerSequence);
+        if (row.state_version !== null && row.state_version !== derivedVersion) {
+          throw unrecoverableLedgerStateVersion();
+        }
+        return {
+          ledger_sequence: ledgerSequence,
+          state_version: derivedVersion,
+          ...toLedgerEntry(row),
+        };
+      });
       const last = page.at(-1);
       if (hasMore && last === undefined) {
         throw new StateMachineError("invalid_persisted_state", "User ledger export did not advance");
@@ -386,8 +392,8 @@ export class UserStateDO {
         now_ms: nowMs,
       });
       this.persistProfile(profile);
-      this.appendLedgerEntry(ledgerEntry);
       this.setStateVersion(command.initial_state_version);
+      this.appendLedgerEntry(ledgerEntry, command.initial_state_version);
       this.appendStateProjection(
         profile,
         command.initial_state_version,
@@ -474,8 +480,8 @@ export class UserStateDO {
         now_ms: nowMs,
       });
       this.persistProfile(nextProfile);
-      this.appendLedgerEntry(ledgerEntry);
       const stateVersion = this.advanceStateVersion();
+      this.appendLedgerEntry(ledgerEntry, stateVersion);
       this.appendStateProjection(
         nextProfile,
         stateVersion,
@@ -552,6 +558,7 @@ export class UserStateDO {
         });
       }
 
+      let rollbackKeyToDelete: string | null = null;
       if (command.rollback_mutation_id !== undefined) {
         const rollbackKey = `enabled:${command.rollback_mutation_id}`;
         const rollbackMutation = this.loadLedgerEntry(rollbackKey);
@@ -566,10 +573,18 @@ export class UserStateDO {
             "The enabled-state mutation to roll back was not found",
           );
         }
-        this.state.storage.sql.exec(
-          "DELETE FROM user_ledger WHERE mutation_key = ?",
-          rollbackKey,
-        );
+        const rollbackRecord = this.loadLedgerRecord(rollbackKey);
+        if (rollbackRecord === null) {
+          throw new StateMachineError(
+            "ledger_state_version_unrecoverable",
+            "Enabled-state ledger version cannot be recovered safely",
+          );
+        }
+        if (rollbackRecord.state_version === null) {
+          rollbackRecord.state_version = this.deriveLegacyLedgerStateVersion(rollbackRecord);
+        }
+        this.appendLedgerTombstone(rollbackRecord, nowMs);
+        rollbackKeyToDelete = rollbackKey;
       }
 
       const nextProfile: UserProfileState = {
@@ -585,8 +600,14 @@ export class UserStateDO {
         now_ms: nowMs,
       });
       this.persistProfile(nextProfile);
-      this.appendLedgerEntry(ledgerEntry);
       const stateVersion = this.advanceStateVersion();
+      this.appendLedgerEntry(ledgerEntry, stateVersion);
+      if (rollbackKeyToDelete !== null) {
+        this.state.storage.sql.exec(
+          "DELETE FROM user_ledger WHERE mutation_key = ?",
+          rollbackKeyToDelete,
+        );
+      }
       this.appendStateProjection(nextProfile, stateVersion, command.mutation_id, nowMs);
       return json({
         schema_version: STATE_SCHEMA_VERSION,
@@ -637,7 +658,11 @@ export class UserStateDO {
           balance_after_micros: transition.state.profile.balance_micros,
           now_ms: nowMs,
         });
-        this.appendLedgerEntry(ledgerEntry);
+        const nextStateVersion = this.loadStateVersion() + 1;
+        if (!Number.isSafeInteger(nextStateVersion)) {
+          throw new StateMachineError("state_version_exhausted", "User state version is exhausted");
+        }
+        this.appendLedgerEntry(ledgerEntry, nextStateVersion);
         financialEvent = createFinancialProjection(
           ledgerEntry,
           profile,
@@ -755,6 +780,7 @@ export class UserStateDO {
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS user_ledger (
         mutation_key TEXT PRIMARY KEY,
+        state_version INTEGER CHECK (state_version IS NULL OR state_version >= 0),
         schema_version INTEGER NOT NULL CHECK (schema_version = 1),
         mutation_id TEXT NOT NULL,
         entry_type TEXT NOT NULL CHECK (
@@ -781,6 +807,14 @@ export class UserStateDO {
         )
       ) STRICT
     `);
+    const ledgerColumns = Array.from(
+      this.state.storage.sql.exec("PRAGMA table_info(user_ledger)"),
+    ) as Array<{ name?: string }>;
+    if (!ledgerColumns.some((column) => column.name === "state_version")) {
+      this.state.storage.sql.exec(
+        "ALTER TABLE user_ledger ADD COLUMN state_version INTEGER CHECK (state_version IS NULL OR state_version >= 0)",
+      );
+    }
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS user_requests (
         request_id TEXT PRIMARY KEY,
@@ -847,6 +881,24 @@ export class UserStateDO {
       `CREATE INDEX IF NOT EXISTS idx_user_ledger_recent
          ON user_ledger(created_at_ms DESC, mutation_key DESC)`,
     );
+    this.state.storage.sql.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_ledger_state_version
+         ON user_ledger(state_version)
+        WHERE state_version IS NOT NULL`,
+    );
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS user_ledger_tombstones (
+        state_version INTEGER PRIMARY KEY CHECK (state_version >= 0),
+        ledger_sequence INTEGER NOT NULL UNIQUE CHECK (ledger_sequence > 0),
+        mutation_key TEXT NOT NULL,
+        mutation_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        balance_after_micros INTEGER NOT NULL CHECK (balance_after_micros >= 0),
+        enabled_after INTEGER NOT NULL CHECK (enabled_after IN (0, 1)),
+        created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+        tombstoned_at_ms INTEGER NOT NULL CHECK (tombstoned_at_ms >= 0)
+      ) STRICT
+    `);
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS user_outbox (
         event_id TEXT PRIMARY KEY,
@@ -1003,25 +1055,78 @@ export class UserStateDO {
   }
 
   private loadLedgerEntry(mutationKey: string): UserLedgerEntry | null {
+    const row = this.loadLedgerRecord(mutationKey);
+    return row === null ? null : toLedgerEntry(row);
+  }
+
+  private loadLedgerRecord(mutationKey: string): UserLedgerRecord | null {
     const row = Array.from(
       this.state.storage.sql.exec(
-        `SELECT schema_version, mutation_key, mutation_id, entry_type, user_id, request_id,
+        `SELECT rowid AS ledger_sequence, state_version, schema_version,
+                mutation_key, mutation_id, entry_type, user_id, request_id,
                 amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
            FROM user_ledger
           WHERE mutation_key = ?`,
         mutationKey,
       ),
-    )[0] as unknown as UserLedgerRow | undefined;
-    return row === undefined ? null : toLedgerEntry(row);
+    )[0] as unknown as UserLedgerRecord | undefined;
+    return row ?? null;
   }
 
-  private appendLedgerEntry(entry: UserLedgerEntry): void {
+  private loadLedgerExportRow(ledgerSequence: number): UserLedgerExportRow | null {
+    const row = Array.from(this.state.storage.sql.exec(
+      `SELECT ledger_sequence, state_version, schema_version, mutation_key, mutation_id,
+              entry_type, user_id, request_id, amount_delta_micros,
+              balance_after_micros, enabled_after, created_at_ms
+         FROM (
+           SELECT rowid AS ledger_sequence, state_version, schema_version, mutation_key,
+                  mutation_id, entry_type, user_id, request_id, amount_delta_micros,
+                  balance_after_micros, enabled_after, created_at_ms
+             FROM user_ledger
+           UNION ALL
+           SELECT ledger_sequence, state_version, 1, mutation_key, mutation_id,
+                  'enabled_change', user_id, NULL, 0,
+                  balance_after_micros, enabled_after, created_at_ms
+             FROM user_ledger_tombstones
+         )
+        WHERE ledger_sequence = ?
+        LIMIT 2`,
+      ledgerSequence,
+    )) as unknown as UserLedgerExportRow[];
+    if (row.length > 1) throw unrecoverableLedgerStateVersion();
+    return row[0] ?? null;
+  }
+
+  private deriveLegacyLedgerStateVersion(record: UserLedgerRecord): number {
+    const opening = this.loadLedgerExportRow(1);
+    const highWater = this.loadLedgerHighWater();
+    const openingVersion = requireOpeningStateVersion(
+      opening,
+      this.loadStateVersion() === highWater - 1 ? 0 : null,
+    );
+    const derived = checkedLedgerVersion(openingVersion, record.ledger_sequence);
+    if (derived > this.loadStateVersion()) throw unrecoverableLedgerStateVersion();
+    return derived;
+  }
+
+  private loadLedgerHighWater(): number {
+    const row = Array.from(this.state.storage.sql.exec(
+      `SELECT MAX(
+                COALESCE((SELECT MAX(rowid) FROM user_ledger), 0),
+                COALESCE((SELECT MAX(ledger_sequence) FROM user_ledger_tombstones), 0)
+              ) AS high_water_sequence`,
+    ))[0] as { high_water_sequence?: unknown } | undefined;
+    return requirePersistedHighWater(row?.high_water_sequence);
+  }
+
+  private appendLedgerEntry(entry: UserLedgerEntry, stateVersion: number): void {
     this.state.storage.sql.exec(
       `INSERT INTO user_ledger (
-         mutation_key, schema_version, mutation_id, entry_type, user_id, request_id,
+         mutation_key, state_version, schema_version, mutation_id, entry_type, user_id, request_id,
          amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       entry.mutation_key,
+      stateVersion,
       entry.schema_version,
       entry.mutation_id,
       entry.entry_type,
@@ -1031,6 +1136,30 @@ export class UserStateDO {
       entry.balance_after_micros,
       entry.enabled_after === null ? null : entry.enabled_after ? 1 : 0,
       entry.created_at_ms,
+    );
+  }
+
+  private appendLedgerTombstone(entry: UserLedgerRecord, nowMs: number): void {
+    if (entry.state_version === null) {
+      throw new StateMachineError(
+        "ledger_state_version_unrecoverable",
+        "Enabled-state ledger version cannot be recovered safely",
+      );
+    }
+    this.state.storage.sql.exec(
+      `INSERT INTO user_ledger_tombstones (
+         state_version, ledger_sequence, mutation_key, mutation_id, user_id,
+         balance_after_micros, enabled_after, created_at_ms, tombstoned_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      entry.state_version,
+      entry.ledger_sequence,
+      entry.mutation_key,
+      entry.mutation_id,
+      entry.user_id,
+      entry.balance_after_micros,
+      entry.enabled_after,
+      entry.created_at_ms,
+      nowMs,
     );
   }
 
@@ -1504,6 +1633,7 @@ function decodeLedgerExportCursor(raw: string): UserLedgerExportCursor {
         "after_sequence",
         "high_water_sequence",
         "ledger_count",
+        "opening_state_version",
         "snapshot_balance_micros",
         "snapshot_spend_debt_micros",
         "snapshot_state_version",
@@ -1515,10 +1645,15 @@ function decodeLedgerExportCursor(raw: string): UserLedgerExportCursor {
       !isNonNegativeSafeInteger(value.after_sequence) ||
       !isNonNegativeSafeInteger(value.high_water_sequence) ||
       !isNonNegativeSafeInteger(value.ledger_count) ||
+      !isNonNegativeSafeInteger(value.opening_state_version) ||
       !isNonNegativeSafeInteger(value.snapshot_state_version) ||
       !isNonNegativeSafeInteger(value.snapshot_balance_micros) ||
       !isNonNegativeSafeInteger(value.snapshot_spend_debt_micros) ||
       (value.after_sequence as number) > (value.high_water_sequence as number) ||
+      checkedLedgerVersion(
+        value.opening_state_version as number,
+        value.high_water_sequence as number,
+      ) !== value.snapshot_state_version ||
       ((value.ledger_count as number) === 0) !== ((value.high_water_sequence as number) === 0)
     ) throw invalidLedgerExportCursor();
     return value as UserLedgerExportCursor;
@@ -1537,6 +1672,47 @@ function requirePersistedSequence(value: unknown): number {
     throw new StateMachineError("invalid_persisted_state", "User ledger sequence is invalid");
   }
   return value as number;
+}
+
+function requirePersistedHighWater(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new StateMachineError("invalid_persisted_state", "User ledger export metadata is invalid");
+  }
+  return value as number;
+}
+
+function requireOpeningStateVersion(
+  opening: UserLedgerExportRow | null,
+  inferred: number | null = null,
+): number {
+  if (
+    opening === null || opening.ledger_sequence !== 1 ||
+    opening.entry_type !== "opening_balance" || opening.request_id !== null ||
+    opening.enabled_after === null || opening.amount_delta_micros !== opening.balance_after_micros
+  ) throw unrecoverableLedgerStateVersion();
+  if (opening.state_version !== null) return opening.state_version;
+  const match = /^d1-user:(0|[1-9]\d*)$/.exec(opening.mutation_id);
+  if (match !== null) {
+    const value = Number(match[1]);
+    if (Number.isSafeInteger(value)) return value;
+  }
+  if (opening.mutation_id.startsWith("admin-create:")) return 0;
+  if (inferred !== null) return inferred;
+  throw unrecoverableLedgerStateVersion();
+}
+
+function checkedLedgerVersion(openingStateVersion: number, ledgerSequence: number): number {
+  const value = openingStateVersion + ledgerSequence - 1;
+  if (!Number.isSafeInteger(value) || value < 0) throw unrecoverableLedgerStateVersion();
+  return value;
+}
+
+function unrecoverableLedgerStateVersion(): StateApiError {
+  return new StateApiError(
+    409,
+    "ledger_state_version_unrecoverable",
+    "Historical ledger state versions cannot be recovered from retained evidence",
+  );
 }
 
 function invalidLedgerExportCursor(): StateApiError {
