@@ -115,6 +115,7 @@ async function fixture(emailVerificationEnabled = false): Promise<Fixture> {
     USER_STATE: {} as DurableObjectNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
     AUTH_RATE_LIMIT: limiter as unknown as DurableObjectNamespace,
+    EMAIL_DELIVERY: { fetch: async () => new Response(null, { status: 202 }) } as unknown as Fetcher,
   } satisfies Env
   return { raw, env, queue, authorization }
 }
@@ -836,6 +837,55 @@ describe('Worker-native TOTP HTTP contract', () => {
       `SELECT id FROM user_totp_email_challenges WHERE user_id = 'alice'`,
     ).get().id).toBe(currentId)
     expect(test.queue.events).toHaveLength(5)
+  })
+
+  it('makes missing TOTP email delivery a terminal, content-free Queue outcome', async () => {
+    const test = await fixture(true)
+    expect((await api(test, '/api/v1/user/totp/send-code', {
+      user: 'alice', body: {},
+    })).status).toBe(200)
+    const event = test.queue.events.at(-1) as TotpEmailVerificationEvent
+    delete test.env.EMAIL_DELIVERY
+    const message = {
+      id: 'missing-totp-email-binding', timestamp: new Date(), body: event,
+      attempts: 1, ack: vi.fn(), retry: vi.fn(),
+    }
+
+    await consumeEvents(
+      { queue: 'events', messages: [message] } as unknown as MessageBatch<unknown>,
+      test.env,
+    )
+
+    expect(message.ack).toHaveBeenCalledOnce()
+    expect(message.retry).not.toHaveBeenCalled()
+    expect(test.raw.prepare(
+      `SELECT delivery_state, last_delivery_error
+         FROM user_totp_email_challenges WHERE id = ?`,
+    ).get(event.payload.challenge_id)).toEqual({
+      delivery_state: 'failed',
+      last_delivery_error: 'email_delivery_not_configured',
+    })
+    expect(JSON.stringify(test.raw.prepare(
+      `SELECT * FROM user_totp_email_challenges WHERE id = ?`,
+    ).get(event.payload.challenge_id))).not.toContain(event.payload.verification_code)
+  })
+
+  it('fails before creating a TOTP email challenge without a delivery binding', async () => {
+    const test = await fixture(true)
+    delete test.env.EMAIL_DELIVERY
+
+    const response = await api(test, '/api/v1/user/totp/send-code', {
+      user: 'alice', body: {},
+    })
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'TOTP_EMAIL_DELIVERY_UNAVAILABLE',
+    })
+    expect(test.queue.events).toHaveLength(0)
+    expect(test.raw.prepare(
+      `SELECT count(*) AS count FROM user_totp_email_challenges`,
+    ).get()).toEqual({ count: 0 })
   })
 
   it('reports the feature unavailable without weakening an existing credential', async () => {

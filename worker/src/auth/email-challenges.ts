@@ -4,6 +4,11 @@ import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import {
+  deliverPlatformEmail,
+  emailDeliveryFailure,
+  hasEmailDeliveryBinding,
+} from '../email/delivery'
 import { authenticateUserRequest, findUserById, publicUser, type UserRow } from './handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
 import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
@@ -75,7 +80,11 @@ export type EmailChallengeDeliveryEvent = PlatformEvent<EmailChallengeDeliveryPa
   aggregate_type: 'user' | 'email_identity'
 }
 
-export type EmailChallengeDeliveryResult = 'delivered' | 'already_delivered' | 'stale'
+export type EmailChallengeDeliveryResult =
+  | 'delivered'
+  | 'already_delivered'
+  | 'stale'
+  | 'permanently_failed'
 
 export interface RegistrationEmailChallengeConsumption {
   /** Put this statement before the user INSERT in the same D1 batch. */
@@ -105,6 +114,7 @@ export async function requestRegistrationEmailVerification(
       context.env,
       'registration_email_verification',
     )
+    requireEmailDeliveryBinding(context.env)
     requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
     const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'register')
     await verifyTurnstile(context, settings, body.turnstile_token)
@@ -214,6 +224,7 @@ export async function requestPasswordReset(context: Context<AuthBindings>): Prom
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
     const settings = await requireEmailChallengeSettings(context.env, 'password_reset')
+    requireEmailDeliveryBinding(context.env)
     const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'login')
     await verifyTurnstile(context, settings, body.turnstile_token)
     await commitAuthRateLimitAttempt(context.env, rateLimit)
@@ -310,6 +321,7 @@ export async function requestEmailVerification(context: Context<AuthBindings>): 
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const settings = await requireEmailChallengeSettings(context.env, 'email_verification')
+    requireEmailDeliveryBinding(context.env)
     const rateLimit = await checkAuthRateLimit(
       context.env,
       context.req.raw,
@@ -335,6 +347,7 @@ export async function requestEmailIdentityBindingCode(
     const body = await readJsonObject(context.req.raw)
     const email = requireBindableEmail(body.email)
     const settings = await readEmailChallengeSettings(context.env)
+    requireEmailDeliveryBinding(context.env)
     requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
     const rateLimit = await checkAuthRateLimit(
       context.env,
@@ -732,55 +745,36 @@ export async function consumeEmailChallengeDelivery(
     }
     return 'delivered'
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown delivery failure'
+    const failure = emailDeliveryFailure(error)
     await env.DB.prepare(
       `UPDATE ${challengeTable}
           SET delivery_state = 'failed', delivery_lease_id = NULL,
               delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(message.slice(0, DELIVERY_ERROR_MAX_LENGTH), Date.now(), challenge.id, leaseId).run()
+    ).bind(failure.code.slice(0, DELIVERY_ERROR_MAX_LENGTH), Date.now(), challenge.id, leaseId).run()
+    if (!failure.retryable) return 'permanently_failed'
     throw error
   }
 }
 
 async function deliverEmailChallenge(event: EmailChallengeDeliveryEvent, env: Env): Promise<void> {
-  if (env.SEND_EMAIL !== undefined) {
-    const content = renderEmailChallenge(event)
-    await env.SEND_EMAIL.send({
-      from: requireEmailFromAddress(env.EMAIL_FROM_ADDRESS),
-      to: event.payload.recipient_email,
-      subject: content.subject,
-      text: content.text,
-      html: content.html,
-    })
-    return
-  }
-
-  if (env.EMAIL_DELIVERY !== undefined) {
-    const response = await env.EMAIL_DELIVERY.fetch(new Request(
-      'https://email-delivery.internal/v1/challenges',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'idempotency-key': event.event_id,
-        },
-        body: JSON.stringify({
-          recipient_email: event.payload.recipient_email,
-          purpose: event.payload.purpose,
-          token: event.payload.token,
-          action_url: event.payload.action_url,
-          site_name: event.payload.site_name,
-          locale: event.payload.locale,
-          expires_at_ms: event.payload.expires_at_ms,
-        }),
-      },
-    ))
-    if (!response.ok) throw new Error(`email delivery Worker returned ${response.status}`)
-    return
-  }
-
-  throw new Error('No email delivery binding is configured (SEND_EMAIL or EMAIL_DELIVERY)')
+  const content = renderEmailChallenge(event)
+  await deliverPlatformEmail({
+    eventId: event.event_id,
+    recipient: event.payload.recipient_email,
+    subject: content.subject,
+    text: content.text,
+    html: content.html,
+    compatibilityPayload: {
+      recipient_email: event.payload.recipient_email,
+      purpose: event.payload.purpose,
+      token: event.payload.token,
+      action_url: event.payload.action_url,
+      site_name: event.payload.site_name,
+      locale: event.payload.locale,
+      expires_at_ms: event.payload.expires_at_ms,
+    },
+  }, env)
 }
 
 function renderEmailChallenge(event: EmailChallengeDeliveryEvent): {
@@ -818,17 +812,6 @@ function renderEmailChallenge(event: EmailChallengeDeliveryEvent): {
   return { subject, text, html }
 }
 
-function requireEmailFromAddress(value: unknown): string {
-  if (typeof value !== 'string') {
-    throw new Error('EMAIL_FROM_ADDRESS is required when SEND_EMAIL is configured')
-  }
-  const email = value.trim().toLowerCase()
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error('EMAIL_FROM_ADDRESS must be a valid email address')
-  }
-  return email
-}
-
 function requireEmailActionUrl(value: string): string {
   let url: URL
   try {
@@ -840,6 +823,16 @@ function requireEmailActionUrl(value: string): string {
     throw new Error('Email challenge action URL must use HTTP or HTTPS')
   }
   return url.toString()
+}
+
+function requireEmailDeliveryBinding(env: Env): void {
+  if (hasEmailDeliveryBinding(env)) return
+  throw new GatewayError(
+    503,
+    'email_delivery_unavailable',
+    'Email delivery is unavailable',
+    'server_error',
+  )
 }
 
 function escapeHtml(value: string): string {

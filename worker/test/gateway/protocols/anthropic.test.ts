@@ -122,6 +122,99 @@ describe('Anthropic Messages request codec', () => {
     })
   })
 
+  it('preserves valid cache breakpoints for native Anthropic forwarding and caps them at four', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 128,
+      system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'two', cache_control: { type: 'ephemeral', ttl: '5m' } },
+          { type: 'text', text: 'three', cache_control: { type: 'ephemeral' } },
+        ],
+      }],
+      tools: [{
+        name: 'lookup',
+        input_schema: { type: 'object' },
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      }],
+    })
+
+    expect(anthropic.system).toEqual([
+      { type: 'text', text: 'system', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(anthropic.messages[0].content).toEqual([
+      { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'two', cache_control: { type: 'ephemeral', ttl: '5m' } },
+      { type: 'text', text: 'three', cache_control: { type: 'ephemeral' } },
+    ])
+    expect(anthropic.tools?.[0]).not.toHaveProperty('cache_control')
+  })
+
+  it('rejects malformed Anthropic cache controls', () => {
+    const base = {
+      model: 'claude-public',
+      max_tokens: 128,
+      messages: [{ role: 'user', content: 'Hello' }],
+    }
+    expect(() => parseAnthropicMessagesRequest({
+      ...base,
+      system: [{ type: 'text', text: 'system', cache_control: { type: 'persistent' } }],
+    })).toThrowError(/cache_control\.type/)
+    expect(() => parseAnthropicMessagesRequest({
+      ...base,
+      tools: [{ name: 'lookup', input_schema: {}, cache_control: { type: 'ephemeral', ttl: '10m' } }],
+    })).toThrowError(/cache_control\.ttl/)
+  })
+
+  it('replays signed Anthropic thinking as encrypted Responses reasoning in turn order', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: 'Hello' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'plan', signature: 'enc-rs-1' },
+            { type: 'thinking', thinking: 'unsigned is not replayable', signature: '' },
+            { type: 'thinking', thinking: '', signature: 'gAAAAforeign-provider' },
+            { type: 'text', text: 'Hi!' },
+            { type: 'tool_use', id: 'toolu_1', name: 'lookup', input: { q: 'x' } },
+          ],
+        },
+      ],
+    })
+
+    expect(toOpenAIResponsesRequest(anthropic, 'grok-upstream').input).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Hello' }] },
+      { type: 'reasoning', encrypted_content: 'enc-rs-1' },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hi!' }] },
+      { type: 'function_call', call_id: 'toolu_1', name: 'lookup', arguments: '{"q":"x"}' },
+    ])
+  })
+
+  it('replays redacted Anthropic thinking as encrypted Responses reasoning', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 128,
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'redacted_thinking', data: 'redacted-provider-payload' },
+          { type: 'text', text: 'Continuing.' },
+        ],
+      }],
+    })
+
+    expect(toOpenAIResponsesRequest(anthropic, 'gpt-upstream').input).toEqual([
+      { type: 'reasoning', encrypted_content: 'redacted-provider-payload' },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Continuing.' }] },
+    ])
+  })
+
   it('rejects malformed Anthropic generation controls', () => {
     const base = {
       model: 'claude-public',
@@ -339,6 +432,49 @@ describe('Anthropic Messages request codec', () => {
 })
 
 describe('Responses SSE to Anthropic Messages codec', () => {
+  it('streams Responses reasoning as signed Anthropic thinking', () => {
+    const codec = new ResponsesToAnthropicEventCodec('claude-public')
+    const events = [
+      ...codec.push({ type: 'response.created', response: { id: 'resp_reasoning' } }),
+      ...codec.push({
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'reasoning', id: 'rs_1' },
+      }),
+      ...codec.push({
+        type: 'response.reasoning_summary_text.delta',
+        output_index: 0,
+        delta: 'thinking...',
+      }),
+      ...codec.push({
+        type: 'response.reasoning_summary_text.done',
+        output_index: 0,
+      }),
+      ...codec.push({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc-stream-1' },
+      }),
+      ...codec.push({
+        type: 'response.completed',
+        response: { status: 'completed', usage: { input_tokens: 2, output_tokens: 1 } },
+      }),
+    ]
+
+    expect(events.map((event) => event.type)).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ])
+    expect(events[1]).toMatchObject({ content_block: { type: 'thinking', thinking: '' } })
+    expect(events[2]).toMatchObject({ delta: { type: 'thinking_delta', thinking: 'thinking...' } })
+    expect(events[3]).toMatchObject({ delta: { type: 'signature_delta', signature: 'enc-stream-1' } })
+  })
+
   it('wraps custom input as valid Anthropic tool JSON and flattens namespace names', () => {
     const codec = new ResponsesToAnthropicEventCodec('claude-public')
     const events = [
@@ -629,6 +765,33 @@ describe('Chat Completions SSE to Anthropic Messages codec', () => {
 })
 
 describe('Anthropic Messages response codec', () => {
+  it('maps buffered Responses reasoning to a signed Anthropic thinking block', () => {
+    const result = responsesToAnthropicMessage(
+      {
+        id: 'resp_reasoning',
+        status: 'completed',
+        output: [
+          {
+            type: 'reasoning',
+            encrypted_content: 'enc-rs-roundtrip',
+            summary: [
+              { type: 'summary_text', text: 'Thinking ' },
+              { type: 'summary_text', text: 'carefully.' },
+            ],
+          },
+          { type: 'message', content: [{ type: 'output_text', text: '42' }] },
+        ],
+        usage: { input_tokens: 3, output_tokens: 2 },
+      },
+      'claude-public',
+    )
+
+    expect(result.content).toEqual([
+      { type: 'thinking', thinking: 'Thinking carefully.', signature: 'enc-rs-roundtrip' },
+      { type: 'text', text: '42' },
+    ])
+  })
+
   it('maps buffered custom and namespace calls to stable Anthropic tool_use blocks', () => {
     const result = responsesToAnthropicMessage(
       {

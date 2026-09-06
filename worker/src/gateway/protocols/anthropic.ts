@@ -30,6 +30,12 @@ export class ProtocolValidationError extends Error {
 export interface AnthropicTextBlock {
   type: 'text'
   text: string
+  cache_control?: AnthropicCacheControl
+}
+
+export interface AnthropicCacheControl {
+  type: 'ephemeral'
+  ttl?: '5m' | '1h'
 }
 
 export type AnthropicSystem = string | AnthropicTextBlock[]
@@ -39,6 +45,7 @@ export interface AnthropicToolUseBlock {
   id: string
   name: string
   input: JsonObject
+  cache_control?: AnthropicCacheControl
 }
 
 export interface AnthropicImageBlock {
@@ -48,6 +55,7 @@ export interface AnthropicImageBlock {
     media_type: string
     data: string
   }
+  cache_control?: AnthropicCacheControl
 }
 
 export interface AnthropicToolResultBlock {
@@ -55,6 +63,20 @@ export interface AnthropicToolResultBlock {
   tool_use_id: string
   content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
   is_error: boolean
+  cache_control?: AnthropicCacheControl
+}
+
+export interface AnthropicThinkingBlock {
+  type: 'thinking'
+  thinking: string
+  signature: string
+  cache_control?: AnthropicCacheControl
+}
+
+export interface AnthropicRedactedThinkingBlock {
+  type: 'redacted_thinking'
+  data: string
+  cache_control?: AnthropicCacheControl
 }
 
 export type AnthropicContentBlock =
@@ -62,6 +84,8 @@ export type AnthropicContentBlock =
   | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
+  | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
 
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -72,6 +96,7 @@ export interface AnthropicTool {
   name: string
   description?: string
   input_schema: JsonObject
+  cache_control?: AnthropicCacheControl
 }
 
 export type AnthropicToolChoice =
@@ -166,7 +191,7 @@ export interface AnthropicMessageResponse {
   type: 'message'
   role: 'assistant'
   model: string
-  content: Array<AnthropicTextBlock | AnthropicToolUseBlock>
+  content: Array<AnthropicTextBlock | AnthropicThinkingBlock | AnthropicToolUseBlock>
   stop_reason: 'end_turn' | 'tool_use' | 'max_tokens'
   stop_sequence: null
   usage: AnthropicUsage
@@ -243,7 +268,7 @@ export function parseAnthropicMessagesRequest(value: unknown): AnthropicMessages
   const outputConfig = root.output_config === undefined
     ? undefined
     : parseOutputConfig(root.output_config, '$.output_config')
-  return {
+  const request: AnthropicMessagesRequest = {
     model,
     max_tokens: maxTokens,
     messages,
@@ -259,6 +284,8 @@ export function parseAnthropicMessagesRequest(value: unknown): AnthropicMessages
     ...(thinking === undefined ? {} : { thinking }),
     ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
   }
+  capAnthropicCacheBreakpoints(request.system, request.messages, request.tools)
+  return request
 }
 
 export function parseAnthropicCountTokensRequest(value: unknown): AnthropicCountTokensRequest {
@@ -292,13 +319,15 @@ export function parseAnthropicCountTokensRequest(value: unknown): AnthropicCount
   const toolChoice = root.tool_choice === undefined
     ? undefined
     : parseToolChoice(root.tool_choice, '$.tool_choice')
-  return {
+  const request: AnthropicCountTokensRequest = {
     model,
     messages,
     ...(system === undefined ? {} : { system }),
     ...(tools === undefined ? {} : { tools }),
     ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
   }
+  capAnthropicCacheBreakpoints(request.system, request.messages, request.tools)
+  return request
 }
 
 export function toOpenAIResponsesRequest(
@@ -406,12 +435,33 @@ export function responsesToAnthropicMessage(
   clientModel: string,
 ): AnthropicMessageResponse {
   const response = objectAt(value, 'response')
-  const content: Array<AnthropicTextBlock | AnthropicToolUseBlock> = []
+  const content: Array<AnthropicTextBlock | AnthropicThinkingBlock | AnthropicToolUseBlock> = []
   let hasToolUse = false
   const output = response.output === undefined ? [] : arrayAt(response.output, 'response.output', MAX_CONTENT_BLOCKS)
   for (let index = 0; index < output.length; index += 1) {
     const item = objectAt(output[index], `response.output[${index}]`)
-    if (item.type === 'message') {
+    if (item.type === 'reasoning') {
+      const summary = item.summary === undefined
+        ? []
+        : arrayAt(item.summary, `response.output[${index}].summary`, MAX_CONTENT_BLOCKS)
+      let thinking = ''
+      for (let summaryIndex = 0; summaryIndex < summary.length; summaryIndex += 1) {
+        const part = objectAt(summary[summaryIndex], `response.output[${index}].summary[${summaryIndex}]`)
+        if (part.type === 'summary_text' && typeof part.text === 'string' && part.text !== '') {
+          thinking += boundedString(
+            part.text,
+            `response.output[${index}].summary[${summaryIndex}].text`,
+            MAX_TEXT_CHARS - thinking.length,
+          )
+        }
+      }
+      const signature = typeof item.encrypted_content === 'string'
+        ? boundedString(item.encrypted_content, `response.output[${index}].encrypted_content`, MAX_TEXT_CHARS)
+        : ''
+      if (thinking !== '' || signature.trim() !== '') {
+        content.push({ type: 'thinking', thinking, signature })
+      }
+    } else if (item.type === 'message') {
       const parts = item.content === undefined
         ? []
         : arrayAt(item.content, `response.output[${index}].content`, MAX_CONTENT_BLOCKS)
@@ -557,7 +607,8 @@ export class ResponsesToAnthropicEventCodec {
   private messageStopped = false
   private responseId = ''
   private blockIndex = 0
-  private currentBlock: 'text' | 'tool_use' | null = null
+  private currentBlock: 'text' | 'thinking' | 'tool_use' | null = null
+  private currentReasoningOutputIndex: number | null = null
   private readonly outputBlocks = new Map<number, number>()
   private readonly outputKinds = new Map<number, 'function' | 'custom'>()
   private readonly outputBlocksWithArgumentDeltas = new Set<number>()
@@ -579,6 +630,12 @@ export class ResponsesToAnthropicEventCodec {
         return this.start(event.response)
       case 'response.output_item.added':
         return this.outputItemAdded(event)
+      case 'response.reasoning_summary_text.delta':
+      case 'response.reasoning_text.delta':
+        return this.reasoningDelta(event)
+      case 'response.reasoning_summary_text.done':
+      case 'response.reasoning_text.done':
+        return []
       case 'response.output_text.delta':
         return this.textDelta(event)
       case 'response.output_text.done':
@@ -637,6 +694,18 @@ export class ResponsesToAnthropicEventCodec {
 
   private outputItemAdded(event: JsonObject): AnthropicSseEvent[] {
     const item = event.item === undefined ? undefined : objectAt(event.item, 'event.item')
+    if (item?.type === 'reasoning') {
+      const events = this.ensureStarted()
+      events.push(...this.closeBlock())
+      this.currentBlock = 'thinking'
+      this.currentReasoningOutputIndex = nonNegativeIntegerOrZero(event.output_index)
+      events.push({
+        type: 'content_block_start',
+        index: this.blockIndex,
+        content_block: { type: 'thinking', thinking: '' },
+      })
+      return events
+    }
     if (item?.type !== 'function_call' && item?.type !== 'custom_tool_call') return []
     const events = this.ensureStarted()
     events.push(...this.closeBlock())
@@ -654,6 +723,31 @@ export class ResponsesToAnthropicEventCodec {
         id: safeIdentifier(item.call_id, 'event.item.call_id', 'toolu'),
         name: responsesToolName(item, 'event.item'),
         input: {},
+      },
+    })
+    return events
+  }
+
+  private reasoningDelta(event: JsonObject): AnthropicSseEvent[] {
+    if (typeof event.delta !== 'string' || event.delta === '') return []
+    const outputIndex = nonNegativeIntegerOrZero(event.output_index)
+    const events = this.ensureStarted()
+    if (this.currentBlock !== 'thinking' || this.currentReasoningOutputIndex !== outputIndex) {
+      events.push(...this.closeBlock())
+      this.currentBlock = 'thinking'
+      this.currentReasoningOutputIndex = outputIndex
+      events.push({
+        type: 'content_block_start',
+        index: this.blockIndex,
+        content_block: { type: 'thinking', thinking: '' },
+      })
+    }
+    events.push({
+      type: 'content_block_delta',
+      index: this.blockIndex,
+      delta: {
+        type: 'thinking_delta',
+        thinking: boundedString(event.delta, 'event.delta', MAX_TEXT_CHARS),
       },
     })
     return events
@@ -757,6 +851,25 @@ export class ResponsesToAnthropicEventCodec {
   private outputItemDone(event: JsonObject): AnthropicSseEvent[] {
     const item = event.item === undefined ? undefined : objectAt(event.item, 'event.item')
     if (
+      item?.type === 'reasoning' &&
+      this.currentBlock === 'thinking' &&
+      this.currentReasoningOutputIndex === nonNegativeIntegerOrZero(event.output_index)
+    ) {
+      const signature = typeof item.encrypted_content === 'string'
+        ? boundedString(item.encrypted_content, 'event.item.encrypted_content', MAX_TEXT_CHARS)
+        : ''
+      return [
+        ...(signature.trim() === ''
+          ? []
+          : [{
+              type: 'content_block_delta',
+              index: this.blockIndex,
+              delta: { type: 'signature_delta', signature },
+            }]),
+        ...this.closeBlock(),
+      ]
+    }
+    if (
       (item?.type === 'function_call' || item?.type === 'custom_tool_call') &&
       this.currentBlock === 'tool_use'
     ) return this.closeBlock()
@@ -799,6 +912,7 @@ export class ResponsesToAnthropicEventCodec {
   private closeBlock(): AnthropicSseEvent[] {
     if (this.currentBlock === null) return []
     const index = this.blockIndex
+    if (this.currentBlock === 'thinking') this.currentReasoningOutputIndex = null
     this.currentBlock = null
     this.blockIndex += 1
     return [{ type: 'content_block_stop', index }]
@@ -1073,9 +1187,13 @@ function parseTextContent(value: unknown, path: string): string | AnthropicConte
 
 function parseTextBlock(value: unknown, path: string): AnthropicTextBlock {
   const block = objectAt(value, path)
-  exactKeys(block, ['type', 'text'], path)
+  exactKeys(block, ['type', 'text', 'cache_control'], path)
   if (block.type !== 'text') fail(`${path}.type`, 'unsupported content block type')
-  return { type: 'text', text: boundedString(block.text, `${path}.text`, MAX_TEXT_CHARS) }
+  return {
+    type: 'text',
+    text: boundedString(block.text, `${path}.text`, MAX_TEXT_CHARS),
+    ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
+  }
 }
 
 function parseContentBlock(value: unknown, path: string): AnthropicContentBlock {
@@ -1086,22 +1204,41 @@ function parseContentBlock(value: unknown, path: string): AnthropicContentBlock 
     case 'image':
       return parseImageBlock(block, path)
     case 'tool_use': {
-      exactKeys(block, ['type', 'id', 'name', 'input'], path)
+      exactKeys(block, ['type', 'id', 'name', 'input', 'cache_control'], path)
       return {
         type: 'tool_use',
         id: nonEmptyString(block.id, `${path}.id`, 256),
         name: nonEmptyString(block.name, `${path}.name`, 256),
         input: jsonObjectAt(block.input, `${path}.input`),
+        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
       }
     }
     case 'tool_result': {
-      exactKeys(block, ['type', 'tool_use_id', 'content', 'is_error'], path)
+      exactKeys(block, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'], path)
       const content = block.content === undefined ? '(empty)' : parseToolResultContent(block.content, `${path}.content`)
       return {
         type: 'tool_result',
         tool_use_id: nonEmptyString(block.tool_use_id, `${path}.tool_use_id`, 256),
         content,
         is_error: block.is_error === undefined ? false : booleanAt(block.is_error, `${path}.is_error`),
+        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
+      }
+    }
+    case 'thinking': {
+      exactKeys(block, ['type', 'thinking', 'signature', 'cache_control'], path)
+      return {
+        type: 'thinking',
+        thinking: boundedString(block.thinking, `${path}.thinking`, MAX_TEXT_CHARS),
+        signature: boundedString(block.signature, `${path}.signature`, MAX_TEXT_CHARS),
+        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
+      }
+    }
+    case 'redacted_thinking': {
+      exactKeys(block, ['type', 'data', 'cache_control'], path)
+      return {
+        type: 'redacted_thinking',
+        data: nonEmptyString(block.data, `${path}.data`, MAX_TEXT_CHARS),
+        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
       }
     }
     default:
@@ -1125,7 +1262,7 @@ function parseToolResultContent(
 
 function parseImageBlock(value: unknown, path: string): AnthropicImageBlock {
   const block = objectAt(value, path)
-  exactKeys(block, ['type', 'source'], path)
+  exactKeys(block, ['type', 'source', 'cache_control'], path)
   const source = objectAt(block.source, `${path}.source`)
   exactKeys(source, ['type', 'media_type', 'data'], `${path}.source`)
   if (source.type !== 'base64') fail(`${path}.source.type`, 'must be "base64"')
@@ -1140,18 +1277,67 @@ function parseImageBlock(value: unknown, path: string): AnthropicImageBlock {
       media_type: mediaType,
       data: boundedString(source.data, `${path}.source.data`, MAX_TEXT_CHARS),
     },
+    ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
   }
 }
 
 function parseTool(value: unknown, path: string): AnthropicTool {
   const tool = objectAt(value, path)
-  exactKeys(tool, ['name', 'description', 'input_schema'], path)
+  exactKeys(tool, ['name', 'description', 'input_schema', 'cache_control'], path)
   return {
     name: nonEmptyString(tool.name, `${path}.name`, 256),
     ...(tool.description === undefined
       ? {}
       : { description: boundedString(tool.description, `${path}.description`, 16_384) }),
     input_schema: jsonObjectAt(tool.input_schema, `${path}.input_schema`),
+    ...optionalCacheControl(tool.cache_control, `${path}.cache_control`),
+  }
+}
+
+function optionalCacheControl(
+  value: unknown,
+  path: string,
+): { cache_control?: AnthropicCacheControl } {
+  if (value === undefined) return {}
+  const cacheControl = objectAt(value, path)
+  exactKeys(cacheControl, ['type', 'ttl'], path)
+  if (cacheControl.type !== 'ephemeral') fail(`${path}.type`, 'must be "ephemeral"')
+  if (cacheControl.ttl !== undefined && cacheControl.ttl !== '5m' && cacheControl.ttl !== '1h') {
+    fail(`${path}.ttl`, 'must be "5m" or "1h"')
+  }
+  return {
+    cache_control: {
+      type: 'ephemeral',
+      ...(cacheControl.ttl === undefined ? {} : { ttl: cacheControl.ttl }),
+    },
+  }
+}
+
+function capAnthropicCacheBreakpoints(
+  system: AnthropicSystem | undefined,
+  messages: AnthropicMessage[],
+  tools: AnthropicTool[] | undefined,
+): void {
+  let retained = 0
+  const retainOrRemove = (block: { cache_control?: AnthropicCacheControl }): void => {
+    if (block.cache_control === undefined) return
+    if (retained < 4) retained += 1
+    else delete block.cache_control
+  }
+  if (Array.isArray(system)) {
+    for (const block of system) retainOrRemove(block)
+  }
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      retainOrRemove(block)
+      if (block.type === 'tool_result' && Array.isArray(block.content)) {
+        for (const nested of block.content) retainOrRemove(nested)
+      }
+    }
+  }
+  if (tools !== undefined) {
+    for (const tool of tools) retainOrRemove(tool)
   }
 }
 
@@ -1178,6 +1364,12 @@ function messageToResponsesItems(message: AnthropicMessage): Array<Record<string
   }
   if (message.role === 'assistant') {
     const result: Array<Record<string, unknown>> = []
+    for (const block of message.content) {
+      if (block.type !== 'thinking' && block.type !== 'redacted_thinking') continue
+      const signature = (block.type === 'thinking' ? block.signature : block.data).trim()
+      if (signature === '' || signature.startsWith('gAAAA')) continue
+      result.push({ type: 'reasoning', encrypted_content: signature })
+    }
     const text = message.content
       .filter((block): block is AnthropicTextBlock => block.type === 'text')
       .map((block) => block.text)

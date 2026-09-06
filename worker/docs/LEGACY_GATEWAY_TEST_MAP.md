@@ -200,8 +200,9 @@ The following classifications apply test-by-test by behavioral family in
    settlement are covered, while semantic failover and partial-output fixtures remain.
 2. Complete custom/freeform tools, namespace tools, `tool_search` and object
    arguments in both directions.
-3. Add native Anthropic→Responses SSE conversion (including signed thinking,
-   images and cache-control accounting).
+3. Complete Anthropic cache-token accounting and remaining URL/file media
+   variants; v0.34 already covers signed/redacted thinking, bounded cache
+   breakpoints, base64 tool-result images and Responses SSE conversion.
 4. Add production-binding E2E for the remaining embeddings providers and error classes.
 5. Add deployed Worker E2E for complex Claude tools and both cross-provider
    Claude↔Gemini paths.

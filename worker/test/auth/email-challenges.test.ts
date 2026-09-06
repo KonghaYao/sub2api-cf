@@ -17,6 +17,7 @@ import { loginWithPassword, registerWithPassword } from '../../src/auth/handler'
 import { getMyPlatformQuotas } from '../../src/user/platform-quotas'
 import { listUserSubscriptions } from '../../src/user/subscriptions'
 import { recoverPendingSubscriptionState } from '../../src/control/subscriptions'
+import { consumeEvents } from '../../src/gateway/queue'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'email-challenge-test-pepper-is-at-least-32-bytes'
@@ -373,6 +374,29 @@ describe('Worker-native email challenges', () => {
     expect(test.raw.prepare('SELECT count(*) AS count FROM email_challenges').get()).toEqual({ count: 0 })
   })
 
+  it('fails closed and enumeration-safe before issuance when email delivery is not configured', async () => {
+    const known = await fixture()
+    const unknown = await fixture()
+    delete known.env.EMAIL_DELIVERY
+    delete unknown.env.EMAIL_DELIVERY
+
+    const knownResponse = await post(known, '/api/v1/auth/forgot-password', {
+      email: 'alice@example.com',
+    })
+    const unknownResponse = await post(unknown, '/api/v1/auth/forgot-password', {
+      email: 'nobody@example.com',
+    })
+
+    expect(knownResponse.status).toBe(503)
+    expect(unknownResponse.status).toBe(503)
+    await expect(knownResponse.json()).resolves.toMatchObject({ code: 'email_delivery_unavailable' })
+    await expect(unknownResponse.json()).resolves.toMatchObject({ code: 'email_delivery_unavailable' })
+    expect(known.events).toHaveLength(0)
+    expect(unknown.events).toHaveLength(0)
+    expect(known.raw.prepare('SELECT count(*) AS count FROM email_challenges').get()).toEqual({ count: 0 })
+    expect(unknown.raw.prepare('SELECT count(*) AS count FROM email_challenges').get()).toEqual({ count: 0 })
+  })
+
   it('retries the same queued delivery without minting another token and makes successful delivery idempotent', async () => {
     const test = await fixture()
     await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
@@ -384,8 +408,12 @@ describe('Worker-native email challenges', () => {
     })
     ;(test.env as Env & { EMAIL_DELIVERY?: Fetcher }).EMAIL_DELIVERY = failingDelivery
 
-    await expect(consumeEmailChallengeDelivery(event, test.env)).rejects.toThrow('503')
-    await expect(consumeEmailChallengeDelivery(event, test.env)).rejects.toThrow('503')
+    await expect(consumeEmailChallengeDelivery(event, test.env)).rejects.toThrow(
+      'email_delivery_unavailable_503',
+    )
+    await expect(consumeEmailChallengeDelivery(event, test.env)).rejects.toThrow(
+      'email_delivery_unavailable_503',
+    )
     expect(new Set(calls.map((body) => JSON.parse(body).token))).toEqual(new Set([event.payload.token]))
     expect(test.raw.prepare(
       `SELECT generation, delivery_attempts, delivery_state FROM email_challenges WHERE id = ?`,
@@ -433,25 +461,71 @@ describe('Worker-native email challenges', () => {
       subject: expect.stringContaining('password'),
       text: expect.stringContaining(event.payload.token),
       html: expect.stringContaining('&lt;Sub2API&gt; Bcc: attacker@example.com'),
+      headers: { 'X-Sub2API-Delivery-ID': event.event_id },
     })
     expect(String(sent[0].subject)).not.toMatch(/[\r\n]/)
     expect(String(sent[0].html)).toContain('&amp;token=')
     expect(String(sent[0].html)).not.toContain('&token=')
   })
 
-  it('fails explicitly when neither native nor compatibility email delivery is configured', async () => {
+  it('records and acknowledges a deterministic delivery failure without an endless retry', async () => {
     const test = await fixture()
     await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
     const event = test.events[0]
+    delete test.env.EMAIL_DELIVERY
+    const message = {
+      id: 'missing-email-binding', timestamp: new Date(), body: event,
+      ack: vi.fn(), retry: vi.fn(),
+    }
 
-    await expect(consumeEmailChallengeDelivery(event, test.env)).rejects.toThrow(
-      'No email delivery binding is configured',
+    await consumeEvents(
+      { queue: 'events', messages: [message] } as unknown as MessageBatch<unknown>,
+      test.env,
     )
+    expect(message.ack).toHaveBeenCalledOnce()
+    expect(message.retry).not.toHaveBeenCalled()
     expect(test.raw.prepare(
       `SELECT delivery_state, last_delivery_error FROM email_challenges WHERE id = ?`,
     ).get(event.payload.challenge_id)).toEqual({
       delivery_state: 'failed',
-      last_delivery_error: expect.stringContaining('No email delivery binding is configured'),
+      last_delivery_error: 'email_delivery_not_configured',
+    })
+    expect(test.raw.prepare(
+      `SELECT count(*) AS count FROM inbox WHERE event_id = ?`,
+    ).get(event.event_id)).toEqual({ count: 0 })
+  })
+
+  it('retries only transient delivery failure and never logs or persists provider secrets', async () => {
+    const test = await fixture()
+    await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+    const event = test.events[0]
+    const providerSecret = `provider-secret-${event.payload.token}`
+    test.env.SEND_EMAIL = {
+      send: async () => {
+        throw new Error(`Authorization: Bearer ${providerSecret}`)
+      },
+    } as SendEmail
+    test.env.EMAIL_FROM_ADDRESS = 'noreply@example.test'
+    const message = {
+      id: 'transient-native-email', timestamp: new Date(), body: event,
+      ack: vi.fn(), retry: vi.fn(),
+    }
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await consumeEvents(
+      { queue: 'events', messages: [message] } as unknown as MessageBatch<unknown>,
+      test.env,
+    )
+
+    expect(message.ack).not.toHaveBeenCalled()
+    expect(message.retry).toHaveBeenCalledOnce()
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(providerSecret)
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(event.payload.token)
+    expect(test.raw.prepare(
+      `SELECT delivery_state, last_delivery_error FROM email_challenges WHERE id = ?`,
+    ).get(event.payload.challenge_id)).toEqual({
+      delivery_state: 'failed',
+      last_delivery_error: 'email_native_delivery_failed',
     })
   })
 
@@ -681,6 +755,7 @@ async function fixture(siteName = 'Sub2API Test'): Promise<Harness> {
     EVENTS_QUEUE: {
       send: vi.fn(async (event: PlatformEvent) => { events.push(event as EmailChallengeDeliveryEvent) }),
     },
+    EMAIL_DELIVERY: serviceBinding(async () => new Response(null, { status: 202 })),
   } as unknown as Env
 
   const app = new Hono<{ Bindings: Env }>()

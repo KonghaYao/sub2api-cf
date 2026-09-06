@@ -48,6 +48,27 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   export/backfill is still required if pre-0055 history must be retained during
   a production data cutover.
 
+## Completed locally in v0.34
+
+- Anthropic Messages now retains up to four validated cache breakpoints and
+  round-trips signed and redacted thinking through the Responses reasoning
+  contract in buffered and streamed paths. Native Anthropic forwarding keeps
+  the original blocks; no synthetic provider signature is created.
+- Pre-0055 financial history can now be rebuilt through a privileged,
+  environment-bound signed cursor. Each request exports at most 100 frozen DO
+  ledger rows; D1 immutable rows are compared field by field, and completeness
+  is recorded only after version, balance, debt, ledger and projection counts
+  reconcile.
+- Registration, password reset, account binding, notification-email and TOTP
+  delivery share one Cloudflare email boundary. Missing delivery bindings fail
+  before challenge issuance, transient failures retry, permanent failures are
+  acknowledged with content-free error codes, and provider bodies/errors are
+  not written to D1 or logs.
+- A versioned, streaming backup bundle core now validates D1 SQL, DO NDJSON and
+  R2 inventory artifacts with byte counts and SHA-256 digests, rejects unsafe
+  bundle contents, and produces a deterministic D1-to-DO-to-R2 restore plan.
+  Remote resource adapters and an empty-environment drill remain outstanding.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
@@ -56,15 +77,15 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Channel customer pricing | Text token/per-request pricing is complete locally; image/video channel tiers are explicitly rejected instead of being mispriced. | Extend the frozen pricing snapshot contract to media dimensions without changing the independent account-cost facts. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
 | Core provider and protocol closure | The four Worker providers cover the main text paths, but retained legacy protocol variants and upstream credential lifecycles are incomplete. | Worker streaming codecs and provider adapters; D1 encrypted credential generations; DO leases/refresh serialization; Queue/Cron health recovery. | Every retained Go compatibility fixture is mapped; OpenAI, Anthropic, Gemini and Codex run authenticated binding and deployed smoke tests with exact settlement and no lease leaks. |
 | Production data cutover | Local binding tests exist, but PostgreSQL/Redis state has not been fully imported and reconciled with D1/DO/R2. | Versioned D1 import, R2 manifests, DO initialization commands and Queue projection catch-up. | Users, keys, balances, ledgers, subscriptions, orders and provider accounts reconcile by row count and sampled digest before staged traffic reaches 100%. |
-| Backup, restore and rollback | Cloudflare deployment rollback exists conceptually; data restore has not been drilled. | D1 export, versioned R2 manifests, per-DO export/restore and Worker Versions rollback notes. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
-| Production identity delivery | Email challenge logic is implemented, but the production sender and deployed flows are not proven. | Cloudflare Email Service binding or a bounded HTTPS mail Worker, with Queue delivery and D1 idempotency. | Registration verification, password reset and notification-mail verification pass deployed E2E without leaking challenge data. |
+| Backup, restore and rollback | The local cross-store bundle, integrity verifier and deterministic restore plan pass; remote D1/DO/R2 adapters and drills remain. | Add explicit environment-selected exports/imports, per-DO restore commands, R2 reconciliation and Worker Versions rollback notes around the v0.34 bundle core. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
+| Production identity delivery | Queue/D1 delivery behavior and Cloudflare binding adapters pass locally, but no sender is committed in environment config and deployed flows are not proven. | Configure a verified `SEND_EMAIL` sender or an idempotent bounded mail Worker separately in every environment. | Registration verification, password reset, account binding, TOTP and notification-mail verification pass deployed E2E without leaking challenge data. |
 
 ## P1: commercial and operational completeness
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
 | Account operations | Batch actions, provider quota/tier/privacy sync and per-model probes are incomplete. | D1 control state, Pool DO cooldown, Queue/Cron probes and versioned health projections. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota is `unknown`, never zero. |
-| Admin usage and finance | Immutable per-user balance/debt history and its admin cursor API now exist for post-0055 events; pre-0055 backfill, broader aggregates and correction/export workflows are incomplete. | Privileged cursorized DO export for optional historical backfill, hour/day D1 rollups, Queue projections and R2 streaming exports. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
+| Admin usage and finance | Immutable per-user balance/debt history plus bounded signed pre-0055 DO backfill now exist; bulk orchestration, broader aggregates and correction/export workflows are incomplete. | Add a bounded background backfill coordinator, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |
 | Channel monitor and alerts | Generic account health exists; model probes, alert rules, silences and reports do not. | Cron to Queue probes, D1 rules/history/silences, R2 evidence/reports and replay-safe delivery. | Duplicate schedules do not duplicate alerts; silence/recovery/DLQ behavior and per-model inference probes pass. |

@@ -11,6 +11,11 @@ import {
   recordAuthRateLimitFailure,
 } from '../auth/rate-limit'
 import {
+  deliverPlatformEmail,
+  emailDeliveryFailure,
+  hasEmailDeliveryBinding,
+} from '../email/delivery'
+import {
   createTotpSetupToken,
   decryptTotpSecret,
   encryptTotpSecret,
@@ -89,7 +94,11 @@ export type TotpEmailVerificationEvent = PlatformEvent<TotpEmailVerificationPayl
   aggregate_type: 'user'
 }
 
-export type TotpEmailDeliveryResult = 'delivered' | 'already_delivered' | 'stale'
+export type TotpEmailDeliveryResult =
+  | 'delivered'
+  | 'already_delivered'
+  | 'stale'
+  | 'permanently_failed'
 
 export async function getTotpStatus(context: Context<UserBindings>): Promise<Response> {
   try {
@@ -129,6 +138,14 @@ export async function sendTotpVerificationCode(context: Context<UserBindings>): 
       throw new GatewayError(400, 'EMAIL_VERIFY_NOT_ENABLED', 'Email verification is not enabled')
     }
     if (!totpFeatureAvailable(context.env)) throw totpNotConfigured()
+    if (!hasEmailDeliveryBinding(context.env)) {
+      throw new GatewayError(
+        503,
+        'TOTP_EMAIL_DELIVERY_UNAVAILABLE',
+        'TOTP verification email delivery is unavailable',
+        'server_error',
+      )
+    }
 
     const now = Date.now()
     const existing = await context.env.DB.prepare(
@@ -750,13 +767,15 @@ export async function consumeTotpEmailVerificationDelivery(
     if (resultChanges(update) !== 1) throw new Error(`TOTP email delivery ${event.event_id} lost its lease`)
     return 'delivered'
   } catch (error) {
+    const failure = emailDeliveryFailure(error)
     await env.DB.prepare(
       `UPDATE user_totp_email_challenges
           SET delivery_state = 'failed', delivery_lease_id = NULL,
               delivery_lease_expires_at_ms = NULL, last_delivery_error = ?,
               updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(errorMessage(error).slice(0, 1_024), Date.now(), challenge.id, leaseId).run()
+    ).bind(failure.code.slice(0, 1_024), Date.now(), challenge.id, leaseId).run()
+    if (!failure.retryable) return 'permanently_failed'
     throw error
   }
 }
@@ -1070,58 +1089,37 @@ export async function totpEmailCodeDigest(
 }
 
 async function deliverTotpEmail(event: TotpEmailVerificationEvent, env: Env): Promise<void> {
-  const subject = `${event.payload.site_name}: Verify TOTP security change`
+  const siteName = normalizedSiteName(event.payload.site_name)
+  const subject = `${siteName}: Verify TOTP security change`
   const text = [
-    `${event.payload.site_name}: TOTP security verification`,
+    `${siteName}: TOTP security verification`,
     '',
     `Verification code: ${event.payload.verification_code}`,
     '',
     'If you did not request this change, secure your account immediately.',
   ].join('\n')
-  if (env.SEND_EMAIL !== undefined) {
-    await env.SEND_EMAIL.send({
-      from: requireEmailFromAddress(env.EMAIL_FROM_ADDRESS),
-      to: event.payload.recipient_email,
-      subject,
-      text,
-      html: `<h1>TOTP security verification</h1><p>Verification code: <code>${event.payload.verification_code}</code></p>`,
-    })
-    return
-  }
-  if (env.EMAIL_DELIVERY !== undefined) {
-    const response = await env.EMAIL_DELIVERY.fetch(new Request(
-      'https://email-delivery.internal/v1/challenges',
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'idempotency-key': event.event_id },
-        body: JSON.stringify({
-          recipient_email: event.payload.recipient_email,
-          purpose: 'totp_identity_verification',
-          token: event.payload.verification_code,
-          action_url: '',
-          site_name: event.payload.site_name,
-          locale: event.payload.locale,
-          expires_at_ms: event.payload.expires_at_ms,
-        }),
-      },
-    ))
-    if (!response.ok) throw new Error(`email delivery Worker returned ${response.status}`)
-    return
-  }
-  throw new Error('No email delivery binding is configured')
+  await deliverPlatformEmail({
+    eventId: event.event_id,
+    recipient: event.payload.recipient_email,
+    subject,
+    text,
+    html: `<h1>TOTP security verification</h1><p>Verification code: <code>${event.payload.verification_code}</code></p>`,
+    compatibilityPayload: {
+      recipient_email: event.payload.recipient_email,
+      purpose: 'totp_identity_verification',
+      token: event.payload.verification_code,
+      action_url: '',
+      site_name: siteName,
+      locale: event.payload.locale,
+      expires_at_ms: event.payload.expires_at_ms,
+    },
+  }, env)
 }
 
 function normalizedSiteName(value: unknown): string {
   if (typeof value !== 'string') return 'Sub2API'
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 128)
   return normalized === '' ? 'Sub2API' : normalized
-}
-
-function requireEmailFromAddress(value: unknown): string {
-  if (typeof value !== 'string' || !isEmail(value.trim().toLowerCase())) {
-    throw new Error('EMAIL_FROM_ADDRESS must be a valid email address')
-  }
-  return value.trim().toLowerCase()
 }
 
 function isEmail(value: string): boolean {

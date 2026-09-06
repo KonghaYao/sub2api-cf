@@ -140,6 +140,36 @@ class FakeUserStateStorage {
       this.ledger.delete(params[0] as string);
       return [];
     }
+    if (
+      normalized.includes("COUNT(*) AS ledger_count") &&
+      normalized.includes("MAX(rowid)") &&
+      normalized.includes("FROM user_ledger")
+    ) {
+      return [{ ledger_count: this.ledger.size, high_water_sequence: this.ledger.size }];
+    }
+    if (
+      normalized.includes("COUNT(*) AS ledger_count") &&
+      normalized.includes("FROM user_ledger") &&
+      normalized.includes("rowid <= ?")
+    ) {
+      const highWaterSequence = params[0] as number;
+      return [{ ledger_count: Math.min(this.ledger.size, highWaterSequence) }];
+    }
+    if (
+      normalized.includes("rowid AS ledger_sequence") &&
+      normalized.includes("FROM user_ledger")
+    ) {
+      const afterSequence = params[0] as number;
+      const highWaterSequence = params[1] as number;
+      const limit = params[2] as number;
+      return [...this.ledger.values()]
+        .map((entry, index) => ({ ...entry, ledger_sequence: index + 1 }))
+        .filter((entry) => (
+          entry.ledger_sequence > afterSequence &&
+          entry.ledger_sequence <= highWaterSequence
+        ))
+        .slice(0, limit);
+    }
     if (normalized.includes("FROM user_ledger") && normalized.includes("mutation_key = ?")) {
       const entry = this.ledger.get(params[0] as string);
       return entry === undefined ? [] : [{ ...entry }];
@@ -294,6 +324,118 @@ const opening = {
 };
 
 describe("UserStateDO balance contract", () => {
+  it("exports a stable ledger snapshot across more than 100 same-timestamp entries", async () => {
+    const { object, storage } = createHarness();
+    storage.profile = {
+      schema_version: 1,
+      user_id: "user-1",
+      enabled: 1,
+      balance_micros: 1_104,
+      reserved_micros: 0,
+      settled_micros: 0,
+      spend_debt_micros: 0,
+      updated_at_ms: 1,
+    };
+    for (let index = 0; index < 105; index += 1) {
+      const opening = index === 0;
+      const mutationId = opening ? "d1-user:0" : `adjust-${String(index).padStart(3, "0")}`;
+      storage.ledger.set(`balance:${mutationId}`, {
+        mutation_key: `balance:${mutationId}`,
+        schema_version: 1,
+        mutation_id: mutationId,
+        entry_type: opening ? "opening_balance" : "balance_adjustment",
+        user_id: "user-1",
+        request_id: null,
+        amount_delta_micros: opening ? 1_000 : 1,
+        balance_after_micros: 1_000 + index,
+        enabled_after: opening ? 1 : null,
+        created_at_ms: 1,
+      });
+    }
+    storage.stateVersion = 104;
+
+    const first = await object.fetch(new Request("https://user-state.test/ledger/export?limit=100"));
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as any;
+    expect(firstBody).toMatchObject({
+      schema_version: 1,
+      snapshot: {
+        user_id: "user-1",
+        state_version: 104,
+        balance_micros: 1_104,
+        spend_debt_micros: 0,
+        ledger_count: 105,
+        high_water_sequence: 105,
+      },
+      complete: false,
+    });
+    expect(firstBody.entries).toHaveLength(100);
+    expect(firstBody.entries[0]).toMatchObject({
+      ledger_sequence: 1,
+      entry_type: "opening_balance",
+      mutation_id: "d1-user:0",
+    });
+    expect(firstBody.next_cursor).toEqual(expect.any(String));
+
+    // A later append must not enter the already-started traversal.
+    storage.ledger.set("balance:later", {
+      mutation_key: "balance:later",
+      schema_version: 1,
+      mutation_id: "later",
+      entry_type: "balance_adjustment",
+      user_id: "user-1",
+      request_id: null,
+      amount_delta_micros: 1,
+      balance_after_micros: 1_105,
+      enabled_after: null,
+      created_at_ms: 1,
+    });
+    storage.profile.balance_micros = 1_105;
+    storage.stateVersion = 105;
+
+    const second = await object.fetch(new Request(
+      `https://user-state.test/ledger/export?limit=100&cursor=${encodeURIComponent(firstBody.next_cursor)}`,
+    ));
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({
+      snapshot: {
+        state_version: 104,
+        balance_micros: 1_104,
+        ledger_count: 105,
+        high_water_sequence: 105,
+      },
+      entries: [
+        { ledger_sequence: 101 },
+        { ledger_sequence: 102 },
+        { ledger_sequence: 103 },
+        { ledger_sequence: 104 },
+        { ledger_sequence: 105 },
+      ],
+      complete: true,
+      next_cursor: null,
+    });
+  });
+
+  it("rejects invalid ledger export limits and cursors", async () => {
+    const { object } = createHarness();
+
+    const invalidLimit = await object.fetch(
+      new Request("https://user-state.test/ledger/export?limit=101"),
+    );
+    const invalidCursor = await object.fetch(
+      new Request("https://user-state.test/ledger/export?cursor=not-a-cursor"),
+    );
+
+    expect(invalidLimit.status).toBe(400);
+    await expect(invalidLimit.json()).resolves.toMatchObject({
+      error: { code: "invalid_ledger_limit" },
+    });
+    expect(invalidCursor.status).toBe(400);
+    await expect(invalidCursor.json()).resolves.toMatchObject({
+      error: { code: "invalid_ledger_cursor" },
+    });
+  });
+
   it("adds commitment and spend-debt columns to existing SQLite tables", () => {
     const { storage } = createHarness(undefined, { legacySchema: true });
 

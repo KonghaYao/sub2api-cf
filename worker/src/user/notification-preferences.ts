@@ -4,6 +4,11 @@ import { authenticateUserRequest, publicUser, type UserRow } from '../auth/handl
 import { controlError, controlSuccess, readJsonObject } from '../control/http'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import {
+  deliverPlatformEmail,
+  emailDeliveryFailure,
+  hasEmailDeliveryBinding,
+} from '../email/delivery'
 
 type UserBindings = { Bindings: Env }
 
@@ -67,7 +72,11 @@ export interface NotificationEmailVerificationPayload {
   generation: number
 }
 
-export type NotificationEmailDeliveryResult = 'delivered' | 'already_delivered' | 'stale'
+export type NotificationEmailDeliveryResult =
+  | 'delivered'
+  | 'already_delivered'
+  | 'stale'
+  | 'permanently_failed'
 
 /**
  * Delivery is deliberately outside this module. The plaintext code exists only
@@ -157,6 +166,14 @@ export async function sendNotificationEmailVerificationCode(
 ): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
+    if (!hasEmailDeliveryBinding(context.env)) {
+      throw new GatewayError(
+        503,
+        'notification_email_delivery_unavailable',
+        'Notification email delivery is unavailable',
+        'server_error',
+      )
+    }
     const body = await readJsonObject(context.req.raw)
     rejectUnknownFields(body, ['email'])
     const email = requireEmail(body.email)
@@ -613,6 +630,7 @@ export async function consumeNotificationEmailVerificationDelivery(
     }
     return 'delivered'
   } catch (error) {
+    const failure = emailDeliveryFailure(error)
     await env.DB.prepare(
       `UPDATE user_notification_email_challenges
           SET delivery_state = 'failed', delivery_lease_id = NULL,
@@ -620,11 +638,12 @@ export async function consumeNotificationEmailVerificationDelivery(
               updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
     ).bind(
-      deliveryErrorName(error).slice(0, DELIVERY_ERROR_MAX_LENGTH),
+      failure.code.slice(0, DELIVERY_ERROR_MAX_LENGTH),
       Date.now(),
       challenge.id,
       leaseId,
     ).run()
+    if (!failure.retryable) return 'permanently_failed'
     throw error
   }
 }
@@ -633,57 +652,28 @@ async function deliverNotificationEmailVerification(
   event: NotificationEmailVerificationEvent,
   env: Env,
 ): Promise<void> {
-  if (env.SEND_EMAIL !== undefined) {
-    const siteName = sanitizeSiteName(event.payload.site_name)
-    const code = event.payload.verification_code
-    const minutes = Math.max(
-      1,
-      Math.ceil((event.payload.expires_at_ms - event.occurred_at_ms) / 60_000),
-    )
-    await env.SEND_EMAIL.send({
-      from: requireEmailFromAddress(env.EMAIL_FROM_ADDRESS),
-      to: event.payload.recipient_email,
-      subject: `${siteName}: Verify notification email`,
-      text: `${siteName}\n\nYour notification email verification code is ${code}. It expires in ${minutes} minutes.`,
-      html: `<h1>Verify notification email</h1><p>Your verification code is <code>${code}</code>.</p><p>It expires in ${minutes} minutes.</p>`,
-    })
-    return
-  }
-  if (env.EMAIL_DELIVERY !== undefined) {
-    const response = await env.EMAIL_DELIVERY.fetch(new Request(
-      'https://email-delivery.internal/v1/challenges',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'idempotency-key': event.event_id,
-        },
-        body: JSON.stringify({
-          recipient_email: event.payload.recipient_email,
-          purpose: 'notification_email_verification',
-          token: event.payload.verification_code,
-          action_url: event.payload.action_url,
-          site_name: sanitizeSiteName(event.payload.site_name),
-          locale: event.payload.locale,
-          expires_at_ms: event.payload.expires_at_ms,
-        }),
-      },
-    ))
-    if (!response.ok) throw new Error(`email delivery Worker returned ${response.status}`)
-    return
-  }
-  throw new Error('No email delivery binding is configured (SEND_EMAIL or EMAIL_DELIVERY)')
-}
-
-function requireEmailFromAddress(value: unknown): string {
-  if (typeof value !== 'string') {
-    throw new Error('EMAIL_FROM_ADDRESS is required when SEND_EMAIL is configured')
-  }
-  const email = normalizeEmail(value)
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error('EMAIL_FROM_ADDRESS must be a valid email address')
-  }
-  return email
+  const siteName = sanitizeSiteName(event.payload.site_name)
+  const code = event.payload.verification_code
+  const minutes = Math.max(
+    1,
+    Math.ceil((event.payload.expires_at_ms - event.occurred_at_ms) / 60_000),
+  )
+  await deliverPlatformEmail({
+    eventId: event.event_id,
+    recipient: event.payload.recipient_email,
+    subject: `${siteName}: Verify notification email`,
+    text: `${siteName}\n\nYour notification email verification code is ${code}. It expires in ${minutes} minutes.`,
+    html: `<h1>Verify notification email</h1><p>Your verification code is <code>${code}</code>.</p><p>It expires in ${minutes} minutes.</p>`,
+    compatibilityPayload: {
+      recipient_email: event.payload.recipient_email,
+      purpose: 'notification_email_verification',
+      token: event.payload.verification_code,
+      action_url: event.payload.action_url,
+      site_name: siteName,
+      locale: event.payload.locale,
+      expires_at_ms: event.payload.expires_at_ms,
+    },
+  }, env)
 }
 
 function sanitizeSiteName(value: string): string {
@@ -702,10 +692,6 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false
   }
-}
-
-function deliveryErrorName(error: unknown): string {
-  return error instanceof Error && error.name ? error.name : 'email_delivery_failed'
 }
 
 function projectPreferences(

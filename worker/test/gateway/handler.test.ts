@@ -2106,7 +2106,7 @@ describe('OpenAI-compatible gateway', () => {
     const { env, database, user, pool, limit } = await harness()
     await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
     pool.reserveAccountIds.push('account-1', 'account-2')
-    const upstream = vi.fn(async () => Response.json({
+    const upstream = vi.fn(async (_input: Request | string | URL, _init?: RequestInit) => Response.json({
       error: {
         message: "Invalid schema for function 'lookup': object schema is required.",
         type: 'invalid_request_error',
@@ -2716,6 +2716,76 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('preserves signed thinking and cache breakpoints on native Anthropic requests', async () => {
+    const { env, database } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, {
+      platform: 'anthropic',
+      protocol: 'anthropic',
+      auth_scheme: 'x-api-key',
+      provider_config_json: '{}',
+      base_url: 'https://api.anthropic.example',
+    })
+    const upstream = vi.fn(async (_input: Request | string | URL, _init?: RequestInit) => Response.json({
+      id: 'msg_native_cache',
+      type: 'message',
+      role: 'assistant',
+      model: 'gpt-upstream',
+      content: [{ type: 'text', text: 'continued' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 2, output_tokens: 1 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-public',
+        max_tokens: 128,
+        system: [{
+          type: 'text',
+          text: 'stable instructions',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        }],
+        messages: [
+          { role: 'user', content: 'Hello' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'plan', signature: 'provider-signature' },
+              { type: 'text', text: 'Working.' },
+            ],
+          },
+          { role: 'user', content: 'Continue' },
+        ],
+      }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    const [, init] = upstream.mock.calls[0]
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'gpt-upstream',
+      system: [{
+        type: 'text',
+        text: 'stable instructions',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      }],
+      messages: [
+        { role: 'user', content: 'Hello' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'plan', signature: 'provider-signature' },
+            { type: 'text', text: 'Working.' },
+          ],
+        },
+        { role: 'user', content: 'Continue' },
+      ],
+    })
+  })
+
   it('returns Anthropic validation errors before reserving funds or upstream capacity', async () => {
     const { env, user, pool } = await harness()
 
@@ -2750,9 +2820,17 @@ describe('OpenAI-compatible gateway', () => {
       vi.fn(async () => {
         const frames = [
           { type: 'response.created', response: { id: 'resp_anthropic_stream' } },
-          { type: 'response.output_item.added', output_index: 0, item: { type: 'message' } },
-          { type: 'response.output_text.delta', output_index: 0, delta: 'Hi' },
-          { type: 'response.output_text.done', output_index: 0 },
+          { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs_1' } },
+          { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: 'Think' },
+          { type: 'response.reasoning_summary_text.done', output_index: 0 },
+          {
+            type: 'response.output_item.done',
+            output_index: 0,
+            item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc-stream-handler' },
+          },
+          { type: 'response.output_item.added', output_index: 1, item: { type: 'message' } },
+          { type: 'response.output_text.delta', output_index: 1, delta: 'Hi' },
+          { type: 'response.output_text.done', output_index: 1 },
           {
             type: 'response.completed',
             response: {
@@ -2794,10 +2872,15 @@ describe('OpenAI-compatible gateway', () => {
       'message_start',
       'content_block_start',
       'content_block_delta',
+      'content_block_delta',
+      'content_block_stop',
+      'content_block_start',
+      'content_block_delta',
       'content_block_stop',
       'message_delta',
       'message_stop',
     ])
+    expect(text).toContain('"type":"signature_delta","signature":"enc-stream-handler"')
     expect(text).toContain('"model":"gpt-public"')
     expect(text).not.toContain('gpt-upstream')
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({

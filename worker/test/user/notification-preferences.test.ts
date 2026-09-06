@@ -86,6 +86,7 @@ async function fixture(): Promise<Fixture> {
     EVENTS_QUEUE: queue as unknown as Queue,
     USER_STATE: {} as DurableObjectNamespace,
     POOL_STATE: {} as DurableObjectNamespace,
+    EMAIL_DELIVERY: { fetch: async () => new Response(null, { status: 202 }) } as unknown as Fetcher,
   } satisfies Env
   const app = new Hono<{ Bindings: Env }>()
   app.put('/preferences', updateCurrentUser)
@@ -367,6 +368,22 @@ describe('user notification preference handlers', () => {
     ).get()).toEqual({ delivery_state: 'failed' })
   })
 
+  it('fails before creating a notification challenge without an email binding', async () => {
+    const test = await fixture()
+    delete test.env.EMAIL_DELIVERY
+
+    const response = await request(test, '/notify-email/send-code', {
+      email: 'alerts@example.test',
+    })
+
+    expect(response.status).toBe(503)
+    expect((await response.json() as any).code).toBe('notification_email_delivery_unavailable')
+    expect(test.queue.events).toHaveLength(0)
+    expect(test.raw.prepare(
+      `SELECT count(*) AS count FROM user_notification_email_challenges`,
+    ).get()).toEqual({ count: 0 })
+  })
+
   it('keeps per-user verification admission in one bounded D1 row', async () => {
     const test = await fixture()
     test.raw.prepare(
@@ -430,6 +447,7 @@ describe('user notification preference handlers', () => {
     expect(delivered[0]).toMatchObject({
       from: 'no-reply@example.test',
       to: 'alerts@example.test',
+      headers: { 'X-Sub2API-Delivery-ID': event.event_id },
     })
     expect(delivered[0]?.text).toContain(event.payload.verification_code)
     expect(test.raw.prepare(
@@ -451,9 +469,10 @@ describe('user notification preference handlers', () => {
     const failed = await fixture()
     await request(failed, '/notify-email/send-code', { email: 'failure@example.test' })
     const failedEvent = latestVerificationEvent(failed)
+    delete failed.env.EMAIL_DELIVERY
     await expect(
       consumeNotificationEmailVerificationDelivery(failedEvent, failed.env),
-    ).rejects.toThrow('No email delivery binding is configured')
+    ).resolves.toBe('permanently_failed')
     expect(failed.raw.prepare(
       `SELECT delivery_state, delivery_attempts, delivery_lease_id, last_delivery_error
          FROM user_notification_email_challenges WHERE id = ?`,
@@ -461,7 +480,7 @@ describe('user notification preference handlers', () => {
       delivery_state: 'failed',
       delivery_attempts: 1,
       delivery_lease_id: null,
-      last_delivery_error: 'Error',
+      last_delivery_error: 'email_delivery_not_configured',
     })
   })
 })

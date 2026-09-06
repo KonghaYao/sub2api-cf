@@ -89,10 +89,13 @@ Cloudflare Email Service binding named `SEND_EMAIL` and set
 does not put an environment-specific sender address in `wrangler.jsonc`.
 
 The optional `EMAIL_DELIVERY` Worker service binding remains available as a
-compatibility adapter. Registration, reset, account verification, and user
-notification-email codes all pass through the Queue consumer with a D1 delivery
-lease. Delivery fails explicitly (and is retried) when neither binding is
-configured; when both exist, `SEND_EMAIL` is used.
+compatibility adapter. Registration, reset, account verification, notification
+email, and TOTP codes all pass through the Queue consumer with a D1 delivery
+lease. New challenge requests fail with `503` before creating state when no
+delivery binding exists. Transient transport/408/425/429/5xx failures retry;
+missing configuration and deterministic 4xx rejection become terminal failed
+deliveries. When both bindings exist, `SEND_EMAIL` is used. Provider exception
+text and response bodies are never persisted as delivery errors.
 
 User notification preferences are stored independently from profile rows and
 use `notification_preferences_version` (or `If-Match`) for optimistic writes.
@@ -153,6 +156,27 @@ pnpm run deploy:production
 The first command is read-only. The second command is resumable after a failed
 file import or an interruption between the verified import and registration.
 
+### Backup bundle core
+
+`scripts/backup-restore.mjs` packages pre-exported D1 SQL, Durable Object NDJSON,
+and an R2 inventory into a versioned manifest with byte lengths and SHA-256
+digests. It rejects missing, extra, tampered, traversal, and symlink entries,
+and validates the whole bundle before creating any local restore output.
+
+```sh
+pnpm run backup:bundle -- --output ./backup.bundle \
+  --artifact d1-sql primary.sql DB ./exports/database.sql \
+  --artifact do-ndjson users.ndjson USER_STATE ./exports/users.ndjson \
+  --artifact r2-inventory objects.ndjson OBJECTS ./exports/objects.ndjson
+pnpm run backup:verify -- --bundle ./backup.bundle
+pnpm run backup:restore-plan -- --bundle ./backup.bundle --target ./restore-preview
+```
+
+`backup:restore-local` only performs an atomic byte-for-byte restore into a new
+local directory. It does not execute remote D1 imports, Durable Object writes,
+or R2 object synchronization. Production restore remains gated on explicit
+environment adapters and an empty-environment drill.
+
 ## Durable Object state contracts
 
 `UserStateDO` stores money only as safe integer micro-units. Its internal
@@ -169,6 +193,12 @@ with its original parameters. Opening balances, adjustments, enabled changes,
 and settlements are appended to the immutable ledger in the same SQLite
 transaction as the profile/request mutation. `GET /snapshot` returns the latest
 100 requests and ledger entries.
+The internal `GET /ledger/export` endpoint freezes a SQLite rowid high-water
+mark and returns at most 100 immutable ledger rows per cursor page. The
+`admin.users.write` backfill route wraps that cursor in an environment-bound
+HMAC signature, verifies every projected D1 row, and marks history complete
+only after ledger count, state version, balance, spend debt, and D1 event counts
+reconcile.
 `POST /release` is canonical; `POST /cancel` remains a compatibility alias.
 
 `PoolStateDO` restores expired leases when an instance starts, schedules the

@@ -75,6 +75,7 @@ import {
   listAdminUsers,
   updateAdminUser,
 } from './control/users'
+import { backfillAdminUserFinancialHistory } from './control/financial-history-backfill'
 import {
   allAdminGroups,
   createAdminGroup,
@@ -551,6 +552,7 @@ export function createApp() {
   app.post('/api/v1/admin/users', createAdminUser)
   app.get('/api/v1/admin/users/:id', getAdminUser)
   app.get('/api/v1/admin/users/:id/balance-history', listAdminUserBalanceHistory)
+  app.post('/api/v1/admin/users/:id/balance-history/backfill', backfillAdminUserFinancialHistory)
   app.put('/api/v1/admin/users/:id', updateAdminUser)
   app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
   app.get('/api/v1/admin/users/:id/platform-quotas', getAdminUserPlatformQuotas)

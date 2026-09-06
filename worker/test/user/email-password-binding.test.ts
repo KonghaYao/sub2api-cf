@@ -35,6 +35,22 @@ interface Fixture {
 describe('authenticated email/password binding', () => {
   beforeEach(() => vi.restoreAllMocks())
 
+  it('fails before creating a binding challenge without production email delivery', async () => {
+    const test = await fixture()
+    delete test.env.EMAIL_DELIVERY
+
+    const response = await post(test, '/api/v1/user/account-bindings/email/send-code', {
+      email: 'new.login@example.com',
+    })
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({ code: 'email_delivery_unavailable' })
+    expect(test.events).toHaveLength(0)
+    expect(test.raw.prepare(
+      `SELECT count(*) AS count FROM email_binding_challenges`,
+    ).get()).toEqual({ count: 0 })
+  })
+
   it('queues one six-digit challenge bound to the authenticated OAuth-only account and target email', async () => {
     const test = await fixture()
 
@@ -647,6 +663,7 @@ async function fixture(): Promise<Fixture> {
       send: vi.fn(async (event: PlatformEvent) => { events.push(event as BindingEvent) }),
     },
     AUTH_RATE_LIMIT: rateLimitNamespace(),
+    EMAIL_DELIVERY: { fetch: async () => new Response(null, { status: 202 }) },
     USER_STATE: {},
     POOL_STATE: {},
   } as unknown as Env

@@ -1,6 +1,6 @@
 {
   "name": "sub2api-worker",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,7 +17,11 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "node scripts/d1-migrate.mjs --remote",
     "db:migrate:staging": "node scripts/d1-migrate.mjs --remote --env staging",
-    "db:migrate:production": "node scripts/d1-migrate.mjs --remote --env production"
+    "db:migrate:production": "node scripts/d1-migrate.mjs --remote --env production",
+    "backup:bundle": "node scripts/backup-restore.mjs create",
+    "backup:verify": "node scripts/backup-restore.mjs verify",
+    "backup:restore-plan": "node scripts/backup-restore.mjs restore-plan",
+    "backup:restore-local": "node scripts/backup-restore.mjs restore"
   },
   "engines": {
     "node": ">=22"

@@ -36,7 +36,7 @@
 - 删除 Go 二进制插件、`go-plugin`/gRPC 子进程、Unix Socket 和运行时加载可执行文件。
 - 删除仅 macOS/Apple Silicon/ChatGPT.app 可用的 live attestation。
 - 删除 Caddy、systemd、Compose、本地日志/插件/备份目录、在线二进制升级和主机 CPU/内存/cgroup 监控。
-- 删除任意 SMTP 直连；邮件改用可选的第三方 HTTPS API，未配置时关闭邮件发送型功能。
+- 删除任意 SMTP 直连；邮件改用 Cloudflare Email Service binding，或具备幂等键和超时边界的内部邮件 Worker；未配置时关闭邮件发送型功能。
 
 对应降级方案：
 
@@ -159,7 +159,7 @@ KV 保存 API Key hash 到内部 ID 的加速映射、版本化模型价格、�
 
 **文件边界**：`worker/src/routes/auth/`、`user/`、`admin/`、`billing/`、`settings/`、`worker/src/services/` 及测试。
 
-**工作**：迁移登录、用户/API Key、分组/账号、价格、订阅、订单、设置和管理接口；邮件只接 HTTPS provider；验证码使用 Turnstile；大文件改为 R2 签名/受控直传。
+**工作**：迁移登录、用户/API Key、分组/账号、价格、订阅、订单、设置和管理接口；邮件只接 Cloudflare Email Service 或内部 Worker binding；验证码使用 Turnstile；大文件改为 R2 签名/受控直传。
 
 **验收门槛**：前端使用的接口完成契约测试；权限矩阵、撤销延迟、OAuth state 一次性消费、支付 webhook 签名与重放、凭据加密全部通过安全测试。
 

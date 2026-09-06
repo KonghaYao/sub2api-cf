@@ -80,6 +80,21 @@ interface UserLedgerRow {
   created_at_ms: number;
 }
 
+interface UserLedgerExportRow extends UserLedgerRow {
+  ledger_sequence: number;
+}
+
+interface UserLedgerExportCursor {
+  v: 1;
+  user_id: string;
+  after_sequence: number;
+  high_water_sequence: number;
+  ledger_count: number;
+  snapshot_state_version: number;
+  snapshot_balance_micros: number;
+  snapshot_spend_debt_micros: number;
+}
+
 interface AuthorizationRow {
   group_enabled: number;
   platform: string;
@@ -131,6 +146,9 @@ export class UserStateDO {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.health();
       if (request.method === "GET" && url.pathname === "/snapshot") return this.snapshot();
+      if (request.method === "GET" && url.pathname === "/ledger/export") {
+        return this.exportLedger(url);
+      }
       if (request.method === "POST" && url.pathname === "/configure") {
         return await this.configure(await readJsonObject(request));
       }
@@ -204,6 +222,108 @@ export class UserStateDO {
         available_micros: profile.balance_micros - profile.reserved_micros,
         requests,
         ledger,
+      });
+    });
+  }
+
+  /**
+   * Internal, bounded export of the complete immutable balance ledger. The
+   * cursor freezes a rowid high-water mark and the profile values observed at
+   * the first page. Later appends therefore cannot shift or enter a traversal.
+   */
+  private exportLedger(url: URL): Response {
+    const limit = parseLedgerExportLimit(url.searchParams.get("limit"));
+    const cursorRaw = url.searchParams.get("cursor");
+    const suppliedCursor = cursorRaw === null ? null : decodeLedgerExportCursor(cursorRaw);
+
+    return this.state.storage.transactionSync(() => {
+      const profile = this.loadProfile();
+      if (profile === null) {
+        throw new StateApiError(404, "user_not_configured", "User state is not configured");
+      }
+      let cursor: UserLedgerExportCursor;
+      if (suppliedCursor === null) {
+        const metadata = Array.from(this.state.storage.sql.exec(
+          `SELECT COUNT(*) AS ledger_count,
+                  COALESCE(MAX(rowid), 0) AS high_water_sequence
+             FROM user_ledger`,
+        ))[0] as { ledger_count?: unknown; high_water_sequence?: unknown } | undefined;
+        if (
+          !Number.isSafeInteger(metadata?.ledger_count) ||
+          (metadata!.ledger_count as number) < 0 ||
+          !Number.isSafeInteger(metadata?.high_water_sequence) ||
+          (metadata!.high_water_sequence as number) < 0
+        ) {
+          throw new StateMachineError(
+            "invalid_persisted_state",
+            "User ledger export metadata is invalid",
+          );
+        }
+        cursor = {
+          v: 1,
+          user_id: profile.user_id,
+          after_sequence: 0,
+          high_water_sequence: metadata!.high_water_sequence as number,
+          ledger_count: metadata!.ledger_count as number,
+          snapshot_state_version: this.loadStateVersion(),
+          snapshot_balance_micros: profile.balance_micros,
+          snapshot_spend_debt_micros: profile.spend_debt_micros,
+        };
+      } else {
+        cursor = suppliedCursor;
+        if (cursor.user_id !== profile.user_id) throw invalidLedgerExportCursor();
+        const current = Array.from(this.state.storage.sql.exec(
+          `SELECT COUNT(*) AS ledger_count
+             FROM user_ledger
+            WHERE rowid <= ?`,
+          cursor.high_water_sequence,
+        ))[0] as { ledger_count?: unknown } | undefined;
+        if (current?.ledger_count !== cursor.ledger_count) {
+          throw new StateApiError(
+            409,
+            "ledger_snapshot_changed",
+            "User ledger changed during export; restart the traversal",
+          );
+        }
+      }
+
+      const rows = Array.from(this.state.storage.sql.exec(
+        `SELECT rowid AS ledger_sequence,
+                schema_version, mutation_key, mutation_id, entry_type, user_id, request_id,
+                amount_delta_micros, balance_after_micros, enabled_after, created_at_ms
+           FROM user_ledger
+          WHERE rowid > ? AND rowid <= ?
+          ORDER BY rowid ASC
+          LIMIT ?`,
+        cursor.after_sequence,
+        cursor.high_water_sequence,
+        limit + 1,
+      )) as unknown as UserLedgerExportRow[];
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit).map((row) => ({
+        ledger_sequence: requirePersistedSequence(row.ledger_sequence),
+        ...toLedgerEntry(row),
+      }));
+      const last = page.at(-1);
+      if (hasMore && last === undefined) {
+        throw new StateMachineError("invalid_persisted_state", "User ledger export did not advance");
+      }
+      const nextCursor = hasMore && last !== undefined
+        ? encodeLedgerExportCursor({ ...cursor, after_sequence: last.ledger_sequence })
+        : null;
+      return json({
+        schema_version: STATE_SCHEMA_VERSION,
+        snapshot: {
+          user_id: cursor.user_id,
+          state_version: cursor.snapshot_state_version,
+          balance_micros: cursor.snapshot_balance_micros,
+          spend_debt_micros: cursor.snapshot_spend_debt_micros,
+          ledger_count: cursor.ledger_count,
+          high_water_sequence: cursor.high_water_sequence,
+        },
+        entries: page,
+        complete: !hasMore,
+        next_cursor: nextCursor,
       });
     });
   }
@@ -1346,4 +1466,79 @@ function assertDatabaseSchemaVersion(value: number): void {
   if (value !== STATE_SCHEMA_VERSION) {
     throw new StateMachineError("invalid_persisted_state", "Unsupported persisted schema_version");
   }
+}
+
+function parseLedgerExportLimit(raw: string | null): number {
+  if (raw === null) return 100;
+  if (!/^\d+$/.test(raw)) {
+    throw new StateApiError(400, "invalid_ledger_limit", "Ledger export limit must be an integer from 1 to 100");
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw new StateApiError(400, "invalid_ledger_limit", "Ledger export limit must be an integer from 1 to 100");
+  }
+  return value;
+}
+
+function encodeLedgerExportCursor(cursor: UserLedgerExportCursor): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeLedgerExportCursor(raw: string): UserLedgerExportCursor {
+  if (raw.length === 0 || raw.length > 2_048 || !/^[A-Za-z0-9_-]+$/.test(raw)) {
+    throw invalidLedgerExportCursor();
+  }
+  try {
+    const padded = raw.replace(/-/g, "+").replace(/_/g, "/") +
+      "=".repeat((4 - raw.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as
+      Partial<UserLedgerExportCursor> | null;
+    if (
+      value === null || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== [
+        "after_sequence",
+        "high_water_sequence",
+        "ledger_count",
+        "snapshot_balance_micros",
+        "snapshot_spend_debt_micros",
+        "snapshot_state_version",
+        "user_id",
+        "v",
+      ].sort().join(",") ||
+      value.v !== 1 ||
+      typeof value.user_id !== "string" || value.user_id.length === 0 || value.user_id.length > 128 ||
+      !isNonNegativeSafeInteger(value.after_sequence) ||
+      !isNonNegativeSafeInteger(value.high_water_sequence) ||
+      !isNonNegativeSafeInteger(value.ledger_count) ||
+      !isNonNegativeSafeInteger(value.snapshot_state_version) ||
+      !isNonNegativeSafeInteger(value.snapshot_balance_micros) ||
+      !isNonNegativeSafeInteger(value.snapshot_spend_debt_micros) ||
+      (value.after_sequence as number) > (value.high_water_sequence as number) ||
+      ((value.ledger_count as number) === 0) !== ((value.high_water_sequence as number) === 0)
+    ) throw invalidLedgerExportCursor();
+    return value as UserLedgerExportCursor;
+  } catch (error) {
+    if (error instanceof StateApiError) throw error;
+    throw invalidLedgerExportCursor();
+  }
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function requirePersistedSequence(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new StateMachineError("invalid_persisted_state", "User ledger sequence is invalid");
+  }
+  return value as number;
+}
+
+function invalidLedgerExportCursor(): StateApiError {
+  return new StateApiError(400, "invalid_ledger_cursor", "Ledger export cursor is invalid");
 }
