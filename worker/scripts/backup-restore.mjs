@@ -71,6 +71,16 @@ function validateKind(value) {
   return value
 }
 
+/** @param {Iterable<string>} kinds @param {string} label */
+function requireCompleteKindSet(kinds, label) {
+  const present = new Set(kinds)
+  for (const kind of KINDS) {
+    if (!present.has(kind)) {
+      throw new Error(`${label} is missing required ${kind} artifact`)
+    }
+  }
+}
+
 /** @param {unknown} value */
 function validateLogicalName(value) {
   if (typeof value !== 'string' || !LOGICAL_NAME.test(value) || value === '.' || value === '..') {
@@ -277,6 +287,7 @@ function validateManifest(value) {
   if (artifacts.some((artifact, index) => artifact !== canonical[index])) {
     throw new Error('Manifest artifacts must be in canonical kind/name/source order')
   }
+  requireCompleteKindSet(artifacts.map((artifact) => artifact.kind), 'Backup manifest')
   return Object.freeze({
     schema: MANIFEST_SCHEMA,
     version: MANIFEST_VERSION,
@@ -332,6 +343,7 @@ export async function createBackupBundle(options) {
     { kind: right.kind, logical_name: right.logicalName, source: right.source },
   ))
   await Promise.all(inputs.map((input) => requireRegularFile(input.filePath, `Artifact ${input.logicalName}`)))
+  requireCompleteKindSet(inputs.map((input) => input.kind), 'Backup bundle')
 
   const parent = dirname(outputDirectory)
   await mkdir(parent, { recursive: true })

@@ -126,6 +126,31 @@ describe('versioned backup bundle', () => {
     }
   })
 
+  it('requires every Cloudflare storage domain in both new and imported manifests', async () => {
+    const root = await temporaryDirectory()
+    const source = await createSourceArtifacts(root)
+    const incompleteOutput = join(root, 'incomplete.bundle')
+
+    await expect(createBackupBundle({
+      outputDirectory: incompleteOutput,
+      artifacts: artifactInputs(source).filter(({ kind }) => kind !== 'r2-inventory'),
+    })).rejects.toThrow('r2-inventory')
+    await expect(readdir(root)).resolves.not.toContain('incomplete.bundle')
+
+    const importedBundle = join(root, 'imported.bundle')
+    await createBackupBundle({ outputDirectory: importedBundle, artifacts: artifactInputs(source) })
+    const manifestPath = join(importedBundle, 'backup-manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.artifacts = manifest.artifacts.filter(
+      ({ kind }: { kind: string }) => kind !== 'do-ndjson',
+    )
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+    await rm(join(importedBundle, 'artifacts/do-ndjson/users.ndjson'))
+    await rm(join(importedBundle, 'artifacts/do-ndjson'), { recursive: true })
+
+    await expect(verifyBackupBundle(importedBundle)).rejects.toThrow('do-ndjson')
+  })
+
   it('rejects traversal, duplicate names, and symbolic-link inputs before publishing a bundle', async () => {
     const root = await temporaryDirectory()
     const source = await createSourceArtifacts(root)

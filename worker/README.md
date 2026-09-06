@@ -161,7 +161,10 @@ file import or an interruption between the verified import and registration.
 `scripts/backup-restore.mjs` packages pre-exported D1 SQL, Durable Object NDJSON,
 and an R2 inventory into a versioned manifest with byte lengths and SHA-256
 digests. It rejects missing, extra, tampered, traversal, and symlink entries,
-and validates the whole bundle before creating any local restore output.
+requires at least one artifact for each of those three storage domains, and
+validates the whole bundle before creating any local restore output. An empty
+domain must still be represented by an empty export artifact, so a verified
+manifest cannot silently omit an entire storage system.
 
 ```sh
 pnpm run backup:bundle -- --output ./backup.bundle \
