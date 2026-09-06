@@ -1885,13 +1885,15 @@ const handleBulkDelete = async () => {
   const accountIds = [...selIds.value]
   if (!confirm(t('admin.accounts.bulkActions.confirmDelete', { count: accountIds.length }))) return
   try {
-    const result = await adminAPI.accounts.batchDelete(accountIds)
+    const result = await adminAPI.accounts.batchDelete(
+      cloudflareWorkerContract.value ? await selectedWorkerDeleteAccounts() : accountIds
+    )
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', {
         success: result.success,
         failed: result.failed
       }))
-      setSelectedIds(result.failed_ids?.length ? result.failed_ids : accountIds)
+      setSelectedIds((result.failed_ids?.length ? result.failed_ids : accountIds) as number[])
     } else {
       appStore.showSuccess(t('admin.accounts.bulkActions.deleteSuccess', { count: result.success }))
       clearSelection()
@@ -2048,6 +2050,27 @@ const selectedWorkerOperationAccounts = () => {
     targets.length !== selected.size ||
     targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)
   ) {
+    throw new Error(t('admin.accounts.bulkSchedulableResultUnknown'))
+  }
+  return targets as Array<{ id: number | string; control_version: number }>
+}
+
+const selectedWorkerDeleteAccounts = async () => {
+  if (selIds.value.length === 0 || selIds.value.length > 500) {
+    throw new Error(t('admin.accounts.workerBatchLimit'))
+  }
+  const selected = Array.from(new Set(selIds.value.map(id => String(id))))
+  const loaded = new Map(accounts.value.map(account => [String(account.id), account]))
+  const missing = selected.filter(id => !loaded.has(id))
+  if (missing.length > 0) {
+    const fetched = await Promise.all(missing.map(id => adminAPI.accounts.getById(id)))
+    fetched.forEach(account => loaded.set(String(account.id), account))
+  }
+  const targets = selected.map((id) => {
+    const account = loaded.get(id)
+    return { id, control_version: (account as unknown as { control_version?: number })?.control_version }
+  })
+  if (targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)) {
     throw new Error(t('admin.accounts.bulkSchedulableResultUnknown'))
   }
   return targets as Array<{ id: number | string; control_version: number }>

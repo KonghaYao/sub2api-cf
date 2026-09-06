@@ -129,6 +129,11 @@ interface AccountPatch {
   subscription_plan?: string | null
 }
 
+interface BatchDeleteTarget {
+  id: string
+  expected_control_version: number
+}
+
 type StoredAccountCredential = UpstreamCredential & Record<string, unknown>
 
 const ACCOUNT_PROJECTION = `
@@ -1015,6 +1020,66 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
   }
 }
 
+/**
+ * Deletes an explicitly versioned set of accounts as one D1 transaction.  The
+ * account DELETE relies on the schema's cascading foreign keys for vault,
+ * group/model and health state; the two durable outboxes without account FKs
+ * are cleared first.  Pool registry rows identify group/model pools rather
+ * than accounts, so they remain valid and the account-delete trigger advances
+ * gateway_config_revision for their next sync.
+ */
+export async function batchDeleteAdminAccounts(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const targets = parseBatchDeleteTargets(body)
+    const idempotency = await controlIdempotency('admin.accounts.batch-delete.v1', requireIdempotencyKey(context.req.raw), {
+      accounts: targets,
+    })
+    const existing = await findControlIdempotency(context.env, idempotency)
+    if (existing !== null) {
+      return controlSuccess(parseIdempotentResponse(existing, 'account_batch_delete'))
+    }
+
+    const accounts = await Promise.all(targets.map(async (target) => {
+      const account = await requireAccount(context.env, target.id)
+      assertVersion(account, target.expected_control_version)
+      return account
+    }))
+    const now = Date.now()
+    const result = {
+      total: targets.length,
+      success: targets.length,
+      failed: 0,
+      success_ids: targets.map((target) => target.id),
+      failed_ids: [],
+    }
+    try {
+      await context.env.DB.batch([
+        batchDeleteVersionGuard(context.env, targets, now),
+        deleteAccountSyntheticProbeJobs(context.env, targets),
+        detachMediaProviderAccounts(context.env, targets),
+        deleteMediaProviderJobs(context.env, targets),
+        deleteAccountsStatement(context.env, targets),
+        controlIdempotencyInsert(context.env, idempotency, 'account_batch_delete', accounts[0]!.id, result, now),
+      ])
+    } catch (error) {
+      // The version guard aborts the entire transaction. Re-read to surface a
+      // stable typed conflict rather than a SQLite constraint implementation detail.
+      for (const target of targets) {
+        const current = await findAccount(context.env, target.id)
+        if (current === null) throw new GatewayError(404, 'account_not_found', 'Account was not found')
+        if (current.control_version !== target.expected_control_version) {
+          throw new GatewayError(412, 'account_version_conflict', 'Account changed; reload it and retry')
+        }
+      }
+      throw error
+    }
+    return controlSuccess(result)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 export async function putAdminAccountGroupLink(context: Context<ControlBindings>): Promise<Response> {
   try {
     const body = await readJsonObject(context.req.raw)
@@ -1455,6 +1520,86 @@ const UPDATE_ACCOUNT_FIELDS = new Set([
   ...CREATE_ACCOUNT_FIELDS,
   'control_version',
 ])
+
+function parseBatchDeleteTargets(body: Record<string, unknown>): BatchDeleteTarget[] {
+  const unsupported = Object.keys(body).find((key) => key !== 'accounts')
+  if (unsupported !== undefined) {
+    throw new GatewayError(400, 'unsupported_batch_delete_field', `Field '${unsupported}' is not supported`)
+  }
+  if (!Array.isArray(body.accounts) || body.accounts.length === 0 || body.accounts.length > 500) {
+    throw new GatewayError(400, 'invalid_batch_delete_accounts', 'accounts must contain between 1 and 500 targets')
+  }
+  const byId = new Map<string, BatchDeleteTarget>()
+  for (const rawTarget of body.accounts) {
+    if (rawTarget === null || typeof rawTarget !== 'object' || Array.isArray(rawTarget)) {
+      throw new GatewayError(400, 'invalid_batch_delete_accounts', 'accounts must contain objects')
+    }
+    const target = rawTarget as Record<string, unknown>
+    const unsupportedTarget = Object.keys(target).find((key) => key !== 'id' && key !== 'expected_control_version')
+    if (unsupportedTarget !== undefined) {
+      throw new GatewayError(400, 'invalid_batch_delete_accounts', `accounts.${unsupportedTarget} is not supported`)
+    }
+    const id = requireResourceId(typeof target.id === 'number' ? String(target.id) : target.id as string | undefined, 'account')
+    const expectedControlVersion = requireSafeInteger(target, 'expected_control_version', 0, Number.MAX_SAFE_INTEGER)
+    const existing = byId.get(id)
+    if (existing !== undefined && existing.expected_control_version !== expectedControlVersion) {
+      throw new GatewayError(409, 'duplicate_account_target', 'Duplicate account targets must use the same control version')
+    }
+    byId.set(id, { id, expected_control_version: expectedControlVersion })
+  }
+  return Array.from(byId.values()).sort((left, right) => left.id.localeCompare(right.id))
+}
+
+function batchDeleteVersionGuard(
+  env: Env,
+  targets: readonly BatchDeleteTarget[],
+  now: number,
+): D1PreparedStatement {
+  const conditions = targets.map(() => '(id = ? AND control_version = ?)').join(' OR ')
+  const bindings = targets.flatMap((target) => [target.id, target.expected_control_version])
+  // revision has a strict positive CHECK. A missing or concurrently changed
+  // target sets it to zero, aborting the whole D1 batch before any delete runs.
+  return env.DB.prepare(
+    `UPDATE gateway_config_revision
+        SET revision = CASE WHEN (
+          SELECT COUNT(*) FROM accounts WHERE ${conditions}
+        ) = ? THEN revision ELSE 0 END,
+            updated_at_ms = ?
+      WHERE singleton = 1`,
+  ).bind(...bindings, targets.length, now)
+}
+
+function deleteAccountSyntheticProbeJobs(env: Env, targets: readonly BatchDeleteTarget[]): D1PreparedStatement {
+  return accountTargetDeleteStatement(env, 'account_synthetic_probe_jobs', targets)
+}
+
+function detachMediaProviderAccounts(env: Env, targets: readonly BatchDeleteTarget[]): D1PreparedStatement {
+  const placeholders = targets.map(() => '?').join(', ')
+  return env.DB.prepare(`UPDATE media_tasks SET provider_account_id = NULL WHERE provider_account_id IN (${placeholders})`)
+    .bind(...targets.map((target) => target.id))
+}
+
+function deleteMediaProviderJobs(env: Env, targets: readonly BatchDeleteTarget[]): D1PreparedStatement {
+  const placeholders = targets.map(() => '?').join(', ')
+  return env.DB.prepare(`DELETE FROM media_provider_jobs WHERE provider_account_id IN (${placeholders})`)
+    .bind(...targets.map((target) => target.id))
+}
+
+function deleteAccountsStatement(env: Env, targets: readonly BatchDeleteTarget[]): D1PreparedStatement {
+  const conditions = targets.map(() => '(id = ? AND control_version = ?)').join(' OR ')
+  return env.DB.prepare(`DELETE FROM accounts WHERE ${conditions}`)
+    .bind(...targets.flatMap((target) => [target.id, target.expected_control_version]))
+}
+
+function accountTargetDeleteStatement(
+  env: Env,
+  table: 'account_synthetic_probe_jobs',
+  targets: readonly BatchDeleteTarget[],
+): D1PreparedStatement {
+  const placeholders = targets.map(() => '?').join(', ')
+  return env.DB.prepare(`DELETE FROM ${table} WHERE account_id IN (${placeholders})`)
+    .bind(...targets.map((target) => target.id))
+}
 
 function rejectUnknownFields(body: Record<string, unknown>, allowed: ReadonlySet<string>): void {
   const unsupported = Object.keys(body).find((key) => !allowed.has(key))

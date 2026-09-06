@@ -290,3 +290,18 @@ explicit typed error. It must never silently discard a submitted field or return
   subscription plan to an API-key account.
 - Validation: focused SQLite account suite (18 tests) and Worker typecheck
   passed. No schema change or visible UI change.
+
+## v0.42.12 Accounts batch delete — 2026-09-07
+
+- The original bulk-delete button now sends opaque account IDs with their
+  control versions. The Worker deduplicates compatible targets, rejects empty,
+  missing, stale, or conflicting sets before deletion, and retains the original
+  list reload and selection clearing behavior on success.
+- A single D1 transaction removes each account and its vault, group/model,
+  health and pending synthetic-probe state; provider media jobs are detached
+  before account deletion. Account-delete triggers advance the gateway revision,
+  causing registered pools to refresh without retaining deleted account state.
+  The deterministic idempotency response makes an ambiguous retry safe.
+- Validation: 20 focused Worker SQLite tests, 38 frontend adapter/parity tests,
+  Worker/frontend typechecks and Cloudflare SPA build passed. No schema or
+  template/style/class change.

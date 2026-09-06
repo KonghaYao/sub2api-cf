@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  batchDeleteAdminAccounts,
   createAdminAccount,
   duplicateAdminAccount,
   getAdminAccount,
@@ -31,6 +32,7 @@ function fixture(): Fixture {
   app.get('/accounts', listAdminAccounts)
   app.post('/accounts', createAdminAccount)
   app.post('/accounts/:id/duplicate', duplicateAdminAccount)
+  app.post('/accounts/batch-delete', batchDeleteAdminAccounts)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
   app.put('/accounts/:id/models/:model_id', putAdminAccountModelCapability)
@@ -649,6 +651,81 @@ describe('admin provider account control plane on D1', () => {
     expect(replay.status).toBe(200)
     await expect(replay.json()).resolves.toMatchObject({ data: { id: duplicated.id } })
     expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
+  })
+
+  it('deletes a versioned account batch atomically and replays its idempotent result', async () => {
+    const test = fixture()
+    const first = await createProvider(test, 'openai')
+    const second = await createProvider(test, 'anthropic')
+    test.raw.prepare(
+      `INSERT INTO account_synthetic_probe_jobs (
+        id, account_id, model_id, capability, generation, account_config_version,
+        account_control_version, credential_ref, account_model_control_version,
+        model_updated_at_ms, upstream_model, requested_by_user_id, status,
+        next_dispatch_at_ms, created_at_ms, updated_at_ms
+      ) VALUES (?, ?, ?, 'chat_completions', 1, 1, 0, ?, 0, 1, ?, 'admin', 'queued', 1, 1, 1)`,
+    ).run('synthetic-delete-job', first.id, 'model', 'secret', 'model')
+    const request = () => test.app.request('/accounts/batch-delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'atomic-account-batch-delete' },
+      body: JSON.stringify({ accounts: [
+        { id: second.id, expected_control_version: 0 },
+        { id: first.id, expected_control_version: 0 },
+        { id: first.id, expected_control_version: 0 },
+      ] }),
+    }, test.env)
+    const firstResponse = await request()
+    expect(firstResponse.status, await firstResponse.clone().text()).toBe(200)
+    await expect(firstResponse.json()).resolves.toMatchObject({
+      data: { total: 2, success: 2, failed: 0, success_ids: expect.arrayContaining([first.id, second.id]) },
+    })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 0 })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM account_secrets').get()).toEqual({ total: 0 })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM account_synthetic_probe_jobs').get()).toEqual({ total: 0 })
+    const replay = await request()
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({
+      data: { success_ids: expect.arrayContaining([first.id, second.id]) },
+    })
+  })
+
+  it('leaves every account intact when a batch target is missing, stale, or a delete aborts', async () => {
+    const test = fixture()
+    const first = await createProvider(test, 'openai')
+    const second = await createProvider(test, 'anthropic')
+    const request = (key: string, accounts: unknown) => test.app.request('/accounts/batch-delete', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key },
+      body: JSON.stringify({ accounts }),
+    }, test.env)
+
+    const missing = await request('batch-delete-missing', [
+      { id: first.id, expected_control_version: 0 },
+      { id: 'missing-account', expected_control_version: 0 },
+    ])
+    expect(missing.status).toBe(404)
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
+
+    const updated = await test.app.request(`/accounts/${first.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ notes: 'concurrent update' }),
+    }, test.env)
+    expect(updated.status).toBe(200)
+    const stale = await request('batch-delete-stale', [
+      { id: first.id, expected_control_version: 0 },
+      { id: second.id, expected_control_version: 0 },
+    ])
+    expect(stale.status).toBe(412)
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
+
+    test.raw.exec(`CREATE TRIGGER abort_batch_delete BEFORE DELETE ON accounts
+      WHEN OLD.id = '${second.id}' BEGIN SELECT RAISE(ABORT, 'forced_delete_failure'); END;`)
+    const aborted = await request('batch-delete-abort', [
+      { id: first.id, expected_control_version: 1 },
+      { id: second.id, expected_control_version: 0 },
+    ])
+    expect(aborted.status).toBeGreaterThanOrEqual(500)
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM account_secrets').get()).toEqual({ total: 2 })
   })
 
   it('persists a typed OpenAI OAuth subscription plan and rejects other account kinds', async () => {

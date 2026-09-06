@@ -637,6 +637,42 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(post.mock.calls[0]?.[2]).toEqual(post.mock.calls[1]?.[2])
   })
 
+  it('sends opaque, versioned batch-delete targets with a retry-safe idempotency key', async () => {
+    post.mockResolvedValueOnce({
+      data: { total: 2, success: 2, failed: 0, success_ids: ['account-a', 'account-b'], failed_ids: [] },
+    })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchDelete } = await import('@/api/admin/accounts')
+    const targets = [
+      { id: 'account-a', control_version: 7 },
+      { id: 'account-b', control_version: 2 },
+    ]
+
+    await expect(batchDelete(targets)).resolves.toMatchObject({ success_ids: ['account-a', 'account-b'] })
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/batch-delete',
+      { accounts: [
+        { id: 'account-a', expected_control_version: 7 },
+        { id: 'account-b', expected_control_version: 2 },
+      ] },
+      { headers: { 'Idempotency-Key': 'admin-account-batch-delete-33333333-3333-4333-8333-333333333333' } },
+    )
+  })
+
+  it('rejects unversioned or duplicate Worker batch-delete targets before transport', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchDelete } = await import('@/api/admin/accounts')
+
+    await expect(batchDelete(['account-a'])).rejects.toThrow(/control versions/)
+    await expect(batchDelete([
+      { id: 'account-a', control_version: 1 },
+      { id: 'account-a', control_version: 1 },
+    ])).rejects.toThrow(/unique ids/)
+    expect(post).not.toHaveBeenCalled()
+  })
+
   it('passes the opaque synthetic history cursor without decoding it', async () => {
     const page = {
       items: [{

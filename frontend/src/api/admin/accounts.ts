@@ -870,9 +870,9 @@ export interface WorkerSyntheticProbeHistoryParams {
   limit?: number
 }
 
-function workerOperationAccounts(accounts: WorkerAccountOperationTarget[]) {
-  if (accounts.length === 0 || accounts.length > 25) {
-    throw new Error('Worker account operations require between 1 and 25 accounts')
+function workerOperationAccounts(accounts: WorkerAccountOperationTarget[], maxAccounts = 25) {
+  if (accounts.length === 0 || accounts.length > maxAccounts) {
+    throw new Error(`Worker account operations require between 1 and ${maxAccounts} accounts`)
   }
   const seen = new Set<string>()
   return accounts.map((account) => {
@@ -1232,10 +1232,10 @@ export interface BatchOperationResult {
   total: number
   success: number
   failed: number
-  success_ids?: number[]
-  failed_ids?: number[]
-  errors?: Array<{ account_id: number; error: string }>
-  warnings?: Array<{ account_id: number; warning: string }>
+  success_ids?: Array<number | string>
+  failed_ids?: Array<number | string>
+  errors?: Array<{ account_id: number | string; error: string }>
+  warnings?: Array<{ account_id: number | string; warning: string }>
 }
 
 /**
@@ -1251,10 +1251,26 @@ export async function revertProxyFallback(id: number): Promise<{ message: string
 /**
  * Delete multiple accounts with bounded server-side concurrency.
  */
-export async function batchDelete(accountIds: number[]): Promise<BatchOperationResult> {
-  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-delete', {
-    account_ids: accountIds
+export async function batchDelete(
+  accountIds: Array<number | string> | WorkerAccountOperationTarget[]
+): Promise<BatchOperationResult> {
+  if (!isCloudflareWorkerContractActive()) {
+    const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-delete', {
+      account_ids: accountIds
+    })
+    return data
+  }
+  if (!accountIds.every((account): account is WorkerAccountOperationTarget =>
+    typeof account === 'object' && account !== null && 'control_version' in account,
+  )) {
+    throw new Error('Worker batch deletion requires account control versions')
+  }
+  const payload = { accounts: workerOperationAccounts(accountIds, 500) }
+  const operation = await workerOperationKey('admin-account-batch-delete', payload)
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-delete', payload, {
+    headers: { 'Idempotency-Key': operation.key }
   })
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
   return data
 }
 
