@@ -382,7 +382,10 @@ describe('admin account control plane', () => {
     expect(healthy.data).toMatchObject({ health_status: 'healthy', config_version: 1, control_version: 0 })
     db.beforeHealth = () => { db.accounts.get(id)!.config_version += 1; db.accounts.get(id)!.control_version += 1 }
     const stale = await createApp().request(`/accounts/${id}/test`, { method: 'POST' }, env(db))
-    expect(stale.status).toBe(409); expect((await json(stale)).code).toBe('account_probe_stale')
+    expect(stale.status).toBe(200)
+    expect(await json(stale)).toMatchObject({
+      data: { health_status: 'healthy', config_version: 1, control_version: 0, persisted: false },
+    })
     expect(db.accounts.get(id)).toMatchObject({ health_status: 'healthy', config_version: 2, control_version: 1 })
   })
 
