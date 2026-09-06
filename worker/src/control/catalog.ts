@@ -902,7 +902,8 @@ async function softDisable(context: Context<ControlBindings>, type: 'group' | 'm
   }
 }
 
-// UI configuration is preserved, but does not claim an implemented runtime policy.
+// UI configuration is preserved, except models_list_config which controls the
+// order and membership of the gateway model catalogue.
 const GROUP_UI_FIELDS = new Set(["long_context_pricing_enabled", "force_openai_fast", "free_openai_fast", "model_pricing", "video_rate_independent", "video_rate_multiplier", "video_price_480p", "video_price_720p", "video_price_1080p", "video_model_prices", "web_search_price_per_call", "search_price_per_1k", "audio_realtime_price_per_min", "audio_tts_price_per_million_chars", "audio_stt_price_per_hour", "peak_rate_enabled", "peak_start", "peak_end", "peak_rate_multiplier", "profit_control_enabled", "profit_min_margin", "profit_safety_buffer", "claude_code_only", "fallback_group_id", "fallback_group_id_on_invalid_request", "mcp_xml_inject", "supported_model_scopes", "models_list_config", "allow_messages_dispatch", "allow_live", "default_mapped_model", "messages_dispatch_model_config", "model_routing", "model_routing_enabled", "max_reasoning_effort", "max_reasoning_effort_over_limit", "reasoning_effort_mappings", "require_oauth_only", "require_privacy_set"])
 const GROUP_CORE_FIELDS = new Set(["expected_control_version", "name", "description", "platform", "is_exclusive", "rpm_limit", "allow_image_generation", "allow_batch_image_generation", "image_rate_independent", "control_version", "enabled", "status", "sort_order", "catalog_mode", "group_type", "rate_multiplier_ppm", "daily_quota_micros", "weekly_quota_micros", "monthly_quota_micros", "image_rate_multiplier_ppm", "batch_image_discount_multiplier_ppm", "batch_image_hold_multiplier_ppm", "image_price_1k_micros", "image_price_2k_micros", "image_price_4k_micros"])
 function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unknown> {
@@ -912,7 +913,8 @@ function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unkno
       if (!Array.isArray(value) || value.length > 0) {
         throw new GatewayError(409, 'group_account_copy_not_supported', 'Copying group accounts is not implemented')
       }
-    } else if (GROUP_UI_FIELDS.has(field)) config[field] = value
+    } else if (field === 'models_list_config') config[field] = parseModelsListConfig(value)
+    else if (GROUP_UI_FIELDS.has(field)) config[field] = value
     else if (!GROUP_CORE_FIELDS.has(field)) {
       throw new GatewayError(400, 'unsupported_group_field', `Field '${field}' is not supported`)
     }
@@ -921,6 +923,34 @@ function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unkno
     throw new GatewayError(400, 'group_config_too_large', 'Group configuration must not exceed 65536 characters')
   }
   return config
+}
+
+function parseModelsListConfig(value: unknown): { enabled: boolean; models: string[] } | null {
+  if (value === null) return null
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayError(400, 'invalid_models_list_config', 'models_list_config must be an object or null')
+  }
+  const config = value as Record<string, unknown>
+  if (typeof config.enabled !== 'boolean' || !Array.isArray(config.models)) {
+    throw new GatewayError(400, 'invalid_models_list_config', 'models_list_config requires enabled and models fields')
+  }
+  if (config.models.length > 500) {
+    throw new GatewayError(400, 'invalid_models_list_config', 'models_list_config supports at most 500 models')
+  }
+  const models: string[] = []
+  const seen = new Set<string>()
+  for (const value of config.models) {
+    if (typeof value !== 'string') {
+      throw new GatewayError(400, 'invalid_models_list_config', 'models_list_config model names must be strings')
+    }
+    const model = value.trim()
+    if (model.length === 0 || model.length > 256 || seen.has(model)) {
+      throw new GatewayError(400, 'invalid_models_list_config', 'models_list_config model names must be unique and 1-256 characters')
+    }
+    seen.add(model)
+    models.push(model)
+  }
+  return { enabled: config.enabled, models }
 }
 
 function parseCreateGroup(body: Record<string, unknown>) {
@@ -1245,7 +1275,7 @@ function publicGroup(row: GroupRow) {
   return {
     ...uiConfig,
     ...normalized,
-    compatibility: { stored_only_fields: Object.keys(uiConfig) },
+    compatibility: { stored_only_fields: Object.keys(uiConfig).filter(field => field !== 'models_list_config') },
     enabled: row.enabled === 1,
     is_exclusive: row.is_exclusive === 1,
     allow_image_generation: row.allow_image_generation === 1,

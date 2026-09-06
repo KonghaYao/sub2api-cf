@@ -226,3 +226,19 @@ explicit typed error. It must never silently discard a submitted field or return
   fixture (5 tests total), Worker typecheck and SPA build passed. Full suites
   were intentionally not repeated.
 - Production D1 pre-migration bookmark: `00000029-00000527-000050de-5046e408c7d8458c57974226c1c3f699`.
+
+## v0.42.7 Groups custom model directory — 2026-09-07
+
+- The existing Groups model-list controls now execute at the gateway. When enabled,
+  `/v1/models` and its provider-compatible projections return only configured
+  models in the exact UI order; unavailable names are skipped. Disabled or absent
+  configuration retains the normal routable catalogue.
+- The setting deliberately changes directory discovery only. It does not turn a
+  display preference into an access-control rule: an already routable model still
+  resolves through the normal gateway route for direct API calls.
+- Group create/update validates and normalizes the saved configuration (boolean
+  switch, unique trimmed names, bounded list), and continues to use the existing
+  group CAS and idempotent D1 write transaction. The existing candidate endpoint
+  and original template/style already use this same Worker-backed configuration.
+- Validation: 45 targeted SQLite control/gateway tests, Worker typecheck, frontend
+  typecheck and Cloudflare SPA build passed. No schema migration was required.

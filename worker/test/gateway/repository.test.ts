@@ -8,6 +8,27 @@ import {
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 describe('gateway repository embeddings routing', () => {
+  it('honors model-list membership and order without changing direct routing', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    seedSecondEmbeddingRoute(raw)
+    raw.prepare(`UPDATE "groups" SET ui_config_json = ? WHERE id = ?`).run(
+      JSON.stringify({ models_list_config: { enabled: true, models: ['embed-second', 'missing', 'embed-public'] } }),
+      'group-1',
+    )
+    const env = { DB: d1 } as Env
+
+    await expect(listModels(env, 'group-1')).resolves.toMatchObject([
+      { public_name: 'embed-second' },
+      { public_name: 'embed-public' },
+    ])
+    await expect(resolveGatewayRoute(
+      env, 'group-1', 'embed-public', 'embeddings', 'user-1',
+    )).resolves.toMatchObject({ model: { public_name: 'embed-public' } })
+    raw.close()
+  })
+
   it('lists and resolves an embeddings route only when both model and account capabilities are enabled', async () => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)
@@ -1189,6 +1210,20 @@ function seedEmbeddingRoute(database: any): void {
     INSERT INTO account_models (
       account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms
     ) VALUES ('account-1', 'model-1', 0, 0, 1, 1, 1);
+  `)
+}
+
+function seedSecondEmbeddingRoute(database: any): void {
+  database.exec(`
+    INSERT INTO models (id, platform, public_name, upstream_name, endpoint, embeddings, enabled, created_at_ms, updated_at_ms)
+    VALUES ('model-2', 'openai', 'embed-second', 'embed-second-upstream', 'both', 1, 1, 1, 1);
+    INSERT INTO group_models (group_id, model_id, enabled, catalog_visible, sort_order, created_at_ms, updated_at_ms)
+    VALUES ('group-1', 'model-2', 1, 1, 1, 1, 1);
+    INSERT INTO model_prices (id, group_id, model_id, version, active, input_micros_per_million, output_micros_per_million,
+      cache_read_micros_per_million, per_request_micros, minimum_reservation_micros, effective_at_ms, created_at_ms)
+    VALUES ('price-2', 'group-1', 'model-2', 1, 1, 1000, 0, 0, 0, 1, 1, 1);
+    INSERT INTO account_models (account_id, model_id, chat_completions, responses, embeddings, created_at_ms, updated_at_ms)
+    VALUES ('account-1', 'model-2', 0, 0, 1, 1, 1);
   `)
 }
 

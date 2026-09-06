@@ -449,8 +449,40 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
       ORDER BY gm.sort_order ASC, m.public_name ASC`,
   )
     .bind(groupId)
-    .all<ModelRoute>()
-  return result.results
+    .all<ModelListRow>()
+  return applyModelsListConfig(result.results)
+}
+
+type ModelListRow = ModelRoute & { ui_config_json: string }
+
+function applyModelsListConfig(models: ModelListRow[]): ModelRoute[] {
+  const config = parseModelsListConfig(models[0]?.ui_config_json)
+  const clean = (model: ModelListRow): ModelRoute => {
+    const { ui_config_json: _uiConfig, ...route } = model
+    return route
+  }
+  if (config === null || !config.enabled) return models.map(clean)
+
+  const byName = new Map(models.map(model => [model.public_name, model]))
+  return config.models.flatMap(name => {
+    const model = byName.get(name)
+    return model === undefined ? [] : [clean(model)]
+  })
+}
+
+function parseModelsListConfig(value: string | undefined): { enabled: boolean; models: string[] } | null {
+  if (value === undefined) return null
+  try {
+    const config = JSON.parse(value) as { models_list_config?: unknown }
+    const list = config.models_list_config
+    if (typeof list !== 'object' || list === null || Array.isArray(list)) return null
+    const { enabled, models } = list as { enabled?: unknown; models?: unknown }
+    if (enabled !== true || !Array.isArray(models)) return null
+    const names = models.filter((model): model is string => typeof model === 'string')
+    return names.length === models.length ? { enabled, models: names } : null
+  } catch {
+    return null
+  }
 }
 
 export async function resolveGatewayRoute(
@@ -1680,6 +1712,7 @@ function modelSelect(includeUserRate = false): string {
                  p.cache_read_micros_per_million AS account_cost_base_cache_read_micros_per_million,
                  p.per_request_micros AS account_cost_base_per_request_micros,
                  g.rate_multiplier_ppm AS group_rate_multiplier_ppm,
+                 g.ui_config_json,
                  ${userRate} AS user_rate_multiplier_ppm,
                  COALESCE(${userRate}, g.rate_multiplier_ppm) AS rate_multiplier_ppm,
                  gm.max_output_tokens, gm.default_max_output_tokens
