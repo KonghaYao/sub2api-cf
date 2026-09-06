@@ -8,6 +8,8 @@ import {
   deliverPlatformEmail,
   emailDeliveryFailure,
   hasEmailDeliveryBinding,
+  isPermanentEmailDeliveryFailure,
+  persistedEmailDeliveryFailure,
 } from '../email/delivery'
 import { authenticateUserRequest, findUserById, publicUser, type UserRow } from './handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
@@ -50,6 +52,7 @@ interface EmailChallengeRow {
   delivery_event_id: string
   delivery_event_hash: string
   delivery_state: 'pending' | 'queued' | 'delivering' | 'sent' | 'failed'
+  last_delivery_error: string | null
   created_at_ms: number
   expires_at_ms: number
 }
@@ -681,7 +684,8 @@ export async function consumeEmailChallengeDelivery(
   const eventHash = await emailDeliveryEventDigest(env, event)
   const challenge = await env.DB.prepare(
     `SELECT id, user_id, purpose, token_hash, generation, status,
-            delivery_event_id, delivery_event_hash, delivery_state, created_at_ms, expires_at_ms
+            delivery_event_id, delivery_event_hash, delivery_state, last_delivery_error,
+            created_at_ms, expires_at_ms
        FROM ${challengeTable}
       WHERE id = ? AND user_id IS ? AND email_hash = ? AND purpose = ? AND token_hash = ?
         AND delivery_event_hash = ?
@@ -701,6 +705,10 @@ export async function consumeEmailChallengeDelivery(
     return 'stale'
   }
   if (challenge.delivery_state === 'sent') return 'already_delivered'
+  if (
+    challenge.delivery_state === 'failed' &&
+    isPermanentEmailDeliveryFailure(challenge.last_delivery_error)
+  ) return 'permanently_failed'
 
   const leaseId = crypto.randomUUID()
   const lease = await env.DB.prepare(
@@ -711,7 +719,10 @@ export async function consumeEmailChallengeDelivery(
       WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
         AND delivery_event_id = ?
         AND (
-          delivery_state IN ('pending', 'queued', 'failed')
+          delivery_state IN ('pending', 'queued')
+          OR (delivery_state = 'failed' AND (
+            last_delivery_error IS NULL OR last_delivery_error NOT LIKE 'permanent:%'
+          ))
           OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
         )
       RETURNING id`,
@@ -726,9 +737,10 @@ export async function consumeEmailChallengeDelivery(
   ).all<{ id: string }>()
   if (lease.results.length !== 1) {
     const current = await env.DB.prepare(
-      `SELECT delivery_state FROM ${challengeTable} WHERE id = ?`,
-    ).bind(challenge.id).first<{ delivery_state: string }>()
+      `SELECT delivery_state, last_delivery_error FROM ${challengeTable} WHERE id = ?`,
+    ).bind(challenge.id).first<{ delivery_state: string; last_delivery_error: string | null }>()
     if (current?.delivery_state === 'sent') return 'already_delivered'
+    if (isPermanentEmailDeliveryFailure(current?.last_delivery_error)) return 'permanently_failed'
     throw new Error(`Email challenge delivery ${event.event_id} already has an active lease`)
   }
 
@@ -751,7 +763,12 @@ export async function consumeEmailChallengeDelivery(
           SET delivery_state = 'failed', delivery_lease_id = NULL,
               delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
         WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(failure.code.slice(0, DELIVERY_ERROR_MAX_LENGTH), Date.now(), challenge.id, leaseId).run()
+    ).bind(
+      persistedEmailDeliveryFailure(failure).slice(0, DELIVERY_ERROR_MAX_LENGTH),
+      Date.now(),
+      challenge.id,
+      leaseId,
+    ).run()
     if (!failure.retryable) return 'permanently_failed'
     throw error
   }

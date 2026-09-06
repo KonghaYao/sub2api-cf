@@ -485,14 +485,31 @@ describe('Worker-native email challenges', () => {
     expect(message.ack).toHaveBeenCalledOnce()
     expect(message.retry).not.toHaveBeenCalled()
     expect(test.raw.prepare(
-      `SELECT delivery_state, last_delivery_error FROM email_challenges WHERE id = ?`,
+      `SELECT delivery_state, delivery_attempts, last_delivery_error FROM email_challenges WHERE id = ?`,
     ).get(event.payload.challenge_id)).toEqual({
       delivery_state: 'failed',
-      last_delivery_error: 'email_delivery_not_configured',
+      delivery_attempts: 1,
+      last_delivery_error: 'permanent:email_delivery_not_configured',
     })
     expect(test.raw.prepare(
       `SELECT count(*) AS count FROM inbox WHERE event_id = ?`,
     ).get(event.event_id)).toEqual({ count: 0 })
+
+    const replay = {
+      ...message,
+      id: 'missing-email-binding-replay',
+      ack: vi.fn(),
+      retry: vi.fn(),
+    }
+    await consumeEvents(
+      { queue: 'events', messages: [replay] } as unknown as MessageBatch<unknown>,
+      test.env,
+    )
+    expect(replay.ack).toHaveBeenCalledOnce()
+    expect(replay.retry).not.toHaveBeenCalled()
+    expect(test.raw.prepare(
+      `SELECT delivery_attempts FROM email_challenges WHERE id = ?`,
+    ).get(event.payload.challenge_id)).toEqual({ delivery_attempts: 1 })
   })
 
   it('retries only transient delivery failure and never logs or persists provider secrets', async () => {

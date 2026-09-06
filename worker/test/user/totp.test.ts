@@ -863,11 +863,27 @@ describe('Worker-native TOTP HTTP contract', () => {
          FROM user_totp_email_challenges WHERE id = ?`,
     ).get(event.payload.challenge_id)).toEqual({
       delivery_state: 'failed',
-      last_delivery_error: 'email_delivery_not_configured',
+      last_delivery_error: 'permanent:email_delivery_not_configured',
     })
     expect(JSON.stringify(test.raw.prepare(
       `SELECT * FROM user_totp_email_challenges WHERE id = ?`,
     ).get(event.payload.challenge_id))).not.toContain(event.payload.verification_code)
+
+    const replay = {
+      ...message,
+      id: 'missing-totp-email-binding-replay',
+      ack: vi.fn(),
+      retry: vi.fn(),
+    }
+    await consumeEvents(
+      { queue: 'events', messages: [replay] } as unknown as MessageBatch<unknown>,
+      test.env,
+    )
+    expect(replay.ack).toHaveBeenCalledOnce()
+    expect(replay.retry).not.toHaveBeenCalled()
+    expect(test.raw.prepare(
+      `SELECT delivery_attempts FROM user_totp_email_challenges WHERE id = ?`,
+    ).get(event.payload.challenge_id)).toEqual({ delivery_attempts: 1 })
   })
 
   it('fails before creating a TOTP email challenge without a delivery binding', async () => {

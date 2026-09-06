@@ -480,7 +480,13 @@ describe('user notification preference handlers', () => {
       delivery_state: 'failed',
       delivery_attempts: 1,
       delivery_lease_id: null,
-      last_delivery_error: 'email_delivery_not_configured',
+      last_delivery_error: 'permanent:email_delivery_not_configured',
     })
+    await expect(
+      consumeNotificationEmailVerificationDelivery(failedEvent, failed.env),
+    ).resolves.toBe('permanently_failed')
+    expect(failed.raw.prepare(
+      `SELECT delivery_attempts FROM user_notification_email_challenges WHERE id = ?`,
+    ).get(failedEvent.payload.challenge_id)).toEqual({ delivery_attempts: 1 })
   })
 })

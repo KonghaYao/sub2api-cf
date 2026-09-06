@@ -53,6 +53,14 @@ export function emailDeliveryFailure(error: unknown): EmailDeliveryFailure {
   return { code: 'email_delivery_failed', retryable: true }
 }
 
+export function persistedEmailDeliveryFailure(failure: EmailDeliveryFailure): string {
+  return failure.retryable ? failure.code : `permanent:${failure.code}`
+}
+
+export function isPermanentEmailDeliveryFailure(value: unknown): boolean {
+  return typeof value === 'string' && value.startsWith('permanent:')
+}
+
 export async function deliverPlatformEmail(
   email: PlatformEmail,
   env: EmailDeliveryEnv,
