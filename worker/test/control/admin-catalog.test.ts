@@ -68,7 +68,7 @@ class CatalogStatement {
         catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
         allowImage, allowBatchImage, imageRateIndependent, imageRateMultiplier,
         batchDiscountMultiplier, batchHoldMultiplier, imagePrice1k, imagePrice2k,
-        imagePrice4k, createdAt, updatedAt,
+        imagePrice4k, createdAt, updatedAt, uiConfig,
       ] = this.values
       this.database.groups.set(String(id), {
         id: String(id),
@@ -94,6 +94,7 @@ class CatalogStatement {
         image_price_1k_micros: imagePrice1k === null ? null : Number(imagePrice1k),
         image_price_2k_micros: imagePrice2k === null ? null : Number(imagePrice2k),
         image_price_4k_micros: imagePrice4k === null ? null : Number(imagePrice4k),
+        ui_config_json: String(uiConfig),
         control_version: 0,
         created_at_ms: Number(createdAt),
         updated_at_ms: Number(updatedAt),
@@ -113,7 +114,7 @@ class CatalogStatement {
         catalogMode, groupType, isExclusive, dailyQuota, weeklyQuota, monthlyQuota,
         allowImage, allowBatchImage, imageRateIndependent, imageRateMultiplier,
         batchDiscountMultiplier, batchHoldMultiplier, imagePrice1k, imagePrice2k,
-        imagePrice4k, expected, nextVersion, updatedAt, id,
+        imagePrice4k, uiConfig, expected, nextVersion, updatedAt, id,
       ] = this.values
       const group = this.database.requireRow(this.database.groups, String(id))
       this.database.assertVersion(group, Number(expected))
@@ -140,6 +141,7 @@ class CatalogStatement {
         image_price_1k_micros: imagePrice1k === null ? null : Number(imagePrice1k),
         image_price_2k_micros: imagePrice2k === null ? null : Number(imagePrice2k),
         image_price_4k_micros: imagePrice4k === null ? null : Number(imagePrice4k),
+        ui_config_json: String(uiConfig),
         control_version: Number(nextVersion),
         updated_at_ms: Number(updatedAt),
       })

@@ -414,19 +414,14 @@ describe('admin GroupsView column settings', () => {
     expect(text.indexOf('Yesterday')).toBeLessThan(text.indexOf('Total'))
   })
 
-  it('does not render or request legacy group summaries and actions in Worker mode', async () => {
+  it('retains original group summaries and actions in Worker mode', async () => {
     setCloudflareWorkerContractActive(true)
-
     const wrapper = await mountView()
-
-    expect(columnKeys(wrapper)).not.toContain('usage')
-    expect(columnKeys(wrapper)).not.toContain('capacity')
-    expect(getUsageSummary).not.toHaveBeenCalled()
-    expect(getCapacitySummary).not.toHaveBeenCalled()
-    expect(getLiveCapability).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-testid="group-sort-order"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="group-duplicate"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="group-rate-multipliers"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="group-rpm-overrides"]').exists()).toBe(true)
+    expect(columnKeys(wrapper)).toContain('usage')
+    expect(columnKeys(wrapper)).toContain('capacity')
+    expect(getUsageSummary).toHaveBeenCalled()
+    expect(getCapacitySummary).toHaveBeenCalled()
+    expect(getLiveCapability).toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="group-duplicate"]').exists()).toBe(true)
   })
 })

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createAdminGroup,
+  listAdminGroups,
+  deleteAdminGroup,
   getAdminGroup,
   updateAdminGroup,
 } from '../../src/control/catalog'
@@ -19,6 +21,8 @@ function fixture(): { app: Hono<{ Bindings: Env }>; env: Env; raw: any } {
   applyMigrations(raw)
   const app = new Hono<{ Bindings: Env }>()
   app.post('/groups', createAdminGroup)
+  app.get('/groups', listAdminGroups)
+  app.delete('/groups/:id', deleteAdminGroup)
   app.get('/groups/:id', getAdminGroup)
   app.put('/groups/:id', updateAdminGroup)
   app.get('/groups/:id/rpm-overrides', listAdminGroupRpmOverrides)
@@ -45,6 +49,48 @@ function fixture(): { app: Hono<{ Bindings: Env }>; env: Env; raw: any } {
 }
 
 describe('group RPM administration on D1', () => {
+  it('preserves group UI configuration through CRUD, filtering and CAS updates', async () => {
+    const test = fixture()
+    const headers = (key: string, version?: number) => ({
+      'content-type': 'application/json', 'idempotency-key': key,
+      ...(version === undefined ? {} : { 'if-match': String(version) }),
+    })
+    const created = await test.app.request('/groups', {
+      method: 'POST', headers: headers('groups-ui-create'),
+      body: JSON.stringify({ name: 'UI Group', platform: 'openai', is_exclusive: false,
+        max_reasoning_effort: 'high', supported_model_scopes: ['text'],
+        models_list_config: { mode: 'custom', models: ['gpt-test'] } }),
+    }, test.env)
+    expect(created.status, await created.clone().text()).toBe(201)
+    const group = (await created.json() as any).data
+    expect(group).toMatchObject({ max_reasoning_effort: 'high', supported_model_scopes: ['text'] })
+    expect(group).not.toHaveProperty('ui_config_json')
+    const updated = await test.app.request(`/groups/${group.id}`, {
+      method: 'PUT', headers: headers('groups-ui-update', 0),
+      body: JSON.stringify({ supported_model_scopes: [], models_list_config: null }),
+    }, test.env)
+    expect(updated.status, await updated.clone().text()).toBe(200)
+    await expect(updated.json()).resolves.toMatchObject({ data: {
+      max_reasoning_effort: 'high', supported_model_scopes: [], models_list_config: null, control_version: 1,
+    } })
+    const stale = await test.app.request(`/groups/${group.id}`, {
+      method: 'PUT', headers: headers('groups-ui-stale', 0), body: JSON.stringify({ name: 'stale' }),
+    }, test.env)
+    expect(stale.status).toBe(412)
+    const list = await test.app.request('/groups?search=UI&is_exclusive=false&sort_by=name&sort_order=asc', {}, test.env)
+    await expect(list.json()).resolves.toMatchObject({ data: { total: 1, items: [{ id: group.id, max_reasoning_effort: 'high' }] } })
+    const detail = await test.app.request(`/groups/${group.id}`, {}, test.env)
+    await expect(detail.json()).resolves.toMatchObject({ data: { supported_model_scopes: [] } })
+    const deleted = await test.app.request(`/groups/${group.id}`, {
+      method: 'DELETE', headers: headers('groups-ui-delete', 1),
+    }, test.env)
+    expect(deleted.status, await deleted.clone().text()).toBe(200)
+    const unknown = await test.app.request('/groups', {
+      method: 'POST', headers: headers('groups-ui-unknown'), body: JSON.stringify({ name: 'unknown', invented: true }),
+    }, test.env)
+    expect(unknown.status).toBe(400)
+  })
+
   it('round-trips exact image generation policy and rejects an underfunded hold', async () => {
     const test = fixture()
     const created = await test.app.request('/groups', {

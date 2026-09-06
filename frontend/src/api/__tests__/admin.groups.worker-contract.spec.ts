@@ -23,6 +23,19 @@ describe('admin groups Cloudflare Worker contract', () => {
     )
   })
 
+  it('preserves advanced fields and explicit clears in create and update payloads', async () => {
+    const projection = { id: 'group-opaque', name: 'Full', control_version: 0 }
+    post.mockResolvedValue({ data: projection })
+    put.mockResolvedValue({ data: { ...projection, control_version: 1 } })
+    const { create, update } = await import('@/api/admin/groups')
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    await create({ name: 'Full', max_reasoning_effort: 'high', supported_model_scopes: ['text'], allow_live: true })
+    expect(post.mock.calls[0][1]).toMatchObject({ max_reasoning_effort: 'high', supported_model_scopes: ['text'], allow_live: true })
+    await update('group-opaque' as unknown as number, { supported_model_scopes: [], model_routing: null })
+    expect(put.mock.calls[0][1]).toMatchObject({ supported_model_scopes: [], model_routing: null })
+  })
+
   it('omits empty legacy filters from the bounded Worker list request', async () => {
     get.mockResolvedValueOnce({
       data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 }

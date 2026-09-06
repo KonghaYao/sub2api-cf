@@ -178,8 +178,15 @@ function appendWorkerImagePolicy(
   }
 }
 
+// Preserve all original fields; only replace fields with explicit unit/name mappings.
+function groupPassthrough(group: CreateGroupRequest | UpdateGroupRequest): Record<string, unknown> {
+  const payload: Record<string, unknown> = { ...group }
+  for (const field of ["rate_multiplier", "subscription_type", "daily_limit_usd", "weekly_limit_usd", "monthly_limit_usd", "image_rate_multiplier", "batch_image_discount_multiplier", "batch_image_hold_multiplier", "image_price_1k", "image_price_2k", "image_price_4k", "status"]) delete payload[field]
+  return payload
+}
+
 function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unknown> {
-  const payload: Record<string, unknown> = { name: group.name }
+  const payload: Record<string, unknown> = groupPassthrough(group)
   if (group.description !== undefined) payload.description = group.description
   if (group.platform !== undefined) payload.platform = group.platform
   if (group.rate_multiplier !== undefined) {
@@ -202,7 +209,7 @@ function workerCreateGroupPayload(group: CreateGroupRequest): Record<string, unk
 }
 
 function workerUpdateGroupPayload(group: UpdateGroupRequest): Record<string, unknown> {
-  const payload: Record<string, unknown> = {}
+  const payload: Record<string, unknown> = groupPassthrough(group)
   if (group.name !== undefined) payload.name = group.name
   if (group.description !== undefined) payload.description = group.description
   if (group.platform !== undefined) payload.platform = group.platform

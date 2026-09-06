@@ -27,6 +27,7 @@ import {
 type ControlBindings = { Bindings: Env }
 
 interface GroupRow {
+  ui_config_json: string
   id: string
   name: string
   description: string | null
@@ -111,7 +112,7 @@ interface PriceRow {
   created_at_ms: number
 }
 
-const GROUP_COLUMNS = `id, name, description, platform, enabled, sort_order,
+const GROUP_COLUMNS = `ui_config_json, id, name, description, platform, enabled, sort_order,
   rate_multiplier_ppm, rpm_limit, catalog_mode, group_type, is_exclusive,
   daily_quota_micros, weekly_quota_micros, monthly_quota_micros,
   allow_image_generation, allow_batch_image_generation, image_rate_independent,
@@ -257,8 +258,8 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
              image_rate_multiplier_ppm, batch_image_discount_multiplier_ppm,
              batch_image_hold_multiplier_ppm, image_price_1k_micros,
              image_price_2k_micros, image_price_4k_micros,
-             created_at_ms, updated_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             created_at_ms, updated_at_ms, ui_config_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           row.id,
           row.name,
@@ -285,6 +286,7 @@ export async function createAdminGroup(context: Context<ControlBindings>): Promi
           row.image_price_4k_micros,
           now,
           now,
+          row.ui_config_json,
         ),
         controlIdempotencyInsert(context.env, idem, 'group', row.id, response, now),
       ])
@@ -319,7 +321,9 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
     if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group'))
     const current = await requireGroup(context.env, id)
     assertControlVersion(current.control_version, expected)
-    const next = { ...current, ...patch, enabled: patch.enabled === undefined ? current.enabled : patch.enabled ? 1 : 0 }
+    const next = { ...current, ...patch, ui_config_json: JSON.stringify({
+      ...JSON.parse(current.ui_config_json ?? '{}'), ...JSON.parse(patch.ui_config_json ?? '{}'),
+    }), enabled: patch.enabled === undefined ? current.enabled : patch.enabled ? 1 : 0 }
     ensureSupportedPlatform(next.platform, next.enabled === 1)
     validateGroupCommerceFields(next)
     const response = publicGroup({
@@ -341,6 +345,7 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
                   image_rate_multiplier_ppm = ?, batch_image_discount_multiplier_ppm = ?,
                   batch_image_hold_multiplier_ppm = ?, image_price_1k_micros = ?,
                   image_price_2k_micros = ?, image_price_4k_micros = ?,
+                  ui_config_json = ?,
                   control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                   updated_at_ms = ?
             WHERE id = ?`,
@@ -367,6 +372,7 @@ export async function updateAdminGroup(context: Context<ControlBindings>): Promi
           next.image_price_1k_micros,
           next.image_price_2k_micros,
           next.image_price_4k_micros,
+          next.ui_config_json,
           expected,
           expected + 1,
           response.updated_at_ms,
@@ -776,7 +782,29 @@ async function softDisable(context: Context<ControlBindings>, type: 'group' | 'm
   }
 }
 
+// UI configuration is preserved, but does not claim an implemented runtime policy.
+const GROUP_UI_FIELDS = new Set(["long_context_pricing_enabled", "force_openai_fast", "free_openai_fast", "model_pricing", "video_rate_independent", "video_rate_multiplier", "video_price_480p", "video_price_720p", "video_price_1080p", "video_model_prices", "web_search_price_per_call", "search_price_per_1k", "audio_realtime_price_per_min", "audio_tts_price_per_million_chars", "audio_stt_price_per_hour", "peak_rate_enabled", "peak_start", "peak_end", "peak_rate_multiplier", "profit_control_enabled", "profit_min_margin", "profit_safety_buffer", "claude_code_only", "fallback_group_id", "fallback_group_id_on_invalid_request", "mcp_xml_inject", "supported_model_scopes", "models_list_config", "allow_messages_dispatch", "allow_live", "default_mapped_model", "messages_dispatch_model_config", "model_routing", "model_routing_enabled", "max_reasoning_effort", "max_reasoning_effort_over_limit", "reasoning_effort_mappings", "require_oauth_only", "require_privacy_set"])
+const GROUP_CORE_FIELDS = new Set(["expected_control_version", "name", "description", "platform", "is_exclusive", "rpm_limit", "allow_image_generation", "allow_batch_image_generation", "image_rate_independent", "control_version", "enabled", "status", "sort_order", "catalog_mode", "group_type", "rate_multiplier_ppm", "daily_quota_micros", "weekly_quota_micros", "monthly_quota_micros", "image_rate_multiplier_ppm", "batch_image_discount_multiplier_ppm", "batch_image_hold_multiplier_ppm", "image_price_1k_micros", "image_price_2k_micros", "image_price_4k_micros"])
+function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unknown> {
+  const config: Record<string, unknown> = {}
+  for (const [field, value] of Object.entries(body)) {
+    if (field === 'copy_accounts_from_group_ids') {
+      if (!Array.isArray(value) || value.length > 0) {
+        throw new GatewayError(409, 'group_account_copy_not_supported', 'Copying group accounts is not implemented')
+      }
+    } else if (GROUP_UI_FIELDS.has(field)) config[field] = value
+    else if (!GROUP_CORE_FIELDS.has(field)) {
+      throw new GatewayError(400, 'unsupported_group_field', `Field '${field}' is not supported`)
+    }
+  }
+  if (JSON.stringify(config).length > 65536) {
+    throw new GatewayError(400, 'group_config_too_large', 'Group configuration must not exceed 65536 characters')
+  }
+  return config
+}
+
 function parseCreateGroup(body: Record<string, unknown>) {
+  const uiConfig = parseGroupUiConfig(body)
   const platform = optionalString(body, 'platform', 32) ?? 'openai'
   const enabled = parseEnabled(body, true) ?? true
   ensureSupportedPlatform(platform, enabled)
@@ -786,6 +814,7 @@ function parseCreateGroup(body: Record<string, unknown>) {
   }
   const groupType = parseGroupType(body) ?? 'standard'
   const result = {
+    ui_config_json: JSON.stringify(uiConfig),
     name: requireString(body, 'name', 128),
     description: optionalNullableString(body, 'description', 1_024) ?? null,
     platform,
@@ -815,6 +844,7 @@ function parseCreateGroup(body: Record<string, unknown>) {
 
 function parseGroupPatch(body: Record<string, unknown>) {
   const result: Partial<{
+    ui_config_json: string;
     name: string; description: string | null; platform: string; enabled: boolean;
     sort_order: number; rate_multiplier_ppm: number; rpm_limit: number;
     catalog_mode: GroupRow['catalog_mode'];
@@ -827,6 +857,8 @@ function parseGroupPatch(body: Record<string, unknown>) {
     image_price_1k_micros: number | null; image_price_2k_micros: number | null;
     image_price_4k_micros: number | null
   }> = {}
+  const uiConfig = parseGroupUiConfig(body)
+  if (Object.keys(uiConfig).length) result.ui_config_json = JSON.stringify(uiConfig)
   const name = optionalString(body, 'name', 128)
   if (name !== undefined) result.name = name
   const description = optionalNullableString(body, 'description', 1_024)
@@ -1088,8 +1120,12 @@ function groupModelSelect(): string {
 }
 
 function publicGroup(row: GroupRow) {
+  const { ui_config_json, ...normalized } = row
+  const uiConfig = JSON.parse(ui_config_json ?? '{}') as Record<string, unknown>
   return {
-    ...row,
+    ...uiConfig,
+    ...normalized,
+    compatibility: { stored_only_fields: Object.keys(uiConfig) },
     enabled: row.enabled === 1,
     is_exclusive: row.is_exclusive === 1,
     allow_image_generation: row.allow_image_generation === 1,

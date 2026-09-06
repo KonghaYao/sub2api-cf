@@ -91,3 +91,21 @@ explicit typed error. It must never silently discard a submitted field or return
   sorting, and execution contracts for the restored actions.
 - v0.41.0 was published as Worker version `8d8dcb12-7a65-4066-9371-fa69c16aaa0d`;
   local HTTP smoke timed out, so deployed health has not been established.
+
+## v0.42 Groups UI and form storage — 2026-09-06
+
+- Restored the Groups view to baseline `5097b3145`, including templates, styles,
+  actions, columns and original capability-loading behavior. Added a fixed parity hash.
+- API adapter preserves every submitted field while translating existing units/names.
+- D1 0065 stores the allowlisted advanced group form configuration. Omitted fields
+  survive updates; null/empty values round-trip. Normalized core fields remain authoritative.
+- The response lists advanced fields under `compatibility.stored_only_fields`: saving
+  these fields does not implement their gateway policy. Nonempty account-copy requests
+  return an explicit 409; unknown top-level fields return 400.
+- Focused validation: 24 Worker catalog/SQLite tests and 24 frontend Groups tests
+  (including original view tests, adapter preservation and parity) passed.
+- Remaining: advanced pricing/routing/reasoning policy execution, group copy/order
+  operations, live capability and usage/capacity summary contracts, plus deployed
+  authenticated CRUD verification. This is a storage/UI slice, not Groups completion.
+- Worker typecheck and Cloudflare SPA build passed. Production D1 pre-migration
+  bookmark: `00000029-000003f3-000050de-c8e62995ffcefe18eb6015357dcce68f`.
