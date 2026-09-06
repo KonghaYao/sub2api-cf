@@ -133,6 +133,8 @@ describe('Anthropic Messages request codec', () => {
           { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
           { type: 'text', text: 'two', cache_control: { type: 'ephemeral', ttl: '5m' } },
           { type: 'text', text: 'three', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'four', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'five', cache_control: { type: 'ephemeral' } },
         ],
       }],
       tools: [{
@@ -146,9 +148,11 @@ describe('Anthropic Messages request codec', () => {
       { type: 'text', text: 'system', cache_control: { type: 'ephemeral', ttl: '1h' } },
     ])
     expect(anthropic.messages[0].content).toEqual([
-      { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
-      { type: 'text', text: 'two', cache_control: { type: 'ephemeral', ttl: '5m' } },
+      { type: 'text', text: 'one' },
+      { type: 'text', text: 'two' },
       { type: 'text', text: 'three', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'four', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'five', cache_control: { type: 'ephemeral' } },
     ])
     expect(anthropic.tools?.[0]).not.toHaveProperty('cache_control')
   })
@@ -167,6 +171,18 @@ describe('Anthropic Messages request codec', () => {
       ...base,
       tools: [{ name: 'lookup', input_schema: {}, cache_control: { type: 'ephemeral', ttl: '10m' } }],
     })).toThrowError(/cache_control\.ttl/)
+    expect(() => parseAnthropicMessagesRequest({
+      ...base,
+      messages: [{
+        role: 'assistant',
+        content: [{
+          type: 'thinking',
+          thinking: 'private reasoning',
+          signature: 'provider-signature',
+          cache_control: { type: 'ephemeral' },
+        }],
+      }],
+    })).toThrowError(/cache_control/)
   })
 
   it('replays signed Anthropic thinking as encrypted Responses reasoning in turn order', () => {

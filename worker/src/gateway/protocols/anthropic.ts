@@ -70,13 +70,11 @@ export interface AnthropicThinkingBlock {
   type: 'thinking'
   thinking: string
   signature: string
-  cache_control?: AnthropicCacheControl
 }
 
 export interface AnthropicRedactedThinkingBlock {
   type: 'redacted_thinking'
   data: string
-  cache_control?: AnthropicCacheControl
 }
 
 export type AnthropicContentBlock =
@@ -1225,20 +1223,18 @@ function parseContentBlock(value: unknown, path: string): AnthropicContentBlock 
       }
     }
     case 'thinking': {
-      exactKeys(block, ['type', 'thinking', 'signature', 'cache_control'], path)
+      exactKeys(block, ['type', 'thinking', 'signature'], path)
       return {
         type: 'thinking',
         thinking: boundedString(block.thinking, `${path}.thinking`, MAX_TEXT_CHARS),
         signature: boundedString(block.signature, `${path}.signature`, MAX_TEXT_CHARS),
-        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
       }
     }
     case 'redacted_thinking': {
-      exactKeys(block, ['type', 'data', 'cache_control'], path)
+      exactKeys(block, ['type', 'data'], path)
       return {
         type: 'redacted_thinking',
         data: nonEmptyString(block.data, `${path}.data`, MAX_TEXT_CHARS),
-        ...optionalCacheControl(block.cache_control, `${path}.cache_control`),
       }
     }
     default:
@@ -1318,26 +1314,45 @@ function capAnthropicCacheBreakpoints(
   messages: AnthropicMessage[],
   tools: AnthropicTool[] | undefined,
 ): void {
-  let retained = 0
-  const retainOrRemove = (block: { cache_control?: AnthropicCacheControl }): void => {
-    if (block.cache_control === undefined) return
-    if (retained < 4) retained += 1
-    else delete block.cache_control
-  }
+  const systemBreakpoints: Array<{ cache_control?: AnthropicCacheControl }> = []
+  const messageBreakpoints: Array<{ cache_control?: AnthropicCacheControl }> = []
+  const toolBreakpoints: Array<{ cache_control?: AnthropicCacheControl }> = []
   if (Array.isArray(system)) {
-    for (const block of system) retainOrRemove(block)
+    for (const block of system) {
+      if (block.cache_control !== undefined) systemBreakpoints.push(block)
+    }
   }
   for (const message of messages) {
     if (!Array.isArray(message.content)) continue
     for (const block of message.content) {
-      retainOrRemove(block)
+      if ('cache_control' in block && block.cache_control !== undefined) {
+        messageBreakpoints.push(block)
+      }
       if (block.type === 'tool_result' && Array.isArray(block.content)) {
-        for (const nested of block.content) retainOrRemove(nested)
+        for (const nested of block.content) {
+          if (nested.cache_control !== undefined) messageBreakpoints.push(nested)
+        }
       }
     }
   }
   if (tools !== undefined) {
-    for (const tool of tools) retainOrRemove(tool)
+    for (const tool of tools) {
+      if (tool.cache_control !== undefined) toolBreakpoints.push(tool)
+    }
+  }
+
+  let excess = systemBreakpoints.length + messageBreakpoints.length + toolBreakpoints.length - 4
+  for (let index = toolBreakpoints.length - 1; index >= 0 && excess > 0; index -= 1) {
+    delete toolBreakpoints[index]!.cache_control
+    excess -= 1
+  }
+  for (let index = 0; index < messageBreakpoints.length && excess > 0; index += 1) {
+    delete messageBreakpoints[index]!.cache_control
+    excess -= 1
+  }
+  for (let index = systemBreakpoints.length - 1; index >= 0 && excess > 0; index -= 1) {
+    delete systemBreakpoints[index]!.cache_control
+    excess -= 1
   }
 }
 
