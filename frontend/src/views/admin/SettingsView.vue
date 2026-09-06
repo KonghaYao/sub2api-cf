@@ -10,279 +10,8 @@
 
       <!-- Settings Form -->
       <form v-else @submit.prevent="saveSettings" class="space-y-6" novalidate>
-        <div v-if="cloudflareWorkerSettings" class="card">
-          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-              Cloudflare Worker Settings
-            </h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Only settings enforced by the current Worker are shown here.
-            </p>
-          </div>
-          <div class="grid grid-cols-1 gap-6 p-6 md:grid-cols-2">
-            <div>
-              <label class="input-label">{{ t("admin.settings.site.siteName") }}</label>
-              <input v-model="form.site_name" type="text" class="input" />
-            </div>
-            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-              <span class="text-sm text-gray-700 dark:text-gray-300">Registration</span>
-              <Toggle v-model="form.registration_enabled" />
-            </div>
-            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-              <span class="text-sm text-gray-700 dark:text-gray-300">Email verification</span>
-              <Toggle v-model="form.email_verify_enabled" />
-            </div>
-            <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-              <span class="text-sm text-gray-700 dark:text-gray-300">Cloudflare Turnstile</span>
-              <Toggle v-model="form.turnstile_enabled" />
-            </div>
-            <div>
-              <label class="input-label">Turnstile site key</label>
-              <input v-model="form.turnstile_site_key" type="text" class="input font-mono" />
-            </div>
-            <div>
-              <label class="input-label">Turnstile secret key</label>
-              <input
-                v-model="form.turnstile_secret_key"
-                type="password"
-                class="input font-mono"
-                :placeholder="form.turnstile_secret_key_configured ? 'Configured — leave blank to keep it' : ''"
-              />
-            </div>
-            <div
-              class="rounded-lg border border-gray-200 p-4 dark:border-dark-600 md:col-span-2"
-              data-testid="worker-passkey-settings"
-            >
-              <div class="flex items-start justify-between gap-4">
-                <div>
-                  <h3 class="font-medium text-gray-900 dark:text-white">
-                    {{ t("admin.settings.security.passkey") }}
-                  </h3>
-                  <p class="text-sm text-gray-500 dark:text-gray-400">
-                    {{ t("admin.settings.security.passkeyHint") }}
-                  </p>
-                </div>
-                <Toggle
-                  v-model="form.passkey_enabled"
-                  data-testid="worker-passkey-toggle"
-                  :disabled="!form.passkey_configured"
-                />
-              </div>
-              <div
-                class="mt-3 rounded-lg border px-3 py-2 text-sm"
-                :class="
-                  form.passkey_configured
-                    ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300'
-                    : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300'
-                "
-                data-testid="worker-passkey-config-status"
-              >
-                <p class="font-medium">
-                  {{
-                    form.passkey_configured
-                      ? t("admin.settings.security.passkeyConfigured")
-                      : t("admin.settings.security.passkeyNotConfigured")
-                  }}
-                </p>
-                <p class="mt-1 break-all">
-                  {{ t("admin.settings.security.passkeyRPID") }}:
-                  {{
-                    form.passkey_rp_id ||
-                    t("admin.settings.security.passkeyValueNotConfigured")
-                  }}
-                </p>
-                <p class="mt-1 break-all">
-                  {{ t("admin.settings.security.passkeyOrigins") }}:
-                  {{
-                    form.passkey_rp_origins.length > 0
-                      ? form.passkey_rp_origins.join(", ")
-                      : t("admin.settings.security.passkeyValueNotConfigured")
-                  }}
-                </p>
-                <p v-if="!form.passkey_configured" class="mt-2">
-                  {{ t("admin.settings.security.passkeyDeploymentHint") }}
-                </p>
-              </div>
-            </div>
-            <div
-              class="space-y-4 rounded-lg border border-gray-200 p-4 dark:border-dark-600 md:col-span-2"
-              data-testid="worker-commercial-settings"
-            >
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <h3 class="font-medium text-gray-900 dark:text-white">Model plaza</h3>
-                  <p class="text-sm text-gray-500 dark:text-gray-400">
-                    Publish the Worker-backed model catalog and active prices.
-                  </p>
-                </div>
-                <Toggle
-                  v-model="form.model_plaza_enabled"
-                  data-testid="worker-model-plaza-toggle"
-                />
-              </div>
-              <div
-                v-if="form.model_plaza_enabled"
-                class="flex items-center justify-between gap-4 rounded-lg bg-gray-50 p-3 dark:bg-dark-700"
-              >
-                <span class="text-sm text-gray-700 dark:text-gray-300">Require sign-in</span>
-                <Toggle
-                  v-model="form.model_plaza_require_auth"
-                  data-testid="worker-model-plaza-auth-toggle"
-                />
-              </div>
-              <div v-if="form.model_plaza_enabled">
-                <label class="input-label">Public pricing description</label>
-                <textarea
-                  v-model="form.model_plaza_description"
-                  rows="4"
-                  maxlength="20000"
-                  class="input"
-                  data-testid="worker-model-plaza-description"
-                ></textarea>
-              </div>
-              <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
-                  <span class="text-sm text-gray-700 dark:text-gray-300">Promo codes</span>
-                  <Toggle v-model="form.promo_code_enabled" data-testid="worker-promo-toggle" />
-                </div>
-                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
-                  <span class="text-sm text-gray-700 dark:text-gray-300">Invitation codes</span>
-                  <Toggle
-                    v-model="form.invitation_code_enabled"
-                    data-testid="worker-invitation-toggle"
-                  />
-                </div>
-                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700">
-                  <span class="text-sm text-gray-700 dark:text-gray-300">Affiliate rewards</span>
-                  <Toggle v-model="form.affiliate_enabled" data-testid="worker-affiliate-toggle" />
-                </div>
-              </div>
-              <div
-                v-if="form.affiliate_enabled"
-                class="grid grid-cols-1 gap-4 rounded-lg border border-gray-200 p-4 dark:border-dark-600 md:grid-cols-2"
-                data-testid="worker-affiliate-policy"
-              >
-                <div>
-                  <label class="input-label">Default rebate rate (%)</label>
-                  <input
-                    v-model.number="form.affiliate_rebate_rate"
-                    data-testid="worker-affiliate-rate"
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    class="input"
-                  />
-                </div>
-                <div>
-                  <label class="input-label">Freeze period (hours)</label>
-                  <input
-                    v-model.number="form.affiliate_rebate_freeze_hours"
-                    data-testid="worker-affiliate-freeze-hours"
-                    type="number"
-                    min="0"
-                    max="720"
-                    step="1"
-                    class="input"
-                  />
-                </div>
-                <div>
-                  <label class="input-label">Attribution duration (days, 0 = unlimited)</label>
-                  <input
-                    v-model.number="form.affiliate_rebate_duration_days"
-                    data-testid="worker-affiliate-duration-days"
-                    type="number"
-                    min="0"
-                    max="3650"
-                    step="1"
-                    class="input"
-                  />
-                </div>
-                <div>
-                  <label class="input-label">Per-invitee rebate cap (USD, 0 = unlimited)</label>
-                  <input
-                    v-model.number="form.affiliate_rebate_per_invitee_cap"
-                    data-testid="worker-affiliate-cap"
-                    type="number"
-                    min="0"
-                    step="0.000001"
-                    class="input"
-                  />
-                </div>
-                <div class="flex items-center justify-between rounded-lg bg-gray-50 p-3 dark:bg-dark-700 md:col-span-2">
-                  <span class="text-sm text-gray-700 dark:text-gray-300">Reward administrator-created payments</span>
-                  <Toggle
-                    v-model="form.affiliate_admin_recharge_enabled"
-                    data-testid="worker-affiliate-admin-recharge-toggle"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="space-y-5 border-t border-gray-100 p-6 dark:border-dark-700">
-            <div>
-              <h3 class="font-medium text-gray-900 dark:text-white">Stripe payments</h3>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Worker-native checkout, signed webhooks, Queue fulfillment, and D1 order history.
-              </p>
-            </div>
-            <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-                <span class="text-sm text-gray-700 dark:text-gray-300">Enable payments</span>
-                <Toggle v-model="form.payment_enabled" />
-              </div>
-              <div>
-                <label class="input-label">Minimum amount</label>
-                <input v-model.number="form.payment_min_amount" type="number" min="0" step="0.01" class="input" />
-              </div>
-              <div>
-                <label class="input-label">Maximum amount (0 = unlimited)</label>
-                <input v-model.number="form.payment_max_amount" type="number" min="0" step="0.01" class="input" />
-              </div>
-              <div>
-                <label class="input-label">Daily amount limit (0 = unlimited)</label>
-                <input v-model.number="form.payment_daily_limit" type="number" min="0" step="0.01" class="input" />
-              </div>
-              <div>
-                <label class="input-label">Checkout timeout (minutes)</label>
-                <input v-model.number="form.payment_order_timeout_minutes" type="number" min="1" max="1440" class="input" />
-              </div>
-              <div>
-                <label class="input-label">Maximum pending orders</label>
-                <input v-model.number="form.payment_max_pending_orders" type="number" min="1" max="100" class="input" />
-              </div>
-              <div>
-                <label class="input-label">Processing fee (%)</label>
-                <input v-model.number="form.payment_recharge_fee_rate" type="number" min="0" max="100" step="0.01" class="input" />
-              </div>
-              <div class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-                <span class="text-sm text-gray-700 dark:text-gray-300">Disable balance checkout</span>
-                <Toggle v-model="form.payment_balance_disabled" />
-              </div>
-            </div>
-            <PaymentProviderList
-              :providers="providers"
-              :loading="providersLoading"
-              :can-create="true"
-              :enabled-payment-types="['stripe']"
-              :all-payment-types="allPaymentTypes.filter((type) => type.value === 'stripe')"
-              :redirect-label="t('admin.settings.payment.easypayRedirect')"
-              @refresh="loadProviders"
-              @create="openCreateProvider"
-              @edit="openEditProvider"
-              @delete="confirmDeleteProvider"
-              @toggle-field="handleToggleField"
-              @toggle-type="handleToggleType"
-              @reorder="handleReorderProviders"
-            />
-          </div>
-        </div>
-
-        <WorkerAuthSourceDefaultsCard v-if="cloudflareWorkerSettings" />
-        <WorkerOAuthProvidersCard v-if="cloudflareWorkerSettings" />
-
         <!-- Tab Navigation -->
-        <div v-if="!cloudflareWorkerSettings" class="settings-tabs-shell">
+        <div class="settings-tabs-shell">
           <nav
             class="settings-tabs-scroll"
             role="tablist"
@@ -316,7 +45,7 @@
         </div>
 
         <!-- Tab: Security — Admin API Key -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'security'" class="space-y-6">
+        <div v-show="activeTab === 'security'" class="space-y-6">
           <!-- Admin API Key Settings -->
           <div class="card">
             <div
@@ -473,7 +202,7 @@
         <!-- /Tab: Security — Admin API Key -->
 
         <!-- Tab: Gateway -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'gateway'" class="space-y-6">
+        <div v-show="activeTab === 'gateway'" class="space-y-6">
           <!-- Overload Cooldown (529) Settings -->
           <div class="card">
             <div
@@ -1692,7 +1421,7 @@
         <!-- /Tab: Gateway -->
 
         <!-- Tab: Security — Registration, Turnstile, LinuxDo -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'security'" class="space-y-6">
+        <div v-show="activeTab === 'security'" class="space-y-6">
           <!-- Registration Settings -->
           <div class="card">
             <div
@@ -4093,7 +3822,7 @@
         <!-- /Tab: Security — Registration, Turnstile, LinuxDo, OIDC -->
 
         <!-- Tab: Users -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'users'" class="space-y-6">
+        <div v-show="activeTab === 'users'" class="space-y-6">
           <!-- Default Settings -->
           <div class="card">
             <div
@@ -4709,7 +4438,7 @@
         <!-- /Tab: Users -->
 
         <!-- Tab: Gateway — Claude Code, Scheduling -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'gateway'" class="space-y-6">
+        <div v-show="activeTab === 'gateway'" class="space-y-6">
           <!-- Claude Code Settings -->
           <div class="card">
             <div
@@ -6518,7 +6247,7 @@
         <!-- /Tab: Gateway — Claude Code, Scheduling -->
 
         <!-- Tab: General -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'general'" class="space-y-6">
+        <div v-show="activeTab === 'general'" class="space-y-6">
           <!-- Site Settings -->
           <div class="card">
             <div
@@ -7080,7 +6809,7 @@
 	        <!-- /Tab: General -->
 
 	        <!-- Tab: Login Agreement -->
-	        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'agreement'" class="space-y-6">
+	        <div v-show="activeTab === 'agreement'" class="space-y-6">
 	          <div class="card">
 	            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
 	              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -7282,7 +7011,7 @@
         <!-- /Tab: Login Agreement -->
 
 	        <!-- Tab: Features (功能开关) -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'features'" class="space-y-6">
+        <div v-show="activeTab === 'features'" class="space-y-6">
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
@@ -7983,7 +7712,7 @@
 
         <!-- Tab: Email -->
         <!-- Tab: Payment -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'payment'" class="space-y-6">
+        <div v-show="activeTab === 'payment'" class="space-y-6">
           <!-- Payment System Settings -->
           <div class="card">
             <div
@@ -8534,7 +8263,7 @@
           />
         </div>
 
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'email'" class="space-y-6">
+        <div v-show="activeTab === 'email'" class="space-y-6">
           <!-- Email disabled hint - show when email_verify_enabled is off -->
           <div v-if="!form.email_verify_enabled" class="card">
             <div class="p-6">
@@ -8956,7 +8685,7 @@
         <!-- /Tab: Email -->
 
         <!-- Tab: Backup -->
-        <div v-if="!cloudflareWorkerSettings" v-show="activeTab === 'backup'">
+        <div v-show="activeTab === 'backup'">
           <BackupSettings />
         </div>
 
@@ -9076,8 +8805,6 @@ import Select from "@/components/common/Select.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import PaymentProviderList from "@/components/payment/PaymentProviderList.vue";
 import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vue";
-import WorkerOAuthProvidersCard from "@/components/admin/settings/WorkerOAuthProvidersCard.vue";
-import WorkerAuthSourceDefaultsCard from "@/components/admin/settings/WorkerAuthSourceDefaultsCard.vue";
 import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
 import Toggle from "@/components/common/Toggle.vue";
@@ -9214,6 +8941,7 @@ const loading = ref(true);
 const loadFailed = ref(false);
 const saving = ref(false);
 const cloudflareWorkerSettings = ref(false);
+const workerUnsupportedGeneralBaseline = ref("");
 const testingSmtp = ref(false);
 const sendingTestEmail = ref(false);
 const smtpPasswordManuallyEdited = ref(false);
@@ -11064,7 +10792,6 @@ async function loadSettings() {
         if (value !== null && value !== undefined) form[key] = value as never;
       }
       form.turnstile_secret_key = "";
-      return;
     }
     settings.payment_load_balance_strategy =
       settings.payment_load_balance_strategy || "round-robin";
@@ -11204,6 +10931,14 @@ async function loadSettings() {
       form.wechat_connect_mode,
     );
     form.oidc_connect_client_secret = "";
+    if (cloudflareWorkerSettings.value) {
+      workerUnsupportedGeneralBaseline.value = JSON.stringify({
+        table_default_page_size: form.table_default_page_size,
+        table_page_size_options: tablePageSizeOptionsInput.value,
+        custom_endpoints: form.custom_endpoints,
+        custom_menu_items: form.custom_menu_items,
+      });
+    }
 
     // Load OpenAI fast/flex policy rules from bulk settings.
     // 仅当 payload 真的包含该字段时填充并标记为已加载；否则保持表单空值，
@@ -11350,8 +11085,29 @@ async function saveSettings() {
   saving.value = true;
   try {
     if (cloudflareWorkerSettings.value) {
+      const unsupportedGeneral = JSON.stringify({
+        table_default_page_size: form.table_default_page_size,
+        table_page_size_options: tablePageSizeOptionsInput.value,
+        custom_endpoints: form.custom_endpoints,
+        custom_menu_items: form.custom_menu_items,
+      });
+      if (unsupportedGeneral !== workerUnsupportedGeneralBaseline.value) {
+        throw Object.assign(
+          new Error("The changed General fields are not implemented by the Cloudflare Worker yet"),
+          { code: "worker_settings_field_not_supported" },
+        );
+      }
       const updated = await adminAPI.settings.updateSettings({
         site_name: form.site_name,
+        backend_mode_enabled: form.backend_mode_enabled,
+        site_subtitle: form.site_subtitle,
+        api_base_url: form.api_base_url,
+        contact_info: form.contact_info,
+        doc_url: form.doc_url,
+        site_logo: form.site_logo,
+        home_content: form.home_content,
+        compact_home_enabled: form.compact_home_enabled,
+        hide_ccs_import_button: form.hide_ccs_import_button,
         registration_enabled: form.registration_enabled,
         email_verify_enabled: form.email_verify_enabled,
         turnstile_enabled: form.turnstile_enabled,

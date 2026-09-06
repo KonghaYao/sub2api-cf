@@ -48,6 +48,15 @@ export type AuthSourceDefaults = Record<AuthSource, AuthSourceDefaultSettings>
 
 export interface PublicSystemSettings {
   site_name: string
+  backend_mode_enabled: boolean
+  site_subtitle: string
+  api_base_url: string
+  contact_info: string
+  doc_url: string
+  site_logo: string
+  home_content: string
+  compact_home_enabled: boolean
+  hide_ccs_import_button: boolean
   registration_enabled: boolean
   registration_email_suffix_whitelist: string[]
   email_verification_enabled: boolean
@@ -81,6 +90,15 @@ export interface AdminSystemSettings {
 
 interface PublicSettingsPatch {
   site_name?: string
+  backend_mode_enabled?: boolean
+  site_subtitle?: string
+  api_base_url?: string
+  contact_info?: string
+  doc_url?: string
+  site_logo?: string
+  home_content?: string
+  compact_home_enabled?: boolean
+  hide_ccs_import_button?: boolean
   registration_enabled?: boolean
   registration_email_suffix_whitelist?: string[]
   email_verification_enabled?: boolean
@@ -497,6 +515,15 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
   }
   return {
     site_name: settings.site_name,
+    backend_mode_enabled: settings.backend_mode_enabled === true,
+    site_subtitle: typeof settings.site_subtitle === 'string' ? settings.site_subtitle : '',
+    api_base_url: typeof settings.api_base_url === 'string' ? settings.api_base_url : '',
+    contact_info: typeof settings.contact_info === 'string' ? settings.contact_info : '',
+    doc_url: typeof settings.doc_url === 'string' ? settings.doc_url : '',
+    site_logo: typeof settings.site_logo === 'string' ? settings.site_logo : '',
+    home_content: typeof settings.home_content === 'string' ? settings.home_content : '',
+    compact_home_enabled: settings.compact_home_enabled === true,
+    hide_ccs_import_button: settings.hide_ccs_import_button === true,
     registration_enabled: settings.registration_enabled,
     registration_email_suffix_whitelist: registrationEmailSuffixWhitelist,
     email_verification_enabled: settings.email_verification_enabled,
@@ -549,6 +576,8 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     const value = requireObject(body.public, 'public')
     rejectUnknownKeys(value, [
       'site_name',
+      'backend_mode_enabled', 'site_subtitle', 'api_base_url', 'contact_info', 'doc_url',
+      'site_logo', 'home_content', 'compact_home_enabled', 'hide_ccs_import_button',
       'registration_enabled',
       'registration_email_suffix_whitelist',
       'email_verification_enabled',
@@ -567,6 +596,12 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     const publicPatch: PublicSettingsPatch = {}
     if (value.site_name !== undefined) {
       publicPatch.site_name = settingString(value.site_name, 'site_name', 128, false)
+    }
+    for (const field of ['site_subtitle', 'api_base_url', 'contact_info', 'doc_url', 'site_logo', 'home_content'] as const) {
+      if (value[field] !== undefined) publicPatch[field] = settingString(value[field], field, 20_000, true)
+    }
+    for (const field of ['backend_mode_enabled', 'compact_home_enabled', 'hide_ccs_import_button'] as const) {
+      if (value[field] !== undefined) publicPatch[field] = settingBoolean(value[field], field)
     }
     if (value.registration_enabled !== undefined) {
       publicPatch.registration_enabled = settingBoolean(value.registration_enabled, 'registration_enabled')

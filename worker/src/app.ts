@@ -421,6 +421,9 @@ function isApiPath(pathname: string): boolean {
 function defaultPublicSettings() {
   return {
     site_name: 'Sub2API',
+    backend_mode_enabled: false,
+    site_subtitle: '', api_base_url: '', contact_info: '', doc_url: '', site_logo: '', home_content: '',
+    compact_home_enabled: false, hide_ccs_import_button: false,
     registration_enabled: false,
     registration_email_suffix_whitelist: [],
     email_verification_enabled: false,

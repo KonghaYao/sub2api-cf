@@ -24,6 +24,15 @@ interface SettingsResponse {
     control_version: number
     public: {
       site_name: string
+      backend_mode_enabled: boolean
+      site_subtitle: string
+      api_base_url: string
+      contact_info: string
+      doc_url: string
+      site_logo: string
+      home_content: string
+      compact_home_enabled: boolean
+      hide_ccs_import_button: boolean
       registration_enabled: boolean
       registration_email_suffix_whitelist: string[]
       email_verification_enabled: boolean
@@ -150,6 +159,9 @@ describe('admin system settings', () => {
         control_version: 0,
         public: {
           site_name: 'Sub2API',
+          backend_mode_enabled: false,
+          site_subtitle: '', api_base_url: '', contact_info: '', doc_url: '', site_logo: '', home_content: '',
+          compact_home_enabled: false, hide_ccs_import_button: false,
           registration_enabled: false,
           registration_email_suffix_whitelist: [],
           email_verification_enabled: false,
@@ -390,6 +402,15 @@ describe('admin system settings', () => {
       body: JSON.stringify({
         public: {
           site_name: 'Edge Sub2API',
+          backend_mode_enabled: true,
+          site_subtitle: 'Fast gateway',
+          api_base_url: 'https://api.example.test',
+          contact_info: 'support@example.test',
+          doc_url: 'https://docs.example.test',
+          site_logo: 'https://cdn.example.test/logo.svg',
+          home_content: '# Welcome',
+          compact_home_enabled: true,
+          hide_ccs_import_button: true,
           registration_enabled: true,
           registration_email_suffix_whitelist: ['example.com', '@EXAMPLE.com', '*.EDU.cn'],
           email_verification_enabled: true,
@@ -416,6 +437,15 @@ describe('admin system settings', () => {
       control_version: 1,
       public: {
         site_name: 'Edge Sub2API',
+        backend_mode_enabled: true,
+        site_subtitle: 'Fast gateway',
+        api_base_url: 'https://api.example.test',
+        contact_info: 'support@example.test',
+        doc_url: 'https://docs.example.test',
+        site_logo: 'https://cdn.example.test/logo.svg',
+        home_content: '# Welcome',
+        compact_home_enabled: true,
+        hide_ccs_import_button: true,
         registration_enabled: true,
         registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
         email_verification_enabled: true,
@@ -437,6 +467,15 @@ describe('admin system settings', () => {
       schema_version: 1,
       control_version: 1,
       site_name: 'Edge Sub2API',
+      backend_mode_enabled: true,
+      site_subtitle: 'Fast gateway',
+      api_base_url: 'https://api.example.test',
+      contact_info: 'support@example.test',
+      doc_url: 'https://docs.example.test',
+      site_logo: 'https://cdn.example.test/logo.svg',
+      home_content: '# Welcome',
+      compact_home_enabled: true,
+      hide_ccs_import_button: true,
       registration_enabled: true,
       registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
       email_verification_enabled: true,
@@ -477,8 +516,15 @@ describe('admin system settings', () => {
     })
     expect(JSON.parse(String(audit.changed_fields_json))).toEqual([
       'public.affiliate_enabled',
+      'public.api_base_url',
       'public.available_channels_enabled',
+      'public.backend_mode_enabled',
+      'public.compact_home_enabled',
+      'public.contact_info',
+      'public.doc_url',
       'public.email_verification_enabled',
+      'public.hide_ccs_import_button',
+      'public.home_content',
       'public.invitation_code_enabled',
       'public.model_plaza_description',
       'public.model_plaza_enabled',
@@ -487,7 +533,9 @@ describe('admin system settings', () => {
       'public.promo_code_enabled',
       'public.registration_email_suffix_whitelist',
       'public.registration_enabled',
+      'public.site_logo',
       'public.site_name',
+      'public.site_subtitle',
       'public.turnstile_enabled',
       'public.turnstile_site_key',
       'secrets.turnstile_secret_key:set',

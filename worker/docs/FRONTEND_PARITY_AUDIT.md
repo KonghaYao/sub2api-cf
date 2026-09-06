@@ -427,3 +427,17 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: focused Worker control/SQLite gateway tests (43), focused
   Channels frontend tests (23), and Worker/frontend typechecks passed. No D1
   migration.
+
+## v0.42.21 Settings template parity and General site settings — 2026-09-07
+
+- Restored the Settings view template, classes, and styles exactly from
+  `origin/main@5097b3145`; a parity test prevents Worker mode from replacing
+  or hiding the original settings tabs and forms.
+- General site settings now round-trip through the versioned Worker control
+  API, D1-backed public JSON, KV projection, audit log, and frontend DTO:
+  backend mode, branding, API/document/contact URLs, home content, and the
+  compact/import switches.
+- Unsupported General table/menu/endpoint edits are detected before submit and
+  return a typed error instead of being silently dropped.
+- Validation: Settings Worker SQLite control tests (11), Settings template
+  parity test, and Worker/frontend typechecks passed. No D1 migration.
