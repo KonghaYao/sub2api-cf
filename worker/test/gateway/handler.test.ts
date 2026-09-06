@@ -2196,6 +2196,40 @@ describe('OpenAI-compatible gateway', () => {
   })
 
   it.each([
+    ['type', 'ghp_1234567890abcdefghijklmnopqrstuvwxyz'],
+    ['code', 'AKIAIOSFODNN7EXAMPLE'],
+    ['param', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl'],
+  ] as const)('does not reflect a credential-like OpenAI 400 %s field', async (field, value) => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: {
+        message: 'The request field is invalid.',
+        type: 'invalid_request_error',
+        code: 'invalid_request',
+        param: 'input',
+        [field]: value,
+      },
+    }, { status: 400 })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(text)).toEqual({
+      error: {
+        message: 'Upstream rejected the request',
+        type: 'invalid_request_error',
+        code: 'upstream_request_error',
+      },
+    })
+    expect(text).not.toContain(value)
+  })
+
+  it.each([
     'Authorization: Bearer upstream-token-1234',
     'Incorrect API key provided: sk-proj-upstream-secret',
     'Request failed for key=upstream-secret-1234',

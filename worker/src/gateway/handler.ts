@@ -3420,12 +3420,16 @@ function containsCredentialLikeValue(value: string): boolean {
 
 function isSafeOpenAiIdentifier(value: string): boolean {
   const trimmed = value.trim()
-  return trimmed.length <= 128 && /^[a-z0-9][a-z0-9_.-]*$/iu.test(trimmed)
+  return trimmed.length <= 128 &&
+    /^[a-z0-9][a-z0-9_.-]*$/iu.test(trimmed) &&
+    !containsCredentialLikeValue(trimmed)
 }
 
 function isSafeOpenAiParam(value: string): boolean {
   const trimmed = value.trim()
-  return trimmed.length <= 512 && /^[a-z0-9_$.[\]-]+$/iu.test(trimmed)
+  return trimmed.length <= 512 &&
+    /^[a-z0-9_$.[\]-]+$/iu.test(trimmed) &&
+    !containsCredentialLikeValue(trimmed)
 }
 
 function isRetryableStatus(status: number): boolean {
