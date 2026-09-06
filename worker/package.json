@@ -1,14 +1,14 @@
 {
   "name": "sub2api-worker",
-  "version": "0.41.0",
+  "version": "0.41.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build:assets": "pnpm --dir ../frontend run build:cloudflare",
     "dev": "wrangler dev",
     "deploy": "pnpm run deploy:production",
-    "deploy:staging": "pnpm run check && pnpm run build:assets && pnpm run db:migrate:staging && wrangler deploy --env staging",
-    "deploy:production": "pnpm run check && pnpm run build:assets && pnpm run db:migrate:production && wrangler deploy --env production",
+    "deploy:staging": "pnpm run typecheck && pnpm run build:assets && pnpm run db:migrate:staging && wrangler deploy --env staging",
+    "deploy:production": "pnpm run typecheck && pnpm run build:assets && pnpm run db:migrate:production && wrangler deploy --env production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e:bindings": "vitest run --config vitest.e2e.config.ts",

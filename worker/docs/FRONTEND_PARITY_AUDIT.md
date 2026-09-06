@@ -77,3 +77,17 @@ explicit typed error. It must never silently discard a submitted field or return
 - Release commands now typecheck/build/migrate/deploy without automatically running full
   unit and binding suites. `pnpm run check` remains available explicitly.
 - Next slice: account list type/privacy filtering and retained sorting contracts.
+
+## v0.41.1 incremental release — 2026-09-06
+
+- Account type and stored privacy filters now constrain both D1 count and paged results.
+  Missing legacy UI config falls back to the normalized credential kind; `__unset__`
+  matches absent/non-text/blank privacy metadata.
+- Added priority, expiry, and schedulable sorting with deterministic ID tie-breaks.
+- Focused SQLite account suite: 17 tests passed. No schema migration required.
+- Default staging/production commands now run Worker typecheck, SPA build/typecheck,
+  verified D1 migration runner, and deployment. Full `check` stays opt-in.
+- Remaining account work includes runtime status filters, upstream billing/last-used
+  sorting, and execution contracts for the restored actions.
+- v0.41.0 was published as Worker version `8d8dcb12-7a65-4066-9371-fa69c16aaa0d`;
+  local HTTP smoke timed out, so deployed health has not been established.

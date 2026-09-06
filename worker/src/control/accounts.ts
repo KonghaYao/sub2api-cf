@@ -200,6 +200,29 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       conditions.push('a.enabled = ?')
       values.push(enabled ? 1 : 0)
     }
+    const accountType = context.req.query('type')
+    if (accountType) {
+      if (!['apikey', 'oauth', 'setup-token', 'upstream', 'bedrock'].includes(accountType)) {
+        throw new GatewayError(400, 'invalid_type', 'type is invalid')
+      }
+      conditions.push(`COALESCE(json_extract(a.ui_config_json, '$.type'),
+        CASE a.credential_kind WHEN 'api_key' THEN 'apikey'
+          WHEN 'setup_token' THEN 'setup-token' ELSE 'oauth' END) = ?`)
+      values.push(accountType)
+    }
+    const privacyMode = context.req.query('privacy_mode')
+    if (privacyMode) {
+      if (privacyMode.length > 128) {
+        throw new GatewayError(400, 'invalid_privacy_mode', 'privacy_mode must not exceed 128 characters')
+      }
+      const privacyColumn = "CASE WHEN json_type(a.ui_config_json, '$.extra.privacy_mode') = 'text' " +
+        "THEN json_extract(a.ui_config_json, '$.extra.privacy_mode') ELSE '' END"
+      if (privacyMode === '__unset__') conditions.push(`trim(${privacyColumn}) = ''`)
+      else {
+        conditions.push(`(${privacyColumn}) = ?`)
+        values.push(privacyMode)
+      }
+    }
     const search = context.req.query('search')?.trim()
     if (search) {
       if (search.length > 256) throw new GatewayError(400, 'invalid_search', 'search must not exceed 256 characters')
@@ -225,6 +248,9 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       status: 'a.enabled',
       rate_multiplier: 'a.billing_rate_multiplier_ppm',
       max_concurrency: 'a.max_concurrency',
+      schedulable: 'a.enabled',
+      priority: "COALESCE(json_extract(a.ui_config_json, '$.priority'), 0)",
+      expires_at: "json_extract(a.ui_config_json, '$.expires_at')",
       created_at: 'a.created_at_ms',
       updated_at: 'a.updated_at_ms',
     }

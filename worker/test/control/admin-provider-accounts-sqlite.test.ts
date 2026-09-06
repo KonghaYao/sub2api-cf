@@ -531,6 +531,37 @@ describe('admin provider account control plane on D1', () => {
     await expect(invalidSort.json()).resolves.toMatchObject({ code: 'invalid_sort_by' })
   })
 
+  it('filters stored account type and privacy before pagination and sorts UI fields', async () => {
+    const test = fixture()
+    const first = await createProvider(test, 'openai')
+    const second = await createProvider(test, 'anthropic')
+    test.raw.prepare('UPDATE accounts SET ui_config_json = ? WHERE id = ?').run(
+      JSON.stringify({ priority: 20, extra: { privacy_mode: 'training_off' }, expires_at: 200 }), first.id,
+    )
+    test.raw.prepare('UPDATE accounts SET ui_config_json = ? WHERE id = ?').run(
+      JSON.stringify({ priority: 10, extra: { privacy_mode: '  ' }, expires_at: 100 }), second.id,
+    )
+    const filtered = await test.app.request(
+      '/accounts?type=apikey&privacy_mode=training_off&page_size=1&sort_by=priority', {}, test.env,
+    )
+    expect(filtered.status).toBe(200)
+    await expect(filtered.json()).resolves.toMatchObject({
+      data: { total: 1, pages: 1, items: [{ id: first.id }] },
+    })
+    const unset = await test.app.request('/accounts?privacy_mode=__unset__', {}, test.env)
+    await expect(unset.json()).resolves.toMatchObject({ data: { total: 1, items: [{ id: second.id }] } })
+    const oauth = await test.app.request('/accounts?type=oauth', {}, test.env)
+    await expect(oauth.json()).resolves.toMatchObject({ data: { total: 0, items: [] } })
+    for (const sort of ['priority', 'expires_at']) {
+      const sorted = await test.app.request(`/accounts?sort_by=${sort}&sort_order=asc&page_size=1`, {}, test.env)
+      await expect(sorted.json()).resolves.toMatchObject({
+        data: { total: 2, items: [{ id: second.id }] },
+      })
+    }
+    const invalid = await test.app.request('/accounts?type=invalid', {}, test.env)
+    expect(invalid.status).toBe(400)
+  })
+
   it('accepts the original account page empty filter values', async () => {
     const test = fixture()
     const account = await createProvider(test, 'openai')
