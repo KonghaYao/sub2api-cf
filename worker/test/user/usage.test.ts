@@ -46,6 +46,13 @@ describe('user usage HTTP contract',()=>{
   expect((await app.request('/api/v1/usage?limit=1&cursor=not-a-cursor',{headers:t.headers},t.env)).status).toBe(400)
   expect((await app.request('/api/v1/usage?page=101&page_size=20',{headers:t.headers},t.env)).status).toBe(400)
  })
+ it('honors supported legacy list sorting and rejects unknown sort fields',async()=>{
+  const t=await fixture(),app=createApp()
+  await t.env.DB.prepare(`INSERT INTO usage_projection(event_id,request_id,user_id,api_key_id,model,input_tokens,output_tokens,amount_micros,occurred_at_ms,projected_at_ms)VALUES('alice-alpha','alice-alpha','alice','alice-key','alpha',1,1,1,?,?)`).bind(TEST_NOW+1,TEST_NOW).run()
+  const sorted=await app.request('/api/v1/usage?page=1&page_size=20&sort_by=model&sort_order=asc',{headers:t.headers},t.env)
+  expect((await sorted.json() as any).data.items.map((row:any)=>row.id)).toEqual(['alice-alpha','alice-event'])
+  expect((await app.request('/api/v1/usage?page=1&sort_by=cost',{headers:t.headers},t.env)).status).toBe(400)
+ })
  it('ports request-type, billing-mode, compaction, endpoint, and platform usage dimensions',async()=>{
   const t=await fixture(),app=createApp()
   await t.env.DB.prepare(`INSERT INTO usage_projection(

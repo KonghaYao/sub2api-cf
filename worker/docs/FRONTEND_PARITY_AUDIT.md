@@ -492,3 +492,14 @@ explicit typed error. It must never silently discard a submitted field or return
   After deleting the final item on a later page, the page reloads at the last
   valid page with the server's returned count.
 - A Vue SFC parity test locks the template and styles to the baseline.
+
+## v0.42.31 User usage page parity — 2026-09-07
+
+- Restored the original Usage page template and styling from
+  `origin/main@5097b3145`, including all filters, sortable usage columns,
+  pagination, error-tab controls, and CSV export.
+- User usage lists now use D1 count plus stable offset pagination. `created_at`
+  and `model` sorting run in SQL with `event_id` as the deterministic tie-breaker.
+- The Worker adapter retains opaque IDs, cursor export traversal, and exact
+  monetary projections. Category filtering remains visible and returns an
+  explicit unavailable message until it has a supported Worker query contract.

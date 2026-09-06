@@ -19,18 +19,22 @@ import type {
 } from '@/types'
 
 export interface UsageExplorerQuery {
+  page?: number
+  page_size?: number
   limit?: number
   cursor?: string
   start_date?: string
   end_date?: string
-  api_key_id?: string
-  group_id?: string
+  api_key_id?: string | number
+  group_id?: string | number
   model?: string
   billing_type?: number | null
   stream?: boolean
   request_type?: UsageRequestType
   native_compaction_v2?: boolean | null
   billing_mode?: string | null
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
 }
 
 // ==================== Dashboard Types ====================
@@ -165,8 +169,8 @@ export async function list(
 export async function query(
   params: UsageExplorerQuery,
   config: { signal?: AbortSignal } = {}
-): Promise<CursorPage<UsageLog>> {
-  const { data } = await apiClient.get<CursorPage<UsageLog>>('/usage', {
+): Promise<CursorPage<UsageLog> & { total?: number; page?: number; page_size?: number; pages?: number }> {
+  const { data } = await apiClient.get<CursorPage<UsageLog> & { total?: number; page?: number; page_size?: number; pages?: number }>('/usage', {
     ...config,
     params
   })

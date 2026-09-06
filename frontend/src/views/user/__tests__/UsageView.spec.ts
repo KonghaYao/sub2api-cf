@@ -244,18 +244,18 @@ describe('user UsageView', () => {
     expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({ native_compaction_v2: null }))
   })
 
-  it('uses the returned cursor for the next page and clears it when filters reset', async () => {
-    query.mockResolvedValueOnce({ items: [usageLog], has_more: true, next_cursor: 'usage-next' })
+  it('uses stable offset pagination and returns to the first page when filters reset', async () => {
+    query.mockResolvedValueOnce({ items: [usageLog], total: 21, page: 1, page_size: 20, pages: 2 })
     const wrapper = mountUsageView()
     await flushPromises()
     query.mockClear()
-    query.mockResolvedValueOnce({ items: [], has_more: false, next_cursor: null })
+    query.mockResolvedValueOnce({ items: [], total: 21, page: 2, page_size: 20, pages: 2 })
 
-    ;(wrapper.vm as any).goToNextUsagePage()
+    ;(wrapper.vm as any).handlePageChange(2)
     await flushPromises()
 
     expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({ limit: 20, cursor: 'usage-next' }),
+      expect.objectContaining({ page: 2, page_size: 20, sort_by: 'created_at', sort_order: 'desc' }),
       expect.anything(),
     )
 
@@ -263,9 +263,8 @@ describe('user UsageView', () => {
     ;(wrapper.vm as any).resetFilters()
     await flushPromises()
     expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({ limit: 20, cursor: undefined }),
+      expect.objectContaining({ page: 1, page_size: 20, sort_by: 'created_at', sort_order: 'desc' }),
       expect.anything(),
     )
-    expect(wrapper.text()).not.toContain('Export CSV')
   })
 })

@@ -46,14 +46,31 @@ export async function listUsage(context: Context<Bindings>): Promise<Response> {
     }
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, MAX_LEGACY_PAGE)
     const size = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+    const order = usageListOrder(context)
     const [count, rows] = await context.env.DB.batch([
       context.env.DB.prepare(`SELECT COUNT(*) AS total FROM usage_projection WHERE ${filter.where}`).bind(...filter.values),
       context.env.DB.prepare(`SELECT ${USAGE_COLUMNS} FROM usage_projection WHERE ${filter.where}
-        ORDER BY occurred_at_ms DESC, event_id DESC LIMIT ? OFFSET ?`).bind(...filter.values, size, (page - 1) * size),
+        ORDER BY ${order.column} ${order.direction}, event_id ${order.direction} LIMIT ? OFFSET ?`).bind(...filter.values, size, (page - 1) * size),
     ])
     const total = integer((count.results[0] as any)?.total)
     return controlSuccess({ items: rows.results.map(usageLog), total, page, page_size: size, pages: total === 0 ? 0 : Math.ceil(total / size) })
   } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+function usageListOrder(context: Context<Bindings>): { column: string; direction: 'ASC' | 'DESC' } {
+  const key = context.req.query('sort_by') ?? 'created_at'
+  const direction = context.req.query('sort_order') ?? 'desc'
+  const columns: Record<string, string> = {
+    created_at: 'occurred_at_ms',
+    model: 'COALESCE(requested_model, model)',
+  }
+  if (!Object.hasOwn(columns, key)) {
+    throw new GatewayError(400, 'unsupported_usage_sort', 'sort_by is not supported')
+  }
+  if (direction !== 'asc' && direction !== 'desc') {
+    throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+  }
+  return { column: columns[key]!, direction: direction.toUpperCase() as 'ASC' | 'DESC' }
 }
 
 export async function getUsageDetail(context: Context<Bindings>): Promise<Response> {

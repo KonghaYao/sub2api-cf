@@ -105,7 +105,7 @@
       <CursorPagination
         v-if="rows.length > 0 || page > 1"
         :page="page"
-        :has-more="hasMore"
+        :has-more="hasMore ?? false"
         :loading="loading"
         @previous="$emit('previous')"
         @next="$emit('next')"
@@ -137,7 +137,9 @@ import type { Column } from '@/components/common/types'
 
 const props = defineProps<{
   rows: UserErrorRequest[]
-  hasMore: boolean
+  hasMore?: boolean
+  total?: number
+  pageSize?: number
   loading: boolean
   page: number
   /** 列设置:仅显示这些 key 的列;不传则全显(key 须与 allColumns 一致) */
@@ -147,6 +149,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'previous'): void
   (e: 'next'): void
+  (e: 'update:page', v: number): void
+  (e: 'update:pageSize', v: number): void
+  (e: 'sort', sortBy: string, sortOrder: 'asc' | 'desc'): void
   (e: 'ipGeoBatchFailed'): void
 }>()
 
