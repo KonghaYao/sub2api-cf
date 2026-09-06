@@ -367,9 +367,15 @@ async function handleSubmitRegistration() {
 onMounted(async () => {
   const params = parseFragmentParams()
   const tokenResponse = readTokenResponse(params)
+  const legacyPendingToken = params.get('pending_oauth_token')?.trim() || ''
   const fragmentError = params.get('error') || ''
   const fragmentErrorDescription =
     params.get('error_description') || params.get('error_message') || ''
+
+  if (legacyPendingToken && !canResumeLegacyPendingOAuth()) {
+    invalidCallback.value = true
+    return
+  }
 
   if (fragmentError) {
     appStore.showError(fragmentErrorDescription || fragmentError)

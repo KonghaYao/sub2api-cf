@@ -171,7 +171,9 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   `subscription_schema_migrations`, `subscription_outbox` and
   `subscription_mutations`. Exact schema, ordering, bounded size, independent
   digests, empty-target atomic restore, identical replay and conflict rejection
-  pass locally through the public HTTP seam and real Workerd Durable Objects.
+  pass local core/adapter tests; export, replay and digest read-back also pass
+  the public HTTP seam against a real Workerd Durable Object. A separate real
+  empty-environment restore drill remains a release gate.
 - Stripe is the sole retained Worker payment provider. Airwallex, standalone
   Alipay, standalone WeChat Pay and EasyPay UI/routes are removed. The legacy
   `/monitor` page and legacy pending-OAuth account chooser are also removed;

@@ -151,6 +151,21 @@ describe('OAuthCallbackView', () => {
     expect(wrapper.text()).toContain('auth.oauth.invalidCallbackTitle')
   })
 
+  it('rejects a legacy pending invitation fragment in Worker mode', async () => {
+    routeState.path = '/auth/oauth/callback'
+    setCloudflareWorkerContractActive(true)
+    locationState.current.hash =
+      '#error=invitation_required&pending_oauth_token=legacy-pending-token&redirect=%2Flegacy-invite'
+
+    const wrapper = mount(OAuthCallbackView)
+    await vi.dynamicImportSettled()
+
+    expect(exchangePendingOAuthCompletionMock).not.toHaveBeenCalled()
+    expect(apiPostMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('auth.oauth.invalidCallbackTitle')
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+  })
+
   it('forwards frontend email oauth provider callbacks back to the backend callback endpoint', async () => {
     routeState.path = '/auth/oauth/callback'
     routeState.query = {

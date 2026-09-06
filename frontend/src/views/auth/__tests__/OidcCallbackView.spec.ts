@@ -122,6 +122,29 @@ describe('OidcCallbackView', () => {
     expect(wrapper.text()).toContain('auth.oidc.callbackHint')
   })
 
+  it('rejects a legacy pending invitation fragment in Worker mode', async () => {
+    setCloudflareWorkerContractActive(true)
+    window.location.hash =
+      '#error=invitation_required&pending_oauth_token=legacy-pending-token&redirect=%2Flegacy-invite'
+
+    const wrapper = mount(OidcCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(exchangePendingOAuthCompletion).not.toHaveBeenCalled()
+    expect(apiClientPost).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('auth.oauth.invalidCallbackHint')
+    expect(wrapper.find('input[type="text"]').exists()).toBe(false)
+  })
+
   it('accepts the legacy fragment token success callback without pending-session exchange', async () => {
     window.location.hash =
       '#access_token=legacy-access-token&refresh_token=legacy-refresh-token&expires_in=3600&token_type=Bearer&redirect=%2Flegacy-dashboard'

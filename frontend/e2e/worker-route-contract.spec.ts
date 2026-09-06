@@ -175,12 +175,9 @@ test('every reachable public Worker route renders and unsupported payment routes
   }
 
   await patrol.inspectResponses()
-  const routeGaps = patrol.failures.apiFailures.filter((failure) =>
-    failure.body.includes('Route not migrated to Cloudflare Workers yet')
-  )
   expect(patrol.failures.pageErrors, JSON.stringify(patrol.failures, null, 2)).toEqual([])
   expect(patrol.failures.requestFailures, JSON.stringify(patrol.failures, null, 2)).toEqual([])
-  expect(routeGaps, JSON.stringify(patrol.failures, null, 2)).toEqual([])
+  expect(patrol.failures.apiFailures, JSON.stringify(patrol.failures, null, 2)).toEqual([])
 })
 
 test('every reachable ordinary-user Worker route renders and legacy-only routes are removed', async ({ page, request }) => {
@@ -220,10 +217,7 @@ test('every reachable ordinary-user Worker route renders and legacy-only routes 
   await expect.soft(page, '/monitor Worker removal redirect').toHaveURL(/\/dashboard(?:\?|$)/)
 
   await patrol.inspectResponses()
-  const routeGaps = patrol.failures.apiFailures.filter((failure) =>
-    failure.body.includes('Route not migrated to Cloudflare Workers yet')
-  )
   expect(patrol.failures.pageErrors, JSON.stringify(patrol.failures, null, 2)).toEqual([])
   expect(patrol.failures.requestFailures, JSON.stringify(patrol.failures, null, 2)).toEqual([])
-  expect(routeGaps, JSON.stringify(patrol.failures, null, 2)).toEqual([])
+  expect(patrol.failures.apiFailures, JSON.stringify(patrol.failures, null, 2)).toEqual([])
 })

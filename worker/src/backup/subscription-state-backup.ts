@@ -4,9 +4,11 @@ import {
   exportSqliteDoBackup,
   inspectSqliteDoBackup,
   restoreSqliteDoBackup,
+  rowsForBackupTable,
   valueForBackupRow,
   type SqliteDoBackupContract,
   type SqliteDoBackupIdentity,
+  type SqliteDoBackupRow,
   type SqliteDoBackupSnapshot,
 } from './sqlite-do-backup'
 
@@ -87,6 +89,13 @@ function validateLogicalState(
     || valueForBackupRow(captured, profiles[0], 'singleton') !== 1
     || valueForBackupRow(captured, profiles[0], 'subscription_id') !== identity.objectId
   ) throw invalidArtifact('Backup artifact subscription identity is invalid')
+
+  for (const row of rowsForBackupTable(captured, 'subscription_outbox')) {
+    validateOutboxRow(captured, row, identity)
+  }
+  for (const row of rowsForBackupTable(captured, 'subscription_mutations')) {
+    validateMutationRow(captured, row, identity)
+  }
 }
 
 function isLogicallyEmpty(captured: SqliteDoBackupSnapshot): boolean {
@@ -99,4 +108,92 @@ function isLogicallyEmpty(captured: SqliteDoBackupSnapshot): boolean {
 
 function invalidArtifact(message: string): StateApiError {
   return new StateApiError(400, 'invalid_backup_artifact', message)
+}
+
+function parseJsonObject(value: string | number | null): Record<string, unknown> {
+  if (typeof value !== 'string') throw invalidArtifact('Backup artifact payload JSON is invalid')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw invalidArtifact('Backup artifact payload JSON is invalid')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw invalidArtifact('Backup artifact payload JSON must be an object')
+  }
+  return parsed as Record<string, unknown>
+}
+
+function validateOutboxRow(
+  captured: SqliteDoBackupSnapshot,
+  row: SqliteDoBackupRow,
+  identity: SqliteDoBackupIdentity,
+): void {
+  const eventId = valueForBackupRow(captured, row, 'event_id')
+  const dedupeKey = valueForBackupRow(captured, row, 'dedupe_key')
+  const event = parseJsonObject(valueForBackupRow(captured, row, 'payload_json'))
+  const payload = parseEmbeddedObject(event.payload)
+  const requestId = nonEmptyString(payload.request_id)
+  if (
+    event.schema_version !== 1
+    || event.event_id !== eventId
+    || typeof eventId !== 'string'
+    || typeof dedupeKey !== 'string'
+    || requestId === null
+  ) throw invalidArtifact('Backup artifact outbox event identity is invalid')
+
+  if (event.event_type === 'usage.settled.v1') {
+    if (
+      event.aggregate_type !== 'user'
+      || event.aggregate_id !== payload.user_id
+      || payload.subscription_id !== identity.objectId
+      || eventId !== `usage:${requestId}`
+      || dedupeKey !== `usage:${requestId}`
+    ) throw invalidArtifact('Backup artifact usage outbox event is inconsistent')
+    return
+  }
+
+  if (event.event_type === 'subscription.usage.settled.v1') {
+    if (
+      event.aggregate_type !== 'subscription'
+      || event.aggregate_id !== identity.objectId
+      || payload.subscription_id !== identity.objectId
+      || eventId !== `subscription-usage:${requestId}`
+      || dedupeKey !== `subscription:${requestId}`
+    ) throw invalidArtifact('Backup artifact subscription outbox event is inconsistent')
+    return
+  }
+
+  throw invalidArtifact('Backup artifact outbox event type is invalid')
+}
+
+function validateMutationRow(
+  captured: SqliteDoBackupSnapshot,
+  row: SqliteDoBackupRow,
+  identity: SqliteDoBackupIdentity,
+): void {
+  const operation = valueForBackupRow(captured, row, 'operation')
+  const controlVersion = valueForBackupRow(captured, row, 'control_version')
+  const payload = parseJsonObject(valueForBackupRow(captured, row, 'payload_json'))
+  const windows = parseEmbeddedObject(payload.windows)
+  const resetWindows = ['daily', 'weekly', 'monthly'].map((kind) => windows[kind])
+  if (
+    operation !== 'reset_quota'
+    || payload.subscription_id !== identity.objectId
+    || !Number.isSafeInteger(controlVersion) || (controlVersion as number) < 0
+    || payload.control_version !== controlVersion
+    || resetWindows.some((value) => value !== null && (!Number.isSafeInteger(value) || (value as number) < 0))
+    || resetWindows.every((value) => value === null)
+  ) throw invalidArtifact('Backup artifact subscription mutation is inconsistent')
+}
+
+function parseEmbeddedObject(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidArtifact('Backup artifact payload contains an invalid object')
+  }
+  return value as Record<string, unknown>
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
 }

@@ -794,6 +794,12 @@ onMounted(async () => {
       return
     }
 
+    if (legacyPendingToken && !canResumeLegacyPendingOAuth()) {
+      errorMessage.value = t('auth.oauth.invalidCallbackHint')
+      isProcessing.value = false
+      return
+    }
+
     if (error === 'invitation_required' && legacyPendingToken) {
       legacyPendingOAuthToken.value = legacyPendingToken
       redirectTo.value = redirect

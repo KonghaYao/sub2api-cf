@@ -107,6 +107,34 @@ function configuration(): Record<string, unknown> {
   }
 }
 
+async function sha256(value: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function artifactWithResignedRow(
+  artifact: string,
+  row: { type: 'row'; table: string; rowid: number; values: unknown[] },
+): Promise<string> {
+  const records = artifact.trimEnd().split('\n').map((line) => JSON.parse(line))
+  const header = records[0]
+  const trailer = records.at(-1)
+  records.splice(records.length - 1, 0, row)
+  const rows = records.slice(1, -1)
+  header.row_count = rows.length
+  const table = header.tables.find((candidate: { name: string }) => candidate.name === row.table)
+  table.row_count += 1
+  header.inventory_digest = await sha256(JSON.stringify({
+    schema_digest: header.schema_digest,
+    tables: header.tables,
+  }))
+  header.state_digest = await sha256(rows.map((candidate: unknown) => JSON.stringify(candidate)).join('\n'))
+  trailer.row_count = rows.length
+  trailer.inventory_digest = header.inventory_digest
+  trailer.state_digest = header.state_digest
+  return `${records.map((record) => JSON.stringify(record)).join('\n')}\n`
+}
+
 describe('SubscriptionStateDO privileged backup contract', () => {
   it('round-trips a configured subscription through canonical NDJSON', async () => {
     const source = createObject()
@@ -214,6 +242,174 @@ describe('SubscriptionStateDO privileged backup contract', () => {
     expect(response.status).toBe(400)
     await expect((await backupRequest(target, '/backup/verify')).json())
       .resolves.toMatchObject({ logical_empty: true })
+  })
+
+  it.each([
+    ['outbox', {
+      type: 'row' as const,
+      table: 'subscription_outbox',
+      rowid: 1,
+      values: ['usage:request-1', 'usage:request-1', '{', 0, 1, null, 1],
+    }],
+    ['mutation', {
+      type: 'row' as const,
+      table: 'subscription_mutations',
+      rowid: 1,
+      values: ['reset-1', 'reset_quota', '{', 0, 1],
+    }],
+  ])('atomically rejects a digest-valid %s row with malformed payload JSON', async (_case, row) => {
+    const source = createObject()
+    await post(source, '/configure', configuration())
+    const exported = await backupRequest(source, '/backup/export', { method: 'POST' })
+    const artifact = await artifactWithResignedRow(await exported.text(), row)
+    const target = createObject()
+
+    const response = await backupRequest(target, '/backup/restore', {
+      method: 'POST', headers: { 'content-type': 'application/x-ndjson' }, body: artifact,
+    })
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'invalid_backup_artifact' } })
+    await expect((await backupRequest(target, '/backup/verify')).json())
+      .resolves.toMatchObject({ logical_empty: true })
+  })
+
+  it.each([
+    ['outbox event identity', {
+      type: 'row' as const,
+      table: 'subscription_outbox',
+      rowid: 1,
+      values: [
+        'usage:request-1',
+        'usage:request-1',
+        JSON.stringify({
+          schema_version: 1,
+          event_id: 'usage:another-request',
+          event_type: 'usage.settled.v1',
+          occurred_at_ms: 1,
+          aggregate_type: 'user',
+          aggregate_id: 'user-1',
+          payload: { request_id: 'request-1' },
+        }),
+        0, 1, null, 1,
+      ],
+    }],
+    ['outbox dedupe identity', {
+      type: 'row' as const,
+      table: 'subscription_outbox',
+      rowid: 1,
+      values: [
+        'usage:request-1',
+        'usage:another-request',
+        JSON.stringify({
+          schema_version: 1,
+          event_id: 'usage:request-1',
+          event_type: 'usage.settled.v1',
+          occurred_at_ms: 1,
+          aggregate_type: 'user',
+          aggregate_id: 'user-1',
+          payload: { request_id: 'request-1' },
+        }),
+        0, 1, null, 1,
+      ],
+    }],
+    ['mutation payload identity', {
+      type: 'row' as const,
+      table: 'subscription_mutations',
+      rowid: 1,
+      values: [
+        'reset-1',
+        'reset_quota',
+        JSON.stringify({
+          subscription_id: 'another-subscription',
+          control_version: 1,
+          windows: { daily: 1, weekly: null, monthly: null },
+        }),
+        0,
+        1,
+      ],
+    }],
+  ])('atomically rejects a digest-valid row with mismatched %s', async (_case, row) => {
+    const source = createObject()
+    await post(source, '/configure', configuration())
+    const exported = await backupRequest(source, '/backup/export', { method: 'POST' })
+    const artifact = await artifactWithResignedRow(await exported.text(), row)
+    const target = createObject()
+
+    const response = await backupRequest(target, '/backup/restore', {
+      method: 'POST', headers: { 'content-type': 'application/x-ndjson' }, body: artifact,
+    })
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'invalid_backup_artifact' } })
+    await expect((await backupRequest(target, '/backup/verify')).json())
+      .resolves.toMatchObject({ logical_empty: true })
+  })
+
+  it('restores outbox and mutation payloads produced through the state API', async () => {
+    const source = createObject()
+    const initial = configuration()
+    expect((await post(source, '/configure', initial)).status).toBe(200)
+    expect((await post(source, '/configure-reset', {
+      configuration: {
+        ...initial,
+        control_version: 1,
+        quota_reset_epoch: 1,
+        quota_reset_generation: 1,
+      },
+      reset: {
+        schema_version: 1,
+        mutation_id: 'reset-1',
+        subscription_id: 'subscription-1',
+        control_version: 1,
+        windows: { daily: initial.starts_at_ms, weekly: null, monthly: null },
+      },
+    })).status).toBe(200)
+    expect((await post(source, '/authorize', {
+      schema_version: 1,
+      request_id: 'request-1',
+      subscription_id: 'subscription-1',
+      user_id: 'user-1',
+      group_id: 'group-1',
+      api_key_id: 'key-1',
+      api_key_auth_version: 1,
+    })).status).toBe(200)
+    expect((await post(source, '/reserve', {
+      schema_version: 1,
+      request_id: 'request-1',
+      amount_micros: 1,
+      reservation_ttl_ms: 60_000,
+    })).status).toBe(200)
+    expect((await post(source, '/settle', {
+      schema_version: 1,
+      request_id: 'request-1',
+      amount_micros: 1,
+      usage_event: {
+        schema_version: 1,
+        event_id: 'usage:request-1',
+        event_type: 'usage.settled.v1',
+        occurred_at_ms: 1,
+        aggregate_type: 'user',
+        aggregate_id: 'user-1',
+        payload: {
+          request_id: 'request-1',
+          user_id: 'user-1',
+          group_id: 'group-1',
+          billing_type: 'subscription',
+          subscription_id: 'subscription-1',
+          amount_micros: 1,
+        },
+      },
+    })).status).toBe(200)
+    const artifact = await (await backupRequest(source, '/backup/export', { method: 'POST' })).text()
+    const target = createObject()
+
+    const restored = await backupRequest(target, '/backup/restore', {
+      method: 'POST', headers: { 'content-type': 'application/x-ndjson' }, body: artifact,
+    })
+
+    expect(restored.status).toBe(200)
+    await expect(restored.json()).resolves.toMatchObject({ restored: true, idempotent: false })
   })
 
   it('allows the protected Worker route to reach only SUBSCRIPTION_STATE', async () => {

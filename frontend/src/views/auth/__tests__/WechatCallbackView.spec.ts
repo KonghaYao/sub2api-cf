@@ -216,6 +216,29 @@ describe('WechatCallbackView', () => {
     expect(wrapper.text()).toContain('Callback hint')
   })
 
+  it('rejects a legacy pending invitation fragment in Worker mode', async () => {
+    setCloudflareWorkerContractActive(true)
+    locationState.current.hash =
+      '#error=invitation_required&pending_oauth_token=legacy-pending-token&redirect=%2Flegacy-invite'
+
+    const wrapper = mount(WechatCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(exchangePendingOAuthCompletionMock).not.toHaveBeenCalled()
+    expect(apiClientPostMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledWith('auth.oauth.invalidCallbackHint')
+    expect(wrapper.find('input[type="text"]').exists()).toBe(false)
+  })
+
   it('overrides an incompatible query mode with the configured open capability during bind recovery', async () => {
     routeState.query = {
       wechat_bind_existing: '1',
