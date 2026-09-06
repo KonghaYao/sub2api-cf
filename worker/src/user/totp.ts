@@ -12,11 +12,12 @@ import {
 } from '../auth/rate-limit'
 import {
   deliverPlatformEmail,
-  emailDeliveryFailure,
   hasEmailDeliveryBinding,
-  isPermanentEmailDeliveryFailure,
-  persistedEmailDeliveryFailure,
 } from '../email/delivery'
+import {
+  executeLeasedEmailDelivery,
+  type EmailDeliveryExecutionResult,
+} from '../email/delivery-executor'
 import {
   createTotpSetupToken,
   decryptTotpSecret,
@@ -96,11 +97,7 @@ export type TotpEmailVerificationEvent = PlatformEvent<TotpEmailVerificationPayl
   aggregate_type: 'user'
 }
 
-export type TotpEmailDeliveryResult =
-  | 'delivered'
-  | 'already_delivered'
-  | 'stale'
-  | 'permanently_failed'
+export type TotpEmailDeliveryResult = EmailDeliveryExecutionResult
 
 export async function getTotpStatus(context: Context<UserBindings>): Promise<Response> {
   try {
@@ -703,98 +700,108 @@ export async function consumeTotpEmailVerificationDelivery(
   value: unknown,
   env: Env,
 ): Promise<TotpEmailDeliveryResult> {
-  if (!isTotpEmailVerificationEvent(value)) throw new Error('Invalid TOTP email verification event')
-  const event = value
-  const now = Date.now()
-  const tokenHash = await totpEmailCodeDigest(
-    env,
-    event.payload.user_id,
-    event.payload.recipient_email,
-    event.payload.verification_code,
-  )
-  const challenge = await env.DB.prepare(
-    `SELECT id, status, delivery_state, last_delivery_error, expires_at_ms
-       FROM user_totp_email_challenges
-      WHERE id = ? AND user_id = ? AND email_hash = ? AND token_hash = ?
-        AND generation = ? AND delivery_event_id = ? LIMIT 1`,
-  ).bind(
-    event.payload.challenge_id,
-    event.payload.user_id,
-    await sha256Hex(event.payload.recipient_email),
-    tokenHash,
-    event.payload.generation,
-    event.event_id,
-  ).first<{
-    id: string
-    status: string
-    delivery_state: string
-    last_delivery_error: string | null
-    expires_at_ms: number
-  }>()
-  if (challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now) return 'stale'
-  if (challenge.delivery_state === 'sent') return 'already_delivered'
-  if (
-    challenge.delivery_state === 'failed' &&
-    isPermanentEmailDeliveryFailure(challenge.last_delivery_error)
-  ) return 'permanently_failed'
-
-  const leaseId = crypto.randomUUID()
-  const lease = await env.DB.prepare(
-    `UPDATE user_totp_email_challenges
-        SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
-            delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
-            last_delivery_error = NULL, updated_at_ms = ?
-      WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
-        AND delivery_event_id = ?
-        AND (
-          delivery_state IN ('pending', 'queued')
-          OR (delivery_state = 'failed' AND (
-            last_delivery_error IS NULL OR last_delivery_error NOT LIKE 'permanent:%'
-          ))
-          OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
-        )
-      RETURNING id`,
-  ).bind(leaseId, now + EMAIL_LEASE_MS, now, challenge.id, now, event.event_id, now)
-    .all<{ id: string }>()
-  if (lease.results.length !== 1) {
-    const current = await env.DB.prepare(
-      `SELECT delivery_state, last_delivery_error
-         FROM user_totp_email_challenges WHERE id = ?`,
-    ).bind(challenge.id).first<{ delivery_state: string; last_delivery_error: string | null }>()
-    if (current?.delivery_state === 'sent') return 'already_delivered'
-    if (isPermanentEmailDeliveryFailure(current?.last_delivery_error)) return 'permanently_failed'
-    throw new Error(`TOTP email delivery ${event.event_id} already has an active lease`)
-  }
-
-  try {
-    await deliverTotpEmail(event, env)
-    const completedAt = Date.now()
-    const update = await env.DB.prepare(
-      `UPDATE user_totp_email_challenges
-          SET delivery_state = 'sent', delivered_at_ms = ?,
-              delivery_lease_id = NULL, delivery_lease_expires_at_ms = NULL,
-              updated_at_ms = ?
-        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(completedAt, completedAt, challenge.id, leaseId).run()
-    if (resultChanges(update) !== 1) throw new Error(`TOTP email delivery ${event.event_id} lost its lease`)
-    return 'delivered'
-  } catch (error) {
-    const failure = emailDeliveryFailure(error)
-    await env.DB.prepare(
-      `UPDATE user_totp_email_challenges
-          SET delivery_state = 'failed', delivery_lease_id = NULL,
-              delivery_lease_expires_at_ms = NULL, last_delivery_error = ?,
-              updated_at_ms = ?
-        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(
-      persistedEmailDeliveryFailure(failure).slice(0, 1_024),
-      Date.now(),
-      challenge.id,
-      leaseId,
-    ).run()
-    if (!failure.retryable) return 'permanently_failed'
-    throw error
-  }
+  return executeLeasedEmailDelivery(value, {
+    leaseMs: EMAIL_LEASE_MS,
+    failureErrorMaxLength: 1_024,
+    describe: (event: TotpEmailVerificationEvent) => `TOTP email delivery ${event.event_id}`,
+    lostLeaseMessage: (event) => `TOTP email delivery ${event.event_id} lost its lease`,
+    load: async (candidate, now) => {
+      if (!isTotpEmailVerificationEvent(candidate)) {
+        throw new Error('Invalid TOTP email verification event')
+      }
+      const event = candidate
+      const [emailHash, tokenHash] = await Promise.all([
+        sha256Hex(event.payload.recipient_email),
+        totpEmailCodeDigest(
+          env,
+          event.payload.user_id,
+          event.payload.recipient_email,
+          event.payload.verification_code,
+        ),
+      ])
+      const challenge = await env.DB.prepare(
+        `SELECT id, status, delivery_state, last_delivery_error, expires_at_ms
+           FROM user_totp_email_challenges
+          WHERE id = ? AND user_id = ? AND email_hash = ? AND token_hash = ?
+            AND generation = ? AND delivery_event_id = ? LIMIT 1`,
+      ).bind(
+        event.payload.challenge_id,
+        event.payload.user_id,
+        emailHash,
+        tokenHash,
+        event.payload.generation,
+        event.event_id,
+      ).first<{
+        id: string
+        status: string
+        delivery_state: string
+        last_delivery_error: string | null
+        expires_at_ms: number
+      }>()
+      return {
+        event,
+        record: challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now
+          ? null
+          : {
+              id: challenge.id,
+              deliveryState: challenge.delivery_state,
+              lastDeliveryError: challenge.last_delivery_error,
+            },
+      }
+    },
+    acquireLease: async ({ event, record }, leaseId, now, leaseExpiresAtMs) => {
+      const lease = await env.DB.prepare(
+        `UPDATE user_totp_email_challenges
+            SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
+                delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
+                last_delivery_error = NULL, updated_at_ms = ?
+          WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
+            AND delivery_event_id = ?
+            AND (
+              delivery_state IN ('pending', 'queued')
+              OR (delivery_state = 'failed' AND (
+                last_delivery_error IS NULL OR last_delivery_error NOT LIKE 'permanent:%'
+              ))
+              OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
+            )
+          RETURNING id`,
+      ).bind(
+        leaseId, leaseExpiresAtMs, now, record.id, now, event.event_id, now,
+      ).all<{ id: string }>()
+      return lease.results.length === 1
+    },
+    inspect: async ({ record }) => {
+      const current = await env.DB.prepare(
+        `SELECT delivery_state, last_delivery_error
+           FROM user_totp_email_challenges WHERE id = ?`,
+      ).bind(record.id).first<{ delivery_state: string; last_delivery_error: string | null }>()
+      return current === null ? null : {
+        id: record.id,
+        deliveryState: current.delivery_state,
+        lastDeliveryError: current.last_delivery_error,
+      }
+    },
+    send: (event) => deliverTotpEmail(event, env),
+    markSent: async ({ record }, leaseId, completedAtMs) => {
+      const update = await env.DB.prepare(
+        `UPDATE user_totp_email_challenges
+            SET delivery_state = 'sent', delivered_at_ms = ?,
+                delivery_lease_id = NULL, delivery_lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+      ).bind(completedAtMs, completedAtMs, record.id, leaseId).run()
+      return resultChanges(update) === 1
+    },
+    markFailed: async ({ record }, leaseId, failure, failedAtMs) => {
+      await env.DB.prepare(
+        `UPDATE user_totp_email_challenges
+            SET delivery_state = 'failed', delivery_lease_id = NULL,
+                delivery_lease_expires_at_ms = NULL, last_delivery_error = ?,
+                updated_at_ms = ?
+          WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+      ).bind(failure, failedAtMs, record.id, leaseId).run()
+    },
+  })
 }
 
 async function verificationMethod(env: Env, user: Pick<UserRow, 'role'>): Promise<'email' | 'password'> {

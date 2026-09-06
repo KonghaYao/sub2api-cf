@@ -12,6 +12,7 @@ import {
   type TotpEmailVerificationEvent,
 } from '../../src/user/totp'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
+import { defineEmailDeliveryConformanceSuite } from '../email/delivery-conformance'
 
 const NOW = Date.parse('2026-09-04T12:00:00.000Z')
 const DAY_MS = 86_400_000
@@ -202,6 +203,25 @@ describe('Worker-native TOTP HTTP contract', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  defineEmailDeliveryConformanceSuite({
+    name: 'TOTP verification',
+    setup: async () => {
+      const test = await fixture(true)
+      const response = await api(test, '/api/v1/user/totp/send-code', {
+        user: 'alice', body: {},
+      })
+      expect(response.status).toBe(200)
+      const event = test.queue.events.at(-1) as TotpEmailVerificationEvent
+      return {
+        env: test.env,
+        raw: test.raw,
+        event,
+        table: 'user_totp_email_challenges',
+        consume: () => consumeTotpEmailVerificationDelivery(event, test.env),
+      }
+    },
   })
 
   it('completes setup, two-stage login, session-bound step-up, and disable', async () => {

@@ -204,6 +204,12 @@ The `admin.users.write` backfill route wraps that cursor in an environment-bound
 HMAC signature, records progress/failure/completion in immutable actor audit,
 verifies every projected D1 row, and marks history complete only after ledger
 count, state version, balance, spend debt, and D1 event counts reconcile.
+Migration 0057 adds bounded administrator-created backfill batches. Each Worker
+invocation processes at most one 100-row ledger page, persists the signed
+continuation cursor, and uses batch/user leases, an in-progress idempotency
+operation, plus version CAS so a crashed or replayed coordinator cannot duplicate
+work. Proven legacy rollback gaps enter an explicit non-retryable
+manual-reconciliation state.
 Pre-v0.34 ledgers with contiguous rowids are safely inferred; a pre-v0.34
 enabled rollback that already deleted a row has no tombstone and therefore
 fails closed for manual financial reconciliation.
@@ -246,9 +252,13 @@ pricing decision with the usage event. Customer billing therefore cannot be
 changed by a later channel edit, and ambiguous prices fail before a hold is
 created.
 Custom rules currently support input, output and cache-read tokens plus flat
-per-request/image prices. Cache-write and image-token dimensions are rejected
-until the gateway usage projection carries those quantities. The legacy
+per-request/image prices. Synchronous Images also freezes channel alias,
+exact/longest-wildcard and 1K/2K/4K tier decisions, reserves the most expensive
+possible output, and settles the actual output tiers without changing the
+independent provider standard/account-cost facts. Cache-write and image-token
+dimensions are rejected until the gateway usage projection carries those
+quantities. The legacy
 `apply_pricing_to_account_stats` switch now uses the frozen channel basis after
 any scoped custom account-stat rule and before the account multiplier. Channel
-image/video pricing remains fail-closed until the media projection carries its
-complete price dimensions.
+video pricing remains fail-closed because no video generation route is retained
+in the Worker yet.

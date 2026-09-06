@@ -82,6 +82,22 @@ type BackfillAuditResult = 'progress' | 'completed' | 'blocked' | 'failed'
 const EXPORT_PAGE_SIZE = 100
 const MAX_BACKFILL_CURSOR_BYTES = 8_192
 
+export interface FinancialHistoryBackfillPageResult {
+  user_id: string
+  ledger_entries_scanned: number
+  financial_events_verified: number
+  pages_scanned: number
+  history_complete: boolean
+  idempotent: boolean
+  next_cursor?: string | null
+}
+
+class FinancialHistoryManualReconciliationError extends GatewayError {}
+
+export function requiresFinancialHistoryManualReconciliation(error: unknown): boolean {
+  return error instanceof FinancialHistoryManualReconciliationError
+}
+
 /**
  * Rebuild a legacy user's immutable D1 financial projection from the complete
  * authoritative Durable Object ledger. Pages may commit independently, but
@@ -90,6 +106,24 @@ const MAX_BACKFILL_CURSOR_BYTES = 8_192
 export async function backfillAdminUserFinancialHistory(
   context: Context<ControlBindings>,
 ): Promise<Response> {
+  try {
+    const userId = requireResourceId(context.req.param('id'), 'user')
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    const input = await readOptionalJsonObject(context.req.raw, MAX_BACKFILL_CURSOR_BYTES + 256)
+    const cursor = optionalString(input, 'cursor', MAX_BACKFILL_CURSOR_BYTES)
+    return controlSuccess(await runFinancialHistoryBackfillPage(context.env, actor, userId, cursor))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+/** Run exactly one signed-cursor ledger page for an authenticated actor. */
+export async function runFinancialHistoryBackfillPage(
+  env: Env,
+  actor: AdminActor,
+  userId: string,
+  cursorRaw?: string,
+): Promise<FinancialHistoryBackfillPageResult> {
   let auditActor: AdminActor | null = null
   let auditTargetUserId: string | null = null
   let auditSnapshot: LedgerExportSnapshot | null = null
@@ -97,12 +131,8 @@ export async function backfillAdminUserFinancialHistory(
   let auditFinancialEventsVerified = 0
   let auditPagesScanned = 0
   try {
-    const userId = requireResourceId(context.req.param('id'), 'user')
-    const actor = await authenticateAdminSession(context.req.raw, context.env)
     auditActor = actor
-    const input = await readOptionalJsonObject(context.req.raw, MAX_BACKFILL_CURSOR_BYTES + 256)
-    const cursorRaw = optionalString(input, 'cursor', MAX_BACKFILL_CURSOR_BYTES)
-    const user = await context.env.DB.prepare(
+    const user = await env.DB.prepare(
       `SELECT id, financial_history_complete
          FROM users
         WHERE id = ?`,
@@ -110,14 +140,14 @@ export async function backfillAdminUserFinancialHistory(
     if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
     auditTargetUserId = userId
     if (user.financial_history_complete === 1) {
-      return controlSuccess({
+      return {
         user_id: userId,
         ledger_entries_scanned: 0,
         financial_events_verified: 0,
         pages_scanned: 0,
         history_complete: true,
         idempotent: true,
-      })
+      }
     }
     if (user.financial_history_complete !== 0) {
       throw new GatewayError(
@@ -130,7 +160,7 @@ export async function backfillAdminUserFinancialHistory(
 
     const progress = cursorRaw === undefined
       ? null
-      : await decodeBackfillCursor(context.env, userId, cursorRaw)
+      : await decodeBackfillCursor(env, userId, cursorRaw)
     let snapshot = progress?.snapshot ?? null
     let ledgerEntriesScanned = progress?.ledger_entries_scanned ?? 0
     let financialEventsVerified = progress?.financial_events_verified ?? 0
@@ -145,16 +175,18 @@ export async function backfillAdminUserFinancialHistory(
     auditFinancialEventsVerified = financialEventsVerified
     auditPagesScanned = pagesScanned
 
-    const response = await fetchLedgerExportPage(context.env, userId, progress?.do_cursor ?? null)
+    const response = await fetchLedgerExportPage(env, userId, progress?.do_cursor ?? null)
     if (!response.ok) {
-      throw response.status === 409
-        ? financialBackfillConflict()
-        : new GatewayError(
-            503,
-            'financial_history_export_failed',
-            'Authoritative financial ledger export failed',
-            'server_error',
-          )
+      if (response.status === 409) {
+        if (await isLegacyRollbackGapResponse(response)) throw legacyRollbackGap()
+        throw financialBackfillConflict()
+      }
+      throw new GatewayError(
+        503,
+        'financial_history_export_failed',
+        'Authoritative financial ledger export failed',
+        'server_error',
+      )
     }
     const page = await parseLedgerExportPage(response, userId)
     pagesScanned += 1
@@ -200,8 +232,8 @@ export async function backfillAdminUserFinancialHistory(
       if (transition.event !== null) projected.push(transition.event)
       else nonFinancialVersions.push(stateVersion)
     }
-    await verifyAndProjectFinancialRows(context.env, projected)
-    await verifyNoUnexpectedFinancialRows(context.env, userId, nonFinancialVersions)
+    await verifyAndProjectFinancialRows(env, projected)
+    await verifyNoUnexpectedFinancialRows(env, userId, nonFinancialVersions)
     financialEventsVerified += projected.length
     auditFinancialEventsVerified = financialEventsVerified
 
@@ -211,7 +243,7 @@ export async function backfillAdminUserFinancialHistory(
         page.next_cursor.length === 0 || page.next_cursor.length > 2_048 ||
         ledgerEntriesScanned >= snapshot.ledger_count || openingStateVersion === null
       ) throw financialBackfillConflict()
-      const nextCursor = await encodeBackfillCursor(context.env, {
+      const nextCursor = await encodeBackfillCursor(env, {
         v: 1,
         user_id: userId,
         do_cursor: page.next_cursor,
@@ -226,12 +258,12 @@ export async function backfillAdminUserFinancialHistory(
         opening_state_version: openingStateVersion,
       })
       const audit = await buildBackfillAuditStatement(
-        context.env, actor, userId, snapshot, ledgerEntriesScanned,
+        env, actor, userId, snapshot, ledgerEntriesScanned,
         financialEventsVerified, pagesScanned, 'progress',
       )
       const recorded = await audit.run()
       if (recorded.meta.changes !== 1) throw auditWriteFailed()
-      return controlSuccess({
+      return {
         user_id: userId,
         ledger_entries_scanned: ledgerEntriesScanned,
         financial_events_verified: financialEventsVerified,
@@ -239,7 +271,7 @@ export async function backfillAdminUserFinancialHistory(
         history_complete: false,
         idempotent: false,
         next_cursor: nextCursor,
-      })
+      }
     }
     if (page.next_cursor !== null) throw financialBackfillConflict()
 
@@ -247,17 +279,19 @@ export async function backfillAdminUserFinancialHistory(
       snapshot === null || openingStateVersion === null ||
       ledgerEntriesScanned !== snapshot.ledger_count ||
       previousBalanceMicros !== snapshot.balance_micros ||
-      spendDebtMicros !== snapshot.spend_debt_micros ||
-      checkedAdd(openingStateVersion, ledgerEntriesScanned - 1) !== snapshot.state_version
+      spendDebtMicros !== snapshot.spend_debt_micros
     ) throw financialBackfillConflict()
+    if (checkedAdd(openingStateVersion, ledgerEntriesScanned - 1) !== snapshot.state_version) {
+      throw legacyRollbackGap()
+    }
 
     const completionAudit = await buildBackfillAuditStatement(
-      context.env, actor, userId, snapshot, ledgerEntriesScanned,
+      env, actor, userId, snapshot, ledgerEntriesScanned,
       financialEventsVerified, pagesScanned, 'completed', true,
     )
-    const [auditRecorded, completed] = await context.env.DB.batch([
+    const [auditRecorded, completed] = await env.DB.batch([
       completionAudit,
-      context.env.DB.prepare(
+      env.DB.prepare(
       `UPDATE users
           SET financial_history_complete = 1
         WHERE id = ? AND financial_history_complete = 0
@@ -271,7 +305,7 @@ export async function backfillAdminUserFinancialHistory(
     const convergedCompletion = completed.results.length === 0 && auditRecorded.results.length === 0
     if (!wonCompletion && !convergedCompletion) throw financialBackfillConflict()
 
-    return controlSuccess({
+    return {
       user_id: userId,
       ledger_entries_scanned: ledgerEntriesScanned,
       financial_events_verified: financialEventsVerified,
@@ -279,14 +313,14 @@ export async function backfillAdminUserFinancialHistory(
       history_complete: true,
       idempotent: convergedCompletion,
       next_cursor: null,
-    })
+    }
   } catch (error) {
     const failure = asGatewayError(error)
     if (auditActor !== null && auditTargetUserId !== null) {
       const result = failure.status === 409 ? 'blocked' : 'failed'
       try {
         const statement = await buildBackfillAuditStatement(
-          context.env,
+          env,
           auditActor,
           auditTargetUserId,
           auditSnapshot,
@@ -302,7 +336,16 @@ export async function backfillAdminUserFinancialHistory(
         })
       }
     }
-    return controlError(failure)
+    throw failure
+  }
+}
+
+async function isLegacyRollbackGapResponse(response: Response): Promise<boolean> {
+  try {
+    const body = await response.json() as { error?: { code?: unknown } }
+    return body.error?.code === 'ledger_state_version_unrecoverable'
+  } catch {
+    return false
   }
 }
 
@@ -460,12 +503,16 @@ function openingVersion(entry: LedgerExportEntry, snapshot: LedgerExportSnapshot
   if (d1Version !== null) {
     const parsed = Number(d1Version[1])
     if (Number.isSafeInteger(parsed) && parsed === entry.state_version) return parsed
+    throw legacyRollbackGap()
   }
   if (entry.mutation_id.startsWith('admin-create:') && entry.state_version === 0) return 0
   // Any older creation flow that began at version zero is still provable from
   // the complete ledger cardinality. A deleted/superseded entry creates a gap
   // and makes this equality false, so it remains fail-closed.
-  if (snapshot.state_version === snapshot.ledger_count - 1 && entry.state_version === 0) return 0
+  if (entry.state_version === 0) {
+    if (snapshot.state_version === snapshot.ledger_count - 1) return 0
+    throw legacyRollbackGap()
+  }
   throw financialBackfillConflict()
 }
 
@@ -776,5 +823,13 @@ function financialBackfillConflict(): GatewayError {
     409,
     'financial_history_backfill_conflict',
     'Authoritative financial history cannot be reconciled safely',
+  )
+}
+
+function legacyRollbackGap(): GatewayError {
+  return new FinancialHistoryManualReconciliationError(
+    409,
+    'financial_history_backfill_conflict',
+    'Legacy financial history contains a rollback gap and requires manual reconciliation',
   )
 }

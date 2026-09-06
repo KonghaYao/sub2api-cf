@@ -148,7 +148,7 @@ describe('synchronous image handler', () => {
     expect(test.stateCalls).toContain('/release')
   })
 
-  it('fails closed when a channel-specific image price would otherwise be ignored', async () => {
+  it('uses an aliased wildcard channel image tier for reservation and immutable settlement', async () => {
     const test = await fixture()
     test.raw.exec(`
       INSERT INTO channels (
@@ -161,27 +161,137 @@ describe('synchronous image handler', () => {
       );
       INSERT INTO channel_groups (channel_id, group_id, created_at_ms)
       VALUES ('channel-1', 'group-1', 1);
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES ('channel-1', 'openai', 'customer-image', 'gpt-image-2', 0, 0, 0, 1);
       INSERT INTO channel_model_pricing (
         id, channel_id, platform, billing_mode, per_request_micros,
         control_version, created_at_ms, updated_at_ms
-      ) VALUES ('channel-image-price', 'channel-1', 'openai', 'image', 100000, 1, 1, 1);
+      ) VALUES ('channel-image-price', 'channel-1', 'openai', 'image', 275000, 3, 1, 1);
       INSERT INTO channel_pricing_models (
         pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
-      ) VALUES ('channel-image-price', 'gpt-image-2', 0, 0, 1);
+      ) VALUES ('channel-image-price', 'gpt-image-*', 1, 0, 1);
+      INSERT INTO channel_pricing_intervals (
+        id, pricing_id, min_tokens, max_tokens, tier_label, per_request_micros,
+        sort_order, created_at_ms, updated_at_ms
+      ) VALUES
+        ('channel-image-1k', 'channel-image-price', 0, NULL, '1K', 125000, 0, 1, 1),
+        ('channel-image-4k', 'channel-image-price', 0, NULL, '4K', 650000, 1, 1, 1);
     `)
 
     const response = await app().request('/v1/images/generations', {
       method: 'POST',
       headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'do not silently misprice this' }),
+      body: JSON.stringify({ model: 'customer-image', prompt: 'price this exactly', n: 2 }),
     }, test.env as never)
 
-    expect(response.status).toBe(409)
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'unsupported_channel_image_pricing' },
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(test.reserve).toHaveBeenCalledWith(expect.objectContaining({ amountMicros: 1_300_000 }))
+    expect(test.settle).toHaveBeenCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({
+        requestedModel: 'customer-image',
+        upstreamModel: 'gpt-image-upstream',
+        initialReservedMicros: 1_300_000,
+        amountMicros: 125_000,
+        standardCostMicros: 100_000,
+        customerPricingBasisMicros: 125_000,
+        customerPricingSnapshotJson: expect.any(String),
+      }),
+    }))
+    const settled = (test.settle.mock.calls as unknown[][])[0]?.[0] as
+      | { usage?: { customerPricingSnapshotJson?: string } }
+      | undefined
+    const usage = settled?.usage
+    expect(JSON.parse(String(usage?.customerPricingSnapshotJson))).toMatchObject({
+      version: 1,
+      source: 'channel',
+      channel_id: 'channel-1',
+      channel_control_version: 1,
+      pricing_id: 'channel-image-price',
+      matched_model_pattern: 'gpt-image-*',
+      billing_model: 'image',
+      tier_prices_micros: { '1K': 125_000, '2K': 275_000, '4K': 650_000 },
+      output_tier_counts: { '1K': 1, '2K': 0, '4K': 0 },
     })
+    expect(test.upstreamFetch).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    {
+      name: 'a missing possible output tier',
+      pricing: `
+        INSERT INTO channel_model_pricing (
+          id, channel_id, platform, billing_mode, per_request_micros,
+          control_version, created_at_ms, updated_at_ms
+        ) VALUES ('channel-image-price', 'channel-1', 'openai', 'image', NULL, 1, 1, 1);
+        INSERT INTO channel_pricing_models (pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms)
+        VALUES ('channel-image-price', 'gpt-image-2', 0, 0, 1);
+        INSERT INTO channel_pricing_intervals (
+          id, pricing_id, min_tokens, max_tokens, tier_label, per_request_micros,
+          sort_order, created_at_ms, updated_at_ms
+        ) VALUES ('only-1k', 'channel-image-price', 0, NULL, '1K', 100000, 0, 1, 1);`,
+      code: 'invalid_pricing_state',
+      status: 500,
+    },
+    {
+      name: 'duplicate case-insensitive tier labels',
+      pricing: `
+        INSERT INTO channel_model_pricing (
+          id, channel_id, platform, billing_mode, per_request_micros,
+          control_version, created_at_ms, updated_at_ms
+        ) VALUES ('channel-image-price', 'channel-1', 'openai', 'image', 100000, 1, 1, 1);
+        INSERT INTO channel_pricing_models (pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms)
+        VALUES ('channel-image-price', 'gpt-image-2', 0, 0, 1);
+        INSERT INTO channel_pricing_intervals (
+          id, pricing_id, min_tokens, max_tokens, tier_label, per_request_micros,
+          sort_order, created_at_ms, updated_at_ms
+        ) VALUES
+          ('tier-a', 'channel-image-price', 0, NULL, '4K', 400000, 0, 1, 1),
+          ('tier-b', 'channel-image-price', 0, NULL, '4k', 500000, 1, 1, 1);`,
+      code: 'invalid_pricing_state',
+      status: 500,
+    },
+    {
+      name: 'ambiguous route price matches',
+      pricing: `
+        INSERT INTO channel_model_pricing (
+          id, channel_id, platform, billing_mode, per_request_micros,
+          control_version, created_at_ms, updated_at_ms
+        ) VALUES
+          ('channel-image-a', 'channel-1', 'openai', 'image', 100000, 1, 1, 1),
+          ('channel-image-b', 'channel-1', 'openai', 'image', 200000, 1, 1, 1);
+        INSERT INTO channel_pricing_models (pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms)
+        VALUES
+          ('channel-image-a', 'gpt-image-*', 1, 0, 1),
+          ('channel-image-b', 'gpt-image-*', 1, 1, 1);`,
+      code: 'ambiguous_channel_pricing',
+      status: 409,
+    },
+  ])('fails closed before reservation for $name', async ({ pricing, code, status }) => {
+    const test = await fixture()
+    test.raw.exec(`
+      INSERT INTO channels (
+        id, name, status, billing_model_source, restrict_models,
+        features_config_json, apply_pricing_to_account_stats,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES ('channel-1', 'Image channel', 'active', 'channel_mapped', 0, '{}', 0, 1, 1, 1);
+      INSERT INTO channel_groups (channel_id, group_id, created_at_ms)
+      VALUES ('channel-1', 'group-1', 1);
+      ${pricing}
+    `)
+
+    const response = await app().request('/v1/images/generations', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'must fail before paid work' }),
+    }, test.env as never)
+
+    expect(response.status).toBe(status)
+    await expect(response.json()).resolves.toMatchObject({ error: { code } })
     expect(test.reserve).not.toHaveBeenCalled()
     expect(test.upstreamFetch).not.toHaveBeenCalled()
+    expect(test.stateCalls).not.toContain('/admit')
   })
 
   it('passes the resolved provider quota into a composite synchronous Images reservation', async () => {
@@ -900,6 +1010,7 @@ describe('synchronous image handler', () => {
     expect(reserveBodies).toHaveLength(2)
     expect(reserveBodies[1]?.excluded_account_ids).toEqual(['account-1'])
     expect(new Headers(test.upstreamFetch.mock.calls[1]?.[1]?.headers).get('chatgpt-account-id')).toBe('workspace-456')
+    expect(test.settle).toHaveBeenCalledOnce()
   })
 
   it('applies the default cooldown to an ordinary upstream transport failure', async () => {

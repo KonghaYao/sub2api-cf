@@ -15,6 +15,7 @@ import {
   type NotificationEmailVerificationEvent,
 } from '../../src/user/notification-preferences'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
+import { defineEmailDeliveryConformanceSuite } from '../email/delivery-conformance'
 
 const PEPPER = 'notification-preferences-test-pepper-value-32-bytes'
 const DAY_MS = 86_400_000
@@ -129,6 +130,22 @@ function latestVerificationEvent(test: Fixture): NotificationEmailVerificationEv
 }
 
 describe('user notification preferences migration', () => {
+  defineEmailDeliveryConformanceSuite({
+    name: 'notification verification',
+    setup: async () => {
+      const test = await fixture()
+      await request(test, '/notify-email/send-code', { email: 'alerts@example.test' })
+      const event = latestVerificationEvent(test)
+      return {
+        env: test.env,
+        raw: test.raw,
+        event,
+        table: 'user_notification_email_challenges',
+        consume: () => consumeNotificationEmailVerificationDelivery(event, test.env),
+      }
+    },
+  })
+
   it('upgrades v19 with strict owner-scoped preferences, normalized unique emails, and hashed challenges', () => {
     const { raw } = createSqliteD1()
     applyMigrations(raw, 19)

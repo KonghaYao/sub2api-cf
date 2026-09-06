@@ -85,7 +85,7 @@ interface EffectiveComponentPrice {
   interval_multiplier_ppm: number
 }
 
-export interface CustomerPricingSnapshot {
+export interface CustomerTokenPricingSnapshot {
   version: 1
   source: 'channel'
   channel_id: string
@@ -103,6 +103,25 @@ export interface CustomerPricingSnapshot {
   effective_pricing: EffectiveCustomerPricing
 }
 
+export type CustomerImageTier = '1K' | '2K' | '4K'
+
+export interface CustomerImagePricingSnapshot {
+  version: 1
+  source: 'channel'
+  channel_id: string
+  channel_control_version: number
+  pricing_id: string
+  matched_model_pattern: string
+  platform: string
+  billing_model: 'image'
+  pricing_at_ms: number
+  customer_rate_multiplier_ppm: number
+  tier_prices_micros: Record<CustomerImageTier, number>
+  output_tier_counts: Record<CustomerImageTier, number>
+}
+
+export type CustomerPricingSnapshot = CustomerTokenPricingSnapshot | CustomerImagePricingSnapshot
+
 export interface CustomerPricingQuote {
   cost: CostBreakdown
   /** Selected price after interval/service/time factors, before the customer rate multiplier. */
@@ -110,13 +129,77 @@ export interface CustomerPricingQuote {
   snapshot: CustomerPricingSnapshot
 }
 
+export interface CustomerTokenPricingQuote extends Omit<CustomerPricingQuote, 'snapshot'> {
+  snapshot: CustomerTokenPricingSnapshot
+}
+
 export interface CustomerReservationInput extends CustomerPricingSelector {
   input_tokens: number
   max_output_tokens: number
 }
 
-export interface CustomerReservationQuote extends CustomerPricingQuote {
+export interface CustomerReservationQuote extends CustomerTokenPricingQuote {
   reservation_micros: number
+}
+
+export function quoteCustomerImageReservation(
+  plan: FrozenPricingPlan,
+  customerRateMultiplierPpm: number,
+  outputCount: number,
+  pricingAtMs: number,
+): number {
+  assertImagePlan(plan, customerRateMultiplierPpm, pricingAtMs)
+  if (!Number.isSafeInteger(outputCount) || outputCount < 1 || outputCount > 10) invalidPricing()
+  const prices = imageTierPrices(plan)
+  const maximumUnitPrice = Math.max(prices['1K'], prices['2K'], prices['4K'])
+  return fixedCharge(
+    checkedNumber(BigInt(maximumUnitPrice) * BigInt(outputCount)),
+    customerRateMultiplierPpm,
+  )
+}
+
+export function quoteCustomerImageCost(
+  plan: FrozenPricingPlan,
+  customerRateMultiplierPpm: number,
+  outputTiers: CustomerImageTier[],
+  pricingAtMs: number,
+): CustomerPricingQuote {
+  assertImagePlan(plan, customerRateMultiplierPpm, pricingAtMs)
+  if (outputTiers.length > 10) invalidPricing()
+  const prices = imageTierPrices(plan)
+  const counts: Record<CustomerImageTier, number> = { '1K': 0, '2K': 0, '4K': 0 }
+  let rawAmount = 0n
+  for (const tier of outputTiers) {
+    if (tier !== '1K' && tier !== '2K' && tier !== '4K') invalidPricing()
+    counts[tier] += 1
+    rawAmount += BigInt(prices[tier])
+  }
+  const basisAmount = checkedNumber(rawAmount)
+  const amount = fixedCharge(basisAmount, customerRateMultiplierPpm)
+  return {
+    cost: {
+      input_amount_micros: 0,
+      output_amount_micros: 0,
+      cache_amount_micros: 0,
+      base_amount_micros: amount,
+      amount_micros: amount,
+    },
+    basis_amount_micros: basisAmount,
+    snapshot: {
+      version: 1,
+      source: 'channel',
+      channel_id: plan.channel_id,
+      channel_control_version: plan.channel_control_version,
+      pricing_id: plan.pricing_id,
+      matched_model_pattern: plan.matched_model_pattern,
+      platform: plan.platform,
+      billing_model: 'image',
+      pricing_at_ms: pricingAtMs,
+      customer_rate_multiplier_ppm: customerRateMultiplierPpm,
+      tier_prices_micros: prices,
+      output_tier_counts: counts,
+    },
+  }
 }
 
 export function quoteCustomerCost(
@@ -124,7 +207,7 @@ export function quoteCustomerCost(
   base: CustomerBasePricing,
   usage: TokenUsage,
   selector: CustomerPricingSelector,
-): CustomerPricingQuote {
+): CustomerTokenPricingQuote {
   assertPlan(plan)
   assertBase(base)
   assertUsage(usage)
@@ -303,6 +386,35 @@ function effectivePricing(
       base.per_request_micros,
     ),
   }
+}
+
+function assertImagePlan(
+  plan: FrozenPricingPlan,
+  customerRateMultiplierPpm: number,
+  pricingAtMs: number,
+): void {
+  assertPlan(plan)
+  if (plan.billing_model !== 'image') invalidPricing()
+  assertSafeNonnegative(customerRateMultiplierPpm)
+  assertSafeNonnegative(pricingAtMs)
+}
+
+function imageTierPrices(plan: FrozenPricingPlan): Record<CustomerImageTier, number> {
+  return {
+    '1K': imageTierPrice(plan, '1K'),
+    '2K': imageTierPrice(plan, '2K'),
+    '4K': imageTierPrice(plan, '4K'),
+  }
+}
+
+function imageTierPrice(plan: FrozenPricingPlan, tier: CustomerImageTier): number {
+  const matches = plan.intervals.filter(
+    (interval) => interval.tier_label.trim().toLowerCase() === tier.toLowerCase(),
+  )
+  if (matches.length > 1) invalidPricing()
+  const value = matches[0]?.per_request_micros ?? plan.per_request_micros
+  if (value === null) invalidPricing()
+  return value
 }
 
 function effectiveComponentPricing(

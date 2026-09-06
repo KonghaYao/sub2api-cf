@@ -77,6 +77,11 @@ import {
 } from './control/users'
 import { backfillAdminUserFinancialHistory } from './control/financial-history-backfill'
 import {
+  continueAdminFinancialHistoryBackfillBatch,
+  createAdminFinancialHistoryBackfillBatch,
+  getAdminFinancialHistoryBackfillBatch,
+} from './control/financial-history-backfill-batches'
+import {
   allAdminGroups,
   createAdminGroup,
   createAdminModel,
@@ -206,6 +211,7 @@ import {
   submitUserMediaTask,
 } from './media/handlers'
 import { handleSyncImages } from './media/sync-handler'
+import { unsupportedVideoGeneration } from './media/video-unsupported'
 import {
   getAsyncImageTask,
   getAsyncImageTaskContent,
@@ -553,6 +559,18 @@ export function createApp() {
   app.get('/api/v1/admin/users/:id', getAdminUser)
   app.get('/api/v1/admin/users/:id/balance-history', listAdminUserBalanceHistory)
   app.post('/api/v1/admin/users/:id/balance-history/backfill', backfillAdminUserFinancialHistory)
+  app.post(
+    '/api/v1/admin/financial-history/backfill-batches',
+    createAdminFinancialHistoryBackfillBatch,
+  )
+  app.get(
+    '/api/v1/admin/financial-history/backfill-batches/:id',
+    getAdminFinancialHistoryBackfillBatch,
+  )
+  app.post(
+    '/api/v1/admin/financial-history/backfill-batches/:id/continue',
+    continueAdminFinancialHistoryBackfillBatch,
+  )
   app.put('/api/v1/admin/users/:id', updateAdminUser)
   app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
   app.get('/api/v1/admin/users/:id/platform-quotas', getAdminUserPlatformQuotas)
@@ -788,6 +806,8 @@ export function createApp() {
   app.post('/v1/images/batches/:id/cancel', cancelGatewayMediaTask)
   app.delete('/v1/images/batches/:id/outputs', deleteGatewayMediaTaskOutputs)
   app.delete('/v1/images/batches/:id', deleteGatewayMediaTask)
+  app.all('/v1/videos', unsupportedVideoGeneration)
+  app.all('/v1/videos/*', unsupportedVideoGeneration)
 
   app.notFound(async (context) => {
     const pathname = new URL(context.req.url).pathname

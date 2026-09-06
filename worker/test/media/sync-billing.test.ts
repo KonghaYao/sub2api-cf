@@ -122,4 +122,63 @@ describe('synchronous image billing', () => {
       },
     })
   })
+
+  it('keeps channel customer charge, provider standard cost, and account cost independent', async () => {
+    const send = vi.fn(async (_event: unknown) => undefined)
+    const db = {
+      prepare(query: string) {
+        if (query.includes('FROM accounts AS account')) {
+          return {
+            bind() { return this },
+            async first() {
+              return {
+                account_rate_multiplier_ppm: 2_000_000,
+                channel_id: null,
+                apply_pricing_to_account_stats: null,
+              }
+            },
+          }
+        }
+        return {
+          bind() { return this },
+          async run() { throw new Error('D1 settlement unavailable') },
+        }
+      },
+    }
+    const snapshot = JSON.stringify({
+      version: 1, source: 'channel', pricing_id: 'channel-image-price', billing_model: 'image',
+    })
+
+    await settleSyncImageBilling({ DB: db, EVENTS_QUEUE: { send } } as never, {
+      user_id: 'user-1', api_key_id: 'key-1', group_id: 'group-1', platform: 'openai',
+      billing: { type: 'balance' }, platform_quota: { platform: 'openai' },
+    } as never, {
+      requestId: 'image-independent-costs', accountId: 'account-1', priceId: 'catalog-price-1',
+      requestedModel: 'customer-image', upstreamModel: 'gpt-image-upstream',
+      amountMicros: 125_000, standardCostMicros: 100_000,
+      customerPricingBasisMicros: 125_000, customerPricingSnapshotJson: snapshot,
+      initialReservedMicros: 650_000, operation: 'generations', imageCount: 1, startedAt: 1,
+    })
+
+    expect(send).toHaveBeenCalledOnce()
+    expect(send.mock.calls[0]?.[0]).toMatchObject({
+      event_type: 'settlement.command.v2',
+      payload: {
+        request_id: 'image-independent-costs',
+        amount_micros: 125_000,
+        usage_event: {
+          event_id: 'usage:image-independent-costs',
+          payload: {
+            price_id: 'catalog-price-1',
+            amount_micros: 125_000,
+            standard_cost_micros: 100_000,
+            account_stats_cost_micros: null,
+            account_rate_multiplier_ppm: 2_000_000,
+            account_cost_micros: 200_000,
+            customer_pricing_snapshot_json: snapshot,
+          },
+        },
+      },
+    })
+  })
 })

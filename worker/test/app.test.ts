@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app'
 import type { Env } from '../src/env'
 
@@ -181,6 +181,53 @@ describe('worker app', () => {
     expect(response.status).toBe(401)
   })
 
+  it.each([
+    ['/v1/videos/generations', 'POST'],
+    ['/v1/videos/edits', 'POST'],
+    ['/v1/videos/extend', 'POST'],
+    ['/v1/videos/tasks/video-task-1', 'GET'],
+  ])('fails closed for the retained video surface at %s without touching authorities', async (path, method) => {
+    const authorityAccess = vi.fn(() => {
+      throw new Error('unsupported video routes must not access an authority')
+    })
+    const assetFetch = vi.fn(async () => new Response('asset'))
+    const upstreamFetch = vi.fn(async () => new Response('upstream'))
+    vi.stubGlobal('fetch', upstreamFetch)
+    const namespace = {
+      idFromName: authorityAccess,
+      get: authorityAccess,
+    } as unknown as DurableObjectNamespace
+    const env = testEnv({
+      DB: { prepare: authorityAccess } as unknown as D1Database,
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher,
+      USER_STATE: namespace,
+      API_KEY_LIMIT_STATE: namespace,
+      POOL_STATE: namespace,
+    })
+
+    const response = await createApp().request(path, {
+      method,
+      headers: {
+        authorization: 'Bearer deliberately-invalid',
+        ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+      },
+      body: method === 'POST' ? '{}' : undefined,
+    }, env)
+
+    expect(response.status).toBe(501)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        type: 'invalid_request_error',
+        code: 'unsupported_video_generation',
+        message: 'Video generation is not supported by the Cloudflare Worker runtime',
+      },
+    })
+    expect(authorityAccess).not.toHaveBeenCalled()
+    expect(upstreamFetch).not.toHaveBeenCalled()
+    expect(assetFetch).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
   it('routes the authenticated available-channels contract', async () => {
     const response = await createApp().request('/api/v1/channels/available', {}, testEnv())
 
@@ -225,6 +272,16 @@ describe('worker app', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'cat' }),
     }, testEnv())
+
+    expect(response.status).toBe(200)
+    await expect(response.text()).resolves.toBe('asset')
+  })
+
+  it.each([
+    '/videos/generations',
+    '/openai/v1/videos/generations',
+  ])('does not capture non-API video path %s from the SPA fallback', async (path) => {
+    const response = await createApp().request(path, { method: 'POST' }, testEnv())
 
     expect(response.status).toBe(200)
     await expect(response.text()).resolves.toBe('asset')

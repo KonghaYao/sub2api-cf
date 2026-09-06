@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   quoteCustomerCost,
+  quoteCustomerImageCost,
+  quoteCustomerImageReservation,
   quoteCustomerReservation,
   serializeCustomerPricingSnapshot,
   type CustomerBasePricing,
@@ -49,6 +51,43 @@ const plan: FrozenPricingPlan = {
 }
 
 describe('customer pricing', () => {
+  it('quotes frozen image tiers with exact integer customer and basis amounts', () => {
+    const imagePlan: FrozenPricingPlan = {
+      ...plan,
+      billing_model: 'image',
+      per_request_micros: 120_000,
+      intervals: [
+        { ...plan.intervals[0], id: 'one-k', tier_label: '1K', per_request_micros: 100_000 },
+        { ...plan.intervals[0], id: 'four-k', tier_label: '4k', per_request_micros: 400_000 },
+      ],
+      time_pricing: null,
+    }
+
+    expect(quoteCustomerImageReservation(imagePlan, 1_500_000, 2, 1)).toBe(1_200_000)
+    const quote = quoteCustomerImageCost(imagePlan, 1_500_000, ['1K', '4K'], 1)
+
+    expect(quote).toMatchObject({
+      cost: {
+        input_amount_micros: 0,
+        output_amount_micros: 0,
+        cache_amount_micros: 0,
+        base_amount_micros: 750_000,
+        amount_micros: 750_000,
+      },
+      basis_amount_micros: 500_000,
+      snapshot: {
+        version: 1,
+        source: 'channel',
+        pricing_id: 'channel-price-1',
+        billing_model: 'image',
+        pricing_at_ms: 1,
+        customer_rate_multiplier_ppm: 1_500_000,
+        tier_prices_micros: { '1K': 100_000, '2K': 120_000, '4K': 400_000 },
+        output_tier_counts: { '1K': 1, '2K': 0, '4K': 1 },
+      },
+    })
+  })
+
   it('inherits nulls, preserves explicit zero, and freezes selected pricing factors', () => {
     const quote = quoteCustomerCost(
       plan,

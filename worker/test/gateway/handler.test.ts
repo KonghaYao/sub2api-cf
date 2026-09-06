@@ -1080,41 +1080,44 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
-  it('rejects unsupported channel image pricing before reserving or calling upstream', async () => {
-    const { env, database, user } = await harness()
-    database.channelPolicy = {
-      billing_model_source: 'channel_mapped', restrict_models: 0, mapped_model: null,
-      source_pattern: null, target_pattern: null, source_is_wildcard: null,
-      target_is_wildcard: null, pricing_match: 1, account_cost_base_match_count: 0,
-      account_cost_base_price_id: null, account_cost_base_price_version: null,
-      account_cost_base_input_micros_per_million: null,
-      account_cost_base_output_micros_per_million: null,
-      account_cost_base_cache_read_micros_per_million: null,
-      account_cost_base_per_request_micros: null,
-      channel_id: 'channel-1', channel_control_version: 1, billing_model: 'gpt-public',
-      pricing_match_count: 1, pricing_id: 'channel-image-1', pricing_control_version: 1,
-      pricing_billing_mode: 'image', pricing_model_pattern: 'gpt-public',
-      pricing_input_micros_per_million: null, pricing_output_micros_per_million: null,
-      pricing_cache_read_micros_per_million: null, pricing_per_request_micros: 1,
-      pricing_fast_multiplier_ppm: null, pricing_flex_multiplier_ppm: null,
-      pricing_time_pricing_json: null, pricing_intervals_json: '[]',
-    }
-    const upstream = vi.fn()
-    vi.stubGlobal('fetch', upstream)
+  it.each(['image', 'video'] as const)(
+    'rejects unsupported channel %s pricing on text routes before reserving or calling upstream',
+    async (billingMode) => {
+      const { env, database, user } = await harness()
+      database.channelPolicy = {
+        billing_model_source: 'channel_mapped', restrict_models: 0, mapped_model: null,
+        source_pattern: null, target_pattern: null, source_is_wildcard: null,
+        target_is_wildcard: null, pricing_match: 1, account_cost_base_match_count: 0,
+        account_cost_base_price_id: null, account_cost_base_price_version: null,
+        account_cost_base_input_micros_per_million: null,
+        account_cost_base_output_micros_per_million: null,
+        account_cost_base_cache_read_micros_per_million: null,
+        account_cost_base_per_request_micros: null,
+        channel_id: 'channel-1', channel_control_version: 1, billing_model: 'gpt-public',
+        pricing_match_count: 1, pricing_id: 'channel-image-1', pricing_control_version: 1,
+        pricing_billing_mode: billingMode, pricing_model_pattern: 'gpt-public',
+        pricing_input_micros_per_million: null, pricing_output_micros_per_million: null,
+        pricing_cache_read_micros_per_million: null, pricing_per_request_micros: 1,
+        pricing_fast_multiplier_ppm: null, pricing_flex_multiplier_ppm: null,
+        pricing_time_pricing_json: null, pricing_intervals_json: '[]',
+      }
+      const upstream = vi.fn()
+      vi.stubGlobal('fetch', upstream)
 
-    const response = await createApp().request('/v1/chat/completions', {
-      method: 'POST',
-      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
-    }, env)
+      const response = await createApp().request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+      }, env)
 
-    expect(response.status).toBe(409)
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'unsupported_channel_billing_mode' },
-    })
-    expect(upstream).not.toHaveBeenCalled()
-    expect(user.calls).toEqual([])
-  })
+      expect(response.status).toBe(409)
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: 'unsupported_channel_billing_mode' },
+      })
+      expect(upstream).not.toHaveBeenCalled()
+      expect(user.calls).toEqual([])
+    },
+  )
 
   it('returns a fail-closed error before reservations for an unsupported channel billing source', async () => {
     const { env, database, user, limit } = await harness()

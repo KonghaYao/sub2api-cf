@@ -38,6 +38,10 @@ export interface SyncImageUsageInput {
   amountMicros: number
   /** Provider list price before the customer group/user multiplier. */
   standardCostMicros?: number
+  /** Channel price before the customer multiplier; used only when account-stat channel pricing is enabled. */
+  customerPricingBasisMicros?: number
+  /** Immutable serialized channel pricing decision. */
+  customerPricingSnapshotJson?: string
   /** Final provider platform used only for account-statistics pricing rules. */
   providerPlatform?: string
   accountCostSnapshot?: AccountCostSnapshot
@@ -131,6 +135,9 @@ export async function settleSyncImageBilling(
     upstreamModel: usageInput.upstreamModel,
     usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false },
     standardCostMicros: usageInput.standardCostMicros ?? usageInput.amountMicros,
+    ...(usageInput.customerPricingBasisMicros === undefined ? {} : {
+      channelPricingBasisMicros: usageInput.customerPricingBasisMicros,
+    }),
     requestCount: Math.max(1, usageInput.imageCount ?? 0),
   })
   const payload = buildSyncImageUsagePayload({
@@ -224,6 +231,7 @@ export function buildSyncImageUsagePayload(input: SyncImageUsageInput): UsageSet
     inbound_endpoint: endpoint,
     upstream_endpoint: input.upstreamEndpoint ?? endpoint,
     billing_mode: 'image',
+    customer_pricing_snapshot_json: input.customerPricingSnapshotJson ?? null,
     native_compaction_v2: false,
     image_count: input.imageCount ?? 0,
     image_size: input.imageSize ?? null,

@@ -6,11 +6,12 @@ import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   deliverPlatformEmail,
-  emailDeliveryFailure,
   hasEmailDeliveryBinding,
-  isPermanentEmailDeliveryFailure,
-  persistedEmailDeliveryFailure,
 } from '../email/delivery'
+import {
+  executeLeasedEmailDelivery,
+  type EmailDeliveryExecutionResult,
+} from '../email/delivery-executor'
 import { authenticateUserRequest, findUserById, publicUser, type UserRow } from './handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
 import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
@@ -83,11 +84,7 @@ export type EmailChallengeDeliveryEvent = PlatformEvent<EmailChallengeDeliveryPa
   aggregate_type: 'user' | 'email_identity'
 }
 
-export type EmailChallengeDeliveryResult =
-  | 'delivered'
-  | 'already_delivered'
-  | 'stale'
-  | 'permanently_failed'
+export type EmailChallengeDeliveryResult = EmailDeliveryExecutionResult
 
 export interface RegistrationEmailChallengeConsumption {
   /** Put this statement before the user INSERT in the same D1 batch. */
@@ -675,103 +672,108 @@ export async function consumeEmailChallengeDelivery(
   value: unknown,
   env: Env,
 ): Promise<EmailChallengeDeliveryResult> {
-  const event = requireEmailChallengeDeliveryEvent(value)
-  const challengeTable = event.payload.purpose === 'email_binding'
+  return executeLeasedEmailDelivery(value, {
+    leaseMs: DELIVERY_LEASE_MS,
+    failureErrorMaxLength: DELIVERY_ERROR_MAX_LENGTH,
+    describe: (event: EmailChallengeDeliveryEvent) =>
+      `Email challenge delivery ${event.event_id}`,
+    load: async (candidate, now) => {
+      const event = requireEmailChallengeDeliveryEvent(candidate)
+      const challengeTable = emailChallengeTable(event)
+      const [digest, eventHash] = await Promise.all([
+        challengeTokenDigest(env, event.payload.token, event.payload.purpose),
+        emailDeliveryEventDigest(env, event),
+      ])
+      const challenge = await env.DB.prepare(
+        `SELECT id, status, delivery_state, last_delivery_error, expires_at_ms
+           FROM ${challengeTable}
+          WHERE id = ? AND user_id IS ? AND email_hash = ? AND purpose = ? AND token_hash = ?
+            AND delivery_event_hash = ? AND generation = ? AND delivery_event_id = ?
+          LIMIT 1`,
+      ).bind(
+        event.payload.challenge_id,
+        event.payload.user_id,
+        event.payload.email_hash,
+        event.payload.purpose,
+        digest,
+        eventHash,
+        event.payload.generation,
+        event.event_id,
+      ).first<{
+        id: string
+        status: string
+        delivery_state: string
+        last_delivery_error: string | null
+        expires_at_ms: number
+      }>()
+      return {
+        event,
+        record: challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now
+          ? null
+          : {
+              id: challenge.id,
+              deliveryState: challenge.delivery_state,
+              lastDeliveryError: challenge.last_delivery_error,
+            },
+      }
+    },
+    acquireLease: async ({ event, record }, leaseId, now, leaseExpiresAtMs) => {
+      const lease = await env.DB.prepare(
+        `UPDATE ${emailChallengeTable(event)}
+            SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
+                delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
+                last_delivery_error = NULL, updated_at_ms = ?
+          WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
+            AND delivery_event_id = ?
+            AND (
+              delivery_state IN ('pending', 'queued')
+              OR (delivery_state = 'failed' AND (
+                last_delivery_error IS NULL OR last_delivery_error NOT LIKE 'permanent:%'
+              ))
+              OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
+            )
+          RETURNING id`,
+      ).bind(
+        leaseId, leaseExpiresAtMs, now, record.id, now, event.event_id, now,
+      ).all<{ id: string }>()
+      return lease.results.length === 1
+    },
+    inspect: async ({ event, record }) => {
+      const current = await env.DB.prepare(
+        `SELECT delivery_state, last_delivery_error
+           FROM ${emailChallengeTable(event)} WHERE id = ?`,
+      ).bind(record.id).first<{ delivery_state: string; last_delivery_error: string | null }>()
+      return current === null ? null : {
+        id: record.id,
+        deliveryState: current.delivery_state,
+        lastDeliveryError: current.last_delivery_error,
+      }
+    },
+    send: (event) => deliverEmailChallenge(event, env),
+    markSent: async ({ event, record }, leaseId, completedAtMs) => {
+      const update = await env.DB.prepare(
+        `UPDATE ${emailChallengeTable(event)}
+            SET delivery_state = 'sent', delivered_at_ms = ?, delivery_lease_id = NULL,
+                delivery_lease_expires_at_ms = NULL, updated_at_ms = ?
+          WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+      ).bind(completedAtMs, completedAtMs, record.id, leaseId).run()
+      return resultChanges(update) === 1
+    },
+    markFailed: async ({ event, record }, leaseId, failure, failedAtMs) => {
+      await env.DB.prepare(
+        `UPDATE ${emailChallengeTable(event)}
+            SET delivery_state = 'failed', delivery_lease_id = NULL,
+                delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
+          WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
+      ).bind(failure, failedAtMs, record.id, leaseId).run()
+    },
+  })
+}
+
+function emailChallengeTable(event: EmailChallengeDeliveryEvent): string {
+  return event.payload.purpose === 'email_binding'
     ? 'email_binding_challenges'
     : 'email_challenges'
-  const now = Date.now()
-  const digest = await challengeTokenDigest(env, event.payload.token, event.payload.purpose)
-  const eventHash = await emailDeliveryEventDigest(env, event)
-  const challenge = await env.DB.prepare(
-    `SELECT id, user_id, purpose, token_hash, generation, status,
-            delivery_event_id, delivery_event_hash, delivery_state, last_delivery_error,
-            created_at_ms, expires_at_ms
-       FROM ${challengeTable}
-      WHERE id = ? AND user_id IS ? AND email_hash = ? AND purpose = ? AND token_hash = ?
-        AND delivery_event_hash = ?
-        AND generation = ? AND delivery_event_id = ?
-      LIMIT 1`,
-  ).bind(
-    event.payload.challenge_id,
-    event.payload.user_id,
-    event.payload.email_hash,
-    event.payload.purpose,
-    digest,
-    eventHash,
-    event.payload.generation,
-    event.event_id,
-  ).first<EmailChallengeRow>()
-  if (challenge === null || challenge.status !== 'pending' || challenge.expires_at_ms <= now) {
-    return 'stale'
-  }
-  if (challenge.delivery_state === 'sent') return 'already_delivered'
-  if (
-    challenge.delivery_state === 'failed' &&
-    isPermanentEmailDeliveryFailure(challenge.last_delivery_error)
-  ) return 'permanently_failed'
-
-  const leaseId = crypto.randomUUID()
-  const lease = await env.DB.prepare(
-    `UPDATE ${challengeTable}
-        SET delivery_state = 'delivering', delivery_attempts = delivery_attempts + 1,
-            delivery_lease_id = ?, delivery_lease_expires_at_ms = ?,
-            last_delivery_error = NULL, updated_at_ms = ?
-      WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
-        AND delivery_event_id = ?
-        AND (
-          delivery_state IN ('pending', 'queued')
-          OR (delivery_state = 'failed' AND (
-            last_delivery_error IS NULL OR last_delivery_error NOT LIKE 'permanent:%'
-          ))
-          OR (delivery_state = 'delivering' AND delivery_lease_expires_at_ms <= ?)
-        )
-      RETURNING id`,
-  ).bind(
-    leaseId,
-    now + DELIVERY_LEASE_MS,
-    now,
-    challenge.id,
-    now,
-    event.event_id,
-    now,
-  ).all<{ id: string }>()
-  if (lease.results.length !== 1) {
-    const current = await env.DB.prepare(
-      `SELECT delivery_state, last_delivery_error FROM ${challengeTable} WHERE id = ?`,
-    ).bind(challenge.id).first<{ delivery_state: string; last_delivery_error: string | null }>()
-    if (current?.delivery_state === 'sent') return 'already_delivered'
-    if (isPermanentEmailDeliveryFailure(current?.last_delivery_error)) return 'permanently_failed'
-    throw new Error(`Email challenge delivery ${event.event_id} already has an active lease`)
-  }
-
-  try {
-    await deliverEmailChallenge(event, env)
-    const update = await env.DB.prepare(
-      `UPDATE ${challengeTable}
-          SET delivery_state = 'sent', delivered_at_ms = ?, delivery_lease_id = NULL,
-              delivery_lease_expires_at_ms = NULL, updated_at_ms = ?
-        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(Date.now(), Date.now(), challenge.id, leaseId).run()
-    if (resultChanges(update) !== 1) {
-      throw new Error(`Email challenge delivery ${event.event_id} lost its lease after sending`)
-    }
-    return 'delivered'
-  } catch (error) {
-    const failure = emailDeliveryFailure(error)
-    await env.DB.prepare(
-      `UPDATE ${challengeTable}
-          SET delivery_state = 'failed', delivery_lease_id = NULL,
-              delivery_lease_expires_at_ms = NULL, last_delivery_error = ?, updated_at_ms = ?
-        WHERE id = ? AND delivery_state = 'delivering' AND delivery_lease_id = ?`,
-    ).bind(
-      persistedEmailDeliveryFailure(failure).slice(0, DELIVERY_ERROR_MAX_LENGTH),
-      Date.now(),
-      challenge.id,
-      leaseId,
-    ).run()
-    if (!failure.retryable) return 'permanently_failed'
-    throw error
-  }
 }
 
 async function deliverEmailChallenge(event: EmailChallengeDeliveryEvent, env: Env): Promise<void> {

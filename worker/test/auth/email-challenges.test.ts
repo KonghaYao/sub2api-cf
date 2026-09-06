@@ -19,6 +19,7 @@ import { listUserSubscriptions } from '../../src/user/subscriptions'
 import { recoverPendingSubscriptionState } from '../../src/control/subscriptions'
 import { consumeEvents } from '../../src/gateway/queue'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
+import { defineEmailDeliveryConformanceSuite } from '../email/delivery-conformance'
 
 const PEPPER = 'email-challenge-test-pepper-is-at-least-32-bytes'
 
@@ -32,6 +33,22 @@ interface Harness {
 
 describe('Worker-native email challenges', () => {
   beforeEach(() => vi.restoreAllMocks())
+
+  defineEmailDeliveryConformanceSuite({
+    name: 'auth challenge',
+    setup: async () => {
+      const test = await fixture()
+      await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+      const event = test.events[0]
+      return {
+        env: test.env,
+        raw: test.raw,
+        event,
+        table: 'email_challenges',
+        consume: () => consumeEmailChallengeDelivery(event, test.env),
+      }
+    },
+  })
 
   it('preserves the six-digit pre-registration contract with cooldown and an enumeration-safe response', async () => {
     const available = await fixture()

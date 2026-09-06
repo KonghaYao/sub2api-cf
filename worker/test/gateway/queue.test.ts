@@ -173,6 +173,53 @@ describe('usage queue projection', () => {
     expect(legacyDatabase.batches[0][0].values[snapshotIndex]).toBeNull()
   })
 
+  it('acknowledges an exact image customer-pricing replay without projecting or charging twice', async () => {
+    const snapshot = JSON.stringify({
+      version: 1,
+      source: 'channel',
+      pricing_id: 'channel-image-price',
+      billing_model: 'image',
+      tier_prices_micros: { '1K': 125_000, '2K': 275_000, '4K': 650_000 },
+      output_tier_counts: { '1K': 1, '2K': 0, '4K': 0 },
+    })
+    const event = createUsageEvent({
+      ...payload,
+      billing_mode: 'image',
+      input_tokens: 0,
+      output_tokens: 0,
+      input_amount_micros: 0,
+      output_amount_micros: 0,
+      cache_amount_micros: 0,
+      base_amount_micros: 125_000,
+      amount_micros: 125_000,
+      image_count: 1,
+      image_size: '1K',
+      image_input_size: '1024x1024',
+      image_output_size: '1024x1024',
+      image_size_source: 'output',
+      image_size_breakdown: { '1K': 1 },
+      customer_pricing_snapshot_json: snapshot,
+    }, 1_000)
+    const firstDatabase = new QueueDatabase()
+    const first = message(event)
+    await consumeEvents(
+      { queue: 'events', messages: [first] } as unknown as MessageBatch<unknown>,
+      env(firstDatabase),
+    )
+    const storedDigest = firstDatabase.batches[0][1].values[3]
+
+    const replayDatabase = new QueueDatabase({ result_digest: storedDigest as string })
+    const replay = message(event)
+    await consumeEvents(
+      { queue: 'events', messages: [replay] } as unknown as MessageBatch<unknown>,
+      env(replayDatabase),
+    )
+
+    expect(replay.ack).toHaveBeenCalledOnce()
+    expect(replay.retry).not.toHaveBeenCalled()
+    expect(replayDatabase.batches).toHaveLength(0)
+  })
+
   it('rejects malformed, non-object, and oversized customer pricing snapshots', async () => {
     const invalidSnapshots: unknown[] = [
       42,

@@ -72,12 +72,30 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   bundle contents, and produces a deterministic D1-to-DO-to-R2 restore plan.
   Remote resource adapters and an empty-environment drill remain outstanding.
 
+## Completed locally in v0.35
+
+- Synchronous Images now freezes channel alias and exact/longest-wildcard price
+  selection plus 1K/2K/4K output tiers. It reserves the maximum possible charge,
+  settles actual outputs once across failover/replay, and preserves independent
+  customer, catalog-standard and provider-account cost facts. Missing,
+  duplicate and ambiguous tiers fail before admission or upstream work. Video
+  pricing remains explicitly rejected because Worker video routes are deferred.
+- Migration 0057 adds administrator-created financial-history backfill batches
+  with a strict one-page-per-Worker budget, persistent signed cursors, batch and
+  item leases, crash-recoverable idempotent create/continue, immutable actor
+  audit and an explicit non-retryable manual-reconciliation state for proven
+  legacy gaps.
+- Registration/account challenge, notification-email and TOTP Queue consumers
+  now share one leased delivery executor and one conformance matrix. Domain SQL
+  remains separate while retry, terminal replay and lost-lease behavior cannot
+  drift between the three flows.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
 | Frontend/Worker contract closure | Local route guards and reachable-page contracts are closed; browser-level deployed proof remains. | Keep the Worker route inventory authoritative and expose new controls only with a complete Worker contract. | Every reachable Vue route passes browser E2E against the Worker; no request returns `Route not migrated`; no unsupported control is visible. |
-| Channel customer pricing | Text token/per-request pricing is complete locally; image/video channel tiers are explicitly rejected instead of being mispriced. | Extend the frozen pricing snapshot contract to media dimensions without changing the independent account-cost facts. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
+| Channel customer pricing | Text and synchronous-image channel pricing are complete locally; deployed proof remains. Video routes and pricing are deferred together. | Keep frozen token/request/image decisions independent from provider account-cost facts; add video only with its Worker route. | Deployed alias, wildcard, interval, request/image, service-tier, failover and replay tests prove one customer charge and one independent account-cost snapshot. |
 | Core provider and protocol closure | The four Worker providers cover the main text paths, but retained legacy protocol variants and upstream credential lifecycles are incomplete. | Worker streaming codecs and provider adapters; D1 encrypted credential generations; DO leases/refresh serialization; Queue/Cron health recovery. | Every retained Go compatibility fixture is mapped; OpenAI, Anthropic, Gemini and Codex run authenticated binding and deployed smoke tests with exact settlement and no lease leaks. |
 | Production data cutover | Local binding tests exist, but PostgreSQL/Redis state has not been fully imported and reconciled with D1/DO/R2. | Versioned D1 import, R2 manifests, DO initialization commands and Queue projection catch-up. | Users, keys, balances, ledgers, subscriptions, orders and provider accounts reconcile by row count and sampled digest before staged traffic reaches 100%. |
 | Backup, restore and rollback | The local cross-store bundle, integrity verifier and deterministic restore plan pass; remote D1/DO/R2 adapters and drills remain. | Add explicit environment-selected exports/imports, per-DO restore commands, R2 reconciliation and Worker Versions rollback notes around the v0.34 bundle core. | Restore into an empty environment, verify digests and financial authorities, then perform one real Worker rollback drill. |
@@ -88,7 +106,7 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
 | Account operations | Batch actions, provider quota/tier/privacy sync and per-model probes are incomplete. | D1 control state, Pool DO cooldown, Queue/Cron probes and versioned health projections. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota is `unknown`, never zero. |
-| Admin usage and finance | Immutable per-user balance/debt history plus bounded signed pre-0055 DO backfill now exist; pre-v0.34 rollback gaps require manual reconciliation, and bulk orchestration, broader aggregates and correction/export workflows are incomplete. | Add a bounded background backfill coordinator, explicit manual-reconciliation records, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
+| Admin usage and finance | Immutable per-user balance/debt history and bounded operator-driven batch coordination now exist; automatic discovery, broader aggregates and correction/export workflows are incomplete. | Add scheduled discovery, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |
 | Channel monitor and alerts | Generic account health exists; model probes, alert rules, silences and reports do not. | Cron to Queue probes, D1 rules/history/silences, R2 evidence/reports and replay-safe delivery. | Duplicate schedules do not duplicate alerts; silence/recovery/DLQ behavior and per-model inference probes pass. |

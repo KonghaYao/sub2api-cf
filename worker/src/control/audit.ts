@@ -294,7 +294,21 @@ function auditSelect(category?: AuditCategory): string {
                'pages_scanned', pages_scanned
              ) AS metadata_json,
              occurred_at_ms
-        FROM admin_financial_history_backfill_audit_events`,
+        FROM admin_financial_history_backfill_audit_events
+      UNION ALL
+      SELECT 'financial_history' AS category, 'batch:' || id AS event_id, action,
+             CASE
+               WHEN to_status = 'completed' THEN 'succeeded'
+               WHEN to_status = 'failed' THEN 'failed'
+               WHEN to_status = 'blocked' THEN 'blocked'
+               ELSE 'recorded'
+             END AS outcome,
+             actor_user_id, actor_session_id, 'admin' AS origin,
+             'financial_history_backfill_batch' AS resource_type,
+             batch_id AS resource_id, batch_control_version AS resource_version,
+             json_object('from_status', from_status, 'to_status', to_status) AS metadata_json,
+             occurred_at_ms
+        FROM admin_financial_history_backfill_batch_audit_events`,
   }
   return category === undefined
     ? AUDIT_CATEGORIES.map((value) => selects[value]).join('\nUNION ALL\n')
@@ -421,6 +435,11 @@ function sanitizeFinancialHistoryMetadata(value: unknown): Record<string, unknow
   if (typeof value.snapshot_digest === 'string' && /^[a-f0-9]{64}$/.test(value.snapshot_digest)) {
     result.snapshot_digest = value.snapshot_digest
   }
+  const statuses = new Set(['queued', 'running', 'blocked', 'completed', 'failed'])
+  if (value.from_status === null || statuses.has(value.from_status as string)) {
+    result.from_status = value.from_status
+  }
+  if (statuses.has(value.to_status as string)) result.to_status = value.to_status
   return result
 }
 

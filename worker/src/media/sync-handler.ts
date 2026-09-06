@@ -5,6 +5,11 @@ import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/e
 import { buildProviderRequest } from '../gateway/providers'
 import type { AccountCredential, GatewayPrincipal, UpstreamCredential } from '../gateway/types'
 import {
+  quoteCustomerImageCost,
+  quoteCustomerImageReservation,
+  serializeCustomerPricingSnapshot,
+} from '../gateway/customer-pricing'
+import {
   authenticateGatewayRequest,
   credentialAad,
   getAccountCredential,
@@ -146,11 +151,11 @@ async function executeSyncImages(
       resolveSyncImagePricePolicy(context.env, principal),
       resolveGatewayRoute(context.env, principal.group_id, manifest.model, 'images', principal.user_id),
     ])
-    if (route.customer_pricing !== undefined) {
+    if (route.customer_pricing !== undefined && route.customer_pricing.billing_model !== 'image') {
       throw new GatewayError(
         409,
         'unsupported_channel_image_pricing',
-        'Channel-specific image pricing is not supported by the Worker runtime yet',
+        `Channel billing mode '${route.customer_pricing.billing_model}' cannot price an Images request`,
         'invalid_request_error',
       )
     }
@@ -166,10 +171,17 @@ async function executeSyncImages(
     }
     const candidates = compatibleCandidates
 
-    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     // Reserve the maximum billable tier. Actual-output settlement can then be
     // lower without ever exceeding a Durable Object hold.
-    const reservedMicros = calculateSyncImageReservation(pricing, '4K', manifest.n)
+    const reservedMicros = route.customer_pricing === undefined
+      ? calculateSyncImageReservation(pricing, '4K', manifest.n)
+      : quoteCustomerImageReservation(
+          route.customer_pricing,
+          pricing.rateMultiplierPpm,
+          manifest.n,
+          startedAt,
+        )
+    admission = await acquireApiKeyAdmission(context.env, principal, requestId)
     const billing = syncImageBilling(context.env)
     await billing.reserve({ env: context.env, principal, requestId, amountMicros: reservedMicros })
     billingReserved = true
@@ -331,6 +343,14 @@ async function executeSyncImages(
               billingOutputs.push(snapshot.metadata.size === '' ? {} : { size: snapshot.metadata.size })
             }
             const outputBilling = resolveOutputBilling(manifest, billingOutputs)
+            const customerQuote = route.customer_pricing === undefined
+              ? null
+              : quoteCustomerImageCost(
+                  route.customer_pricing,
+                  pricing.rateMultiplierPpm,
+                  outputBilling.tiers,
+                  startedAt,
+                )
             const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
               initialReservedMicros: number
             } = {
@@ -339,8 +359,13 @@ async function executeSyncImages(
               priceId: route.model.price_id,
               requestedModel: manifest.model,
               upstreamModel: route.model.upstream_name,
-              amountMicros: calculateSyncImageActualCost(pricing, outputBilling.tiers),
+              amountMicros: customerQuote?.cost.amount_micros ??
+                calculateSyncImageActualCost(pricing, outputBilling.tiers),
               standardCostMicros: calculateSyncImageStandardCost(pricing, outputBilling.tiers),
+              ...(customerQuote === null ? {} : {
+                customerPricingBasisMicros: customerQuote.basis_amount_micros,
+                customerPricingSnapshotJson: serializeCustomerPricingSnapshot(customerQuote.snapshot),
+              }),
               providerPlatform: route.model.platform,
               initialReservedMicros: reservedMicros,
               operation,
@@ -447,7 +472,16 @@ async function executeSyncImages(
       throw lastError ?? new GatewayError(503, 'no_upstream_accounts', 'No upstream account is configured', 'server_error')
     }
     const outputBilling = resolveOutputBilling(manifest, completed.normalized.outputs)
-    const actualMicros = calculateSyncImageActualCost(pricing, outputBilling.tiers)
+    const customerQuote = route.customer_pricing === undefined
+      ? null
+      : quoteCustomerImageCost(
+          route.customer_pricing,
+          pricing.rateMultiplierPpm,
+          outputBilling.tiers,
+          startedAt,
+        )
+    const actualMicros = customerQuote?.cost.amount_micros ??
+      calculateSyncImageActualCost(pricing, outputBilling.tiers)
     const usage: Omit<SyncImageUsageInput, 'principal' | 'occurredAt'> & {
       initialReservedMicros: number
     } = {
@@ -458,6 +492,10 @@ async function executeSyncImages(
       upstreamModel: route.model.upstream_name,
       amountMicros: actualMicros,
       standardCostMicros: calculateSyncImageStandardCost(pricing, outputBilling.tiers),
+      ...(customerQuote === null ? {} : {
+        customerPricingBasisMicros: customerQuote.basis_amount_micros,
+        customerPricingSnapshotJson: serializeCustomerPricingSnapshot(customerQuote.snapshot),
+      }),
       providerPlatform: route.model.platform,
       initialReservedMicros: reservedMicros,
       operation,
