@@ -23,6 +23,22 @@ describe('admin groups Cloudflare Worker contract', () => {
     )
   })
 
+  it('omits empty legacy filters from the bounded Worker list request', async () => {
+    get.mockResolvedValueOnce({
+      data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 }
+    })
+    const { list } = await import('@/api/admin/groups')
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+
+    await list(1, 20, { status: '' as 'active' })
+
+    expect(get).toHaveBeenCalledWith('/admin/groups', {
+      params: { page: 1, page_size: 20 },
+      signal: undefined
+    })
+  })
+
   it('creates with an idempotency key and translates the legacy multiplier', async () => {
     const created = {
       id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',

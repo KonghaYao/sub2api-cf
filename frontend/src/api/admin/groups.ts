@@ -256,12 +256,49 @@ export async function list(
     signal?: AbortSignal
   }
 ): Promise<PaginatedResponse<AdminGroup>> {
+  if (isCloudflareWorkerContractActive() && pageSize > 100) {
+    const { data } = await apiClient.get<AdminGroup[]>('/admin/groups/all', {
+      params: {
+        include_inactive: true,
+        ...(filters?.platform ? { platform: filters.platform } : {})
+      },
+      signal: options?.signal
+    })
+    const normalizedSearch = filters?.search?.trim().toLowerCase()
+    const items = data.map(adaptWorkerGroup).filter((group) => {
+      if (filters?.status && group.status !== filters.status) return false
+      if (filters?.is_exclusive !== undefined && group.is_exclusive !== filters.is_exclusive) return false
+      if (normalizedSearch && !group.name.toLowerCase().includes(normalizedSearch)) return false
+      return true
+    })
+    rememberGroups(items)
+    return {
+      items,
+      total: items.length,
+      page: 1,
+      page_size: items.length,
+      pages: items.length === 0 ? 0 : 1
+    }
+  }
+
+  const params = isCloudflareWorkerContractActive()
+    ? {
+        page,
+        page_size: pageSize,
+        ...(filters?.platform ? { platform: filters.platform } : {}),
+        ...(filters?.status ? { status: filters.status } : {}),
+        ...(filters?.is_exclusive === undefined ? {} : { is_exclusive: filters.is_exclusive }),
+        ...(filters?.search?.trim() ? { search: filters.search.trim() } : {}),
+        ...(filters?.sort_by ? { sort_by: filters.sort_by } : {}),
+        ...(filters?.sort_order ? { sort_order: filters.sort_order } : {})
+      }
+    : {
+        page,
+        page_size: pageSize,
+        ...filters
+      }
   const { data } = await apiClient.get<PaginatedResponse<AdminGroup>>('/admin/groups', {
-    params: {
-      page,
-      page_size: pageSize,
-      ...filters
-    },
+    params,
     signal: options?.signal
   })
   const result = { ...data, items: data.items.map(adaptWorkerGroup) }
