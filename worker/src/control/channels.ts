@@ -1033,14 +1033,7 @@ function publicStatus(value: ChannelStatus): PublicChannelStatus {
 }
 
 function parseBillingSource(value: unknown): BillingModelSource {
-  if (value === 'channel_mapped' || value === 'requested' || value === 'upstream') return value
-  if (value === 'response_model') {
-    throw new GatewayError(
-      409,
-      'billing_model_source_not_supported',
-      'Response-model billing is not implemented by the Worker runtime yet',
-    )
-  }
+  if (value === 'channel_mapped' || value === 'requested' || value === 'upstream' || value === 'response_model') return value
   throw invalid('billing_model_source', 'billing_model_source is invalid')
 }
 

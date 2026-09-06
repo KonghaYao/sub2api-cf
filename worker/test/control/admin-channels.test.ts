@@ -258,9 +258,9 @@ describe('admin channels HTTP contract', () => {
     }
   })
 
-  it('persists requested and upstream billing sources while rejecting response-model billing', async () => {
+  it('persists every billing model source', async () => {
     const test = await fixture()
-    for (const billingModelSource of ['requested', 'upstream']) {
+    for (const billingModelSource of ['requested', 'upstream', 'response_model']) {
       const response = await request(test, '/api/v1/admin/channels', {
         method: 'POST', headers: mutationHeaders(`channel-billing-source-${billingModelSource}`),
         body: JSON.stringify({
@@ -271,13 +271,7 @@ describe('admin channels HTTP contract', () => {
       expect(response.status).toBe(201)
       expect((await json(response)).data).toMatchObject({ billing_model_source: billingModelSource })
     }
-    const response = await request(test, '/api/v1/admin/channels', {
-      method: 'POST', headers: mutationHeaders('channel-billing-source-response-model'),
-      body: JSON.stringify({ name: 'Unsupported response model', billing_model_source: 'response_model' }),
-    })
-    expect(response.status).toBe(409)
-    expect((await json(response)).error).toMatchObject({ code: 'billing_model_source_not_supported' })
-    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 2 })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 3 })
   })
 
   it('creates and reads a normalized channel graph exactly, with idempotency and audit', async () => {

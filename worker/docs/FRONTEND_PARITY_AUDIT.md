@@ -386,3 +386,19 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: focused Worker Channels/repository SQLite tests (51), focused
   Channels frontend tests (18), Worker/frontend typechecks, and Cloudflare SPA
   build passed. No D1 migration.
+
+## v0.42.18 Channels response-model billing — 2026-09-07
+
+- The original `response_model` choice is active again. It keeps the request
+  price only as the initial reservation, then selects the completed upstream
+  response's declared model from that channel's existing price whitelist.
+- Final settlement reprices in both directions. A higher response-model price
+  commits the additional amount before settlement; the Durable Object records
+  an insufficient remainder as `spend_debt_micros` atomically, rather than
+  silently charging the initial lower price. A lower price settles normally
+  against the existing reservation.
+- Native and OpenAI-compatible non-stream responses, plus rewritten SSE
+  payloads, retain the raw upstream model declaration for settlement only.
+  The customer-facing payload still has the public model name rewritten.
+- Validation: focused Worker gateway/state tests (209), Channels frontend
+  contract tests (18), and Worker/frontend typechecks passed. No D1 migration.

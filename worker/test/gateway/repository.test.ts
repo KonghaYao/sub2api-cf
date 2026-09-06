@@ -4,6 +4,7 @@ import {
   getAccountCredential,
   listModels,
   resolveGatewayRoute,
+  resolveResponseModelPricing,
 } from '../../src/gateway/repository'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
@@ -1023,6 +1024,41 @@ describe('gateway repository channel model policy', () => {
         pricing_id: 'price-long', matched_model_pattern: 'vendor-tar*',
         per_request_micros: 2,
       },
+    })
+    raw.close()
+  })
+
+  it('keeps a response-model channel baseline for reservation and resolves its declared model price', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      UPDATE channels SET billing_model_source = 'response_model' WHERE id = 'channel-openai';
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES
+        ('baseline-price', 'channel-openai', 'openai', 'per_request', 10, 1, 1, 1),
+        ('response-price', 'channel-openai', 'openai', 'per_request', 30, 2, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('baseline-price', 'openai-public', 0, 0, 1),
+        ('response-price', 'actual-upstream-model', 0, 0, 1);
+    `)
+    const route = await resolveGatewayRoute(
+      { DB: d1 } as Env, 'group-openai', 'openai-public', 'responses', 'user-1',
+    )
+    expect(route.customer_pricing).toMatchObject({
+      pricing_id: 'baseline-price', response_model_billing: true, per_request_micros: 10,
+    })
+    await expect(resolveResponseModelPricing(
+      { DB: d1 } as Env,
+      route.customer_pricing!,
+      'actual-upstream-model',
+    )).resolves.toMatchObject({
+      pricing_id: 'response-price', per_request_micros: 30, response_model_billing: true,
     })
     raw.close()
   })

@@ -47,6 +47,7 @@ class FakeStatement {
 
   async first<T>(): Promise<T | null> {
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
+    if (this.query.includes('WITH response_input AS')) return this.database.responseModelPricing as T | null
     if (this.query.includes('FROM resolved_alias alias')) return this.database.externalAliasModel as T | null
     if (this.query.includes('JOIN user_platform_quotas quota')) {
       return this.database.routePlatformQuota as T | null
@@ -90,8 +91,10 @@ class FakeStatement {
         platform_quota_settled: this.values[8] ?? 1,
         platform_quota_usage_json: null,
         platform_quota_projected: this.values[9] ?? 1,
-        initial_reserved_micros: null,
-        reservations_ensured: 1,
+        initial_reserved_micros: this.query.includes('initial_reserved_micros')
+          ? this.values[10] : null,
+        reservations_ensured: this.query.includes('initial_reserved_micros')
+          ? this.values[11] : 1,
       }
     } else if (this.query.includes('SET billing_settled = 1')) {
       if (this.database.recovery !== null) this.database.recovery.billing_settled = 1
@@ -247,6 +250,7 @@ class FakeDatabase {
   directModelMissing = false
   externalAliasModel: Record<string, unknown> | null = null
   routePlatformQuota: Record<string, unknown> | null = null
+  responseModelPricing: Record<string, unknown> | null = null
   readonly principal = {
     api_key_id: 'key-1',
     api_key_auth_version: 1,
@@ -1120,6 +1124,59 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
+  it('reprices a response-model channel upward and commits the additional amount before settlement', async () => {
+    const { env, database, user } = await harness()
+    database.channelPolicy = {
+      billing_model_source: 'response_model', restrict_models: 0, mapped_model: null,
+      source_pattern: null, target_pattern: null, source_is_wildcard: null,
+      target_is_wildcard: null, pricing_match: 1, account_cost_base_match_count: 0,
+      account_cost_base_price_id: null, account_cost_base_price_version: null,
+      account_cost_base_input_micros_per_million: null,
+      account_cost_base_output_micros_per_million: null,
+      account_cost_base_cache_read_micros_per_million: null,
+      account_cost_base_per_request_micros: null,
+      channel_id: 'channel-1', channel_control_version: 9, billing_model: 'gpt-public',
+      pricing_match_count: 1, pricing_id: 'channel-baseline', pricing_control_version: 4,
+      pricing_billing_mode: 'per_request', pricing_model_pattern: 'gpt-public',
+      pricing_input_micros_per_million: null, pricing_output_micros_per_million: null,
+      pricing_cache_read_micros_per_million: null, pricing_per_request_micros: 10,
+      pricing_fast_multiplier_ppm: null, pricing_flex_multiplier_ppm: null,
+      pricing_time_pricing_json: null, pricing_intervals_json: '[]',
+    }
+    database.responseModelPricing = {
+      channel_id: 'channel-1', channel_control_version: 9,
+      billing_model: 'actual-upstream-model', pricing_match_count: 1,
+      pricing_id: 'channel-response', pricing_control_version: 5,
+      pricing_billing_mode: 'per_request', pricing_model_pattern: 'actual-upstream-model',
+      pricing_input_micros_per_million: null, pricing_output_micros_per_million: null,
+      pricing_cache_read_micros_per_million: null, pricing_per_request_micros: 30,
+      pricing_fast_multiplier_ppm: null, pricing_flex_multiplier_ppm: null,
+      pricing_time_pricing_json: null, pricing_intervals_json: '[]',
+      billing_model_source: 'response_model',
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      model: 'actual-upstream-model', choices: [],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    })))
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(200)
+    expect(user.calls.filter((call) => call.path === '/reserve').map((call) => call.body.amount_micros))
+      .toEqual([10])
+    expect(user.calls.filter((call) => call.path === '/ensure').map((call) => call.body.target_amount_micros))
+      .toEqual([30])
+    const settlement = user.calls.find((call) => call.path === '/settle')?.body
+    expect(settlement).toMatchObject({ amount_micros: 30 })
+    expect(settlement?.usage_event).toMatchObject({
+      payload: { amount_micros: 30, billing_mode: 'per_request' },
+    })
+  })
+
   it.each(['image', 'video'] as const)(
     'rejects unsupported channel %s pricing on text routes before reserving or calling upstream',
     async (billingMode) => {
@@ -1163,7 +1220,7 @@ describe('OpenAI-compatible gateway', () => {
     const { env, database, user, limit } = await harness()
     database.channelPolicy = {
       channel_id: 'channel-1',
-      billing_model_source: 'upstream',
+      billing_model_source: 'invalid_source',
       restrict_models: 0,
       source_pattern: null,
       target_pattern: null,

@@ -54,6 +54,7 @@ export interface FrozenPricingPlan {
   flex_multiplier_ppm: number | null
   intervals: FrozenPricingInterval[]
   time_pricing: FrozenTimePricing | null
+  response_model_billing?: boolean
 }
 
 export interface CustomerBasePricing {

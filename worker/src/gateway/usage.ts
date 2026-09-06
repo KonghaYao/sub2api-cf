@@ -64,6 +64,19 @@ export function extractUsage(value: unknown): TokenUsage | null {
   return null
 }
 
+/**
+ * Reads only protocol-level model declarations from an upstream payload. Callers
+ * must pass the raw upstream body before model-name rewriting; arbitrary nested
+ * content is intentionally never inspected.
+ */
+export function extractTrustedResponseModel(value: unknown): string | null {
+  const root = objectRecord(value)
+  if (root === null) return null
+  const direct = trustedModelName(root.model)
+  if (direct !== null) return direct
+  return trustedModelName(objectRecord(root.response)?.model)
+}
+
 export function estimatedUsage(inputBytes: number, outputBytes: number): TokenUsage {
   return {
     input_tokens: Math.max(1, inputBytes),
@@ -168,6 +181,8 @@ export class SseEventTransformer {
   private sawChatDone = false
   private responsesTerminal: 'completed' | 'failed' | null = null
   private responsesFailure: ResponsesFailureDetails | null = null
+  private responseModelValue: string | null = null
+  private responseModelConflict = false
 
   constructor(
     private readonly upstreamModel: string,
@@ -194,6 +209,10 @@ export class SseEventTransformer {
 
   usage(): TokenUsage | null {
     return this.latestUsage
+  }
+
+  responseModel(): string | null {
+    return this.responseModelConflict ? null : this.responseModelValue
   }
 
   outputBytes(): number {
@@ -241,6 +260,7 @@ export class SseEventTransformer {
     } else if (data !== '') {
       try {
         const parsed: unknown = JSON.parse(data)
+        this.observeResponseModel(extractTrustedResponseModel(parsed))
         const usage = extractUsage(parsed)
         if (usage !== null) this.latestUsage = usage
         const object = objectRecord(parsed)
@@ -286,11 +306,28 @@ export class SseEventTransformer {
     this.emittedBytes += encoded.byteLength
     return encoded
   }
+
+  private observeResponseModel(model: string | null): void {
+    if (model === null || this.responseModelConflict) return
+    if (this.responseModelValue === null) {
+      this.responseModelValue = model
+    } else if (this.responseModelValue.toLowerCase() !== model.toLowerCase()) {
+      this.responseModelConflict = true
+    }
+  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
+    : null
+}
+
+function trustedModelName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const model = value.trim()
+  return model !== '' && model.length <= 256 && !/[\u0000-\u001f\u007f]/.test(model)
+    ? model
     : null
 }
 

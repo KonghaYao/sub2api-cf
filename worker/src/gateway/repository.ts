@@ -670,7 +670,7 @@ function externalAliasRouteModel(row: ExternalAliasModelRow): ModelRoute {
 }
 
 function frozenPricingPlan(
-  row: PricingProjectionRow,
+  row: PricingProjectionRow & { billing_model_source?: string },
   platform: ProviderPlatform,
 ): FrozenPricingPlan | undefined {
   if (!Number.isSafeInteger(row.pricing_match_count) || row.pricing_match_count < 0) {
@@ -726,7 +726,101 @@ function frozenPricingPlan(
     flex_multiplier_ppm: row.pricing_flex_multiplier_ppm,
     intervals: parseFrozenPricingIntervals(row.pricing_intervals_json),
     time_pricing: parseFrozenTimePricing(row.pricing_time_pricing_json),
+    ...(row.billing_model_source === 'response_model' ? { response_model_billing: true } : {}),
   }
+}
+
+/**
+ * Resolves a channel price for a model declared by a completed upstream response.
+ * The declaration is never used for routing; it only replaces the already-reserved
+ * channel price while the request is still in its idempotent settlement transition.
+ */
+export async function resolveResponseModelPricing(
+  env: Env,
+  baseline: FrozenPricingPlan,
+  responseModel: string,
+): Promise<FrozenPricingPlan | undefined> {
+  const model = responseModel.trim()
+  if (
+    model === '' || model.length > 256 || /[\u0000-\u001f\u007f]/.test(model) ||
+    !isProviderPlatform(baseline.platform)
+  ) return undefined
+  const row = await env.DB.prepare(
+    `WITH response_input AS (SELECT ? AS model),
+          pricing_pattern_matches AS (
+       SELECT pricing.id AS pricing_id,
+              pricing.control_version AS pricing_control_version,
+              pricing.billing_mode AS pricing_billing_mode,
+              allowed.model_pattern AS pricing_model_pattern,
+              pricing.input_micros_per_million AS pricing_input_micros_per_million,
+              pricing.output_micros_per_million AS pricing_output_micros_per_million,
+              pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.per_request_micros AS pricing_per_request_micros,
+              pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
+              pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
+              pricing.time_pricing_json AS pricing_time_pricing_json,
+              ${channelPricingMatchPhaseSql('response.model')} AS match_phase,
+              allowed.is_wildcard,
+              CASE WHEN allowed.is_wildcard = 1
+                THEN length(allowed.model_pattern) ELSE 0 END AS wildcard_length
+         FROM channels channel
+         JOIN channel_model_pricing pricing
+           ON pricing.channel_id = channel.id AND pricing.platform = ?
+         JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
+         CROSS JOIN response_input response
+        WHERE channel.id = ? AND channel.status = 'active'
+          AND ${channelPricingMatchPhaseSql('response.model')} IS NOT NULL
+     ), best_pricing AS (
+       SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
+         FROM pricing_pattern_matches matched
+        WHERE matched.match_phase = (SELECT MIN(match_phase) FROM pricing_pattern_matches)
+          AND matched.wildcard_length = (
+            SELECT MAX(wildcard_length) FROM pricing_pattern_matches
+             WHERE match_phase = (SELECT MIN(match_phase) FROM pricing_pattern_matches)
+          )
+     )
+     SELECT channel.id AS channel_id,
+            channel.control_version AS channel_control_version,
+            response.model AS billing_model,
+            COALESCE(pricing.pricing_match_count, 0) AS pricing_match_count,
+            pricing.pricing_id,
+            pricing.pricing_control_version,
+            pricing.pricing_billing_mode,
+            pricing.pricing_model_pattern,
+            pricing.pricing_input_micros_per_million,
+            pricing.pricing_output_micros_per_million,
+            pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_per_request_micros,
+            pricing.pricing_fast_multiplier_ppm,
+            pricing.pricing_flex_multiplier_ppm,
+            pricing.pricing_time_pricing_json,
+            channel.billing_model_source,
+            (
+              SELECT json_group_array(json_object(
+                'id', interval.id, 'min_tokens', interval.min_tokens,
+                'max_tokens', interval.max_tokens, 'tier_label', interval.tier_label,
+                'input_micros_per_million', interval.input_micros_per_million,
+                'output_micros_per_million', interval.output_micros_per_million,
+                'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'input_multiplier_ppm', interval.input_multiplier_ppm,
+                'output_multiplier_ppm', interval.output_multiplier_ppm,
+                'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,
+                'per_request_micros', interval.per_request_micros
+              ))
+                FROM (
+                  SELECT * FROM channel_pricing_intervals interval
+                   WHERE interval.pricing_id = pricing.pricing_id
+                   ORDER BY interval.sort_order ASC, interval.id ASC
+                   LIMIT 101
+                ) interval
+            ) AS pricing_intervals_json
+       FROM channels channel
+       CROSS JOIN response_input response
+       LEFT JOIN best_pricing pricing ON 1 = 1
+      WHERE channel.id = ? AND channel.status = 'active'`,
+  ).bind(model, baseline.platform, baseline.channel_id, baseline.channel_id)
+    .first<PricingProjectionRow & { billing_model_source: string }>()
+  return row === null ? undefined : frozenPricingPlan(row, baseline.platform)
 }
 
 function parseFrozenPricingIntervals(value: string | null): FrozenPricingInterval[] {
@@ -1317,7 +1411,7 @@ interface ChannelModelPolicyRow extends PricingProjectionRow {
 }
 
 function assertSupportedChannelBillingSource(value: string): void {
-  if (!['channel_mapped', 'requested', 'upstream'].includes(value)) {
+  if (!['channel_mapped', 'requested', 'upstream', 'response_model'].includes(value)) {
     throw new GatewayError(
       409,
       'unsupported_billing_model_source',

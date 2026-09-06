@@ -71,6 +71,7 @@ import {
   getAccountCredential,
   listModels,
   resolveGatewayRoute,
+  resolveResponseModelPricing,
 } from './repository'
 import { buildProviderRequest, type ProviderOperation } from './providers'
 import type { ProviderPlatform } from './providers'
@@ -106,6 +107,7 @@ import type {
 import {
   calculateCost,
   estimatedUsage,
+  extractTrustedResponseModel,
   extractUsage,
   reservationForRequest,
   rewriteModelNames,
@@ -1256,6 +1258,7 @@ async function dispatchGateway(
         principal,
         model,
         customerPricing: route.customer_pricing,
+        reservedMicros: reservationMicros,
         requestedModel,
         inputBytes: parsed.bytes.byteLength,
         clientSignal: context.req.raw.signal,
@@ -1294,6 +1297,7 @@ async function dispatchGateway(
         principal,
         model,
         customerPricing: route.customer_pricing,
+        reservedMicros: reservationMicros,
         requestedModel,
         inputBytes: parsed.bytes.byteLength,
         stream,
@@ -1326,6 +1330,7 @@ async function dispatchGateway(
       principal,
       model,
       customerPricing: route.customer_pricing,
+      reservedMicros: reservationMicros,
       requestedModel,
       inputBytes: parsed.bytes.byteLength,
       clientSignal: context.req.raw.signal,
@@ -1620,6 +1625,7 @@ interface FinalizeInput {
   principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>
   model: ModelRoute
   customerPricing?: FrozenPricingPlan
+  reservedMicros: number
   requestedModel: string
   inputBytes: number
   stream: boolean
@@ -1658,7 +1664,7 @@ async function createBufferedChatFromResponsesStream(
   ) => {
     if (settled) return
     settled = true
-    await settleAndProject(input, usage, outcome, zeroCost)
+    await settleAndProject(input, usage, outcome, zeroCost, accounting.responseModel())
   }
 
   try {
@@ -1853,7 +1859,7 @@ async function createSynchronousResponse(
         )
       }
     }
-    await settleAndProject(input, usage, 'completed')
+    await settleAndProject(input, usage, 'completed', false, extractTrustedResponseModel(parsed))
     const output = downstreamValue === null
       ? bytes
       : encoder.encode(JSON.stringify(
@@ -1876,6 +1882,7 @@ interface GatewayStreamTransformer {
   push(chunk: Uint8Array): Uint8Array[]
   finish(): Uint8Array[]
   usage(): TokenUsage | null
+  responseModel?(): string | null
   outputBytes(): number
   terminal(): 'completed' | 'failed' | 'missing'
   failure?(): ReturnType<typeof responsesFailureDetails> | null
@@ -1916,6 +1923,10 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
 
   usage(): TokenUsage | null {
     return this.delegate.usage()
+  }
+
+  responseModel(): string | null {
+    return this.delegate.responseModel()
   }
 
   outputBytes(): number {
@@ -1984,6 +1995,10 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
 
   usage(): TokenUsage | null {
     return this.accounting.usage()
+  }
+
+  responseModel(): string | null {
+    return this.accounting.responseModel()
   }
 
   outputBytes(): number {
@@ -2092,6 +2107,10 @@ class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
       return { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false }
     }
     return this.accounting.usage()
+  }
+
+  responseModel(): string | null {
+    return this.accounting.responseModel()
   }
 
   zeroCost(): boolean {
@@ -2229,6 +2248,10 @@ class GeminiResponsesStreamTransformer implements GatewayStreamTransformer {
     return this.accounting.usage()
   }
 
+  responseModel(): string | null {
+    return this.accounting.responseModel()
+  }
+
   outputBytes(): number {
     return this.emittedBytes
   }
@@ -2312,6 +2335,10 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
 
   usage(): TokenUsage | null {
     return this.accounting.usage()
+  }
+
+  responseModel(): string | null {
+    return this.accounting.responseModel()
   }
 
   outputBytes(): number {
@@ -2587,6 +2614,7 @@ function createStreamingResponse(input: FinalizeInput & {
             usage ?? estimatedUsage(input.inputBytes, tracker.outputBytes()),
             outcome,
             tracker.zeroCost?.() === true,
+            tracker.responseModel?.(),
           )
         } else {
           await cancelGatewayReservations(input.env, input.principal, input.requestId)
@@ -2820,10 +2848,19 @@ async function settleAndProject(
   usage: TokenUsage,
   outcome: UsageSettledPayload['outcome'],
   zeroCost = false,
+  responseModel?: string | null,
 ): Promise<void> {
-  const customerQuote = input.customerPricing === undefined
+  let pricingPlan = input.customerPricing
+  if (
+    !zeroCost && outcome === 'completed' && pricingPlan?.response_model_billing === true &&
+    responseModel !== null && responseModel !== undefined
+  ) {
+    const resolved = await resolveResponseModelPricing(input.env, pricingPlan, responseModel)
+    if (resolved !== undefined) pricingPlan = resolved
+  }
+  const customerQuote = pricingPlan === undefined
     ? null
-    : quoteCustomerCost(input.customerPricing, input.model, usage, {
+    : quoteCustomerCost(pricingPlan, input.model, usage, {
         pricing_at_ms: input.startedAt,
         service_tier: input.serviceTier,
       })
@@ -2891,7 +2928,7 @@ async function settleAndProject(
     request_type: zeroCost ? 4 : input.stream ? 2 : 1,
     inbound_endpoint: input.inboundEndpointPath,
     upstream_endpoint: input.upstreamEndpointPath,
-    billing_mode: input.customerPricing?.billing_model ?? 'token',
+    billing_mode: pricingPlan?.billing_model ?? 'token',
     customer_pricing_snapshot_json: customerQuote === null
       ? null
       : serializeCustomerPricingSnapshot(customerQuote.snapshot),
@@ -2907,6 +2944,7 @@ async function settleAndProject(
       input.requestId,
       cost.amount_micros,
       event,
+      input.reservedMicros,
     )
   } catch (error) {
     console.error('failed to persist settlement recovery', {

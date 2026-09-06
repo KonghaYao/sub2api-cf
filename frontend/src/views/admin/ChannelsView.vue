@@ -728,7 +728,8 @@ const billingModelSourceOptions = computed(() => {
   return [
     { value: 'channel_mapped', label: t('admin.channels.form.billingModelSourceChannelMapped', 'Bill by channel-mapped model') },
     { value: 'requested', label: t('admin.channels.form.billingModelSourceRequested', 'Bill by requested model') },
-    { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') }
+    { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') },
+    { value: 'response_model', label: t('admin.channels.form.billingModelSourceResponse', 'Bill by upstream response model') }
   ]
 })
 

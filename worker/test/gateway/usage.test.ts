@@ -114,12 +114,21 @@ describe('gateway usage accounting', () => {
     expect(text).toContain('"model":"gpt-public"')
     expect(text).toContain('你好')
     expect(text).toContain('data: [DONE]')
+    expect(transformer.responseModel()).toBe('gpt-upstream')
     expect(transformer.usage()).toEqual({
       input_tokens: 8,
       output_tokens: 2,
       cache_read_tokens: 0,
       estimated: false,
     })
+  })
+
+  it('does not adopt a conflicting model declaration from an upstream stream', () => {
+    const transformer = new SseEventTransformer('gpt-upstream', 'gpt-public')
+    transformer.push(new TextEncoder().encode(
+      'data: {"model":"actual-model-a"}\n\ndata: {"response":{"model":"actual-model-b"}}\n\n',
+    ))
+    expect(transformer.responseModel()).toBeNull()
   })
 
   it('treats an incomplete Responses terminal as billable completion and real errors as failures', () => {
