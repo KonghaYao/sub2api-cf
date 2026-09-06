@@ -259,7 +259,7 @@ describe('usage reasoning effort page display', () => {
     expect(wrapper.text()).not.toContain('XHigh')
   })
 
-  it('admin Worker Explorer does not present unpersisted reasoning-effort fields', async () => {
+  it('admin usage explorer exposes requested and forwarded reasoning effort through the original column control', async () => {
     const wrapper = mount(AdminUsageView, {
       global: {
         stubs: {
@@ -276,10 +276,14 @@ describe('usage reasoning effort page display', () => {
     })
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="reasoning-effort-cell"]').exists()).toBe(false)
-
     await wrapper.get('[data-testid="usage-column-settings"]').trigger('click')
-    expect(wrapper.find('[data-testid="usage-column-toggle-reasoning_effort"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('XHigh')
+    const reasoningToggle = wrapper.get('[data-testid="usage-column-toggle-reasoning_effort"]')
+    expect(reasoningToggle.exists()).toBe(true)
+    await reasoningToggle.trigger('click')
+
+    const cell = reasoningCellText(wrapper)
+    expect(cell).toContain('Max')
+    expect(cell).toContain('XHigh')
+    expect(cell).toContain('↳')
   })
 })

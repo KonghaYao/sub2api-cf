@@ -632,6 +632,25 @@ async function openUsersTab(wrapper: ReturnType<typeof mountView>) {
   await flushPromises();
 }
 
+async function openFeaturesTab(wrapper: ReturnType<typeof mountView>) {
+  const featuresTabButton = wrapper
+    .findAll("button")
+    .find((node) => node.text().includes("admin.settings.tabs.features"));
+
+  expect(featuresTabButton).toBeDefined();
+  await featuresTabButton?.trigger("click");
+  await flushPromises();
+}
+
+function findCardByText(
+  wrapper: ReturnType<typeof mountView>,
+  text: string,
+) {
+  const card = wrapper.findAll(".card").find((node) => node.text().includes(text));
+  expect(card).toBeDefined();
+  return card!;
+}
+
 describe("admin SettingsView email domain quota copy", () => {
   it("documents the email domain quota and empty-whitelist behavior in both locales", () => {
     expect(zhCommon.auth.emailDomainRegistrationLimit).toContain("主流邮箱");
@@ -807,7 +826,7 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
-  it("loads and saves the Worker-native Stripe payment controls", async () => {
+  it("keeps the original payment form visible and saves its Worker-backed values", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
       cloudflare_worker_contract: true,
@@ -834,8 +853,17 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const wrapper = mountView();
     await flushPromises();
+    await openPaymentTab(wrapper);
 
-    expect(wrapper.text()).toContain("Stripe payments");
+    const paymentCard = findCardByText(wrapper, "admin.settings.payment.title");
+    expect(paymentCard.isVisible()).toBe(true);
+    expect(paymentCard.text()).toContain("admin.settings.payment.productNamePrefix");
+    expect(paymentCard.text()).toContain("admin.settings.payment.enabledPaymentTypes");
+    const stripeButton = paymentCard
+      .findAll("button")
+      .find((button) => button.text() === "payment.methods.stripe");
+    expect(stripeButton).toBeDefined();
+    expect(stripeButton!.classes()).toContain("bg-primary-500");
     expect(getPaymentConfig).toHaveBeenCalledTimes(1);
     expect(getProviders).toHaveBeenCalledTimes(1);
 
@@ -854,7 +882,7 @@ describe("admin SettingsView payment visible method controls", () => {
     }));
   });
 
-  it("renders the Worker auth-source entitlement editor on the settings page", async () => {
+  it("keeps the original per-auth-source entitlement fields visible", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
       cloudflare_worker_contract: true,
@@ -864,12 +892,23 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const wrapper = mountView();
     await flushPromises();
+    await openUsersTab(wrapper);
 
-    expect(wrapper.get('[data-testid="worker-auth-source-defaults-card"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="auth-source-select"]').findAll("option")).toHaveLength(7);
+    const authSourceCard = findCardByText(
+      wrapper,
+      "认证来源默认值",
+    );
+    expect(authSourceCard.isVisible()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-email-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-linuxdo-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-oidc-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-wechat-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-dingtalk-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-github-enabled"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="auth-source-google-enabled"]').exists()).toBe(true);
   });
 
-  it("shows the Worker Passkey projection and persists its sign-in toggle", async () => {
+  it("shows the original Passkey form and persists its sign-in toggle", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
       cloudflare_worker_contract: true,
@@ -883,9 +922,11 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     const wrapper = mountView();
     await flushPromises();
+    await openSecurityTab(wrapper);
 
-    const card = wrapper.get('[data-testid="worker-passkey-settings"]');
-    const toggle = card.get('[data-testid="worker-passkey-toggle"]');
+    const card = wrapper.get('[data-testid="passkey-settings"]');
+    const toggle = card.get('[data-testid="passkey-toggle"]');
+    expect(card.isVisible()).toBe(true);
     expect((toggle.element as HTMLInputElement).checked).toBe(true);
     expect(toggle.attributes("disabled")).toBeUndefined();
     expect(card.text()).toContain("login.example.com");
@@ -901,7 +942,7 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
-  it("loads and persists Worker commercial feature switches", async () => {
+  it("keeps the original commercial feature controls and persists their values", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
       cloudflare_worker_contract: true,
@@ -915,20 +956,54 @@ describe("admin SettingsView payment visible method controls", () => {
     const wrapper = mountView();
     await flushPromises();
 
-    expect((wrapper.get('[data-testid="worker-model-plaza-toggle"]').element as HTMLInputElement).checked)
-      .toBe(true);
-    expect((wrapper.get('[data-testid="worker-model-plaza-auth-toggle"]').element as HTMLInputElement).checked)
-      .toBe(true);
-    expect((wrapper.get('[data-testid="worker-promo-toggle"]').element as HTMLInputElement).checked)
-      .toBe(true);
-    expect((wrapper.get('[data-testid="worker-invitation-toggle"]').element as HTMLInputElement).checked)
-      .toBe(true);
-    expect((wrapper.get('[data-testid="worker-affiliate-toggle"]').element as HTMLInputElement).checked)
-      .toBe(true);
-    expect((wrapper.get('[data-testid="worker-model-plaza-description"]').element as HTMLTextAreaElement).value)
-      .toBe("Current public prices");
+    await openSecurityTab(wrapper);
+    const registrationCard = findCardByText(
+      wrapper,
+      "admin.settings.registration.promoCode",
+    );
+    expect(registrationCard.isVisible()).toBe(true);
+    expect(registrationCard.text()).toContain("admin.settings.registration.invitationCode");
 
-    await wrapper.get('[data-testid="worker-promo-toggle"]').setValue(false);
+    const promoLabel = registrationCard
+      .findAll("label")
+      .find((label) => label.text() === "admin.settings.registration.promoCode");
+    const invitationLabel = registrationCard
+      .findAll("label")
+      .find((label) => label.text() === "admin.settings.registration.invitationCode");
+    expect(promoLabel).toBeDefined();
+    expect(invitationLabel).toBeDefined();
+    const promoToggle = registrationCard
+      .findAll('input[type="checkbox"]')
+      .find((input) => promoLabel!.element.parentElement?.parentElement?.contains(input.element));
+    const invitationToggle = registrationCard
+      .findAll('input[type="checkbox"]')
+      .find((input) => invitationLabel!.element.parentElement?.parentElement?.contains(input.element));
+    expect((promoToggle!.element as HTMLInputElement).checked).toBe(true);
+    expect((invitationToggle!.element as HTMLInputElement).checked).toBe(true);
+
+    await openFeaturesTab(wrapper);
+    const modelPlazaCard = findCardByText(
+      wrapper,
+      "admin.settings.features.modelPlaza.title",
+    );
+    const modelPlazaToggles = modelPlazaCard.findAll('input[type="checkbox"]');
+    expect(modelPlazaCard.isVisible()).toBe(true);
+    expect((modelPlazaToggles[0]!.element as HTMLInputElement).checked).toBe(true);
+    expect((modelPlazaToggles[1]!.element as HTMLInputElement).checked).toBe(true);
+    expect((modelPlazaCard.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "Current public prices",
+    );
+
+    const affiliateCard = findCardByText(
+      wrapper,
+      "admin.settings.features.affiliate.title",
+    );
+    expect(affiliateCard.isVisible()).toBe(true);
+    expect(
+      (affiliateCard.get('input[type="checkbox"]').element as HTMLInputElement).checked,
+    ).toBe(true);
+
+    await promoToggle!.setValue(false);
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
 
@@ -942,7 +1017,7 @@ describe("admin SettingsView payment visible method controls", () => {
     }));
   });
 
-  it("loads and persists the private Worker affiliate policy separately", async () => {
+  it("loads the original affiliate form and persists its private policy separately", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
       cloudflare_worker_contract: true,
@@ -962,16 +1037,21 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const wrapper = mountView();
     await flushPromises();
+    await openFeaturesTab(wrapper);
 
     expect(getCommercialConfig).toHaveBeenCalledTimes(1);
-    expect((wrapper.get('[data-testid="worker-affiliate-rate"]').element as HTMLInputElement).value)
-      .toBe("12.5");
-    expect((wrapper.get('[data-testid="worker-affiliate-freeze-hours"]').element as HTMLInputElement).value)
-      .toBe("24");
-    expect((wrapper.get('[data-testid="worker-affiliate-cap"]').element as HTMLInputElement).value)
-      .toBe("50");
+    const affiliateCard = findCardByText(
+      wrapper,
+      "admin.settings.features.affiliate.title",
+    );
+    expect(affiliateCard.isVisible()).toBe(true);
+    const policyInputs = affiliateCard.findAll('input[type="number"]');
+    expect((policyInputs[0]!.element as HTMLInputElement).value).toBe("12.5");
+    expect((policyInputs[1]!.element as HTMLInputElement).value).toBe("24");
+    expect((policyInputs[2]!.element as HTMLInputElement).value).toBe("365");
+    expect((policyInputs[3]!.element as HTMLInputElement).value).toBe("50");
 
-    await wrapper.get('[data-testid="worker-affiliate-rate"]').setValue("15");
+    await policyInputs[0]!.setValue("15");
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
 

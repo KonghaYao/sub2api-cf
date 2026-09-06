@@ -186,10 +186,6 @@ describe('admin UsersView', () => {
 
     await flushPromises()
 
-    expect(wrapper.get('[data-test="edit-platform-quota-defaults"]').exists()).toBe(true)
-    await wrapper.get('[data-test="edit-platform-quota-defaults"]').trigger('click')
-    expect(wrapper.get('[data-test="platform-quota-defaults-modal"]').exists()).toBe(true)
-
     const columns = wrapper.get('[data-test="columns"]').text()
     const visibleColumns = columns.split(',')
     expect(visibleColumns.slice(-4, -1)).toEqual(['last_active_at', 'last_used_at', 'created_at'])
