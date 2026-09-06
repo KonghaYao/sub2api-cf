@@ -482,3 +482,13 @@ explicit typed error. It must never silently discard a submitted field or return
 - The original bulk limits dialog now uses one Worker transaction for its
   explicit user selection. The batch has an idempotency record and rejects the
   whole operation if any selected user is no longer present.
+
+## v0.42.30 User API Keys page parity — 2026-09-07
+
+- Restored the original Keys page template and styling exactly from
+  `origin/main@5097b3145`; Worker-specific branches no longer hide key actions,
+  quota inputs, or the original dialogs.
+- The Worker adapter continues to provide UUID/CAS and exact-micro behavior.
+  After deleting the final item on a later page, the page reloads at the last
+  valid page with the server's returned count.
+- A Vue SFC parity test locks the template and styles to the baseline.

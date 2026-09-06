@@ -229,6 +229,7 @@ const PaginationStub = {
   template: `
     <div>
       <button data-test="page-size-50" @click="$emit('update:pageSize', 50)">50</button>
+      <button data-test="page-two" @click="$emit('update:page', 2)">2</button>
     </div>
   `,
 }
@@ -288,6 +289,13 @@ const getButtonByText = (wrapper: VueWrapper, text: string) => {
     throw new Error(`Button not found: ${text}`)
   }
   return button
+}
+
+const getFormToggle = (wrapper: VueWrapper, label: string) => {
+  const section = wrapper.get('#key-form').findAll('.flex.items-center.justify-between')
+    .find((item) => item.text().includes(label))
+  if (!section) throw new Error(`Toggle not found: ${label}`)
+  return section.get('button')
 }
 
 describe('user KeysView column settings', () => {
@@ -548,8 +556,7 @@ describe('user KeysView column settings', () => {
     expect(groupSelect).toBeDefined()
     groupSelect!.vm.$emit('update:modelValue', groupID)
     await nextTick()
-    await wrapper.get('[data-testid="api-key-quota-toggle"]').trigger('click')
-    await wrapper.get('input[step="0.000001"]').setValue('0.000001')
+    await wrapper.get('input[step="0.01"]').setValue('0.000001')
     await wrapper.get('form#key-form').trigger('submit')
     await flushPromises()
 
@@ -576,11 +583,12 @@ describe('user KeysView column settings', () => {
       .find((select) => select.attributes('data-tour') === 'key-form-group')
     groupSelect!.vm.$emit('update:modelValue', groupID)
     await nextTick()
-    await wrapper.get('[data-testid="custom-key-toggle"]').trigger('click')
-    await wrapper.get('[data-testid="custom-key-input"]').setValue('Customer_Key-2026_abcdefgh')
-    await wrapper.get('[data-testid="ip-policy-toggle"]').trigger('click')
-    await wrapper.get('[data-testid="ip-whitelist-input"]').setValue('10.2.3.4/8\n2001:db8::/32')
-    await wrapper.get('[data-testid="ip-blacklist-input"]').setValue('10.9.0.0/16')
+    await getFormToggle(wrapper, 'keys.customKeyLabel').trigger('click')
+    await wrapper.get('input[placeholder="keys.customKeyPlaceholder"]').setValue('Customer_Key-2026_abcdefgh')
+    await getFormToggle(wrapper, 'keys.ipRestriction').trigger('click')
+    const createPolicies = wrapper.get('#key-form').findAll('textarea')
+    await createPolicies[0].setValue('10.2.3.4/8\n2001:db8::/32')
+    await createPolicies[1].setValue('10.9.0.0/16')
     await wrapper.get('form#key-form').trigger('submit')
     await flushPromises()
 
@@ -608,8 +616,9 @@ describe('user KeysView column settings', () => {
     const wrapper = await mountView()
 
     await getButtonByText(wrapper, 'Edit').trigger('click')
-    await wrapper.get('[data-testid="ip-whitelist-input"]').setValue('192.0.2.0/24')
-    await wrapper.get('[data-testid="ip-blacklist-input"]').setValue('')
+    const editPolicies = wrapper.get('#key-form').findAll('textarea')
+    await editPolicies[0].setValue('192.0.2.0/24')
+    await editPolicies[1].setValue('')
     await wrapper.get('form#key-form').trigger('submit')
     await flushPromises()
 
@@ -649,7 +658,32 @@ describe('user KeysView column settings', () => {
     )
   })
 
-  it('clears an existing quota and all rate windows when their edit toggles are disabled', async () => {
+  it('falls back to the final valid page after deleting its last API key', async () => {
+    const key = createApiKey({ id: 'page-two-key' })
+    listKeys
+      .mockResolvedValueOnce({ items: [createApiKey({ id: 'page-one-key' })], total: 21, page: 1, page_size: 20, pages: 2 })
+      .mockResolvedValueOnce({ items: [key], total: 21, page: 2, page_size: 20, pages: 2 })
+      .mockResolvedValueOnce({ items: [], total: 20, page: 2, page_size: 20, pages: 1 })
+      .mockResolvedValueOnce({ items: [createApiKey({ id: 'page-one-key' })], total: 20, page: 1, page_size: 20, pages: 1 })
+    deleteKey.mockResolvedValueOnce({ ...key, status: 'inactive' })
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-test="page-two"]').trigger('click')
+    await flushPromises()
+    await getButtonByText(wrapper, 'common.delete').trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteKey).toHaveBeenCalledWith('page-two-key')
+    expect(listKeys).toHaveBeenLastCalledWith(
+      1,
+      20,
+      expect.objectContaining({ sort_by: 'created_at', sort_order: 'desc' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('clears an existing quota and all rate windows with the original form controls', async () => {
     const key = createApiKey({
       id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -664,8 +698,9 @@ describe('user KeysView column settings', () => {
     const wrapper = await mountView()
 
     await getButtonByText(wrapper, 'Edit').trigger('click')
-    await wrapper.get('[data-testid="api-key-quota-toggle"]').trigger('click')
-    await wrapper.get('[data-testid="api-key-rate-limit-toggle"]').trigger('click')
+    const amountInputs = wrapper.get('#key-form').findAll('input[step="0.01"]')
+    for (const input of amountInputs) await input.setValue('0')
+    await getFormToggle(wrapper, 'keys.rateLimitSection').trigger('click')
     await wrapper.get('form#key-form').trigger('submit')
     await flushPromises()
 

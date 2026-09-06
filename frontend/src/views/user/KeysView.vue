@@ -97,10 +97,9 @@
           <template #cell-key="{ value, row }">
             <div class="flex items-center gap-2">
               <code class="code text-xs">
-                {{ row.key ? maskApiKey(row.key) : `${row.key_prefix}…` }}
+                {{ maskApiKey(value) }}
               </code>
               <button
-                v-if="row.key"
                 @click="copyToClipboard(value, row.id)"
                 class="rounded-lg p-1 transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
                 :class="
@@ -374,7 +373,6 @@
             <div class="flex items-center gap-1">
               <!-- Use Key Button -->
               <button
-                v-if="row.key"
                 @click="openUseKeyModal(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20 dark:hover:text-green-400"
               >
@@ -383,7 +381,7 @@
               </button>
               <!-- Import to CC Switch Button -->
               <button
-                v-if="row.key && !publicSettings?.hide_ccs_import_button"
+                v-if="!publicSettings?.hide_ccs_import_button"
                 @click="importToCcswitch(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"
               >
@@ -515,7 +513,6 @@
             <label class="input-label mb-0">{{ t('keys.customKeyLabel') }}</label>
             <button
               type="button"
-              data-testid="custom-key-toggle"
               @click="formData.use_custom_key = !formData.use_custom_key"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -533,7 +530,6 @@
           <div v-if="formData.use_custom_key">
             <input
               v-model="formData.custom_key"
-              data-testid="custom-key-input"
               type="text"
               class="input font-mono"
               :placeholder="t('keys.customKeyPlaceholder')"
@@ -559,7 +555,6 @@
             <label class="input-label mb-0">{{ t('keys.ipRestriction') }}</label>
             <button
               type="button"
-              data-testid="ip-policy-toggle"
               @click="formData.enable_ip_restriction = !formData.enable_ip_restriction"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -580,7 +575,6 @@
               <label class="input-label">{{ t('keys.ipWhitelist') }}</label>
               <textarea
                 v-model="formData.ip_whitelist"
-                data-testid="ip-whitelist-input"
                 rows="3"
                 class="input font-mono text-sm"
                 :placeholder="t('keys.ipWhitelistPlaceholder')"
@@ -592,7 +586,6 @@
               <label class="input-label">{{ t('keys.ipBlacklist') }}</label>
               <textarea
                 v-model="formData.ip_blacklist"
-                data-testid="ip-blacklist-input"
                 rows="3"
                 class="input font-mono text-sm"
                 :placeholder="t('keys.ipBlacklistPlaceholder')"
@@ -604,11 +597,12 @@
 
         <!-- Quota Limit Section -->
         <div class="space-y-3">
+          <label class="input-label">{{ t('keys.quotaLimit') }}</label>
+          <!-- Switch commented out - always show input, 0 = unlimited
           <div class="flex items-center justify-between">
             <label class="input-label mb-0">{{ t('keys.quotaLimit') }}</label>
             <button
               type="button"
-              data-testid="api-key-quota-toggle"
               @click="formData.enable_quota = !formData.enable_quota"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -623,15 +617,16 @@
               />
             </button>
           </div>
+          -->
 
-          <div v-if="formData.enable_quota" class="space-y-4">
+          <div class="space-y-4">
             <div>
               <div class="relative">
                 <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">$</span>
                 <input
                   v-model.number="formData.quota"
                   type="number"
-                  step="0.000001"
+                  step="0.01"
                   min="0"
                   class="input pl-7"
                   :placeholder="t('keys.quotaAmountPlaceholder')"
@@ -672,7 +667,6 @@
             <label class="input-label mb-0">{{ t('keys.rateLimitSection') }}</label>
             <button
               type="button"
-              data-testid="api-key-rate-limit-toggle"
               @click="formData.enable_rate_limit = !formData.enable_rate_limit"
               :class="[
                 'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
@@ -698,7 +692,7 @@
                 <input
                   v-model.number="formData.rate_limit_5h"
                   type="number"
-                  step="0.000001"
+                  step="0.01"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -744,7 +738,7 @@
                 <input
                   v-model.number="formData.rate_limit_1d"
                   type="number"
-                  step="0.000001"
+                  step="0.01"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -790,7 +784,7 @@
                 <input
                   v-model.number="formData.rate_limit_7d"
                   type="number"
-                  step="0.000001"
+                  step="0.01"
                   min="0"
                   class="input pl-7"
                   :placeholder="'0'"
@@ -969,29 +963,6 @@
       @confirm="handleDelete"
       @cancel="showDeleteDialog = false"
     />
-
-    <BaseDialog
-      :show="createdApiKeySecret !== ''"
-      :title="t('keys.keyCreatedSuccess')"
-      width="narrow"
-      @close="createdApiKeySecret = ''"
-    >
-      <div class="space-y-3">
-        <p class="text-sm text-amber-700 dark:text-amber-300">
-          {{ createdApiKeyWarning }}
-        </p>
-        <div class="flex items-center gap-2 rounded-lg bg-gray-100 p-3 dark:bg-dark-800">
-          <code class="min-w-0 flex-1 break-all text-xs">{{ createdApiKeySecret }}</code>
-          <button
-            type="button"
-            class="btn btn-secondary shrink-0"
-            @click="copyToClipboard(createdApiKeySecret, 'created')"
-          >
-            {{ t('keys.copyToClipboard') }}
-          </button>
-        </div>
-      </div>
-    </BaseDialog>
 
     <!-- Reset Quota Confirmation Dialog -->
     <ConfirmDialog
@@ -1734,7 +1705,9 @@ const handleSubmit = async () => {
   // and rejects values that cannot be represented without rounding.
   const amountOrUnlimited = (value: number | null): number =>
     typeof value === 'number' ? value : 0
-  const quota = formData.value.enable_quota ? amountOrUnlimited(formData.value.quota) : 0
+  // The original form always exposes quota (zero means unlimited), so it must
+  // not depend on the legacy, commented-out quota toggle.
+  const quota = amountOrUnlimited(formData.value.quota)
   const rateLimitData = formData.value.enable_rate_limit
     ? {
         rate_limit_5h: amountOrUnlimited(formData.value.rate_limit_5h),
@@ -1838,7 +1811,13 @@ const handleDelete = async () => {
     await keysAPI.delete(String(selectedKey.value.id))
     appStore.showSuccess(t('keys.keyDeletedSuccess'))
     showDeleteDialog.value = false
-    loadApiKeys()
+    await loadApiKeys()
+    // Deleting the last row on a later page makes that page invalid. Reload the
+    // preceding valid page so the user never remains on an empty phantom page.
+    if (apiKeys.value.length === 0 && pagination.value.page > 1 && pagination.value.pages < pagination.value.page) {
+      pagination.value.page = Math.max(1, pagination.value.pages)
+      await loadApiKeys()
+    }
   } catch (error: any) {
     // 优先使用后端返回的错误消息，提供更具体的错误信息给用户
     const errorMsg = error?.message || t('keys.failedToDelete')
