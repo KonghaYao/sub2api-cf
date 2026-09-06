@@ -37,8 +37,16 @@ export async function updateApiKeyGroup(
   return data
 }
 
+export async function revokeApiKey(id: string | number): Promise<ApiKey> {
+  const { data } = await apiClient.delete<ApiKey>(`/admin/api-keys/${id}`, {
+    headers: { 'Idempotency-Key': operationKey('admin-api-key-revoke', id) },
+  })
+  return data
+}
+
 export const apiKeysAPI = {
-  updateApiKeyGroup
+  updateApiKeyGroup,
+  revokeApiKey,
 }
 
 export default apiKeysAPI

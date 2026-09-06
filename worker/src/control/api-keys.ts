@@ -2,6 +2,7 @@ import type { Context } from 'hono'
 import type { Env } from '../env'
 import { apiKeyDigest, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { authenticateAdminSession } from './admin-auth'
 import { normalizeIpPolicyList, parseStoredIpPolicy } from '../gateway/ip-policy'
 import {
   controlIdempotency,
@@ -288,11 +289,19 @@ export async function listAdminApiKeys(context: Context<ControlBindings>): Promi
 export async function revokeAdminApiKey(context: Context<ControlBindings>): Promise<Response> {
   try {
     const keyId = requireResourceId(context.req.param('id'), 'api_key')
+    const key = requireIdempotencyKey(context.req.raw)
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    const idempotency = await controlIdempotency('admin.api_keys.revoke.v1', key, { api_key_id: keyId })
+    const previous = await findControlIdempotency(context.env, idempotency)
+    if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'api_key'))
     let row = await findApiKey(context.env, keyId)
     if (row === null) throw new GatewayError(404, 'api_key_not_found', 'API key was not found')
     if (row.revoked_at_ms === null) {
       const now = Date.now()
-      await context.env.DB.prepare(
+      const response = publicApiKey({ ...row, enabled: 0, revoked_at_ms: now, updated_at_ms: now,
+        auth_version: row.auth_version + 1, control_version: row.control_version + 1 })
+      await context.env.DB.batch([
+        context.env.DB.prepare(
         `UPDATE api_keys
             SET enabled = 0, revoked_at_ms = ?, updated_at_ms = ?,
                 auth_version = auth_version + 1,
@@ -300,11 +309,15 @@ export async function revokeAdminApiKey(context: Context<ControlBindings>): Prom
           WHERE id = ? AND revoked_at_ms IS NULL`,
       )
         .bind(now, now, row.id)
-        .run()
-      row = await findApiKey(context.env, keyId)
-      if (row === null) {
-        throw new GatewayError(503, 'api_key_projection_failed', 'API key update could not be read', 'server_error')
-      }
+        ,
+        context.env.DB.prepare(
+          `INSERT INTO auth_audit_events (id, user_id, event_type, outcome, email_hash, ip_hash, session_id, metadata_json, occurred_at_ms)
+           VALUES (?, ?, 'admin.api_keys.revoke', 'succeeded', NULL, NULL, ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), actor.user_id, actor.session_id,
+          JSON.stringify({ api_key_id: row.id, key_owner_id: row.user_id, group_id: row.group_id }), now),
+        controlIdempotencyInsert(context.env, idempotency, 'api_key', row.id, response, now),
+      ])
+      return controlSuccess(response)
     }
     return controlSuccess(publicApiKey(row))
   } catch (error) {
