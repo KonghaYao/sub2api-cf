@@ -98,8 +98,8 @@ describe('PricingEntryCard service tier multipliers', () => {
   })
 })
 
-describe('PricingEntryCard account-stat Worker token support', () => {
-  it('hides unsupported cache-write and image token prices, including interval controls', () => {
+describe('PricingEntryCard account-stat form parity', () => {
+  it('keeps cache-write, image-token and interval controls visible', () => {
     const entry = {
       ...createEntry(),
       intervals: [{
@@ -119,21 +119,19 @@ describe('PricingEntryCard account-stat Worker token support', () => {
         sort_order: 0,
       }],
     }
-    const wrapper = shallowMount(PricingEntryCard, {
-      props: { entry, accountStatsWorkerMode: true },
-    })
+    const wrapper = shallowMount(PricingEntryCard, { props: { entry } })
 
-    expect(wrapper.text()).not.toContain('admin.channels.form.cacheWrite5mPrice')
-    expect(wrapper.text()).not.toContain('admin.channels.form.cacheWrite1hPrice')
-    expect(wrapper.text()).not.toContain('admin.channels.form.imageInputPrice')
-    expect(wrapper.text()).not.toContain('admin.channels.form.imageTokenPrice')
+    expect(wrapper.text()).toContain('admin.channels.form.cacheWrite5mPrice')
+    expect(wrapper.text()).toContain('admin.channels.form.cacheWrite1hPrice')
+    expect(wrapper.text()).toContain('admin.channels.form.imageInputPrice')
+    expect(wrapper.text()).toContain('admin.channels.form.imageTokenPrice')
     expect(wrapper.text()).toContain('admin.channels.form.inputPrice')
     expect(wrapper.text()).toContain('admin.channels.form.outputPrice')
     expect(wrapper.text()).toContain('admin.channels.form.cacheReadPrice')
-    expect(wrapper.findComponent({ name: 'IntervalRow' }).props('hideCacheWritePrices')).toBe(true)
+    expect(wrapper.findComponent({ name: 'IntervalRow' }).props('hideCacheWritePrices')).toBeFalsy()
   })
 
-  it.each(['per_request', 'image'] as const)('uses only a required top-level price for %s', (billingMode) => {
+  it.each(['per_request', 'image'] as const)('keeps tiers editable for %s', (billingMode) => {
     const entry = {
       ...createEntry(billingMode),
       intervals: [{
@@ -144,13 +142,10 @@ describe('PricingEntryCard account-stat Worker token support', () => {
         per_request_price: 1, sort_order: 0,
       }],
     }
-    const wrapper = shallowMount(PricingEntryCard, {
-      props: { entry, accountStatsWorkerMode: true },
-    })
+    const wrapper = shallowMount(PricingEntryCard, { props: { entry } })
 
-    expect(wrapper.findComponent({ name: 'IntervalRow' }).exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('admin.channels.form.addTier')
-    expect(wrapper.text()).toContain('*')
+    expect(wrapper.findComponent({ name: 'IntervalRow' }).exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.channels.form.addTier')
   })
 })
 
@@ -167,9 +162,7 @@ describe('PricingEntryCard default-price autofill', () => {
       image_output_price: 0,
     })
     const entry = createEntry()
-    const wrapper = shallowMount(PricingEntryCard, {
-      props: { entry, enableDefaultPricing: true },
-    })
+    const wrapper = shallowMount(PricingEntryCard, { props: { entry } })
 
     wrapper.findComponent({ name: 'ModelTagInput' }).vm.$emit(
       'update:models',

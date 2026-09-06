@@ -451,7 +451,6 @@
                   :key="idx"
                   :entry="entry"
                   :platform="section.platform"
-                  enable-default-pricing
                   enable-time-pricing
                   enable-tier-multipliers
                   @update="updatePricingEntry(sIdx, idx, $event)"
@@ -583,10 +582,7 @@
                       v-for="(entry, pIdx) in rule.pricing"
                       :key="pIdx"
                       :entry="entry"
-                      :platform="entry.account_stats_platform || section.platform"
-                      :account-stats-worker-mode="workerContractActive"
-                      :enable-default-pricing="!workerContractActive"
-                      :supported-billing-modes="workerContractActive ? ['token', 'per_request', 'image'] : undefined"
+                      :platform="section.platform"
                       @update="rule.pricing.splice(pIdx, 1, $event)"
                       @remove="removeRulePricingEntry(sIdx, ruleIndex, pIdx)"
                     />
@@ -1515,14 +1511,6 @@ async function handleSubmit() {
         appStore.showError(t(
           'admin.channels.form.accountStatsRulePricingRequired',
           'Every account-stat pricing rule needs at least one model price'
-        ))
-        activeTab.value = section.platform
-        return
-      }
-      if (workerContractActive && rule.pricing.some(entry => entry.billing_mode === 'video')) {
-        appStore.showError(t(
-          'admin.channels.form.accountStatsRuleVideoUnsupported',
-          'Worker account-stat pricing supports token, request, and image modes'
         ))
         activeTab.value = section.platform
         return

@@ -73,7 +73,6 @@ describe('ChannelsView Worker pricing helpers', () => {
     await flushPromises()
 
     const pricing = wrapper.findComponent(PricingEntryCard)
-    expect(pricing.props('enableDefaultPricing')).toBe(true)
     expect(pricing.props('entry')).toMatchObject({ models: ['claude-sonnet-4'] })
     expect(syncPricingModels).toHaveBeenCalledWith('anthropic')
     expect(create).not.toHaveBeenCalled()
@@ -193,9 +192,6 @@ describe('ChannelsView Worker pricing helpers', () => {
       handleSubmit: () => Promise<void>
     }
     await vm.openEditDialog(channel)
-    const accountStatsPricing = wrapper.findAllComponents(PricingEntryCard).at(-1)
-    expect(accountStatsPricing?.props('accountStatsWorkerMode')).toBe(true)
-    expect(accountStatsPricing?.props('enableDefaultPricing')).toBe(false)
     await vm.handleSubmit()
 
     const request = update.mock.calls.at(-1)?.[1]

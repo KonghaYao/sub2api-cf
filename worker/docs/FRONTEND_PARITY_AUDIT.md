@@ -402,3 +402,14 @@ explicit typed error. It must never silently discard a submitted field or return
   The customer-facing payload still has the public model name rewritten.
 - Validation: focused Worker gateway/state tests (209), Channels frontend
   contract tests (18), and Worker/frontend typechecks passed. No D1 migration.
+
+## v0.42.19 Channels account-stat pricing form parity — 2026-09-07
+
+- Restored the original pricing-entry form for account-stat rules. Worker mode
+  no longer hides cache-write, image, video, or tier controls, and no longer
+  removes the default-price autofill action from that form.
+- Values unsupported by the present Worker account-stat calculator remain
+  visible and are rejected through the existing typed control-plane contract;
+  they are not silently discarded or represented as unavailable UI choices.
+- Validation: focused Channels UI/API tests (28) and frontend typecheck passed.
+  No D1 migration.

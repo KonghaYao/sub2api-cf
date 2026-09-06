@@ -117,12 +117,12 @@
               <input :value="entry.output_price" @input="emitField('output_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
             </div>
-            <div v-if="!accountStatsWorkerMode">
+            <div>
               <label class="text-xs text-gray-400">{{ t('admin.channels.form.cacheWrite5mPrice') }}</label>
               <input :value="entry.cache_write_price" @input="emitField('cache_write_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
             </div>
-            <div v-if="!accountStatsWorkerMode">
+            <div>
               <label class="text-xs text-gray-400">{{ t('admin.channels.form.cacheWrite1hPrice') }}</label>
               <input :value="entry.cache_write_1h_price" @input="emitField('cache_write_1h_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
@@ -132,12 +132,12 @@
               <input :value="entry.cache_read_price" @input="emitField('cache_read_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
             </div>
-            <div v-if="!hideImageInput && !accountStatsWorkerMode">
+            <div>
               <label class="text-xs text-gray-400">{{ t('admin.channels.form.imageInputPrice') }}</label>
               <input :value="entry.image_input_price" @input="emitField('image_input_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
             </div>
-            <div v-if="!accountStatsWorkerMode">
+            <div>
               <label class="text-xs text-gray-400">{{ t('admin.channels.form.imageTokenPrice') }}</label>
               <input :value="entry.image_output_price" @input="emitField('image_output_price', ($event.target as HTMLInputElement).value)"
                 type="number" step="any" min="0" class="input mt-0.5 text-sm" :placeholder="t('admin.channels.form.pricePlaceholder')" />
@@ -175,7 +175,6 @@
                 :interval="iv"
                 :mode="entry.billing_mode"
                 :enable-multipliers="enableTierMultipliers"
-                :hide-cache-write-prices="accountStatsWorkerMode"
                 @update="updateInterval(idx, $event)"
                 @remove="removeInterval(idx)"
               />
@@ -194,7 +193,6 @@
           <!-- Default per-request price -->
           <label class="mt-3 block text-xs font-medium text-gray-500 dark:text-gray-400">
             {{ t('admin.channels.form.defaultPerRequestPrice') }}
-            <span v-if="accountStatsWorkerMode" class="text-red-500">*</span>
             <span class="ml-1 font-normal text-gray-400">$</span>
           </label>
           <div class="mt-1 w-48">
@@ -203,7 +201,7 @@
           </div>
 
           <!-- Tiers -->
-          <div v-if="!accountStatsWorkerMode" class="mt-3 flex items-center justify-between">
+          <div class="mt-3 flex items-center justify-between">
             <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
               {{ t('admin.channels.form.requestTiers') }}
             </label>
@@ -211,7 +209,7 @@
               + {{ t('admin.channels.form.addTier') }}
             </button>
           </div>
-          <div v-if="!accountStatsWorkerMode && entry.intervals && entry.intervals.length > 0" class="mt-2 space-y-2">
+          <div v-if="entry.intervals && entry.intervals.length > 0" class="mt-2 space-y-2">
             <IntervalRow
               v-for="(iv, idx) in entry.intervals"
               :key="idx"
@@ -221,7 +219,7 @@
               @remove="removeInterval(idx)"
             />
           </div>
-          <div v-else-if="!accountStatsWorkerMode" class="mt-2 rounded border border-dashed border-gray-300 p-3 text-center text-xs text-gray-400 dark:border-dark-500">
+          <div v-else class="mt-2 rounded border border-dashed border-gray-300 p-3 text-center text-xs text-gray-400 dark:border-dark-500">
             {{ t('admin.channels.form.noTiersYet') }}
           </div>
         </div>
@@ -231,7 +229,6 @@
           <!-- Default image price (per-request, same as per_request mode) -->
           <label class="mt-3 block text-xs font-medium text-gray-500 dark:text-gray-400">
             {{ entry.billing_mode === 'video' ? t('admin.channels.form.defaultVideoPrice') : t('admin.channels.form.defaultImagePrice') }}
-            <span v-if="accountStatsWorkerMode" class="text-red-500">*</span>
             <span class="ml-1 font-normal text-gray-400">$</span>
           </label>
           <div class="mt-1 w-48">
@@ -240,7 +237,7 @@
           </div>
 
           <!-- Image tiers -->
-          <div v-if="!accountStatsWorkerMode" class="mt-3 flex items-center justify-between">
+          <div class="mt-3 flex items-center justify-between">
             <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
               {{ entry.billing_mode === 'video' ? t('admin.channels.form.videoTiers') : t('admin.channels.form.imageTiers') }}
             </label>
@@ -248,7 +245,7 @@
               + {{ t('admin.channels.form.addTier') }}
             </button>
           </div>
-          <div v-if="!accountStatsWorkerMode && entry.intervals && entry.intervals.length > 0" class="mt-2 space-y-2">
+          <div v-if="entry.intervals && entry.intervals.length > 0" class="mt-2 space-y-2">
             <IntervalRow
               v-for="(iv, idx) in entry.intervals"
               :key="idx"
@@ -285,17 +282,10 @@ const props = withDefaults(defineProps<{
   hideTokenIntervals?: boolean
   enableTimePricing?: boolean
   enableTierMultipliers?: boolean
-  enableDefaultPricing?: boolean
-  hideImageInput?: boolean
-  accountStatsWorkerMode?: boolean
-  supportedBillingModes?: BillingMode[]
 }>(), {
   hideTokenIntervals: false,
   enableTimePricing: false,
   enableTierMultipliers: false,
-  enableDefaultPricing: true,
-  hideImageInput: false,
-  accountStatsWorkerMode: false,
 })
 
 const emit = defineEmits<{
@@ -306,17 +296,12 @@ const emit = defineEmits<{
 // Collapse state: entries with existing models default to collapsed
 const collapsed = ref(props.entry.models.length > 0)
 
-const allBillingModeOptions = computed(() => [
+const billingModeOptions = computed(() => [
   { value: 'token', label: t('admin.channels.billingMode.token') },
   { value: 'per_request', label: t('admin.channels.billingMode.perRequest') },
   { value: 'image', label: t('admin.channels.billingMode.image') },
   { value: 'video', label: t('admin.channels.billingMode.video') }
 ])
-const billingModeOptions = computed(() => props.supportedBillingModes?.length
-  ? allBillingModeOptions.value.filter(option => props.supportedBillingModes?.includes(option.value as BillingMode))
-  : allBillingModeOptions.value
-)
-
 const billingModeLabel = computed(() => {
   const opt = billingModeOptions.value.find(o => o.value === props.entry.billing_mode)
   return opt ? opt.label : props.entry.billing_mode
@@ -376,7 +361,6 @@ async function onModelsUpdate(newModels: string[]) {
   // 只在新增模型且当前无价格时自动填充
   const addedModels = newModels.filter(m => !oldModels.includes(m))
   if (addedModels.length === 0) return
-  if (!props.enableDefaultPricing) return
 
   // 检查是否所有价格字段都为空
   const e = props.entry
