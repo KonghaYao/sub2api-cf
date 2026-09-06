@@ -1,5 +1,6 @@
 import type { Context } from 'hono'
 import type { Env } from '../env'
+import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   controlIdempotency,
@@ -222,6 +223,70 @@ export async function allAdminGroups(context: Context<ControlBindings>): Promise
       `SELECT ${GROUP_COLUMNS} FROM "groups" ${where} ORDER BY sort_order ASC, id ASC`,
     ).bind(...values).all<GroupRow>()
     return controlSuccess(rows.results.map(publicGroup))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+export async function duplicateAdminGroup(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    const sourceId = requireResourceId(context.req.param('id'), 'group')
+    const key = `${actor.user_id}:${requireIdempotencyKey(context.req.raw)}`
+    const idem = await controlIdempotency('admin.groups.duplicate.v1', key, { sourceId })
+    const previous = await findControlIdempotency(context.env, idem)
+    if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group'))
+    const source = await requireGroup(context.env, sourceId)
+    const id = await deterministicUuid('admin.groups.duplicate.v1', key)
+    const now = Date.now()
+    for (let copy = 1; copy <= 100; copy++) {
+      const suffix = copy === 1 ? ' (Copy)' : ` (Copy ${copy})`
+      const name = Array.from(source.name.trim()).slice(0, 128 - suffix.length).join('') + suffix
+      if (await findGroupByName(context.env, name)) continue
+      const row: GroupRow = { ...source, id, name, enabled: 0, control_version: 0, created_at_ms: now, updated_at_ms: now }
+      const response = publicGroup(row)
+      const columns = GROUP_COLUMNS.split(',').map(column => column.trim()) as Array<keyof GroupRow>
+      try {
+        await context.env.DB.batch([
+          // Guard the configuration read; all relation SELECTs share the write transaction.
+          context.env.DB.prepare(`UPDATE "groups" SET control_version =
+            CASE WHEN control_version = ? THEN control_version ELSE -1 END WHERE id = ?`)
+            .bind(source.control_version, sourceId),
+          context.env.DB.prepare(`INSERT INTO "groups" (${GROUP_COLUMNS}) VALUES (${columns.map(() => '?').join(', ')})`)
+            .bind(...columns.map(column => row[column])),
+          context.env.DB.prepare(`INSERT INTO account_groups
+            (account_id, group_id, priority, weight, control_version, created_at_ms, updated_at_ms)
+            SELECT ag.account_id, ?, ag.priority, ag.weight, 0, ?, ? FROM account_groups ag
+            JOIN accounts a ON a.id = ag.account_id WHERE ag.group_id = ?
+            AND (? = 0 OR a.credential_kind <> 'api_key')`)
+            .bind(id, now, now, sourceId, JSON.parse(source.ui_config_json).require_oauth_only === true ? 1 : 0),
+          context.env.DB.prepare(`INSERT INTO group_models
+            (group_id, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
+             default_max_output_tokens, catalog_visible, control_version, created_at_ms, updated_at_ms)
+            SELECT ?, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
+             default_max_output_tokens, catalog_visible, 0, ?, ? FROM group_models WHERE group_id = ?`)
+            .bind(id, now, now, sourceId),
+          context.env.DB.prepare(`INSERT INTO model_prices
+            (id, group_id, model_id, version, active, input_micros_per_million, output_micros_per_million,
+             cache_read_micros_per_million, per_request_micros, minimum_reservation_micros, effective_at_ms, created_at_ms)
+            SELECT lower(hex(randomblob(16))), ?, model_id, 1, 1, input_micros_per_million,
+             output_micros_per_million, cache_read_micros_per_million, per_request_micros,
+             minimum_reservation_micros, ?, ? FROM model_prices WHERE group_id = ? AND active = 1`)
+            .bind(id, now, now, sourceId),
+          context.env.DB.prepare(`INSERT INTO channel_groups (channel_id, group_id, created_at_ms)
+            SELECT channel_id, ?, ? FROM channel_groups WHERE group_id = ?`).bind(id, now, sourceId),
+          controlIdempotencyInsert(context.env, idem, 'group', id, response, now),
+        ])
+        return controlSuccess(response, 201)
+      } catch (error) {
+        const recovered = await findControlIdempotency(context.env, idem)
+        if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'group'))
+        // A concurrent copy may claim the name after the pre-read.
+        if (await findGroupByName(context.env, name)) continue
+        throw mapCatalogWriteError(error)
+      }
+    }
+    throw new GatewayError(409, 'group_name_exists', 'Too many copy names exist; rename the source and retry')
   } catch (error) {
     return controlError(asGatewayError(error))
   }

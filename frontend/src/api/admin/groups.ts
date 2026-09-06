@@ -422,6 +422,7 @@ function getCurrentAdminID(): string | null {
     if (typeof user !== 'object' || user === null) return null
 
     const id = (user as { id?: unknown }).id
+    if (typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id)) return id
     if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) return null
     return String(id)
   } catch {
@@ -457,7 +458,6 @@ function storeDuplicateOperationKey(storageKey: string, key: string | null): voi
 }
 
 export async function duplicate(id: number): Promise<AdminGroup> {
-  requireLegacyGroupFeature('Group duplication')
   const scope = duplicateOperationScope(id)
   let idempotencyKey = scope
     ? duplicateOperationKeys.get(scope.key) ?? getStoredDuplicateOperationKey(scope.key)
@@ -479,6 +479,7 @@ export async function duplicate(id: number): Promise<AdminGroup> {
     duplicateOperationKeys.delete(scope.key)
     storeDuplicateOperationKey(scope.key, null)
   }
+  rememberGroup(data)
   return adaptWorkerGroup(data)
 }
 

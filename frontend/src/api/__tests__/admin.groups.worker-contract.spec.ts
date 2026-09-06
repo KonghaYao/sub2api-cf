@@ -298,7 +298,6 @@ describe('admin groups Cloudflare Worker contract', () => {
     const groups = await import('@/api/admin/groups')
 
     await expect(groups.getLiveCapability()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.duplicate(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getStats(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getGroupApiKeys(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.listCompositeRoutes(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })

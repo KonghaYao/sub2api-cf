@@ -27,6 +27,17 @@ describe('admin group duplicate API', () => {
     vi.restoreAllMocks()
   })
 
+  it('supports Worker opaque administrator IDs and retries with the same operation key', async () => {
+    setCloudflareWorkerContractActive(true)
+    localStorage.setItem('auth_user', JSON.stringify({ id: 'admin-opaque' }))
+    post.mockRejectedValueOnce(new Error('network timeout'))
+    await expect(duplicate('group-opaque' as unknown as number)).rejects.toThrow('network timeout')
+    await duplicate('group-opaque' as unknown as number)
+    expect(post.mock.calls[0]).toEqual(post.mock.calls[1])
+    expect(post.mock.calls[1][0]).toBe('/admin/groups/group-opaque/duplicate')
+    expect(post.mock.calls[1][2].headers['Idempotency-Key']).toContain('admin-opaque-group-opaque')
+  })
+
   it('sends a stable idempotency key with the duplicate request', async () => {
     const group = await duplicate(42)
 

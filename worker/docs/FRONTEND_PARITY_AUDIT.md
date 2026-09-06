@@ -123,3 +123,26 @@ explicit typed error. It must never silently discard a submitted field or return
   account copying, and execution of the advanced stored-only configuration fields.
 - v0.42.0 deployment version: `2a765763-e7a7-4e36-88ab-0aa13789c65b`.
   D1 0065 applied successfully; current-machine HTTPS smoke timed out.
+
+## v0.42.2 Groups duplicate action — 2026-09-06
+
+- The original duplicate button now calls the Worker. Retry keys survive ambiguous
+  failures for both opaque and numeric administrator IDs; the backend scopes replay
+  to the authenticated actor and source group.
+- Copies normalized group fields (including multipliers/quotas/image billing), stored
+  advanced UI configuration, model mappings, active model prices, channel membership,
+  and account bindings with exact priority/weight. OAuth-only source configuration
+  excludes API-key accounts from copied bindings. Existing credentials stay on the
+  original account; no credential rows are copied or returned.
+- New group ID/name, inactive status, fresh timestamps, zero control versions and
+  independent price IDs/version 1. Name collisions advance Copy/Copy 2 (bounded at 100).
+  Source configuration CAS, all relations and the replay record commit atomically.
+- Does not copy user permissions, user-specific rate/RPM overrides, API keys, subscription
+  plans/entitlements, retired prices, usage, financial history or runtime state.
+- Validation: 2 SQLite duplication journeys (including rollback/retry) and 22 frontend
+  tests passed; Worker typecheck passed. No schema change.
+- Remaining visible gaps: statistics/API-key listing, usage/capacity summaries, live
+  discovery, composite routes, per-user rate multipliers, copying accounts into an
+  existing group, and advanced stored configuration execution.
+- v0.42.1 deployed as `3f5bf6b0-e098-4ec4-b3ab-bda7e29520e6`; production HTTP
+  health has not been established from this machine.
