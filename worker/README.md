@@ -104,7 +104,14 @@ The profile response returns that version and verified notification addresses.
 The read-only administrative audit stream is available at
 `GET /api/v1/admin/audit/events`, with category-scoped detail under
 `/api/v1/admin/audit/events/:category/:id`. It requires `admin.audit.read` and
-has no clear/delete endpoint.
+has no clear/delete endpoint. A separate immutable management-request audit
+log is available at `GET /api/v1/admin/audit-logs` and
+`GET /api/v1/admin/audit-logs/:id`. Migration 0076 stores event-time actor,
+authentication, route, trusted Cloudflare client IP, response status, latency,
+and shared request-ID snapshots without fabricating HTTP metadata for the
+domain stream. Request bodies remain explicitly `[not_captured]`; the retained
+clear action returns `audit_log_clear_not_migrated` until its fresh-TOTP delete
+transaction is implemented.
 
 ## Checks
 

@@ -9,6 +9,10 @@ type AdminBindings = { Bindings: Env }
 
 export interface AdminActor {
   user_id: string
+  actor_email: string
+  actor_role: 'admin'
+  auth_method: 'jwt' | 'admin_api_key'
+  credential_masked: string
   session_id: string
   session_type: 'user_access' | 'admin_recovery'
   step_up_expires_at_ms: number | null
@@ -59,6 +63,12 @@ export const requireAdminMutationSecurity: MiddlewareHandler<AdminBindings> = as
   next,
 ) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(context.req.method.toUpperCase())) {
+    await next()
+    return
+  }
+  // The request-audit clear endpoint is an explicit non-mutating 501 boundary
+  // until its own fresh-TOTP deletion transaction is migrated.
+  if (new URL(context.req.url).pathname === '/api/v1/admin/audit-logs/clear') {
     await next()
     return
   }
@@ -125,6 +135,15 @@ export async function authenticateAdminSession(request: Request, env: Env): Prom
   return pending
 }
 
+/** Returns the immutable snapshot produced by the preceding admin auth middleware. */
+export async function getAuthenticatedAdminActor(request: Request): Promise<AdminActor> {
+  const actor = adminActorCache.get(request)
+  if (actor === undefined) {
+    throw new Error('admin actor snapshot is unavailable before authentication')
+  }
+  return actor
+}
+
 async function authenticateAdminSessionUncached(request: Request, env: Env): Promise<AdminActor> {
   const authorization = request.headers.get('authorization')?.trim() ?? ''
   const match = /^Bearer\s+([^\s]+)$/i.exec(authorization)
@@ -162,6 +181,10 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
     }
     return {
       user_id: user.id,
+      actor_email: user.email,
+      actor_role: 'admin',
+      auth_method: 'jwt',
+      credential_masked: maskAdminCredential(match[1]),
       session_id: user.session_id,
       session_type: 'user_access',
       step_up_expires_at_ms: user.step_up_expires_at_ms,
@@ -169,7 +192,7 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
   }
   const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
   const session = await env.DB.prepare(
-    `SELECT s.id AS session_id, s.user_id
+    `SELECT s.id AS session_id, s.user_id, u.email AS actor_email, u.role AS actor_role
        FROM admin_sessions s
        JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = ? AND s.revoked_at_ms IS NULL AND s.expires_at_ms > ?
@@ -177,7 +200,12 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
       LIMIT 1`,
   )
     .bind(digest, Date.now())
-    .first<{ session_id: string; user_id: string }>()
+    .first<{
+      session_id: string
+      user_id: string
+      actor_email: string
+      actor_role: 'admin'
+    }>()
   if (session === null) {
     throw new GatewayError(
       401,
@@ -188,9 +216,16 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
   }
   return {
     ...session,
+    auth_method: 'admin_api_key',
+    credential_masked: maskAdminCredential(match[1]),
     session_type: 'admin_recovery',
     step_up_expires_at_ms: null,
   }
+}
+
+function maskAdminCredential(token: string): string {
+  if (token.length <= 8) return '[masked]'
+  return `${token.slice(0, 4)}…${token.slice(-4)}`
 }
 
 function requireTrustedAdminOrigin(request: Request): void {

@@ -194,7 +194,7 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   const write = method !== 'GET' && method !== 'HEAD'
   const category = (read: AdminPermission, mutation: AdminPermission): AdminPermission =>
     write ? mutation : read
-  if (/^\/api\/v1\/admin\/audit(?:\/|$)/.test(pathname)) {
+  if (/^\/api\/v1\/admin\/audit(?:-logs)?(?:\/|$)/.test(pathname)) {
     return ['admin.audit.read']
   }
   if (/^\/api\/v1\/admin\/(?:settings$|oauth-providers(?:\/|$))/.test(pathname)) {

@@ -1,52 +1,50 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { get } = vi.hoisted(() => ({ get: vi.fn() }))
+const { get, post } = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
 
-vi.mock('@/api/client', () => ({ apiClient: { get } }))
+vi.mock('@/api/client', () => ({ apiClient: { get, post } }))
 
-describe('admin audit Cloudflare Worker contract', () => {
+describe('admin request audit Cloudflare Worker contract', () => {
   beforeEach(() => {
     vi.resetModules()
     get.mockReset()
+    post.mockReset()
   })
 
-  it('passes cursor filters to the Worker-native event list route', async () => {
-    const response = { items: [], has_more: false, next_cursor: null }
+  it('passes page and original filter fields to the request-audit list route', async () => {
+    const response = { items: [], total: 0, page: 2, page_size: 50, pages: 0 }
     get.mockResolvedValueOnce({ data: response })
     const api = await import('@/api/admin/audit')
     const query = {
-      limit: 20,
-      cursor: 'opaque-cursor',
-      category: 'auth' as const,
-      action: 'auth.login',
-      outcome: 'failed' as const,
-      actor_user_id: 'user-one',
-      resource_type: 'user',
-      resource_id: 'user-one',
+      page: 2,
+      page_size: 50,
       start_time: '2026-09-01T00:00:00.000Z',
-      end_time: '2026-09-02T00:00:00.000Z'
+      end_time: '2026-09-02T00:00:00.000Z',
+      actor_user_id: 'user-one',
+      actor_email: 'admin@example.com',
+      auth_method: 'jwt',
+      action: 'POST /api/v1/admin/users',
+      method: 'POST',
+      client_ip: '203.0.113.1',
+      success: 'true',
+      q: 'users',
     }
 
     await expect(api.list(query)).resolves.toEqual(response)
-    expect(get).toHaveBeenCalledWith('/admin/audit/events', { params: query })
+    expect(get).toHaveBeenCalledWith('/admin/audit-logs', { params: query })
   })
 
-  it('uses category plus encoded event ID for details and exposes no clear call', async () => {
-    get.mockResolvedValueOnce({ data: { category: 'payment', event_id: 'refund/event 1' } })
+  it('uses the numeric detail route', async () => {
+    get.mockResolvedValueOnce({ data: { id: 42 } })
     const api = await import('@/api/admin/audit')
-
-    await api.get('payment', 'refund/event 1')
-
-    expect(get).toHaveBeenCalledWith('/admin/audit/events/payment/refund%2Fevent%201')
-    expect(api.auditAPI).not.toHaveProperty('clear')
+    await api.get(42)
+    expect(get).toHaveBeenCalledWith('/admin/audit-logs/42')
   })
 
-  it('supports Worker account operation audit details', async () => {
-    get.mockResolvedValueOnce({ data: { category: 'account', event_id: 'account:event/1' } })
+  it('keeps the original clear action wired to the explicit Worker route', async () => {
+    post.mockResolvedValueOnce({ data: { deleted: 3 } })
     const api = await import('@/api/admin/audit')
-
-    await api.get('account', 'account:event/1')
-
-    expect(get).toHaveBeenCalledWith('/admin/audit/events/account/account%3Aevent%2F1')
+    await expect(api.clear('123456')).resolves.toEqual({ deleted: 3 })
+    expect(post).toHaveBeenCalledWith('/admin/audit-logs/clear', { totp_code: '123456' })
   })
 })

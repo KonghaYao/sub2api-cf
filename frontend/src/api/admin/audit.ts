@@ -1,57 +1,73 @@
-/** Worker-native, read-only administrative audit event API. */
+/**
+ * Admin operation audit log API.
+ *
+ * The audit log is admin-only (not exposed to end users). It records
+ * management-plane operations with masked header credentials and redacted
+ * request bodies. Entries cannot be deleted individually; the whole log can
+ * only be cleared with a fresh TOTP verification.
+ */
 
 import { apiClient } from '../client'
-
-export type AuditCategory = 'settings' | 'rbac' | 'account' | 'auth' | 'payment'
-export type AuditOutcome = 'succeeded' | 'failed' | 'blocked' | 'recorded'
+import type { PaginatedResponse } from '@/types'
 
 export interface AuditLog {
-  category: AuditCategory
-  event_id: string
+  id: number
+  created_at: string
+  actor_user_id?: string | number
+  actor_email: string
+  actor_role: string
+  auth_method: 'jwt' | 'admin_api_key'
+  credential_masked: string
   action: string
-  outcome: AuditOutcome
-  actor_user_id: string | null
-  actor_session_id_masked: string | null
-  origin: string
-  resource_type: string
-  resource_id: string
-  resource_version: number | null
-  occurred_at_ms: number
-  occurred_at: string
-  metadata?: Record<string, unknown>
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  path: string
+  request_id: string
+  client_ip: string
+  user_agent: string
+  request_body?: string
+  status_code: number
+  latency_ms: number
+  extra?: Record<string, unknown>
 }
 
 export interface AuditLogQuery {
-  limit?: number
-  cursor?: string
-  category?: AuditCategory
-  action?: string
-  outcome?: AuditOutcome
-  actor_user_id?: string
-  resource_type?: string
-  resource_id?: string
+  page?: number
+  page_size?: number
   start_time?: string
   end_time?: string
+  actor_user_id?: string | number
+  actor_email?: string
+  auth_method?: string
+  action?: string
+  method?: string
+  client_ip?: string
+  success?: string
+  q?: string
 }
 
-export interface AuditLogListResponse {
-  items: AuditLog[]
-  has_more: boolean
-  next_cursor: string | null
-}
+export type AuditLogListResponse = PaginatedResponse<AuditLog>
 
-export async function list(params: AuditLogQuery = {}): Promise<AuditLogListResponse> {
-  const { data } = await apiClient.get<AuditLogListResponse>('/admin/audit/events', { params })
+/** List audit logs (paginated, filterable). */
+export async function list(params: AuditLogQuery): Promise<AuditLogListResponse> {
+  const { data } = await apiClient.get('/admin/audit-logs', { params })
   return data
 }
 
-export async function get(category: AuditCategory, eventId: string): Promise<AuditLog> {
-  const { data } = await apiClient.get<AuditLog>(
-    `/admin/audit/events/${encodeURIComponent(category)}/${encodeURIComponent(eventId)}`
-  )
+/** Get a single audit log entry (includes the redacted request body). */
+export async function get(id: number): Promise<AuditLog> {
+  const { data } = await apiClient.get(`/admin/audit-logs/${id}`)
   return data
 }
 
-export const auditAPI = { list, get }
+/**
+ * Clear all audit logs. The Worker currently returns the explicit
+ * audit_log_clear_not_migrated error until fresh-TOTP deletion is implemented.
+ */
+export async function clear(totpCode: string): Promise<{ deleted: number }> {
+  const { data } = await apiClient.post('/admin/audit-logs/clear', { totp_code: totpCode })
+  return data
+}
+
+export const auditAPI = { list, get, clear }
 
 export default auditAPI

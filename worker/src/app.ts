@@ -63,6 +63,12 @@ import {
 } from './control/account-synthetic-probes'
 import { getAdminAuditEvent, listAdminAuditEvents } from './control/audit'
 import {
+  auditAdminRequest,
+  clearAdminRequestAuditLogs,
+  getAdminRequestAuditLog,
+  listAdminRequestAuditLogs,
+} from './control/request-audit'
+import {
   recoverAdminSession,
   requireAdminMutationSecurity,
   requireAdminSession,
@@ -213,6 +219,7 @@ import {
   revokeAdminSubscription,
 } from './control/subscriptions'
 import type { Env } from './env'
+import { requestIdFor } from './request-id'
 import {
   handleAnthropicCountTokens,
   handleAnthropicMessages,
@@ -456,8 +463,9 @@ export function createApp() {
   const passkeys = createPasskeyHandlers(resolvePasskeyConfiguration)
 
   app.use('*', async (context, next) => {
+    const requestId = requestIdFor(context.req.raw)
     await next()
-    context.header('x-request-id', context.req.header('cf-ray') ?? crypto.randomUUID())
+    context.header('x-request-id', requestId)
     context.header('x-content-type-options', 'nosniff')
     context.header('x-frame-options', 'DENY')
     context.header('referrer-policy', 'strict-origin-when-cross-origin')
@@ -584,6 +592,7 @@ export function createApp() {
     requireAdminSession,
     requireAdminRoutePermission,
     requireAdminMutationSecurity,
+    auditAdminRequest,
   )
   // These must precede /admin/users/:id: Hono's parameter route also matches
   // a longer path prefix in some adapters.
@@ -815,6 +824,17 @@ export function createApp() {
   )
   app.get('/api/v1/admin/audit/events', listAdminAuditEvents)
   app.get('/api/v1/admin/audit/events/:category/:id', getAdminAuditEvent)
+  app.get(
+    '/api/v1/admin/audit-logs',
+    requireAdminPermission('admin.audit.read'),
+    listAdminRequestAuditLogs,
+  )
+  app.post('/api/v1/admin/audit-logs/clear', clearAdminRequestAuditLogs)
+  app.get(
+    '/api/v1/admin/audit-logs/:id',
+    requireAdminPermission('admin.audit.read'),
+    getAdminRequestAuditLog,
+  )
 
   app.get('/api/v1/keys', listUserApiKeys)
   app.post('/api/v1/keys', createUserApiKey)

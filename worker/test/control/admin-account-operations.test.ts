@@ -168,9 +168,9 @@ describe('admin account operations', () => {
       } })
       expect(test.queue.messages).toHaveLength(25)
       expect(queries.count).toBeLessThanOrEqual(50)
-      // Exact count keeps this boundary sensitive to middleware or handler
-      // queries being added even while the platform ceiling remains 50.
-      expect(queries.count).toBe(22)
+      // Exact count includes the one-statement request-audit snapshot and keeps
+      // this boundary sensitive while the platform ceiling remains 50.
+      expect(queries.count).toBe(23)
     } finally {
       vi.useRealTimers()
       test.raw.close()

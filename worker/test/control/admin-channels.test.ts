@@ -833,8 +833,9 @@ describe('admin channels HTTP contract', () => {
 
     expect(updated.status).toBe(200)
     // Includes authentication, RBAC, mutation security, pre-reads, validation,
-    // the CAS write batch, audit, and idempotency on the production app route.
-    expect(counted.prepared()).toBe(41)
+    // the CAS write batch, domain audit, request audit, and idempotency on the
+    // production app route.
+    expect(counted.prepared()).toBe(42)
   })
 
   it('keeps a maximum-size mixed graph replacement below the D1 statement ceiling', async () => {
@@ -872,9 +873,9 @@ describe('admin channels HTTP contract', () => {
     }, test.env)
 
     expect(updated.status).toBe(200)
-    // 31 normalized inserts + four targeted deletes + CAS/audit/idempotency,
-    // with the complete production authentication and validation path included.
-    expect(counted.prepared()).toBe(45)
+    // 31 normalized inserts + four targeted deletes + CAS/domain audit/request
+    // audit/idempotency, with the production auth and validation path included.
+    expect(counted.prepared()).toBe(46)
   })
 
   it('accepts adjacent token intervals but rejects intervals that truly overlap', async () => {

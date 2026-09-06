@@ -250,14 +250,38 @@ describe('production admin route permission matrix', () => {
   })
 
   it('isolates the immutable audit stream behind the audit read permission', async () => {
+    const denied = await request('/api/v1/admin/audit-logs')
+    expect(denied.status).toBe(403)
+    await expect(denied.json()).resolves.toMatchObject({
+      error: { code: 'admin_permission_required' },
+    })
+
     grantRole('audit-reader', ['admin.audit.read'])
 
     const audit = await request('/api/v1/admin/audit/events')
+    const requestAudit = await request('/api/v1/admin/audit-logs')
+    const requestAuditDetail = await request('/api/v1/admin/audit-logs/999')
+    const unsupportedClear = await request('/api/v1/admin/audit-logs/clear', 'POST')
     const operations = await request('/api/v1/admin/payment/dashboard')
 
     expect(audit.status).toBe(200)
     await expect(audit.json()).resolves.toMatchObject({
       data: { items: [], has_more: false, next_cursor: null },
+    })
+    expect(requestAudit.status).toBe(200)
+    await expect(requestAudit.json()).resolves.toMatchObject({
+      data: {
+        items: [{ action: 'GET /api/v1/admin/audit/events' }],
+        total: 1, page: 1, page_size: 20, pages: 1,
+      },
+    })
+    expect(requestAuditDetail.status).toBe(404)
+    await expect(requestAuditDetail.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_not_found' },
+    })
+    expect(unsupportedClear.status).toBe(501)
+    await expect(unsupportedClear.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_not_migrated' },
     })
     expect(operations.status).toBe(403)
     await expect(operations.json()).resolves.toMatchObject({

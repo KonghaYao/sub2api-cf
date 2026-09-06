@@ -4,50 +4,51 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AuditLogView from '../AuditLogView.vue'
 
-const { list, get, showError } = vi.hoisted(() => ({
-  list: vi.fn(),
-  get: vi.fn(),
-  showError: vi.fn()
+const { list, get, clear, getStatus, showError, showSuccess } = vi.hoisted(() => ({
+  list: vi.fn(), get: vi.fn(), clear: vi.fn(), getStatus: vi.fn(),
+  showError: vi.fn(), showSuccess: vi.fn(),
 }))
 
-vi.mock('@/api/admin', () => ({
-  adminAPI: { audit: { list, get } }
-}))
-
-vi.mock('@/stores', () => ({
-  useAppStore: () => ({ showError })
-}))
-
+vi.mock('@/api/admin', () => ({ adminAPI: { audit: { list, get, clear } } }))
+vi.mock('@/api', () => ({ totpAPI: { getStatus } }))
+vi.mock('@/stores', () => ({ useAppStore: () => ({ showError, showSuccess }) }))
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...(await importOriginal<typeof import('vue-i18n')>()),
-  useI18n: () => ({ t: (key: string) => key })
+  useI18n: () => ({ t: (key: string) => key }),
 }))
 
-const auditEvent = {
-  category: 'auth',
-  event_id: 'event-one',
-  action: 'auth.login',
-  outcome: 'succeeded',
+const auditLog = {
+  id: 42,
+  created_at: '2026-09-01T00:00:00.000Z',
   actor_user_id: 'user-one',
-  actor_session_id_masked: 'sess…alue',
-  origin: 'auth',
-  resource_type: 'user',
-  resource_id: 'user-one',
-  resource_version: null,
-  occurred_at_ms: 1_788_451_200_000,
-  occurred_at: '2026-09-01T00:00:00.000Z'
+  actor_email: 'admin@example.com',
+  actor_role: 'admin',
+  auth_method: 'jwt',
+  credential_masked: 'sub2…alue',
+  action: 'POST /api/v1/admin/users',
+  method: 'POST',
+  path: '/api/v1/admin/users',
+  request_id: 'request-one',
+  client_ip: '203.0.113.1',
+  user_agent: 'test-agent',
+  status_code: 201,
+  latency_ms: 7,
 }
 
 const TablePageLayoutStub = defineComponent({
-  template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+  template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>',
 })
 const DataTableStub = defineComponent({
   props: { data: { type: Array, default: () => [] } },
-  template: '<div><div v-for="row in data" :key="row.event_id"><slot name="cell-actions" :row="row" /></div><slot v-if="data.length === 0" name="empty" /></div>'
+  template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-actions" :row="row" /></div></div>',
+})
+const PaginationStub = defineComponent({
+  emits: ['update:page', 'update:pageSize'],
+  template: '<button data-test="next-page" @click="$emit(\'update:page\', 2)">next</button>',
 })
 const BaseDialogStub = defineComponent({
   props: { show: { type: Boolean, default: false } },
-  template: '<div v-if="show" data-test="dialog"><slot /><slot name="footer" /></div>'
+  template: '<div v-if="show" data-test="dialog"><slot /><slot name="footer" /></div>',
 })
 
 function mountView() {
@@ -57,50 +58,44 @@ function mountView() {
         AppLayout: { template: '<div><slot /></div>' },
         TablePageLayout: TablePageLayoutStub,
         DataTable: DataTableStub,
+        Pagination: PaginationStub,
         BaseDialog: BaseDialogStub,
+        ConfirmDialog: true,
         Select: true,
-        Icon: true
-      }
-    }
+        Icon: true,
+      },
+    },
   })
 }
 
-describe('admin audit event view', () => {
+describe('admin request audit view', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    list
-      .mockResolvedValueOnce({ items: [auditEvent], has_more: true, next_cursor: 'cursor-two' })
-      .mockResolvedValueOnce({ items: [{ ...auditEvent, event_id: 'event-two' }], has_more: false, next_cursor: null })
-      .mockResolvedValueOnce({ items: [auditEvent], has_more: true, next_cursor: 'cursor-two' })
-    get.mockResolvedValue({ ...auditEvent, metadata: { reason: 'test' } })
+    list.mockResolvedValue({ items: [auditLog], total: 21, page: 1, page_size: 20, pages: 2 })
+    get.mockResolvedValue({ ...auditLog, request_body: '[not_captured]' })
+    clear.mockRejectedValue({ code: 'audit_log_clear_not_migrated', message: 'not migrated' })
+    getStatus.mockResolvedValue({ enabled: true })
   })
 
-  it('uses cursor history for next and previous navigation', async () => {
+  it('uses original page pagination and filter contract', async () => {
     const wrapper = mountView()
     await flushPromises()
-
-    expect(list).toHaveBeenNthCalledWith(1, expect.objectContaining({ limit: 20, cursor: undefined }))
-    await wrapper.get('[aria-label="admin.audit.pagination.next"]').trigger('click')
+    expect(list).toHaveBeenNthCalledWith(1, expect.objectContaining({ page: 1, page_size: 20 }))
+    await wrapper.get('[data-test="next-page"]').trigger('click')
     await flushPromises()
-    expect(list).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: 'cursor-two' }))
-
-    await wrapper.get('[aria-label="admin.audit.pagination.previous"]').trigger('click')
-    await flushPromises()
-    expect(list).toHaveBeenNthCalledWith(3, expect.objectContaining({ cursor: undefined }))
+    expect(list).toHaveBeenNthCalledWith(2, expect.objectContaining({ page: 2, page_size: 20 }))
   })
 
-  it('opens category-scoped detail and contains no clear affordance', async () => {
+  it('opens numeric detail and preserves the original clear affordance', async () => {
     const wrapper = mountView()
     await flushPromises()
     const detailButton = wrapper.findAll('button').find((button) =>
       button.text().includes('admin.audit.columns.detail'))
-    expect(detailButton).toBeDefined()
     await detailButton!.trigger('click')
     await flushPromises()
-
-    expect(get).toHaveBeenCalledWith('auth', 'event-one')
+    expect(get).toHaveBeenCalledWith(42)
     expect(wrapper.find('[data-test="dialog"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('admin.audit.clearAll')
-    expect(wrapper.find('.btn-danger').exists()).toBe(false)
+    expect(wrapper.text()).toContain('admin.audit.clearAll')
+    expect(wrapper.find('.btn-danger').exists()).toBe(true)
   })
 })
