@@ -249,6 +249,29 @@ describe('user groups', () => {
     expect(body.data[0]).not.toHaveProperty('rate_multiplier_ppm')
   })
 
+  it('requires an explicit permission for public groups when an administrator restricts them', async () => {
+    const test = await fixture()
+    seedGroup(test.raw, { id: 'public', name: 'Public', isExclusive: false })
+    test.raw.prepare(
+      'UPDATE users SET restrict_public_groups = 1 WHERE id = ?',
+    ).run('alice')
+
+    const restricted = await app().request('/groups/available', {
+      headers: { authorization: test.authorization },
+    }, test.env)
+    await expect(restricted.json()).resolves.toMatchObject({ data: [] })
+
+    test.raw.prepare(
+      'INSERT INTO user_group_permissions (user_id, group_id, created_at_ms) VALUES (?, ?, ?)',
+    ).run('alice', 'public', Date.now())
+    const granted = await app().request('/groups/available', {
+      headers: { authorization: test.authorization },
+    }, test.env)
+    await expect(granted.json()).resolves.toMatchObject({
+      data: [{ id: 'public', is_exclusive: false }],
+    })
+  })
+
   it('returns only overrides for groups the user can currently access', async () => {
     const test = await fixture()
     seedGroup(test.raw, { id: 'standard', name: 'Standard', rateMultiplierPpm: 1_250_000 })

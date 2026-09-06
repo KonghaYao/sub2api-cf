@@ -51,7 +51,7 @@ export async function listAvailableUserGroups(
         WHERE g.enabled = 1
           AND ${groupAccessPredicate('g')}
         ORDER BY g.sort_order ASC, g.name COLLATE NOCASE ASC, g.id ASC`,
-    ).bind(user.id, user.id, now, now).all<AvailableGroupRow>()
+    ).bind(user.id, user.id, user.id, now, now).all<AvailableGroupRow>()
 
     const response = controlSuccess(rows.results.map(publicAvailableGroup))
     response.headers.set(
@@ -77,7 +77,7 @@ export async function getUserGroupRates(context: Context<UserBindings>): Promise
           AND g.enabled = 1
           AND ${groupAccessPredicate('g')}
         ORDER BY r.group_id ASC`,
-    ).bind(user.id, user.id, user.id, now, now).all<UserGroupRateRow>()
+    ).bind(user.id, user.id, user.id, user.id, now, now).all<UserGroupRateRow>()
 
     const rates: Record<string, number> = Object.create(null) as Record<string, number>
     for (const row of rows.results) {
@@ -110,7 +110,7 @@ export async function requireUserGroupAccess(
             CASE WHEN ${groupAccessPredicate('g')} THEN 1 ELSE 0 END AS accessible
        FROM "groups" g
       WHERE g.id = ?`,
-  ).bind(userId, userId, now, now, groupId).first<UserGroupAccessRow>()
+  ).bind(userId, userId, userId, now, now, groupId).first<UserGroupAccessRow>()
 
   if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   if (group.enabled !== 1) {

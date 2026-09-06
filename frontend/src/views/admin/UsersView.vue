@@ -1743,9 +1743,13 @@ const closeApiKeysModal = () => {
   viewingUser.value = null
 }
 
-const handleAllowedGroups = (user: AdminUser) => {
-  allowedGroupsUser.value = user
-  showAllowedGroupsModal.value = true
+const handleAllowedGroups = async (user: AdminUser) => {
+  try {
+    allowedGroupsUser.value = await adminAPI.users.getById(user.id)
+    showAllowedGroupsModal.value = true
+  } catch (error: any) {
+    appStore.showError(error?.message || t('admin.users.failedToLoadUser'))
+  }
 }
 
 const closeAllowedGroupsModal = () => {

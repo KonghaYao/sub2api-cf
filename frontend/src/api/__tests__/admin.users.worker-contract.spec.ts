@@ -85,7 +85,7 @@ describe('admin users Cloudflare Worker contract', () => {
       created_at: '2026-09-03T00:00:00.000Z',
       updated_at: '2026-09-04T00:00:00.000Z',
       notes: '',
-      allowed_groups: null,
+      allowed_groups: [],
     })
   })
 
@@ -123,6 +123,7 @@ describe('admin users Cloudflare Worker contract', () => {
       balance_micros: 12_500_000,
       concurrency: 7,
       rpm_limit: 120,
+      allowed_groups: ['4', '9'],
     }, {
       headers: {
         'Idempotency-Key': 'admin-user-create-11111111-1111-4111-8111-111111111111',
@@ -177,6 +178,9 @@ describe('admin users Cloudflare Worker contract', () => {
       status: 'active',
       concurrency: 11,
       rpm_limit: 240,
+      allowed_groups: ['4'],
+      restrict_public_groups: true,
+      group_rates: { 4: 1.25 },
     }, {
       headers: {
         'Idempotency-Key': `admin-user-update-${WORKER_USER_ID}-11111111-1111-4111-8111-111111111111`,

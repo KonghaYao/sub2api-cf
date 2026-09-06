@@ -65,6 +65,14 @@ explicit typed error. It must never silently discard a submitted field or return
 - User-list sort fields now reach the Worker and are applied in D1 with a stable ID tie-breaker.
 - Sorts without a Worker projection return `unsupported_user_sort` instead of being silently ignored.
 
+## v0.42.26 incremental release — 2026-09-07
+
+- The original user group-permission dialog now persists opaque group IDs, explicit permissions,
+  public-group restriction, and per-group rate overrides through the Worker contract.
+- Migration 0073 stores the public-group restriction. The shared authorization predicate applies it
+  to API-key validation, gateway routing, available groups, group rates, and channels immediately.
+- Users and the group dialog have source-template/style parity guards; no visual or form controls changed.
+
 ## Account compatibility storage contract
 
 - D1 stores only non-secret UI configuration and normalized searchable/sortable fields.

@@ -348,7 +348,7 @@ const handleSave = async () => {
       allowed_groups: allowedGroups,
       restrict_public_groups: restrictPublicGroups.value,
       group_rates: Object.keys(groupRates).length > 0 ? groupRates : undefined,
-    })
+    }, props.user.control_version)
 
     appStore.showSuccess(t('admin.users.groupConfigUpdated'))
     emit('success')

@@ -188,6 +188,12 @@ class UserStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
+    if (
+      this.query.includes('FROM user_group_permissions') ||
+      this.query.includes('FROM user_group_rate_overrides')
+    ) {
+      return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
+    }
     if (!this.query.includes('FROM users')) {
       throw new Error(`Unexpected all query: ${this.query}`)
     }

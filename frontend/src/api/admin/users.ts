@@ -18,6 +18,9 @@ type WorkerAdminUser = {
   balance_micros: number
   concurrency: number
   rpm_limit: number
+  allowed_groups?: string[]
+  group_rates?: Record<string, number>
+  restrict_public_groups?: boolean | number
   created_at_ms: number
   updated_at_ms: number
   [key: string]: unknown
@@ -61,7 +64,9 @@ function adaptWorkerUser(value: WorkerAdminUser): AdminUser {
     created_at: timestampToIso(value.created_at_ms),
     updated_at: timestampToIso(value.updated_at_ms),
     notes: '',
-    allowed_groups: null,
+    allowed_groups: value.allowed_groups ?? [],
+    group_rates: value.group_rates,
+    restrict_public_groups: value.restrict_public_groups === true || value.restrict_public_groups === 1,
     balance_notify_enabled: false,
     balance_notify_threshold: null,
     balance_notify_extra_emails: [],
@@ -140,6 +145,9 @@ function workerCreatePayload(userData: {
   balance?: number
   concurrency?: number
   rpm_limit?: number
+  allowed_groups?: Array<string | number> | null
+  restrict_public_groups?: boolean
+  group_rates?: Record<string | number, number | null>
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     email: userData.email,
@@ -152,6 +160,13 @@ function workerCreatePayload(userData: {
   }
   if (userData.concurrency !== undefined) payload.concurrency = userData.concurrency
   if (userData.rpm_limit !== undefined) payload.rpm_limit = userData.rpm_limit
+  if (userData.allowed_groups !== undefined) {
+    payload.allowed_groups = userData.allowed_groups?.map(String) ?? null
+  }
+  if (userData.restrict_public_groups !== undefined) {
+    payload.restrict_public_groups = userData.restrict_public_groups
+  }
+  if (userData.group_rates !== undefined) payload.group_rates = userData.group_rates
   return payload
 }
 
@@ -170,6 +185,11 @@ function workerUpdatePayload(
   if (updates.status !== undefined) payload.status = updates.status
   if (updates.concurrency !== undefined) payload.concurrency = updates.concurrency
   if (updates.rpm_limit !== undefined) payload.rpm_limit = updates.rpm_limit
+  if (updates.allowed_groups !== undefined) payload.allowed_groups = updates.allowed_groups?.map(String)
+  if (updates.restrict_public_groups !== undefined) {
+    payload.restrict_public_groups = updates.restrict_public_groups
+  }
+  if (updates.group_rates !== undefined) payload.group_rates = updates.group_rates
   return payload
 }
 

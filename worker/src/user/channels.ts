@@ -153,7 +153,7 @@ async function readAvailableChannels(env: Env, userId: string, now: number): Pro
      WHERE channel.status = 'active' AND g.enabled = 1
        AND ${groupAccessPredicate('g')}
   )`
-  const bindings = [userId, userId, now, now]
+  const bindings = [userId, userId, userId, now, now]
   const results = await env.DB.batch([
     env.DB.prepare(
       `${visibleChannels}

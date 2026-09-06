@@ -21,6 +21,7 @@ import {
   requireResourceId,
   requireSafeInteger,
   requireString,
+  optionalBoolean,
   optionalSafeInteger,
 } from './http'
 
@@ -37,6 +38,7 @@ interface UserRow {
   rpm_limit: number
   state_version: number
   control_version: number
+  restrict_public_groups: number
   created_at_ms: number
   updated_at_ms: number
 }
@@ -49,6 +51,9 @@ interface CreateUserInput {
   concurrency: number
   rpm_limit: number
   password?: string
+  allowed_groups?: string[]
+  restrict_public_groups?: boolean
+  group_rates?: Record<string, number | null>
 }
 
 interface UserUpdatePatch {
@@ -60,6 +65,9 @@ interface UserUpdatePatch {
   concurrency?: number
   rpm_limit?: number
   password?: string
+  allowed_groups?: string[]
+  restrict_public_groups?: boolean
+  group_rates?: Record<string, number | null>
 }
 
 interface UserFinancialEventRow {
@@ -123,9 +131,11 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
       rpm_limit: input.rpm_limit,
       state_version: 0,
       control_version: 0,
+      restrict_public_groups: input.restrict_public_groups ? 1 : 0,
       created_at_ms: now,
       updated_at_ms: now,
     }
+    await assertEditableUserGroups(context.env, input.allowed_groups, input.group_rates)
     try {
       await context.env.DB.batch([
         context.env.DB.prepare(
@@ -133,8 +143,8 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
              id, email, display_name, role, status, balance_micros,
              concurrency, rpm_limit, state_version, created_at_ms, updated_at_ms,
              password_credential, password_changed_at_ms, email_verified_at_ms,
-             financial_history_complete
-           ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?, 1)`,
+             financial_history_complete, restrict_public_groups
+           ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?)`,
         ).bind(
           user.id,
           user.email,
@@ -148,7 +158,9 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
           passwordCredential,
           passwordCredential === null ? null : now,
           passwordCredential === null ? null : now,
+          user.restrict_public_groups,
         ),
+        ...userGroupConfigStatements(context.env, user.id, input.allowed_groups, input.group_rates, now),
         controlIdempotencyInsert(context.env, idempotency, 'user', user.id, user, now),
       ])
     } catch (error) {
@@ -278,8 +290,10 @@ export async function getAdminUser(context: Context<ControlBindings>): Promise<R
     }
     if (!stateResponse.ok) throw await stateError(stateResponse)
     const state = await parseUserState(stateResponse, user.id)
+    const groupConfig = await readUserGroupConfig(context.env, user.id)
     return controlSuccess({
       ...user,
+      ...groupConfig,
       balance_micros: state.balance_micros,
       reserved_micros: state.reserved_micros,
       settled_micros: state.settled_micros,
@@ -485,6 +499,7 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
     ) {
       throw new GatewayError(412, 'user_version_conflict', 'User changed; reload it and retry')
     }
+    await assertEditableUserGroups(context.env, patch.allowed_groups, patch.group_rates)
     const next = applyUserUpdatePatch(patch, user)
     if (
       user.role === 'admin' &&
@@ -510,7 +525,10 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       next.role !== user.role ||
       next.concurrency !== user.concurrency ||
       next.rpm_limit !== user.rpm_limit ||
-      patch.password !== undefined
+      patch.password !== undefined ||
+      patch.restrict_public_groups !== undefined ||
+      patch.allowed_groups !== undefined ||
+      patch.group_rates !== undefined
     let updatedAtMs = user.updated_at_ms
     const statements: D1PreparedStatement[] = []
 
@@ -526,6 +544,7 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
         context.env.DB.prepare(
           `UPDATE users
               SET email = ?, display_name = ?, role = ?, concurrency = ?, rpm_limit = ?,
+                  restrict_public_groups = ?,
                   email_verified_at_ms = CASE
                     WHEN email <> ? THEN NULL
                     ELSE email_verified_at_ms
@@ -551,6 +570,9 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
           next.role,
           next.concurrency,
           next.rpm_limit,
+          patch.restrict_public_groups === undefined
+            ? user.restrict_public_groups
+            : patch.restrict_public_groups ? 1 : 0,
           next.email,
           passwordCredential,
           passwordCredential,
@@ -563,6 +585,13 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
           user.id,
         ),
       )
+      statements.push(...userGroupConfigStatements(
+        context.env,
+        user.id,
+        patch.allowed_groups,
+        patch.group_rates,
+        updatedAtMs,
+      ))
       if (passwordCredential !== null) {
         statements.push(context.env.DB.prepare(
           `UPDATE user_sessions
@@ -609,6 +638,9 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
     const response = {
       ...user,
       ...next,
+      restrict_public_groups: patch.restrict_public_groups === undefined
+        ? user.restrict_public_groups
+        : patch.restrict_public_groups ? 1 : 0,
       status: projectedStatus,
       balance_micros: balanceMicros,
       state_version: stateVersion,
@@ -688,6 +720,9 @@ function parseCreateUser(body: Record<string, unknown>): CreateUserInput {
     concurrency: optionalSafeInteger(body, 'concurrency') ?? 5,
     rpm_limit: optionalSafeInteger(body, 'rpm_limit') ?? 0,
     password: optionalNewPassword(body),
+    allowed_groups: parseOptionalGroupIds(body, 'allowed_groups'),
+    restrict_public_groups: optionalBoolean(body, 'restrict_public_groups'),
+    group_rates: parseOptionalGroupRates(body),
   }
 }
 
@@ -719,7 +754,125 @@ function parseUserUpdatePatch(body: Record<string, unknown>): UserUpdatePatch {
   patch.concurrency = optionalSafeInteger(body, 'concurrency')
   patch.rpm_limit = optionalSafeInteger(body, 'rpm_limit')
   patch.password = optionalNewPassword(body)
+  patch.allowed_groups = parseOptionalGroupIds(body, 'allowed_groups')
+  patch.restrict_public_groups = optionalBoolean(body, 'restrict_public_groups')
+  patch.group_rates = parseOptionalGroupRates(body)
   return patch
+}
+
+function parseOptionalGroupIds(body: Record<string, unknown>, field: string): string[] | undefined {
+  if (body[field] === undefined) return undefined
+  if (body[field] === null) return []
+  if (!Array.isArray(body[field]) || body[field].length > 100) {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must contain at most 100 group IDs`)
+  }
+  return [...new Set(body[field].map((value) => requireResourceId(
+    typeof value === 'number' ? String(value) : value as string | undefined,
+    'group',
+  )))].sort()
+}
+
+function parseOptionalGroupRates(body: Record<string, unknown>): Record<string, number | null> | undefined {
+  if (body.group_rates === undefined) return undefined
+  if (body.group_rates === null || typeof body.group_rates !== 'object' || Array.isArray(body.group_rates)) {
+    throw new GatewayError(400, 'invalid_group_rates', 'group_rates must be an object')
+  }
+  const values = Object.entries(body.group_rates as Record<string, unknown>)
+  if (values.length > 100) {
+    throw new GatewayError(400, 'invalid_group_rates', 'group_rates must contain at most 100 entries')
+  }
+  const rates: Record<string, number | null> = Object.create(null) as Record<string, number | null>
+  for (const [rawGroupId, rawRate] of values) {
+    const groupId = requireResourceId(rawGroupId, 'group')
+    if (rawRate === null) {
+      rates[groupId] = null
+      continue
+    }
+    if (typeof rawRate !== 'number' || !Number.isFinite(rawRate) || rawRate < 0) {
+      throw new GatewayError(400, 'invalid_group_rates', 'Group rates must be non-negative numbers')
+    }
+    const ppm = Math.round(rawRate * 1_000_000)
+    if (!Number.isSafeInteger(ppm) || ppm > Number.MAX_SAFE_INTEGER) {
+      throw new GatewayError(400, 'invalid_group_rates', 'Group rate is out of range')
+    }
+    rates[groupId] = ppm
+  }
+  return rates
+}
+
+async function assertEditableUserGroups(
+  env: Env,
+  allowedGroups: readonly string[] | undefined,
+  groupRates: Record<string, number | null> | undefined,
+): Promise<void> {
+  const ids = [...new Set([...(allowedGroups ?? []), ...Object.keys(groupRates ?? {})])]
+  if (ids.length === 0) return
+  const results = await env.DB.batch(ids.map((id) => env.DB.prepare(
+    `SELECT id FROM "groups" WHERE id = ? AND enabled = 1 AND group_type = 'standard'`,
+  ).bind(id)))
+  if (results.some((result) => result.results.length !== 1)) {
+    throw new GatewayError(409, 'invalid_user_group', 'Groups must be active standard groups')
+  }
+}
+
+function userGroupConfigStatements(
+  env: Env,
+  userId: string,
+  allowedGroups: readonly string[] | undefined,
+  groupRates: Record<string, number | null> | undefined,
+  now: number,
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = []
+  if (allowedGroups !== undefined) {
+    statements.push(env.DB.prepare('DELETE FROM user_group_permissions WHERE user_id = ?').bind(userId))
+    for (const groupId of allowedGroups) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO user_group_permissions (user_id, group_id, granted_by_user_id, created_at_ms)
+         VALUES (?, ?, NULL, ?)`,
+      ).bind(userId, groupId, now))
+    }
+  }
+  for (const [groupId, ratePpm] of Object.entries(groupRates ?? {})) {
+    if (ratePpm === null) {
+      statements.push(env.DB.prepare(
+        'DELETE FROM user_group_rate_overrides WHERE user_id = ? AND group_id = ?',
+      ).bind(userId, groupId))
+    } else {
+      statements.push(env.DB.prepare(
+        `INSERT INTO user_group_rate_overrides (
+           user_id, group_id, rate_multiplier_ppm, control_version, created_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, 0, ?, ?)
+         ON CONFLICT(user_id, group_id) DO UPDATE SET
+           rate_multiplier_ppm = excluded.rate_multiplier_ppm,
+           control_version = user_group_rate_overrides.control_version + 1,
+           updated_at_ms = excluded.updated_at_ms`,
+      ).bind(userId, groupId, ratePpm, now, now))
+    }
+  }
+  return statements
+}
+
+async function readUserGroupConfig(
+  env: Env,
+  userId: string,
+): Promise<{ allowed_groups: string[]; group_rates: Record<string, number> }> {
+  const [permissionResult, rateResult] = await env.DB.batch([
+    env.DB.prepare(
+      'SELECT group_id FROM user_group_permissions WHERE user_id = ? ORDER BY group_id ASC',
+    ).bind(userId),
+    env.DB.prepare(
+      `SELECT group_id, rate_multiplier_ppm FROM user_group_rate_overrides
+        WHERE user_id = ? ORDER BY group_id ASC`,
+    ).bind(userId),
+  ])
+  const groupRates: Record<string, number> = Object.create(null) as Record<string, number>
+  for (const row of rateResult.results as Array<{ group_id: string; rate_multiplier_ppm: number }>) {
+    groupRates[row.group_id] = row.rate_multiplier_ppm / 1_000_000
+  }
+  return {
+    allowed_groups: (permissionResult.results as Array<{ group_id: string }>).map((row) => row.group_id),
+    group_rates: groupRates,
+  }
 }
 
 function applyUserUpdatePatch(
@@ -839,7 +992,7 @@ function optionalNewPassword(body: Record<string, unknown>): string | undefined 
 async function findUserById(env: Env, id: string): Promise<UserRow | null> {
   return env.DB.prepare(
     `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
-            state_version, control_version, created_at_ms, updated_at_ms
+            state_version, control_version, restrict_public_groups, created_at_ms, updated_at_ms
        FROM users
       WHERE id = ?`,
   )
@@ -850,7 +1003,7 @@ async function findUserById(env: Env, id: string): Promise<UserRow | null> {
 async function findUserByEmail(env: Env, email: string): Promise<UserRow | null> {
   return env.DB.prepare(
     `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
-            state_version, control_version, created_at_ms, updated_at_ms
+            state_version, control_version, restrict_public_groups, created_at_ms, updated_at_ms
        FROM users
       WHERE email = ?`,
   )
