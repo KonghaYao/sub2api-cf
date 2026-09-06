@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
 const origin = process.env.WORKER_BROWSER_E2E_ORIGIN ?? 'http://127.0.0.1:8791'
+const chromeExecutable = process.env.PLAYWRIGHT_CHROME_EXECUTABLE_PATH
 
 export default defineConfig({
   testDir: './e2e',
@@ -14,10 +15,9 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     baseURL: origin,
     browserName: 'chromium',
+    channel: chromeExecutable ? undefined : 'chrome',
     headless: true,
-    launchOptions: {
-      executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    },
+    launchOptions: chromeExecutable ? { executablePath: chromeExecutable } : undefined,
     trace: 'retain-on-failure',
   },
 })

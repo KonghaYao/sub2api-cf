@@ -15,6 +15,7 @@ import {
   createRemoteBackupPlan,
   createRemoteRestorePlan,
   executeRemotePlan,
+  verifyExecutedStep,
 } from '../../scripts/backup-restore-remote.mjs'
 
 const scriptPath = decodeURIComponent(
@@ -343,6 +344,38 @@ describe('remote Cloudflare adapter plans', () => {
 })
 
 describe('remote execution safety and recovery', () => {
+  it('records independent remote digests for a first-run USER_STATE export', async () => {
+    const root = await temporaryDirectory()
+    const plan = createRemoteBackupPlan({
+      environment: 'staging', accountId: 'a'.repeat(32),
+      workingDirectory: root, bundleDirectory: join(root, 'bundle'),
+      durableObjects: [{ namespace: 'USER_STATE', objectId: 'user-1', logicalName: 'user-1.ndjson' }],
+    })
+    const step = plan.steps[1]
+    await writeFile(step.output!, '{"verified":"artifact"}\n')
+    const verifyCalls: string[] = []
+
+    await expect(verifyExecutedStep(plan, step, {
+      supports: () => true,
+      execute: async () => ({ status: 'completed' }),
+      verify: async (candidate) => {
+        verifyCalls.push(candidate.id)
+        return {
+          status: 'verified', step_id: candidate.id, kind: candidate.postcondition.kind,
+          artifact_sha256: sha256('{"verified":"artifact"}\n'),
+          remote_inventory_digest: 'a'.repeat(64),
+          remote_state_digest: 'b'.repeat(64),
+        }
+      },
+    })).resolves.toMatchObject({
+      step_id: step.id,
+      sha256: sha256('{"verified":"artifact"}\n'),
+      remote_inventory_digest: 'a'.repeat(64),
+      remote_state_digest: 'b'.repeat(64),
+    })
+    expect(verifyCalls).toEqual([step.id])
+  })
+
   it('keeps the journal realpath-separated from bundle, work directory, manifest, and artifacts', async () => {
     const root = await temporaryDirectory()
     const workingDirectory = join(root, 'exports')

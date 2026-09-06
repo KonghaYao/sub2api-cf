@@ -1,10 +1,11 @@
 import { sha256Hex } from '../gateway/crypto'
 import { StateApiError, json } from '../state/http'
+import { USER_STATE_BACKUP_V1_SCHEMA } from './user-state-backup-schema.mjs'
 
 const BACKUP_SCHEMA = 'sub2api-user-state-backup'
 const BACKUP_VERSION = 1
-const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-const MAX_ROWS = 200_000
+const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+const MAX_ROWS = 25_000
 const MAX_LINE_BYTES = 256 * 1024
 const DIGEST = /^[a-f0-9]{64}$/
 const encoder = new TextEncoder()
@@ -85,11 +86,25 @@ export async function exportUserStateBackup(
     inventory_digest: digests.inventoryDigest,
     state_digest: digests.stateDigest,
   }
-  const lines = [header, ...captured.rows, trailer].map((value) => `${JSON.stringify(value)}\n`)
+  const headerLine = `${JSON.stringify(header)}\n`
+  const trailerLine = `${JSON.stringify(trailer)}\n`
+  let artifactBytes = encoder.encode(headerLine).byteLength + encoder.encode(trailerLine).byteLength
+  for (const row of captured.rows) artifactBytes += encoder.encode(JSON.stringify(row)).byteLength + 1
+  if (artifactBytes > MAX_ARTIFACT_BYTES) {
+    throw new StateApiError(413, 'backup_state_too_large', 'Durable Object state exceeds the backup limit')
+  }
+  let lineIndex = 0
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const line of lines) controller.enqueue(encoder.encode(line))
-      controller.close()
+    pull(controller) {
+      if (lineIndex === 0) controller.enqueue(encoder.encode(headerLine))
+      else if (lineIndex <= captured.rows.length) {
+        controller.enqueue(encoder.encode(`${JSON.stringify(captured.rows[lineIndex - 1])}\n`))
+      } else if (lineIndex === captured.rows.length + 1) controller.enqueue(encoder.encode(trailerLine))
+      else {
+        controller.close()
+        return
+      }
+      lineIndex += 1
     },
   })
   return new Response(stream, {
@@ -126,13 +141,11 @@ export async function restoreUserStateBackup(
   identity: BackupIdentity,
 ): Promise<Response> {
   const contentLength = request.headers.get('content-length')
-  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_ARTIFACT_BYTES)) {
-    throw invalidArtifact('Backup artifact exceeds the bounded input size')
+  if (contentLength !== null && !/^\d+$/.test(contentLength)) {
+    throw invalidArtifact('Backup artifact content length is invalid')
   }
-  const text = await request.text()
-  if (encoder.encode(text).byteLength > MAX_ARTIFACT_BYTES) {
-    throw invalidArtifact('Backup artifact exceeds the bounded input size')
-  }
+  if (contentLength !== null && Number(contentLength) > MAX_ARTIFACT_BYTES) throw artifactTooLarge()
+  const text = await readBoundedArtifactText(request)
   const parsed = await parseArtifact(text, identity, storage)
   let result: { idempotent: boolean }
   try {
@@ -181,6 +194,32 @@ export async function restoreUserStateBackup(
   })
 }
 
+async function readBoundedArtifactText(request: Request): Promise<string> {
+  if (request.body === null) return ''
+  const reader = request.body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  const chunks: string[] = []
+  let bytes = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      bytes += next.value.byteLength
+      if (bytes > MAX_ARTIFACT_BYTES) {
+        await reader.cancel('backup artifact exceeds the bounded input size')
+        throw artifactTooLarge()
+      }
+      chunks.push(decoder.decode(next.value, { stream: true }))
+    }
+    chunks.push(decoder.decode())
+    return chunks.join('')
+  } catch (error) {
+    if (error instanceof StateApiError) throw error
+    try { await reader.cancel('invalid backup artifact body') } catch {}
+    throw invalidArtifact('Backup artifact body is not valid UTF-8')
+  }
+}
+
 export function readUserStateBackupIdentity(request: Request): BackupIdentity {
   const environment = request.headers.get('x-sub2api-backup-environment') ?? ''
   const namespace = request.headers.get('x-sub2api-backup-namespace') ?? ''
@@ -199,13 +238,16 @@ export function readUserStateBackupIdentity(request: Request): BackupIdentity {
 
 function captureState(storage: DurableObjectStorage): CapturedState {
   const tables = TABLE_NAMES.map((name) => ({ name, columns: tableColumns(storage, name) }))
+  if (JSON.stringify(tables) !== JSON.stringify(USER_STATE_BACKUP_V1_SCHEMA)) {
+    throw new StateApiError(500, 'backup_schema_invalid', 'Durable Object backup schema is not USER_STATE v1')
+  }
   const rows: BackupRow[] = []
   let bytes = 0
   for (const table of tables) {
     const columnNames = table.columns.map(({ name }) => quoteIdentifier(name)).join(', ')
-    const selected = Array.from(storage.sql.exec(
+    const selected = storage.sql.exec(
       `SELECT rowid AS __backup_rowid, ${columnNames} FROM ${quoteIdentifier(table.name)} ORDER BY rowid ASC`,
-    )) as Array<Record<string, unknown>>
+    ) as unknown as Iterable<Record<string, unknown>>
     for (const selectedRow of selected) {
       const rowid = selectedRow.__backup_rowid
       if (!Number.isSafeInteger(rowid) || (rowid as number) <= 0) {
@@ -468,4 +510,8 @@ function requireExactKeys(value: Record<string, unknown>, expected: string[]): v
 
 function invalidArtifact(message: string): StateApiError {
   return new StateApiError(400, 'invalid_backup_artifact', message)
+}
+
+function artifactTooLarge(): StateApiError {
+  return new StateApiError(413, 'backup_artifact_too_large', 'Backup artifact exceeds the bounded input size')
 }

@@ -1,9 +1,18 @@
 // Node's SQLite binding is used only by this Node-hosted contract test.
 // @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
 import { DatabaseSync } from 'node:sqlite'
+// @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
+import { mkdtemp, rm } from 'node:fs/promises'
+// @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
+import { tmpdir } from 'node:os'
+// @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { createRemoteBackupPlan } from '../../scripts/backup-restore-remote.mjs'
+import { createUserStateBackupRemoteAdapter } from '../../scripts/backup-restore-remote-user-state.mjs'
 import { createApp } from '../../src/app'
+import { USER_STATE_BACKUP_V1_SCHEMA } from '../../src/backup/user-state-backup-schema.mjs'
 import type { Env } from '../../src/env'
 import { UserStateDO } from '../../src/state/user-state-do'
 
@@ -100,6 +109,115 @@ async function rebuildArtifact(records: any[]): Promise<string> {
 }
 
 describe('UserStateDO privileged backup contract', () => {
+  it('stops reading an oversized streaming restore body before buffering the whole request', async () => {
+    const target = createObject()
+    let pulls = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        controller.enqueue(new Uint8Array(256 * 1024).fill(0x20))
+        if (pulls >= 40) controller.close()
+      },
+      cancel() { cancelled = true },
+    })
+    const init = {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-ndjson' },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' }
+
+    const response = await request(target.object, '/backup/restore', init)
+
+    expect(response.status).toBe(413)
+    expect(cancelled).toBe(true)
+    expect(pulls).toBeLessThan(25)
+  })
+
+  it('produces a real export accepted by the Node USER_STATE v1 adapter', async () => {
+    const source = createObject()
+    await postJson(source.object, '/configure', {
+      schema_version: 1,
+      mutation_id: 'opening-adapter-contract',
+      user_id: 'user-1',
+      balance_micros: 1_000,
+      enabled: true,
+    })
+    const artifact = await (await request(source.object, '/backup/export', { method: 'POST' })).text()
+    const header = JSON.parse(artifact.split('\n')[0])
+    const root = await mkdtemp(join(tmpdir(), 'sub2api-user-state-contract-'))
+    try {
+      const plan = createRemoteBackupPlan({
+        environment: 'staging', accountId: 'a'.repeat(32),
+        workingDirectory: root, bundleDirectory: join(root, 'bundle'),
+        durableObjects: [{ namespace: 'USER_STATE', objectId: 'user-1', logicalName: 'user-1.ndjson' }],
+      })
+      const step = plan.steps[1]
+      const adapter = createUserStateBackupRemoteAdapter({
+        environment: 'staging',
+        origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
+        token: 't'.repeat(32),
+        fetcher: async (remoteRequest) => {
+          if (new URL(remoteRequest.url).pathname.endsWith('/export')) {
+            return new Response(artifact, { headers: { 'content-type': 'application/x-ndjson' } })
+          }
+          return Response.json({
+            schema: 'sub2api-user-state-backup', version: 1,
+            environment: 'staging', namespace: 'USER_STATE', object_id: 'user-1',
+            inventory_digest: header.inventory_digest, state_digest: header.state_digest,
+          })
+        },
+      })
+
+      await expect(adapter.execute(step)).resolves.toMatchObject({ status: 'completed' })
+      await expect(adapter.verify(step)).resolves.toMatchObject({
+        remote_inventory_digest: header.inventory_digest,
+        remote_state_digest: header.state_digest,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('never exports an artifact larger than the restore and adapter byte limit', async () => {
+    const source = createObject()
+    expect((await postJson(source.object, '/configure', {
+      schema_version: 1,
+      mutation_id: 'opening-bounded-export',
+      user_id: 'user-1',
+      balance_micros: 10_000,
+      enabled: true,
+    })).status).toBe(200)
+    for (let index = 0; index < 7_000; index += 1) {
+      expect((await postJson(source.object, '/balance/adjust', {
+        schema_version: 1,
+        mutation_id: `large-${index}-${'x'.repeat(100)}`,
+        amount_delta_micros: 1,
+      })).status).toBe(200)
+    }
+    const withinLimit = await request(source.object, '/backup/export', { method: 'POST' })
+    expect(withinLimit.status).toBe(200)
+    const lastArtifact = await withinLimit.text()
+    expect(new TextEncoder().encode(lastArtifact).byteLength).toBeLessThanOrEqual(4 * 1024 * 1024)
+
+    for (let index = 7_000; index < 12_000; index += 1) {
+      expect((await postJson(source.object, '/balance/adjust', {
+        schema_version: 1,
+        mutation_id: `large-${index}-${'x'.repeat(100)}`,
+        amount_delta_micros: 1,
+      })).status).toBe(200)
+    }
+    expect((await request(source.object, '/backup/export', { method: 'POST' })).status).toBe(413)
+
+    const target = createObject()
+    expect((await request(target.object, '/backup/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-ndjson' },
+      body: lastArtifact,
+    })).status).toBe(200)
+  })
+
   it('round-trips the complete financial state through canonical NDJSON', async () => {
     const source = createObject()
     expect((await postJson(source.object, '/configure', {
@@ -130,6 +248,7 @@ describe('UserStateDO privileged backup contract', () => {
       object_id: 'user-1',
       row_count: 4,
     })
+    expect(lines[0].schema_contract).toEqual(USER_STATE_BACKUP_V1_SCHEMA)
     expect(lines.filter((line) => line.type === 'row').map((line) => line.table)).toEqual([
       'user_profile',
       'user_state_metadata',

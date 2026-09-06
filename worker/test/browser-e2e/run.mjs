@@ -5,14 +5,16 @@ import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { unstable_startWorker } from 'wrangler'
+import { reserveLoopbackPort, workerOriginBindings } from './runtime.mjs'
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const workerDirectory = resolve(scriptDirectory, '../..')
 const repositoryDirectory = resolve(workerDirectory, '..')
 const frontendDirectory = join(repositoryDirectory, 'frontend')
 const configPath = join(workerDirectory, 'wrangler.browser-e2e.jsonc')
-const origin = 'http://127.0.0.1:8791'
 const persistenceDirectory = await mkdtemp(join(tmpdir(), 'sub2api-browser-e2e-'))
+const portReservation = await reserveLoopbackPort()
+const { origin, port } = portReservation
 
 let worker
 let shuttingDown = false
@@ -84,6 +86,7 @@ async function waitForReady() {
 async function cleanup() {
   if (shuttingDown) return
   shuttingDown = true
+  await portReservation.release().catch(() => {})
   await worker?.dispose().catch(() => {})
   await rm(persistenceDirectory, { recursive: true, force: true })
 }
@@ -117,11 +120,13 @@ try {
   )
 
   console.log('[browser-e2e] starting local Worker')
+  await portReservation.release()
   worker = await unstable_startWorker({
     config: configPath,
+    bindings: workerOriginBindings(origin),
     dev: {
       remote: false,
-      server: { hostname: '127.0.0.1', port: 8791, secure: false },
+      server: { hostname: '127.0.0.1', port, secure: false },
       inspector: false,
       persist: persistenceDirectory,
       watch: false,

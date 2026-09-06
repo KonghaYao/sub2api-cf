@@ -122,6 +122,12 @@ export function executeRemotePlan(options: {
   | { readonly status: 'completed'; readonly plan: RemotePlan; readonly journal: RemoteJournal }
 >
 
+export function verifyExecutedStep(
+  plan: RemotePlan,
+  step: RemoteStep,
+  executor: RemoteExecutor,
+): Promise<Readonly<Record<string, unknown>>>
+
 export function parseRemoteCliArguments(
   arguments_: string[],
   cwd: string,

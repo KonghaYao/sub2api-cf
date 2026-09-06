@@ -84,7 +84,7 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
   return { adminSession: setup.admin_session, groupId: setup.group_id }
 }
 
-test('user registers, creates a key, completes Chat billing into Usage, and persists an R2 avatar', async ({ page, request }) => {
+test('user registers, logs in, creates a key, completes Chat billing into Usage, and persists an R2 avatar', async ({ page, request }) => {
   const setup = await prepareFreshWorker(request)
 
   await page.goto('/register')
@@ -95,9 +95,23 @@ test('user registers, creates a key, completes Chat billing into Usage, and pers
   )
   await page.getByRole('button', { name: /create account/i }).click()
   const registration = await expectData<{
-    access_token: string
     user: { id: string }
   }>(await registrationResponse)
+  await expect(page).toHaveURL(/\/dashboard$/)
+
+  await page.evaluate(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+  })
+  await page.goto('/login')
+  await expect(page).toHaveURL(/\/login$/)
+  await page.locator('#email').fill(EMAIL)
+  await page.locator('#password').fill(PASSWORD)
+  const loginResponse = page.waitForResponse((response) =>
+    response.url().endsWith('/api/v1/auth/login') && response.request().method() === 'POST'
+  )
+  await page.getByRole('button', { name: /^sign in$/i }).click()
+  const login = await expectData<{ access_token: string }>(await loginResponse)
   await expect(page).toHaveURL(/\/dashboard$/)
 
   const funded = await request.post(`/api/v1/admin/users/${registration.user.id}/balance`, {
@@ -111,7 +125,7 @@ test('user registers, creates a key, completes Chat billing into Usage, and pers
 
   await expect.poll(async () => {
     const response = await request.get('/api/v1/auth/me', {
-      headers: { authorization: `Bearer ${registration.access_token}` },
+      headers: { authorization: `Bearer ${login.access_token}` },
     })
     const profile = await expectData<{ balance: number }>(response)
     return profile.balance
@@ -167,7 +181,7 @@ test('user registers, creates a key, completes Chat billing into Usage, and pers
     return body.data?.items?.some((item) =>
       item.requested_model === 'gpt-browser-e2e' || item.model === 'gpt-browser-e2e'
     ) ?? false
-  }, { token: registration.access_token })).toBe(true)
+  }, { token: login.access_token })).toBe(true)
 
   await page.goto('/usage')
   await expect(page.getByText('gpt-browser-e2e', { exact: true }).first()).toBeVisible()

@@ -8,6 +8,7 @@
     "ENVIRONMENT": "e2e",
     "APP_VERSION": "binding-e2e",
     "ADMIN_TOKEN": "e2e-admin-token-32-bytes-minimum-value",
+    "BACKUP_OPERATOR_TOKEN": "e2e-backup-operator-token-32-byte-value",
     "API_KEY_PEPPER": "e2e-api-key-pepper-32-bytes-minimum-value",
     "CREDENTIALS_MASTER_KEY": "e2e-credentials-master-key-32-byte-value"
   },

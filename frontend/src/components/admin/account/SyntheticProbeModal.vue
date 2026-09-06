@@ -76,7 +76,7 @@
                 {{ result.account_id }} · {{ result.model_id }} · {{ result.capability }}
               </span>
               <span :class="result.success ? 'text-green-600' : 'text-amber-600'">
-                {{ result.success ? t('admin.accounts.syntheticProbe.accepted') : t('admin.accounts.syntheticProbe.stale') }}
+                {{ result.success ? t('admin.accounts.syntheticProbe.accepted') : t('admin.accounts.syntheticProbe.rejected') }}
               </span>
             </div>
             <p v-if="result.job_id" class="mt-1 break-all text-gray-500 dark:text-dark-400">{{ result.job_id }}</p>
@@ -201,6 +201,8 @@ export interface SyntheticProbeAccount {
   id: string | number
   name: string
   platform: string
+  enabled?: boolean
+  status?: string
   control_version?: number
   model_capabilities?: AccountModelCapability[]
 }
@@ -234,6 +236,7 @@ const historyLoading = ref(false)
 const historyError = ref('')
 const historyHasMore = ref(false)
 const historyCursor = ref<string | null>(null)
+let historyRequestGeneration = 0
 
 function supportsCapability(model: WorkerAdminModel, capability: WorkerSyntheticProbeCapability): boolean {
   if (capability === 'chat_completions') return model.endpoint === 'chat_completions' || model.endpoint === 'both'
@@ -245,6 +248,10 @@ const legalTargets = computed<LegalTarget[]>(() => {
   const modelById = new Map(props.models.filter((model) => model.enabled).map((model) => [model.id, model]))
   const targets = new Map<string, LegalTarget>()
   for (const account of props.accounts) {
+    const accountEnabled = typeof account.enabled === 'boolean'
+      ? account.enabled
+      : account.status === 'active'
+    if (!accountEnabled) continue
     if (!Number.isSafeInteger(account.control_version) || (account.control_version ?? -1) < 0) continue
     for (const relation of account.model_capabilities ?? []) {
       const model = modelById.get(relation.model_id)
@@ -303,22 +310,31 @@ async function submit() {
 }
 
 async function loadHistory(append: boolean) {
-  if (historyLoading.value || !historyAccountId.value) return
+  if ((append && historyLoading.value) || !historyAccountId.value) return
+  const requestGeneration = ++historyRequestGeneration
+  const requestedAccountId = historyAccountId.value
+  if (!append) {
+    historyItems.value = []
+    historyHasMore.value = false
+    historyCursor.value = null
+  }
   historyLoading.value = true
   historyError.value = ''
   try {
     const page = await listSyntheticProbeHistory({
-      account_id: historyAccountId.value,
+      account_id: requestedAccountId,
       limit: 25,
       ...(append && historyCursor.value ? { cursor: historyCursor.value } : {}),
     })
+    if (requestGeneration !== historyRequestGeneration || requestedAccountId !== historyAccountId.value) return
     historyItems.value = append ? [...historyItems.value, ...page.items] : page.items
     historyHasMore.value = page.has_more
     historyCursor.value = page.next_cursor
   } catch (error) {
+    if (requestGeneration !== historyRequestGeneration || requestedAccountId !== historyAccountId.value) return
     historyError.value = error instanceof Error ? error.message : t('admin.accounts.syntheticProbe.historyFailed')
   } finally {
-    historyLoading.value = false
+    if (requestGeneration === historyRequestGeneration) historyLoading.value = false
   }
 }
 

@@ -1,7 +1,7 @@
 // @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
 import { createHash } from 'node:crypto'
 // @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 // @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
 import { tmpdir } from 'node:os'
 // @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createRemoteBackupPlan } from '../../scripts/backup-restore-remote.mjs'
 import type { RemoteStep } from '../../scripts/backup-restore-remote.mjs'
 import { createUserStateBackupRemoteAdapter } from '../../scripts/backup-restore-remote-user-state.mjs'
+import { USER_STATE_BACKUP_V1_SCHEMA } from '../../src/backup/user-state-backup-schema.mjs'
 
 const temporaryDirectories: string[] = []
 const tableNames = [
@@ -18,16 +19,33 @@ const tableNames = [
   'user_ledger_tombstones', 'user_outbox',
 ]
 
-function backupArtifact(environment: 'staging' | 'production', objectId: string) {
-  const schemaContract = tableNames.map((name) => ({
+function backupArtifact(
+  environment: 'staging' | 'production',
+  objectId: string,
+  exactSchema = true,
+) {
+  const schemaContract = exactSchema
+    ? structuredClone(USER_STATE_BACKUP_V1_SCHEMA)
+    : tableNames.map((name) => ({
+        name,
+        columns: [{
+          cid: 0, name: 'fixture_value', type: 'TEXT', not_null: 0,
+          default_value: null, primary_key: 0,
+        }],
+      }))
+  const rows = exactSchema
+    ? [
+        {
+          type: 'row', table: 'user_profile', rowid: 1,
+          values: [1, 1, objectId, 1, 0, 0, 0, 0, 0],
+        },
+        { type: 'row', table: 'user_state_metadata', rowid: 1, values: [1, 0] },
+      ]
+    : [{ type: 'row', table: 'user_profile', rowid: 1, values: ['not-v1'] }]
+  const tables = tableNames.map((name) => ({
     name,
-    columns: [{
-      cid: 0, name: 'fixture_value', type: 'TEXT', not_null: 0,
-      default_value: null, primary_key: 0,
-    }],
+    row_count: rows.filter((row) => row.table === name).length,
   }))
-  const rows = [{ type: 'row', table: 'user_profile', rowid: 1, values: ['original'] }]
-  const tables = tableNames.map((name) => ({ name, row_count: name === 'user_profile' ? 1 : 0 }))
   const schemaDigest = createHash('sha256').update(JSON.stringify(schemaContract)).digest('hex')
   const inventoryDigest = createHash('sha256')
     .update(JSON.stringify({ schema_digest: schemaDigest, tables }))
@@ -61,6 +79,38 @@ afterEach(async () => {
 })
 
 describe('USER_STATE remote HTTP adapter', () => {
+  it('rejects a self-consistent artifact whose schema is not the exact USER_STATE v1 schema', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sub2api-user-state-adapter-'))
+    temporaryDirectories.push(root)
+    const fixture = backupArtifact('staging', 'user-1', false)
+    const artifactPath = join(root, 'wrong-schema.ndjson')
+    await writeFile(artifactPath, fixture.text)
+    const step: RemoteStep = {
+      sequence: 2,
+      id: 'restore:do:USER_STATE:user-1:wrong-schema.ndjson',
+      phase: 'durable-objects', operation: 'restore-durable-object-ndjson',
+      transport: 'worker-http', environment: 'staging',
+      resource: { namespace: 'USER_STATE', objectId: 'user-1' },
+      request: {
+        method: 'POST', service: 'sub2api-worker-staging',
+        origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
+        path: '/internal/backup/durable-objects/USER_STATE/user-1/restore',
+      },
+      artifact: artifactPath,
+      artifact_bytes: Buffer.byteLength(fixture.text),
+      artifact_sha256: createHash('sha256').update(fixture.text).digest('hex'),
+      postcondition: { kind: 'durable-objects-inventory-state-digest' },
+    }
+    const adapter = createUserStateBackupRemoteAdapter({
+      environment: 'staging',
+      origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
+      token: 't'.repeat(32),
+      fetcher: async () => { throw new Error('must reject before fetch') },
+    })
+
+    await expect(adapter.execute(step)).rejects.toThrow('schema contract')
+  })
+
   it('atomically exports a DO artifact and independently verifies its remote digest', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sub2api-user-state-adapter-'))
     temporaryDirectories.push(root)
@@ -115,7 +165,9 @@ describe('USER_STATE remote HTTP adapter', () => {
     expect(requests[0].headers.get('x-sub2api-backup-environment')).toBe('staging')
     expect(requests[0].redirect).toBe('error')
 
-    await writeFile(step.output as string, artifact.replace('original', 'tampered'))
+    const tamperedRecords = artifact.trimEnd().split('\n').map((line) => JSON.parse(line))
+    tamperedRecords[1].values[4] = 1
+    await writeFile(step.output as string, `${tamperedRecords.map((record) => JSON.stringify(record)).join('\n')}\n`)
     await expect(adapter.verify(step)).rejects.toThrow('digest does not match')
     expect(requests).toHaveLength(2)
   })
@@ -196,5 +248,52 @@ describe('USER_STATE remote HTTP adapter', () => {
     })
     expect(requests.map((request) => new URL(request.url).pathname.split('/').at(-1)))
       .toEqual(['restore', 'verify'])
+  })
+
+  it('sends the same validated bytes when the artifact path is atomically replaced', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sub2api-user-state-adapter-'))
+    temporaryDirectories.push(root)
+    const original = backupArtifact('staging', 'user-1')
+    const replacement = backupArtifact('staging', 'user-1')
+    const replacementRecords = replacement.text.trimEnd().split('\n').map((line) => JSON.parse(line))
+    replacementRecords[1].values[4] = 1
+    const replacementText = `${replacementRecords.map((record) => JSON.stringify(record)).join('\n')}\n`
+    const artifactPath = join(root, 'user-1.ndjson')
+    const replacementPath = join(root, 'replacement.ndjson')
+    await writeFile(artifactPath, original.text)
+    await writeFile(replacementPath, replacementText)
+    const step: RemoteStep = {
+      sequence: 2,
+      id: 'restore:do:USER_STATE:user-1:user-1.ndjson',
+      phase: 'durable-objects', operation: 'restore-durable-object-ndjson',
+      transport: 'worker-http', environment: 'staging',
+      resource: { namespace: 'USER_STATE', objectId: 'user-1' },
+      request: {
+        method: 'POST', service: 'sub2api-worker-staging',
+        origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
+        path: '/internal/backup/durable-objects/USER_STATE/user-1/restore',
+      },
+      artifact: artifactPath,
+      artifact_bytes: Buffer.byteLength(original.text),
+      artifact_sha256: createHash('sha256').update(original.text).digest('hex'),
+      postcondition: { kind: 'durable-objects-inventory-state-digest' },
+    }
+    const adapter = createUserStateBackupRemoteAdapter({
+      environment: 'staging',
+      origin: 'https://sub2api-worker-staging.claude-code-best.workers.dev',
+      token: 't'.repeat(32),
+      fetcher: async (request) => {
+        await rename(replacementPath, artifactPath)
+        expect(await request.text()).toBe(original.text)
+        return Response.json({
+          restored: true,
+          inventory_digest: original.inventoryDigest,
+          state_digest: original.stateDigest,
+        })
+      },
+    })
+
+    await expect(adapter.execute(step)).resolves.toMatchObject({ status: 'completed' })
+    await expect(adapter.verify(step)).rejects.toThrow(/plan|digest/)
   })
 })

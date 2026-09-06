@@ -36,6 +36,7 @@ const accounts = [{
   id: 'account-1',
   name: 'Primary account',
   platform: 'openai',
+  enabled: true,
   control_version: 7,
   model_capabilities: [{
     model_id: 'model-alpha',
@@ -75,7 +76,7 @@ describe('SyntheticProbeModal', () => {
     listSyntheticProbeHistory.mockResolvedValue({ items: [], has_more: false, next_cursor: null })
   })
 
-  it('queues only legal account/model/capability targets and exposes accepted and stale results', async () => {
+  it('queues only legal account/model/capability targets and exposes accepted and rejected results', async () => {
     queueSyntheticProbes.mockResolvedValue({
       total: 2,
       queued: 1,
@@ -116,6 +117,8 @@ describe('SyntheticProbeModal', () => {
     ])
     expect(wrapper.get('[data-testid="synthetic-results"]').text()).toContain('queued-job')
     expect(wrapper.get('[data-testid="synthetic-results"]').text()).toContain('account_version_conflict')
+    expect(wrapper.get('[data-testid="synthetic-results"]').text()).toContain('admin.accounts.syntheticProbe.rejected')
+    expect(wrapper.get('[data-testid="synthetic-results"]').text()).not.toContain('admin.accounts.syntheticProbe.stale')
     expect(wrapper.get('[data-testid="synthetic-results"]').text()).not.toContain('credential')
   })
 
@@ -141,6 +144,25 @@ describe('SyntheticProbeModal', () => {
     expect(new Set(targets.map((target) => target.attributes('data-testid'))).size).toBe(targets.length)
   })
 
+  it('offers targets only for enabled runtime or active adapted accounts', async () => {
+    const wrapper = mountModal({
+      accounts: [
+        { ...accounts[0], id: 'runtime-enabled', enabled: true, status: undefined },
+        { ...accounts[0], id: 'runtime-disabled', enabled: false, status: undefined },
+        { ...accounts[0], id: 'adapted-active', enabled: undefined, status: 'active' },
+        { ...accounts[0], id: 'adapted-inactive', enabled: undefined, status: 'inactive' },
+        { ...accounts[0], id: 'explicit-disabled', enabled: false, status: 'active' },
+      ],
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="synthetic-target-runtime-enabled-model-alpha-responses"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="synthetic-target-adapted-active-model-alpha-responses"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="synthetic-target-runtime-disabled-model-alpha-responses"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="synthetic-target-adapted-inactive-model-alpha-responses"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="synthetic-target-explicit-disabled-model-alpha-responses"]').exists()).toBe(false)
+  })
+
   it('keeps the selected target available for retry after a queueing error', async () => {
     queueSyntheticProbes
       .mockRejectedValueOnce(new Error('queue unavailable'))
@@ -163,6 +185,42 @@ describe('SyntheticProbeModal', () => {
     await flushPromises()
     expect(queueSyntheticProbes).toHaveBeenCalledTimes(2)
     expect(wrapper.get('[data-testid="synthetic-results"]').text()).toContain('retry-job')
+  })
+
+  it('starts account history switching immediately and ignores the older delayed response', async () => {
+    let resolveOldRequest!: (value: unknown) => void
+    const oldRequest = new Promise((resolve) => { resolveOldRequest = resolve })
+    const historyItem = (id: string, accountId: string, modelId: string) => ({
+      id, job_id: `job-${id}`, account_id: accountId, model_id: modelId,
+      capability: 'responses', generation: 1, outcome: 'succeeded', error_code: null,
+      upstream_status: 200, latency_ms: 31, alert_transition: null, checked_at_ms: 1_788_451_260_000,
+    })
+    listSyntheticProbeHistory
+      .mockImplementationOnce(() => oldRequest)
+      .mockResolvedValueOnce({
+        items: [historyItem('new', 'account-2', 'new-account-model')],
+        has_more: false,
+        next_cursor: null,
+      })
+    const wrapper = mountModal({
+      accounts: [accounts[0], { ...accounts[0], id: 'account-2', name: 'Second account' }],
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="synthetic-history-account"]').setValue('account-2')
+    await flushPromises()
+    expect(listSyntheticProbeHistory).toHaveBeenCalledTimes(2)
+    expect(listSyntheticProbeHistory).toHaveBeenLastCalledWith({ account_id: 'account-2', limit: 25 })
+    expect(wrapper.get('[data-testid="synthetic-history"]').text()).toContain('new-account-model')
+
+    resolveOldRequest({
+      items: [historyItem('old', 'account-1', 'old-account-model')],
+      has_more: false,
+      next_cursor: null,
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="synthetic-history"]').text()).toContain('new-account-model')
+    expect(wrapper.get('[data-testid="synthetic-history"]').text()).not.toContain('old-account-model')
   })
 
   it('retries failed history and appends the next page with an opaque cursor', async () => {

@@ -196,7 +196,7 @@ environment adapters and an empty-environment drill.
 staging/production plans around that bundle. D1 steps use Wrangler argument
 arrays. USER_STATE now has a privileged Worker HTTP transport and the
 `createUserStateBackupRemoteAdapter` Node adapter; its canonical NDJSON covers
-all six SQLite tables, is limited to 32 MiB/200,000 rows, and restores only an
+all six SQLite tables, is limited to 4 MiB/25,000 rows, and restores only an
 empty object (or accepts an identical replay). Other Durable Object namespaces
 and R2 remain explicit contract-only adapters. The CLI never applies a plan.
 Programmatic execution rejects any remaining contract-only step before side

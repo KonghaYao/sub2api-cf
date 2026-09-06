@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { link, lstat, mkdir, open, readFile, rm } from 'node:fs/promises'
+import { link, lstat, mkdir, open, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import process from 'node:process'
 
-const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-const MAX_ROWS = 200_000
+import { USER_STATE_BACKUP_V1_SCHEMA } from '../src/backup/user-state-backup-schema.mjs'
+
+const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+const MAX_ROWS = 25_000
 const MAX_LINE_BYTES = 256 * 1024
 const DIGEST = /^[a-f0-9]{64}$/
 const OBJECT_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9_-])?$/
@@ -66,10 +68,9 @@ export function createUserStateBackupRemoteAdapter(options) {
     async verify(step) {
       requireSupportedStep(step, options.environment, origin)
       const artifactPath = step.operation === 'export-durable-object-ndjson' ? step.output : step.artifact
-      const [artifact, integrity] = await Promise.all([
-        readArtifactSummary(artifactPath, step, options.environment),
-        hashFile(artifactPath),
-      ])
+      const artifactFile = await readArtifactFile(artifactPath)
+      const artifact = readArtifactSummary(artifactFile.buffer, step, options.environment)
+      const integrity = artifactFile.integrity
       if (step.operation === 'restore-durable-object-ndjson') {
         if (integrity.bytes !== step.artifact_bytes || integrity.sha256 !== step.artifact_sha256) {
           throw new Error(`USER_STATE restore artifact no longer matches its plan: ${step.id}`)
@@ -110,7 +111,8 @@ async function exportArtifact(step, request, fetcher) {
   }
   await writeNewFileAtomically(step.output, response.body)
   try {
-    await readArtifactSummary(step.output, step, step.environment)
+    const artifactFile = await readArtifactFile(step.output)
+    readArtifactSummary(artifactFile.buffer, step, step.environment)
   } catch (error) {
     await rm(step.output, { force: true })
     throw error
@@ -118,16 +120,16 @@ async function exportArtifact(step, request, fetcher) {
 }
 
 async function restoreArtifact(step, request, fetcher) {
-  const integrity = await hashFile(step.artifact)
+  const artifactFile = await readArtifactFile(step.artifact)
+  const integrity = artifactFile.integrity
   if (integrity.bytes !== step.artifact_bytes || integrity.sha256 !== step.artifact_sha256) {
     throw new Error(`USER_STATE restore artifact no longer matches its plan: ${step.id}`)
   }
-  const artifact = await readArtifactSummary(step.artifact, step, step.environment)
-  const body = await readFile(step.artifact)
+  const artifact = readArtifactSummary(artifactFile.buffer, step, step.environment)
   const response = await fetcher(new Request(request, {
     method: 'POST',
     headers: { ...Object.fromEntries(request.headers), 'content-type': 'application/x-ndjson' },
-    body,
+    body: artifactFile.buffer,
   }))
   if (!response.ok) throw new Error(`USER_STATE restore failed with HTTP ${response.status}: ${step.id}`)
   const result = await safeJson(response, `USER_STATE restore returned invalid JSON: ${step.id}`)
@@ -222,8 +224,7 @@ async function writeNewFileAtomically(path, body) {
   }
 }
 
-async function readArtifactSummary(path, step, environment) {
-  const bytes = await readFile(path)
+function readArtifactSummary(bytes, step, environment) {
   if (bytes.byteLength > MAX_ARTIFACT_BYTES) throw new Error(`USER_STATE artifact is too large: ${step.id}`)
   const text = bytes.toString('utf8')
   if (!text.endsWith('\n')) throw new Error(`USER_STATE artifact is truncated: ${step.id}`)
@@ -290,6 +291,9 @@ function parseCanonicalLine(line, stepId) {
 }
 
 function parseSchemaContract(value, stepId) {
+  if (JSON.stringify(value) !== JSON.stringify(USER_STATE_BACKUP_V1_SCHEMA)) {
+    throw new Error(`USER_STATE artifact schema contract is not the exact v1 schema: ${stepId}`)
+  }
   if (!Array.isArray(value) || value.length !== TABLE_NAMES.length) {
     throw new Error(`USER_STATE artifact schema contract is invalid: ${stepId}`)
   }
@@ -377,20 +381,29 @@ function hasExactKeys(value, expected) {
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index])
 }
 
-async function hashFile(path) {
+async function readArtifactFile(path) {
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
-    const metadata = await handle.stat()
-    if (!metadata.isFile() || metadata.size > MAX_ARTIFACT_BYTES) {
+    const before = await handle.stat({ bigint: true })
+    if (!before.isFile() || before.size > BigInt(MAX_ARTIFACT_BYTES)) {
       throw new Error(`USER_STATE artifact is not a bounded regular file: ${path}`)
     }
-    const hash = createHash('sha256')
-    let bytes = 0
-    for await (const chunk of handle.createReadStream({ autoClose: false })) {
-      bytes += chunk.length
-      hash.update(chunk)
+    const buffer = await handle.readFile()
+    const after = await handle.stat({ bigint: true })
+    if (
+      before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeNs !== after.mtimeNs
+      || before.ctimeNs !== after.ctimeNs || BigInt(buffer.byteLength) !== before.size
+    ) {
+      throw new Error(`USER_STATE artifact changed while it was being read: ${path}`)
     }
-    return { bytes, sha256: hash.digest('hex') }
+    return {
+      buffer,
+      integrity: {
+        bytes: buffer.byteLength,
+        sha256: createHash('sha256').update(buffer).digest('hex'),
+      },
+    }
   } finally {
     await handle.close()
   }

@@ -790,15 +790,38 @@ async function requireCanonicalPlan(plan) {
 }
 
 /** @param {Record<string, any>} plan @param {Record<string, any>} step @param {Record<string, any>} executor */
-async function verifyExecutedStep(plan, step, executor) {
+export async function verifyExecutedStep(plan, step, executor) {
   if (plan.operation === 'backup') {
     const actual = await hashRemoteArtifact(step.output)
-    return {
+    const proof = {
       step_id: step.id,
       kind: step.postcondition.kind,
       artifact_path: step.output,
       bytes: actual.bytes,
       sha256: actual.sha256,
+    }
+    if (step.transport !== 'worker-http') return proof
+    if (typeof executor.verify !== 'function') {
+      throw new Error(`Remote executor has no independent verifier for step: ${step.id}`)
+    }
+    const requiredDigests = step.postcondition.required_digests ?? []
+    const result = await executor.verify(step)
+    if (!isRecord(result)) throw new Error(`Remote verifier returned no postcondition: ${step.id}`)
+    requireExactKeys(
+      result,
+      ['status', 'step_id', 'kind', 'artifact_sha256', ...requiredDigests],
+      'Remote verifier postcondition',
+    )
+    if (
+      result.status !== 'verified'
+      || result.step_id !== step.id
+      || result.kind !== step.postcondition.kind
+      || result.artifact_sha256 !== actual.sha256
+      || requiredDigests.some((field) => typeof result[field] !== 'string' || !SHA256.test(result[field]))
+    ) throw new Error(`Remote verifier did not prove the required postcondition: ${step.id}`)
+    return {
+      ...proof,
+      ...Object.fromEntries(requiredDigests.map((field) => [field, result[field]])),
     }
   }
   if (typeof executor.verify !== 'function') {

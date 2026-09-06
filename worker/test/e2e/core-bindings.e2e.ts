@@ -257,5 +257,46 @@ describe('Cloudflare binding E2E', () => {
       listDurableObjectIds(env.POOL_STATE),
     ])
     expect(durableObjectCounts.every((ids) => ids.length > 0)).toBe(true)
+
+    const userStateBackup = await workerRequest(
+      `/internal/backup/durable-objects/USER_STATE/${registered.user.id}/export`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.BACKUP_OPERATOR_TOKEN}`,
+          'x-sub2api-backup-environment': 'e2e',
+        },
+      },
+    )
+    expect(userStateBackup.status).toBe(200)
+    expect(userStateBackup.headers.get('content-type')).toContain('application/x-ndjson')
+    const backupText = new TextDecoder().decode(await userStateBackup.arrayBuffer())
+    const backupHeader = JSON.parse(backupText.split('\n')[0])
+    expect(backupHeader).toMatchObject({
+      schema: 'sub2api-user-state-backup',
+      version: 1,
+      environment: 'e2e',
+      namespace: 'USER_STATE',
+      object_id: registered.user.id,
+    })
+    const replayedBackup = await workerRequest(
+      `/internal/backup/durable-objects/USER_STATE/${registered.user.id}/restore`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.BACKUP_OPERATOR_TOKEN}`,
+          'x-sub2api-backup-environment': 'e2e',
+          'content-type': 'application/x-ndjson',
+        },
+        body: backupText,
+      },
+    )
+    expect(replayedBackup.status).toBe(200)
+    await expect(replayedBackup.json()).resolves.toMatchObject({
+      restored: true,
+      idempotent: true,
+      inventory_digest: backupHeader.inventory_digest,
+      state_digest: backupHeader.state_digest,
+    })
   })
 })
