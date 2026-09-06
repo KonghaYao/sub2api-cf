@@ -160,7 +160,7 @@ describe('channels Cloudflare Worker contract', () => {
         pricing: [{
           id: 'stats-pricing-uuid', platform: 'openai', models: ['gpt-5*'], billing_mode: 'token',
           input_micros_per_million: 500_000, output_micros_per_million: 1_500_000,
-          cache_write_micros_per_million: null, cache_write_1h_micros_per_million: null,
+          cache_write_micros_per_million: 750_000, cache_write_1h_micros_per_million: null,
           cache_read_micros_per_million: 100_000, image_output_micros_per_million: null,
           per_request_micros: null, intervals: [],
         }],
@@ -187,10 +187,17 @@ describe('channels Cloudflare Worker contract', () => {
       account_stats_pricing_rules: [{
         name: 'Operations', group_ids: ['group-uuid'], account_ids: ['account-uuid'], pricing: [{
           platform: 'openai', models: ['gpt-5*'], billing_mode: 'token',
-          input_price: 0.0000005, output_price: 0.0000015,
-          cache_write_price: null, cache_write_1h_price: null,
-          cache_read_price: 0.0000001, image_input_price: null, image_output_price: null,
-          per_request_price: null, intervals: [], time_pricing: null,
+        input_price: 0.0000005, output_price: 0.0000015,
+        cache_write_price: 0.00000075, cache_write_1h_price: null,
+        cache_read_price: 0.0000001, image_input_price: null, image_output_price: null,
+          per_request_price: null, intervals: [{
+            min_tokens: 0, max_tokens: null, tier_label: 'standard',
+            input_price: null, output_price: null,
+            cache_write_price: 0.0000009, cache_write_1h_price: null,
+            cache_read_price: null, input_multiplier: null, output_multiplier: null,
+            cache_write_multiplier: null, cache_read_multiplier: null,
+            per_request_price: null, sort_order: 0,
+          }], time_pricing: null,
         }],
       }],
     })
@@ -219,7 +226,9 @@ describe('channels Cloudflare Worker contract', () => {
           billing_mode: 'token',
           input_micros_per_million: 500_000,
           output_micros_per_million: 1_500_000,
+          cache_write_micros_per_million: 750_000,
           cache_read_micros_per_million: 100_000,
+          intervals: [expect.objectContaining({ cache_write_micros_per_million: 900_000 })],
         })],
       }],
     }, {
@@ -234,6 +243,7 @@ describe('channels Cloudflare Worker contract', () => {
       pricing: [expect.objectContaining({
         input_price: 0.0000005,
         output_price: 0.0000015,
+        cache_write_price: 0.00000075,
         cache_read_price: 0.0000001,
       })],
     })])
@@ -286,10 +296,8 @@ describe('channels Cloudflare Worker contract', () => {
   })
 
   it.each([
-    ['cache_write_price', { cache_write_price: 0.000001 }],
     ['cache_write_1h_price', { cache_write_1h_price: 0.000001 }],
     ['image_output_price', { image_output_price: 0.000001 }],
-    ['interval cache_write_price', { intervals: [{ min_tokens: 0, max_tokens: null, tier_label: '', input_price: 0.000001, output_price: null, cache_write_price: 0.000001, cache_write_1h_price: null, cache_read_price: null, input_multiplier: null, output_multiplier: null, cache_write_multiplier: null, cache_read_multiplier: null, per_request_price: null, sort_order: 0 }] }],
     ['interval cache_write_1h_price', { intervals: [{ min_tokens: 0, max_tokens: null, tier_label: '', input_price: 0.000001, output_price: null, cache_write_price: null, cache_write_1h_price: 0.000001, cache_read_price: null, input_multiplier: null, output_multiplier: null, cache_write_multiplier: null, cache_read_multiplier: null, per_request_price: null, sort_order: 0 }] }],
   ])('rejects unsupported Worker account-stat %s', async (_name, override) => {
     const { create } = await import('@/api/admin/channels')

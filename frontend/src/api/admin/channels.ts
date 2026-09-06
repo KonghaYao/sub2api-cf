@@ -408,7 +408,6 @@ function workerPricing(pricing: ChannelModelPricing): Record<string, unknown> {
 }
 
 function workerAccountStatsInterval(interval: PricingInterval): Record<string, unknown> {
-  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_price', interval.cache_write_price)
   rejectUnsupportedAccountStatsPrice('account_stats.cache_write_1h_price', interval.cache_write_1h_price)
   return {
     ...(interval.id === undefined ? {} : { id: interval.id }),
@@ -417,6 +416,7 @@ function workerAccountStatsInterval(interval: PricingInterval): Record<string, u
     tier_label: interval.tier_label,
     input_micros_per_million: optionalExactInteger(interval.input_price, 1_000_000_000_000, 'account_stats.input_price'),
     output_micros_per_million: optionalExactInteger(interval.output_price, 1_000_000_000_000, 'account_stats.output_price'),
+    cache_write_micros_per_million: optionalExactInteger(interval.cache_write_price, 1_000_000_000_000, 'account_stats.cache_write_price'),
     cache_read_micros_per_million: optionalExactInteger(interval.cache_read_price, 1_000_000_000_000, 'account_stats.cache_read_price'),
     per_request_micros: optionalExactInteger(interval.per_request_price, 1_000_000, 'account_stats.per_request_price'),
     sort_order: interval.sort_order,
@@ -424,7 +424,6 @@ function workerAccountStatsInterval(interval: PricingInterval): Record<string, u
 }
 
 function workerAccountStatsPricing(pricing: ChannelModelPricing): Record<string, unknown> {
-  rejectUnsupportedAccountStatsPrice('account_stats.cache_write_price', pricing.cache_write_price)
   rejectUnsupportedAccountStatsPrice('account_stats.cache_write_1h_price', pricing.cache_write_1h_price)
   rejectUnsupportedAccountStatsPrice('account_stats.image_input_price', pricing.image_input_price)
   rejectUnsupportedAccountStatsPrice('account_stats.image_output_price', pricing.image_output_price)
@@ -441,6 +440,7 @@ function workerAccountStatsPricing(pricing: ChannelModelPricing): Record<string,
     billing_mode: pricing.billing_mode,
     input_micros_per_million: optionalExactInteger(pricing.input_price, 1_000_000_000_000, 'account_stats.input_price'),
     output_micros_per_million: optionalExactInteger(pricing.output_price, 1_000_000_000_000, 'account_stats.output_price'),
+    cache_write_micros_per_million: optionalExactInteger(pricing.cache_write_price, 1_000_000_000_000, 'account_stats.cache_write_price'),
     cache_read_micros_per_million: optionalExactInteger(pricing.cache_read_price, 1_000_000_000_000, 'account_stats.cache_read_price'),
     per_request_micros: optionalExactInteger(pricing.per_request_price, 1_000_000, 'account_stats.per_request_price'),
     intervals: pricing.billing_mode === 'token'

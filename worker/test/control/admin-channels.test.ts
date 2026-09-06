@@ -442,9 +442,32 @@ describe('admin channels HTTP contract', () => {
     }
   })
 
-  it('rejects account-statistics prices the Worker cannot calculate yet', async () => {
+  it('accepts cache-write prices and rejects account-statistics prices the Worker cannot calculate yet', async () => {
     const test = await fixture()
-    for (const field of ['cache_write_micros_per_million', 'cache_write_1h_micros_per_million', 'image_output_micros_per_million']) {
+    const accepted = await request(test, '/api/v1/admin/channels', {
+      method: 'POST', headers: mutationHeaders('supported-account-stat-cache-write'),
+      body: JSON.stringify({
+        name: 'Cache-write account stats', group_ids: ['group-a'],
+        account_stats_pricing_rules: [{
+          name: 'rule', group_ids: ['group-a'], pricing: [{
+            platform: 'anthropic', models: ['claude'], billing_mode: 'token',
+            input_micros_per_million: 1, cache_write_micros_per_million: 2,
+            intervals: [{
+              min_tokens: 0, max_tokens: null, tier_label: 'standard',
+              cache_write_micros_per_million: 3,
+            }],
+          }],
+        }],
+      }),
+    })
+    expect(accepted.status).toBe(201)
+    expect((await json(accepted)).data.account_stats_pricing_rules[0].pricing[0])
+      .toMatchObject({
+        cache_write_micros_per_million: 2,
+        intervals: [expect.objectContaining({ cache_write_micros_per_million: 3 })],
+      })
+
+    for (const field of ['cache_write_1h_micros_per_million', 'image_output_micros_per_million']) {
       const response = await request(test, '/api/v1/admin/channels', {
         method: 'POST', headers: mutationHeaders(`unsupported-account-stat-${field}`),
         body: JSON.stringify({

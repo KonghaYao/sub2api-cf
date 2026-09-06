@@ -86,6 +86,21 @@ describe('gateway usage accounting', () => {
     })
   })
 
+  it('preserves provider-reported cache-write input for account-cost settlement', () => {
+    expect(extractUsage({
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 0,
+        prompt_tokens_details: { cached_tokens: 2, cache_write_tokens: 3 },
+      },
+    })).toMatchObject({
+      input_tokens: 10,
+      cache_read_tokens: 2,
+      cache_write_tokens: 3,
+      estimated: false,
+    })
+  })
+
   it('reserves a conservative bounded amount before contacting upstream', () => {
     expect(reservationForRequest(model, { max_tokens: 100 }, 100)).toBe(2_651)
     expect(reservationForRequest(

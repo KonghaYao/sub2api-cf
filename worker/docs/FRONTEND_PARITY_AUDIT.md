@@ -413,3 +413,17 @@ explicit typed error. It must never silently discard a submitted field or return
   they are not silently discarded or represented as unavailable UI choices.
 - Validation: focused Channels UI/API tests (28) and frontend typecheck passed.
   No D1 migration.
+
+## v0.42.20 Channels account-stat cache-write settlement — 2026-09-07
+
+- Account-stat token pricing now accepts normal cache-write prices at the
+  top level and in token intervals. The exact Worker micro-unit adapter,
+  control-plane API, and existing D1 columns round-trip those values.
+- OpenAI-compatible and Anthropic usage parsers retain provider-reported
+  cache-creation tokens. Account-cost settlement removes those tokens from
+  regular input and prices cache write, cache read, and normal input separately.
+- The one-hour cache-write field stays visible but returns the established typed
+  unsupported-field error because upstream usage does not report its TTL.
+- Validation: focused Worker control/SQLite gateway tests (43), focused
+  Channels frontend tests (23), and Worker/frontend typechecks passed. No D1
+  migration.

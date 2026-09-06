@@ -927,6 +927,7 @@ function normalizedAnthropicUsage(
     input_tokens: totalInputTokens,
     output_tokens: outputTokens,
     cache_read_tokens: cacheReadTokens,
+    ...(cacheCreationTokens > 0 ? { cache_write_tokens: cacheCreationTokens } : {}),
     estimated: false,
   }
 }

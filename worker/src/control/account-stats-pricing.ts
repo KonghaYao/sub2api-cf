@@ -135,7 +135,7 @@ function parseStatsPricing(value: unknown, ruleIndex: number): ParsedStatsPricin
       throw new GatewayError(409, 'account_stats_time_pricing_not_supported', 'Account statistics pricing does not support time pricing')
     }
     for (const field of [
-      'cache_write_micros_per_million', 'cache_write_1h_micros_per_million',
+      'cache_write_1h_micros_per_million',
       'image_input_micros_per_million', 'image_output_micros_per_million',
       'fast_multiplier_ppm', 'flex_multiplier_ppm',
     ]) {
@@ -190,7 +190,7 @@ function parseStatsPricing(value: unknown, ruleIndex: number): ParsedStatsPricin
 function parseStatsInterval(value: unknown, prefix: string, index: number): ParsedStatsInterval {
   const row = object(value, `${prefix}.intervals[${index}]`)
   for (const field of [
-    'cache_write_micros_per_million', 'cache_write_1h_micros_per_million',
+    'cache_write_1h_micros_per_million',
     'image_output_micros_per_million',
   ]) {
     if (row[field] !== undefined && row[field] !== null) {

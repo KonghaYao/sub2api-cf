@@ -372,10 +372,16 @@ function parseUsageObject(value: unknown, inputOnly = false): TokenUsage | null 
     | undefined
   const cached = firstInteger(inputDetails?.cached_tokens) ?? 0
   if (cached < 0) return null
+  const cacheWrite = firstInteger(
+    inputDetails?.cache_write_tokens,
+    inputDetails?.cache_creation_tokens,
+    usage.cache_creation_input_tokens,
+  ) ?? 0
   return {
     input_tokens: input,
     output_tokens: output,
     cache_read_tokens: Math.min(cached, input),
+    ...(cacheWrite > 0 ? { cache_write_tokens: Math.min(cacheWrite, input) } : {}),
     estimated: false,
   }
 }

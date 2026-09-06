@@ -70,6 +70,29 @@ describe('gateway account-cost snapshots', () => {
     })
   })
 
+  it('bills reported cache-write input separately from cache reads and regular input', async () => {
+    raw.exec(`
+      INSERT INTO channel_account_stats_pricing_rules (id,channel_id,name,sort_order,created_at_ms,updated_at_ms)
+      VALUES ('rule-cache-write','channel-1','cache-write',0,1,1);
+      INSERT INTO channel_account_stats_rule_groups (rule_id,group_id,created_at_ms)
+      VALUES ('rule-cache-write','group-1',1);
+      INSERT INTO channel_account_stats_model_pricing
+        (id,rule_id,platform,billing_mode,input_micros_per_million,cache_write_micros_per_million,cache_read_micros_per_million,sort_order,created_at_ms,updated_at_ms)
+      VALUES ('price-cache-write','rule-cache-write','openai','token',1000000,7000000,2000000,0,1,1);
+      INSERT INTO channel_account_stats_pricing_models (pricing_id,model_pattern,is_wildcard,sort_order,created_at_ms)
+      VALUES ('price-cache-write','gpt-upstream',0,0,1);
+    `)
+
+    const result = await resolveAccountCostSnapshot({ DB: d1 }, {
+      accountId: 'account-1', groupId: 'group-1', platform: 'openai', upstreamModel: 'gpt-upstream',
+      usage: { input_tokens: 10, output_tokens: 0, cache_read_tokens: 2, cache_write_tokens: 3, estimated: false },
+      standardCostMicros: 100, requestCount: 1,
+    })
+
+    // (5 regular * 1) + (3 cache-write * 7) + (2 cache-read * 2) = 30µUSD.
+    expect(result).toMatchObject({ account_stats_cost_micros: 30, account_cost_micros: 38 })
+  })
+
   it('uses the left-open/right-closed token interval and optional platform match', async () => {
     raw.exec(`
       INSERT INTO channel_account_stats_pricing_rules (id,channel_id,name,sort_order,created_at_ms,updated_at_ms)

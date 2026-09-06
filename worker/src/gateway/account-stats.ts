@@ -252,10 +252,12 @@ function calculateCustomCost(
   }
 
   const cached = Math.min(usage.cache_read_tokens, usage.input_tokens)
-  const regularInput = usage.input_tokens - cached
+  const cacheWrite = Math.min(usage.cache_write_tokens ?? 0, usage.input_tokens - cached)
+  const regularInput = usage.input_tokens - cached - cacheWrite
   const cost =
     BigInt(priced(regularInput, source.input_micros_per_million)) +
     BigInt(priced(usage.output_tokens, source.output_micros_per_million)) +
+    BigInt(priced(cacheWrite, source.cache_write_micros_per_million)) +
     BigInt(priced(cached, source.cache_read_micros_per_million))
   const value = checkedNumber(cost)
   return value > 0 ? value : null
@@ -290,7 +292,8 @@ function validateInput(input: AccountCostInput): void {
     !safeNonNegative(input.requestCount) ||
     !safeNonNegative(input.usage.input_tokens) ||
     !safeNonNegative(input.usage.output_tokens) ||
-    !safeNonNegative(input.usage.cache_read_tokens)
+    !safeNonNegative(input.usage.cache_read_tokens) ||
+    (input.usage.cache_write_tokens !== undefined && !safeNonNegative(input.usage.cache_write_tokens))
   ) throw new Error('Invalid account-cost input')
 }
 
