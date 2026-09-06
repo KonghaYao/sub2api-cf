@@ -30,6 +30,7 @@ const COLUMNS = `id, request_id, client_request_id, bucket_day, occurred_at_ms, 
 
 interface ListFilters {
   limit: number
+  page?: number
   cursor?: Cursor
   startMs?: number
   endMs?: number
@@ -61,7 +62,7 @@ interface ResolutionAuditRow {
 
 export const listOwnerRequests = (context: Context<Bindings>) => listFor(context, 'owner', 'all', 'usage')
 export const listOwnerErrors = (context: Context<Bindings>) => listFor(context, 'owner', 'errors', 'usage')
-export const listAdminUsage = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'usage')
+export const listAdminUsage = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'usage', true)
 export const listAdminRequests = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'ops')
 export const listAdminRequestErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'errors', 'ops')
 export const listAdminUpstreamErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'upstream', 'ops')
@@ -172,12 +173,13 @@ async function listFor(
   view: View,
   family: Family,
   timeContract: 'usage' | 'ops',
+  legacyOffset = false,
 ): Promise<Response> {
   try {
     let owner: string | undefined
     if (view === 'owner') owner = (await authenticateUserRequest(context.req.raw, context.env)).id
     else await authenticateAdminSession(context.req.raw, context.env)
-    const filters = await parseFilters(context, family, timeContract, owner)
+    const filters = await parseFilters(context, family, timeContract, owner, true, legacyOffset)
     const clauses: string[] = []
     const values: unknown[] = []
     addFamilyClause(family, clauses)
@@ -196,6 +198,14 @@ async function listResponse(
   view: View,
 ): Promise<Response> {
   const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
+  if (filters.page !== undefined) {
+    const [count, rows] = await env.DB.batch([
+      env.DB.prepare(`SELECT COUNT(*) AS total FROM request_observations ${where}`).bind(...values),
+      env.DB.prepare(`SELECT ${COLUMNS} FROM request_observations ${where} ORDER BY occurred_at_ms DESC, id DESC LIMIT ? OFFSET ?`).bind(...values, filters.limit, (filters.page - 1) * filters.limit),
+    ])
+    const total = Number((count.results[0] as { total?: unknown } | undefined)?.total ?? 0)
+    return controlSuccess({ items: (rows.results as ObservationRow[]).map((row) => projectRow(row, view)), total, page: filters.page, page_size: filters.limit, pages: total === 0 ? 0 : Math.ceil(total / filters.limit) })
+  }
   const result = await env.DB.prepare(
     `SELECT ${COLUMNS} FROM request_observations ${where}
       ORDER BY occurred_at_ms DESC, id DESC LIMIT ?`,
@@ -221,8 +231,10 @@ async function parseFilters(
   timeContract: 'usage' | 'ops',
   forcedUserId?: string,
   defaultOpsRange = true,
+  legacyOffset = false,
 ): Promise<ListFilters> {
   for (const legacy of ['page', 'page_size', 'sort_by', 'sort_order', 'q', 'user_query']) {
+    if (legacyOffset && (legacy === 'page' || legacy === 'page_size') && context.req.query(legacy) !== undefined) continue
     if (context.req.query(legacy) !== undefined) {
       throw new GatewayError(
         400,
@@ -233,6 +245,10 @@ async function parseFilters(
   }
   const limit = queryInteger(context.req.query('limit'), 'limit', 20, 1, 100)
   const filters: ListFilters = { limit, family }
+  if (legacyOffset && (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined)) {
+    filters.page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
+    filters.limit = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+  }
   const rawCursor = context.req.query('cursor')
   const cursor = rawCursor === undefined ? undefined : await decodeCursor(context.env, rawCursor)
   const exact = (name: string, maximum = 200): string | undefined => {
