@@ -629,6 +629,98 @@ describe('admin channels HTTP contract', () => {
     expect(emptyInterval.status).toBe(400)
   })
 
+  it('rejects time pricing that cannot be evaluated safely by the gateway', async () => {
+    const test = await fixture()
+    const cases = [
+      {
+        key: 'timezone',
+        time_pricing: {
+          timezone: 'UTC+8', weekdays_only: false,
+          periods: [{ start_time: '09:00', end_time: '12:00', multiplier_ppm: 2_000_000 }],
+        },
+      },
+      {
+        key: 'empty-period',
+        time_pricing: {
+          timezone: 'UTC', weekdays_only: false,
+          periods: [{ start_time: '09:00', end_time: '09:00', multiplier_ppm: 2_000_000 }],
+        },
+      },
+      {
+        key: 'cross-midnight',
+        time_pricing: {
+          timezone: 'UTC', weekdays_only: false,
+          periods: [{ start_time: '22:00', end_time: '02:00', multiplier_ppm: 2_000_000 }],
+        },
+      },
+      {
+        key: 'overlap',
+        time_pricing: {
+          timezone: 'UTC', weekdays_only: false,
+          periods: [
+            { start_time: '09:00:00', end_time: '12:00:00', multiplier_ppm: 2_000_000 },
+            { start_time: '11:59:59', end_time: '14:00:00', multiplier_ppm: 1_500_000 },
+          ],
+        },
+      },
+    ]
+
+    for (const item of cases) {
+      const response = await request(test, '/api/v1/admin/channels', {
+        method: 'POST', headers: mutationHeaders(`channel-time-pricing-${item.key}`),
+        body: JSON.stringify({
+          name: `Invalid time pricing ${item.key}`,
+          model_pricing: [{
+            platform: 'anthropic', models: [`claude-${item.key}`], billing_mode: 'token',
+            input_micros_per_million: 1, time_pricing: item.time_pricing,
+          }],
+        }),
+      })
+      expect(response.status).toBe(400)
+      expect((await json(response)).error.code).toBe('invalid_time_pricing')
+    }
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 0 })
+
+    const adjacent = await request(test, '/api/v1/admin/channels', {
+      method: 'POST', headers: mutationHeaders('channel-time-pricing-adjacent'),
+      body: JSON.stringify({
+        name: 'Adjacent time pricing',
+        model_pricing: [{
+          platform: 'anthropic', models: ['claude-adjacent-time'], billing_mode: 'token',
+          input_micros_per_million: 1,
+          time_pricing: {
+            timezone: 'Asia/Shanghai', weekdays_only: true,
+            periods: [
+              { start_time: '09:00:00', end_time: '12:00:00', multiplier_ppm: 2_000_000 },
+              { start_time: '12:00:00', end_time: '18:00:00', multiplier_ppm: 1_500_000 },
+            ],
+          },
+        }],
+      }),
+    })
+    expect(adjacent.status).toBe(201)
+  })
+
+  it('rejects interval-only per-request pricing until the text gateway supports tier selectors', async () => {
+    const test = await fixture()
+    const response = await request(test, '/api/v1/admin/channels', {
+      method: 'POST', headers: mutationHeaders('channel-per-request-tier-selector-required'),
+      body: JSON.stringify({
+        name: 'Unsupported request tiers',
+        model_pricing: [{
+          platform: 'anthropic', models: ['claude-tiered'], billing_mode: 'per_request',
+          intervals: [{
+            min_tokens: 0, max_tokens: 100, tier_label: 'batch', per_request_micros: 40_000,
+          }],
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect((await json(response)).error.code).toBe('invalid_billing_mode')
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 0 })
+  })
+
   it('bounds normalized graph writes to the free-plan D1 query budget', async () => {
     const test = await fixture()
     const mappings = Object.fromEntries(
@@ -809,9 +901,9 @@ describe('admin channels HTTP contract', () => {
     expect(zeroWidth.status).toBe(400)
   })
 
-  it('treats per-request, image, and video intervals as label tiers instead of token ranges', async () => {
+  it('treats image and video intervals as label tiers instead of token ranges', async () => {
     const test = await fixture()
-    for (const mode of ['per_request', 'image', 'video'] as const) {
+    for (const mode of ['image', 'video'] as const) {
       const response = await request(test, '/api/v1/admin/channels', {
         method: 'POST', headers: mutationHeaders(`channel-${mode}-label-tiers`),
         body: JSON.stringify({

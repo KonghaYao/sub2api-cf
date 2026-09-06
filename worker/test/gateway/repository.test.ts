@@ -1037,6 +1037,67 @@ describe('gateway repository channel model policy', () => {
     raw.close()
   })
 
+  it('falls back to OpenAI/Codex base pricing after literal variant matching', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
+    seedChannel(raw, { restrictModels: false })
+    raw.exec(`
+      UPDATE models
+         SET public_name = 'gpt-5.6-luna-high',
+             upstream_name = 'gpt-5.6-luna-2026-08-01'
+       WHERE id = 'model-openai';
+      INSERT INTO channel_model_mappings (
+        channel_id, platform, source_pattern, target_pattern,
+        source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+      ) VALUES (
+        'channel-openai', 'openai', 'customer-luna', 'gpt-5.6-luna-2026-08-01',
+        0, 0, 0, 1
+      );
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES (
+        'luna-base-price', 'channel-openai', 'openai', 'per_request', 81,
+        1, 1, 1
+      );
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('luna-base-price', 'gpt-5.6-luna', 0, 0, 1);
+    `)
+    const env = { DB: d1 } as Env
+
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'gpt-5.6-luna-high', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: { pricing_id: 'luna-base-price', per_request_micros: 81 },
+    })
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'customer-luna', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: { pricing_id: 'luna-base-price', per_request_micros: 81 },
+    })
+
+    raw.exec(`
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES (
+        'luna-variant-price', 'channel-openai', 'openai', 'per_request', 99,
+        1, 1, 1
+      );
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES ('luna-variant-price', 'gpt-5.6-luna-high', 0, 0, 1);
+    `)
+    await expect(resolveGatewayRoute(
+      env, 'group-openai', 'gpt-5.6-luna-high', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: { pricing_id: 'luna-variant-price', per_request_micros: 99 },
+    })
+    raw.close()
+  })
+
   it('fails closed for ambiguous pricing and freezes non-text billing modes for the caller', async () => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)

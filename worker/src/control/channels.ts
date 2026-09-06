@@ -527,13 +527,31 @@ function parseTimePricing(value: unknown, priceIndex: number): Record<string, un
     const period = parseObject(raw, `periods[${index}]`, 1024)
     const start = clock(period.start_time, 'start_time')
     const end = clock(period.end_time, 'end_time')
-    if (start === end) throw invalid('time_pricing', 'time pricing period must not be empty')
-    return { start_time: start, end_time: end, multiplier_ppm: integer(period.multiplier_ppm, 'multiplier_ppm', 1) }
+    const startSecond = clockSecond(start)
+    const endSecond = clockSecond(end, true)
+    if (start === end || startSecond >= endSecond) {
+      throw invalid('time_pricing', 'time pricing period start must be before end')
+    }
+    return {
+      start_time: start,
+      end_time: end,
+      multiplier_ppm: integer(period.multiplier_ppm, 'multiplier_ppm', 1),
+      startSecond,
+      endSecond,
+    }
   })
+  const sorted = [...periods].sort((left, right) => left.startSecond - right.startSecond)
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index].startSecond < sorted[index - 1].endSecond) {
+      throw invalid('time_pricing', 'time pricing periods overlap')
+    }
+  }
+  const timezone = requiredText(row.timezone, 'timezone', 64)
+  validateTimeZone(timezone)
   return {
-    timezone: requiredText(row.timezone, 'timezone', 64),
+    timezone,
     weekdays_only: optionalBoolean(row.weekdays_only, 'weekdays_only') ?? false,
-    periods,
+    periods: periods.map(({ startSecond: _start, endSecond: _end, ...period }) => period),
   }
 }
 
@@ -570,8 +588,14 @@ function validateBillingConfiguration(price: ParsedPricing, index: number): void
   if (price.time_pricing !== null && price.billing_mode !== 'token') {
     throw invalid('time_pricing', `model_pricing[${index}] time_pricing only supports token billing`)
   }
+  if (price.billing_mode === 'per_request' && price.per_request_micros === null) {
+    throw invalid(
+      'billing_mode',
+      `model_pricing[${index}] per_request billing requires per_request_micros until tier selectors are supported`,
+    )
+  }
   if (
-    ['per_request', 'image', 'video'].includes(price.billing_mode)
+    ['image', 'video'].includes(price.billing_mode)
     && price.per_request_micros === null
     && price.intervals.length === 0
   ) {
@@ -1117,6 +1141,21 @@ function clock(value: unknown, field: string): string {
     throw invalid(field, `${field} must use HH:mm or HH:mm:ss`)
   }
   return value
+}
+
+function clockSecond(value: string, end = false): number {
+  if (end && (value === '00:00' || value === '00:00:00')) return 24 * 60 * 60
+  const [hour, minute, second = 0] = value.split(':').map(Number)
+  return hour * 3_600 + minute * 60 + second
+}
+
+function validateTimeZone(value: string): void {
+  if (value === 'Local') throw invalid('time_pricing', 'time_pricing timezone must be an IANA timezone')
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0)
+  } catch {
+    throw invalid('time_pricing', 'time_pricing timezone must be an IANA timezone')
+  }
 }
 
 function rejectCredentialFields(body: Record<string, unknown>): void {

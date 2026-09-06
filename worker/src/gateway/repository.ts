@@ -747,6 +747,46 @@ function channelPricingMatchSql(candidate: string): string {
   )`
 }
 
+function normalizedOpenAICodexPricingBaseSql(expression: string): string {
+  const value = `lower(replace(replace(replace(trim(${expression}), '_', '-'), ' ', '-'), 'gpt5', 'gpt-5'))`
+  return `(CASE
+    WHEN ${value} LIKE '%gpt-5.6-sol%' THEN 'gpt-5.6-sol'
+    WHEN ${value} LIKE '%gpt-5.6-terra%' THEN 'gpt-5.6-terra'
+    WHEN ${value} LIKE '%gpt-5.6-luna%' THEN 'gpt-5.6-luna'
+    WHEN ${value} = 'gpt-5.6' OR ${value} LIKE '%/gpt-5.6' THEN 'gpt-5.6-sol'
+    WHEN ${value} LIKE '%gpt-5.6-none' OR ${value} LIKE '%gpt-5.6-minimal'
+      OR ${value} LIKE '%gpt-5.6-low' OR ${value} LIKE '%gpt-5.6-medium'
+      OR ${value} LIKE '%gpt-5.6-high' OR ${value} LIKE '%gpt-5.6-xhigh'
+      OR ${value} LIKE '%gpt-5.6-max'
+      OR ${value} GLOB '*gpt-5.6-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      THEN 'gpt-5.6-sol'
+    WHEN ${value} LIKE '%gpt-5.5-pro%' THEN 'gpt-5.5-pro'
+    WHEN ${value} LIKE '%gpt-5.5%' THEN 'gpt-5.5'
+    WHEN ${value} LIKE '%gpt-5.4-mini%' OR ${value} LIKE '%gpt-5.4mini%' THEN 'gpt-5.4-mini'
+    WHEN ${value} LIKE '%gpt-5.4-nano%' OR ${value} LIKE '%gpt-5.4nano%' THEN 'gpt-5.4-nano'
+    WHEN ${value} LIKE '%gpt-5.4%' THEN 'gpt-5.4'
+    WHEN ${value} LIKE '%gpt-5.2%' THEN 'gpt-5.2'
+    WHEN ${value} LIKE '%gpt-5.3-codex-spark%' OR ${value} LIKE '%gpt-5.3codexspark%'
+      THEN 'gpt-5.3-codex-spark'
+    WHEN ${value} LIKE '%gpt-5.3-codex%' OR ${value} LIKE '%gpt-5.3codex%'
+      THEN 'gpt-5.3-codex'
+    WHEN ${value} LIKE '%gpt-5.3%' THEN 'gpt-5.3-codex'
+    WHEN ${value} LIKE '%codex%' THEN 'gpt-5.3-codex'
+    WHEN ${value} LIKE '%gpt-5%' THEN 'gpt-5.4'
+    ELSE NULL
+  END)`
+}
+
+/** Literal channel patterns always win; known OpenAI/Codex base names are fallback-only. */
+function channelPricingMatchPhaseSql(candidate: string): string {
+  const normalizedBase = normalizedOpenAICodexPricingBaseSql(candidate)
+  return `(CASE
+    WHEN ${channelPricingMatchSql(candidate)} THEN 0
+    WHEN ${normalizedBase} IS NOT NULL AND ${channelPricingMatchSql(normalizedBase)} THEN 1
+    ELSE NULL
+  END)`
+}
+
 async function resolveExternalChannelAlias(
   env: Env,
   groupId: string,
@@ -931,8 +971,10 @@ function externalAliasModelStatement(
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
               pricing.time_pricing_json AS pricing_time_pricing_json,
               allowed.model_pattern AS pricing_model_pattern,
+              ${channelPricingMatchPhaseSql('alias.expanded_target')} AS match_phase,
               DENSE_RANK() OVER (
-                ORDER BY allowed.is_wildcard ASC,
+                ORDER BY ${channelPricingMatchPhaseSql('alias.expanded_target')} ASC,
+                         allowed.is_wildcard ASC,
                          CASE WHEN allowed.is_wildcard = 1
                            THEN length(allowed.model_pattern) ELSE 0 END DESC
               ) AS specificity_rank
@@ -940,7 +982,8 @@ function externalAliasModelStatement(
          JOIN channel_model_pricing pricing
            ON pricing.channel_id = alias.channel_id AND pricing.platform = alias.platform
          JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
-        WHERE alias.match_count = 1 AND ${channelPricingMatchSql('alias.expanded_target')}
+        WHERE alias.match_count = 1
+          AND ${channelPricingMatchPhaseSql('alias.expanded_target')} IS NOT NULL
      ), best_pricing AS (
        SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
          FROM pricing_pattern_matches matched
@@ -1278,8 +1321,10 @@ function channelModelPolicyStatement(
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
               pricing.time_pricing_json AS pricing_time_pricing_json,
               allowed.model_pattern AS pricing_model_pattern,
+              ${channelPricingMatchPhaseSql('target.billing_model')} AS match_phase,
               DENSE_RANK() OVER (
-                ORDER BY allowed.is_wildcard ASC,
+                ORDER BY ${channelPricingMatchPhaseSql('target.billing_model')} ASC,
+                         allowed.is_wildcard ASC,
                          CASE WHEN allowed.is_wildcard = 1
                            THEN length(allowed.model_pattern) ELSE 0 END DESC
               ) AS specificity_rank
@@ -1288,7 +1333,7 @@ function channelModelPolicyStatement(
          JOIN channel_model_pricing pricing
            ON pricing.channel_id = channel.id AND pricing.platform = target.target_platform
          JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
-        WHERE ${channelPricingMatchSql('target.billing_model')}
+        WHERE ${channelPricingMatchPhaseSql('target.billing_model')} IS NOT NULL
      ), best_pricing AS (
        SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
          FROM pricing_pattern_matches matched
