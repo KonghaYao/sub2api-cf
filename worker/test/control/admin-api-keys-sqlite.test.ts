@@ -93,6 +93,21 @@ function failSafeDatabase(database: D1Database, beforeFirstBatch: () => void): D
   } as unknown as D1Database
 }
 
+function synchronizeFirstBatches(database: D1Database, count: number): D1Database {
+  let arrivals = 0
+  let release!: () => void
+  const ready = new Promise<void>((resolve) => { release = resolve })
+  return {
+    prepare: (query: string) => database.prepare(query),
+    batch: async (statements: D1PreparedStatement[]) => {
+      arrivals += 1
+      if (arrivals === count) release()
+      await ready
+      return database.batch(statements)
+    },
+  } as unknown as D1Database
+}
+
 async function createKey(
   test: Fixture,
   groupId: string,
@@ -506,5 +521,37 @@ describe('admin API key D1 authorization', () => {
     await expect(stale.json()).resolves.toMatchObject({ code: 'control_version_conflict' })
     expect(test.raw.prepare('SELECT name, control_version FROM api_keys WHERE id = ?').get(keyId))
       .toEqual({ name: 'automation', control_version: 0 })
+  })
+
+  it('recovers concurrent revocations with the same idempotency key without double incrementing auth', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-revoke-create-0001')
+    const keyId = ((await created.json()) as { data: { id: string } }).data.id
+    const racingEnv = env(synchronizeFirstBatches(test.d1, 2))
+    const revoke = () => createApp().request(`/api/v1/admin/api-keys/${keyId}`, {
+      method: 'DELETE',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-revoke-concurrent-0001',
+      },
+    }, racingEnv)
+
+    const [first, second] = await Promise.all([revoke(), revoke()])
+
+    expect([first.status, second.status]).toEqual([200, 200])
+    await expect(first.json()).resolves.toMatchObject({
+      code: 0,
+      data: { id: keyId, enabled: 0, auth_version: 2, control_version: 1 },
+    })
+    await expect(second.json()).resolves.toMatchObject({
+      code: 0,
+      data: { id: keyId, enabled: 0, auth_version: 2, control_version: 1 },
+    })
+    expect(test.raw.prepare(
+      'SELECT enabled, auth_version, control_version FROM api_keys WHERE id = ?',
+    ).get(keyId)).toEqual({ enabled: 0, auth_version: 2, control_version: 1 })
+    expect(test.raw.prepare(
+      "SELECT COUNT(*) AS total FROM auth_audit_events WHERE event_type = 'admin.api_keys.revoke'",
+    ).get()).toEqual({ total: 1 })
   })
 })

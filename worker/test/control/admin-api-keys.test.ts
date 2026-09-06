@@ -117,6 +117,9 @@ class KeyStatement {
       })
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
+    if (this.query.includes('INSERT INTO auth_audit_events')) {
+      return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
+    }
     if (this.query.includes('UPDATE api_keys') && this.query.includes('revoked_at_ms')) {
       const [now, _updatedAt, id] = this.values
       const key = this.database.keys.get(String(id))
@@ -470,11 +473,17 @@ describe('admin API keys', () => {
     )
     const revoked = await createApp().request('/api/v1/admin/api-keys/key-1', {
       method: 'DELETE',
-      headers: { authorization: headers.authorization },
+      headers: {
+        authorization: headers.authorization,
+        'idempotency-key': 'revoke-key-1',
+      },
     }, testEnv)
     const replayed = await createApp().request('/api/v1/admin/api-keys/key-1', {
       method: 'DELETE',
-      headers: { authorization: headers.authorization },
+      headers: {
+        authorization: headers.authorization,
+        'idempotency-key': 'revoke-key-1',
+      },
     }, testEnv)
 
     expect(listed.status).toBe(200)

@@ -699,24 +699,11 @@ describe('synchronous image handler', () => {
       body: JSON.stringify({ prompt: 'cat', stream: true }),
     }, test.env as never)
     await vi.waitFor(() => expect(upstreamController).not.toBeNull())
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const earlyResponse = await Promise.race([
-      responsePromise,
-      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 25) }),
-    ])
-    if (timer !== undefined) clearTimeout(timer)
-    if (earlyResponse === null) {
-      upstreamController!.enqueue(encoder.encode([
-        'event: response.completed',
-        'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"ig_late","type":"image_generation_call","result":"aW1hZ2U="}]}}',
-        '',
-        '',
-      ].join('\n')))
-      upstreamController!.close()
-      await responsePromise
-    }
-    expect(earlyResponse).not.toBeNull()
-    if (earlyResponse === null) return
+    // Awaiting the response while the upstream stream is deliberately still open
+    // proves the handler does not buffer until response.completed. A buffering
+    // regression deterministically hits the test timeout instead of racing a
+    // loaded CI worker against an arbitrary wall-clock deadline.
+    const earlyResponse = await responsePromise
 
     const reader = earlyResponse.body!.getReader()
     const first = await reader.read()
