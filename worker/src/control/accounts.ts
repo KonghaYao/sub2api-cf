@@ -201,11 +201,12 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       conditions.push('a.platform = ?')
       values.push(supportedPlatform)
     }
-    const enabled = parseEnabledQuery(context.req.query('enabled'), context.req.query('status'))
-    if (enabled !== undefined) {
-      conditions.push('a.enabled = ?')
-      values.push(enabled ? 1 : 0)
-    }
+    appendAccountStatusCondition(
+      conditions,
+      values,
+      context.req.query('enabled'),
+      context.req.query('status'),
+    )
     const accountType = context.req.query('type')
     if (accountType) {
       if (!['apikey', 'oauth', 'setup-token', 'upstream', 'bedrock'].includes(accountType)) {
@@ -2281,7 +2282,12 @@ function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boo
   return fallback
 }
 
-function parseEnabledQuery(enabled: string | undefined, status: string | undefined): boolean | undefined {
+function appendAccountStatusCondition(
+  conditions: string[],
+  values: unknown[],
+  enabled: string | undefined,
+  status: string | undefined,
+): void {
   enabled = enabled === '' ? undefined : enabled
   status = status === '' ? undefined : status
   if (enabled !== undefined && status !== undefined) {
@@ -2291,15 +2297,31 @@ function parseEnabledQuery(enabled: string | undefined, status: string | undefin
     if (enabled !== 'true' && enabled !== 'false') {
       throw new GatewayError(400, 'invalid_enabled', 'enabled must be true or false')
     }
-    return enabled === 'true'
+    conditions.push('a.enabled = ?')
+    values.push(enabled === 'true' ? 1 : 0)
+    return
   }
-  if (status !== undefined) {
-    if (status !== 'active' && status !== 'inactive') {
-      throw new GatewayError(400, 'invalid_status', 'status must be active or inactive')
-    }
-    return status === 'active'
+  if (status === undefined) return
+  if (status === 'active') {
+    conditions.push("a.enabled = 1 AND a.health_status <> 'unhealthy'")
+    return
   }
-  return undefined
+  if (status === 'inactive') {
+    conditions.push('a.enabled = 0')
+    return
+  }
+  if (status === 'error') {
+    conditions.push("a.health_status = 'unhealthy'")
+    return
+  }
+  if (status === 'rate_limited' || status === 'temp_unschedulable' || status === 'unschedulable') {
+    throw new GatewayError(
+      422,
+      'unsupported_account_status_filter',
+      `Account status filter ${status} is not available in the Worker projection`,
+    )
+  }
+  throw new GatewayError(400, 'invalid_status', 'status is invalid')
 }
 
 function parseGroupLinks(value: unknown): GroupLinkInput[] {
@@ -2566,7 +2588,11 @@ function accountResponse(value: {
     ...compatibility,
     rate_multiplier: multiplierPpm / 1_000_000,
     enabled: value.enabled,
-    status: value.enabled ? 'active' as const : 'inactive' as const,
+    status: !value.enabled
+      ? 'inactive' as const
+      : value.health_status === 'unhealthy'
+        ? 'error' as const
+        : 'active' as const,
     credentials_status: compatibility.credentials_status ?? { has_api_key: true },
     provider_account_metadata: {
       quota: { status: 'unsupported' as const, value: null },

@@ -470,3 +470,9 @@ explicit typed error. It must never silently discard a submitted field or return
 - Permission and rate rows still cascade when a user or group is deleted; the
   audit preserves the deleted target ID so administrative history remains
   available.
+
+## v0.42.28 Accounts status-filter parity — 2026-09-07
+
+- Account status filters now map `active`, `inactive`, and `error` to the
+  Worker enabled and health projections. Runtime-only status choices remain in
+  the original filter UI and return a typed unsupported-filter error.

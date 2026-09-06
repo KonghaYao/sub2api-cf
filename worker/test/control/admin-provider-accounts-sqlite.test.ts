@@ -317,6 +317,33 @@ describe('admin provider account control plane on D1', () => {
     })
   })
 
+  it('maps account list status filters to the persisted enabled and health projections', async () => {
+    const test = fixture()
+    const healthy = await createProvider(test, 'openai')
+    const unhealthy = await createProvider(test, 'anthropic')
+    const inactive = await createProvider(test, 'gemini')
+    test.raw.prepare("UPDATE accounts SET health_status = 'unhealthy' WHERE id = ?").run(unhealthy.id)
+    test.raw.prepare('UPDATE accounts SET enabled = 0 WHERE id = ?').run(inactive.id)
+
+    const active = await test.app.request('/accounts?status=active', {}, test.env)
+    await expect(active.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: healthy.id, status: 'active' }] },
+    })
+    const errors = await test.app.request('/accounts?status=error', {}, test.env)
+    await expect(errors.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: unhealthy.id, status: 'error' }] },
+    })
+    const inactiveAccounts = await test.app.request('/accounts?status=inactive', {}, test.env)
+    await expect(inactiveAccounts.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: inactive.id, status: 'inactive' }] },
+    })
+    const unsupported = await test.app.request('/accounts?status=rate_limited', {}, test.env)
+    expect(unsupported.status).toBe(422)
+    await expect(unsupported.json()).resolves.toMatchObject({
+      error: { code: 'unsupported_account_status_filter' },
+    })
+  })
+
   it('round-trips the original account form without persisting or projecting secrets', async () => {
     const test = fixture()
     test.raw.exec(`
