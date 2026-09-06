@@ -310,6 +310,185 @@ describe('admin provider account control plane on D1', () => {
     })
   })
 
+  it('round-trips the original account form without persisting or projecting secrets', async () => {
+    const test = fixture()
+    test.raw.exec(`
+      INSERT INTO "groups" (id, name, platform, enabled, created_at_ms, updated_at_ms)
+      VALUES ('legacy-group', 'Legacy group', 'openai', 1, 1, 1);
+    `)
+    const originalCredentials = {
+      base_url: 'https://legacy-openai.test/v1',
+      api_key: 'legacy-api-secret',
+      access_token: 'legacy-access-secret',
+      refresh_token: 'legacy-refresh-secret',
+      cookie: 'legacy-cookie-secret',
+      model_mapping: { public: 'upstream' },
+      pool_mode: true,
+    }
+    const createResponse = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'original-form-round-trip',
+      },
+      body: JSON.stringify({
+        name: 'Original form',
+        notes: 'keep this note',
+        platform: 'openai',
+        type: 'apikey',
+        credentials: originalCredentials,
+        extra: { web_search_emulation: 'force_off', labels: ['one'] },
+        proxy_id: null,
+        concurrency: 7,
+        load_factor: 1.25,
+        priority: 9,
+        rate_multiplier: 1.5,
+        group_ids: ['legacy-group'],
+        expires_at: 1_900_000_000,
+        auto_pause_on_expired: true,
+        upstream_billing_probe_enabled: false,
+      }),
+    }, test.env)
+    const created = await createResponse.json() as any
+    expect(createResponse.status, JSON.stringify(created)).toBe(201)
+    expect(created.data).toMatchObject({
+      name: 'Original form',
+      notes: 'keep this note',
+      platform: 'openai',
+      type: 'apikey',
+      credentials: {
+        base_url: 'https://legacy-openai.test/v1',
+        model_mapping: { public: 'upstream' },
+        pool_mode: true,
+      },
+      credentials_status: {
+        has_api_key: true,
+        has_access_token: true,
+        has_refresh_token: true,
+        has_cookie: true,
+      },
+      extra: { web_search_emulation: 'force_off', labels: ['one'] },
+      proxy_id: null,
+      concurrency: 7,
+      load_factor: 1.25,
+      priority: 9,
+      rate_multiplier: 1.5,
+      group_ids: ['legacy-group'],
+      expires_at: 1_900_000_000,
+      auto_pause_on_expired: true,
+      upstream_billing_probe_enabled: false,
+      status: 'active',
+      control_version: 0,
+    })
+    const createdSerialized = JSON.stringify(created)
+    for (const secret of ['legacy-api-secret', 'legacy-access-secret', 'legacy-refresh-secret', 'legacy-cookie-secret']) {
+      expect(createdSerialized).not.toContain(secret)
+    }
+
+    const persisted = test.raw.prepare(
+      `SELECT a.*, s.key_version, s.nonce_b64, s.ciphertext_b64
+         FROM accounts a JOIN account_secrets s ON s.id = a.credential_ref
+        WHERE a.id = ?`,
+    ).get(created.data.id)
+    const persistedSerialized = JSON.stringify(persisted)
+    for (const secret of ['legacy-api-secret', 'legacy-access-secret', 'legacy-refresh-secret', 'legacy-cookie-secret']) {
+      expect(persistedSerialized).not.toContain(secret)
+    }
+    const persistedUiConfig = String(persisted.ui_config_json)
+    expect(persistedUiConfig).toContain('model_mapping')
+    for (const secret of ['legacy-api-secret', 'legacy-access-secret', 'legacy-refresh-secret', 'legacy-cookie-secret']) {
+      expect(persistedUiConfig).not.toContain(secret)
+    }
+    expect(persisted.max_concurrency).toBe(7)
+    expect(persisted.billing_rate_multiplier_ppm).toBe(1_500_000)
+    await expect(decryptCredential(
+      persisted.nonce_b64,
+      persisted.ciphertext_b64,
+      MASTER_KEY,
+      credentialAad('test', persisted.id, persisted.credential_ref, persisted.key_version),
+    )).resolves.toMatchObject(originalCredentials)
+
+    const detailResponse = await test.app.request(`/accounts/${created.data.id}`, {}, test.env)
+    const detail = await detailResponse.json() as any
+    expect(detailResponse.status, JSON.stringify(detail)).toBe(200)
+    expect(detail).toMatchObject({ data: created.data })
+    const listResponse = await test.app.request('/accounts?search=Original&page=1&page_size=20', {}, test.env)
+    expect(listResponse.status).toBe(200)
+    const listed = await listResponse.json() as any
+    expect(listed.data).toMatchObject({ total: 1, page: 1 })
+    expect(listed.data.items).toHaveLength(1)
+    expect(listed.data.items[0]).toMatchObject({
+      id: created.data.id,
+      credentials: created.data.credentials,
+      credentials_status: created.data.credentials_status,
+      group_ids: created.data.group_ids,
+    })
+
+    const updateResponse = await test.app.request(`/accounts/${created.data.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({
+        notes: '',
+        credentials: {
+          access_token: null,
+          refresh_token: '',
+          cookie: null,
+          model_mapping: {},
+          pool_mode: false,
+        },
+        extra: {},
+        proxy_id: null,
+        concurrency: 11,
+        load_factor: null,
+        priority: 0,
+        group_ids: [],
+        expires_at: null,
+        auto_pause_on_expired: false,
+        upstream_billing_probe_enabled: false,
+        upstream_billing_rate_sync_enabled: false,
+        status: 'inactive',
+      }),
+    }, test.env)
+    const updated = await updateResponse.json() as any
+    expect(updateResponse.status, JSON.stringify(updated)).toBe(200)
+    expect(updated.data).toMatchObject({
+      notes: '',
+      credentials: {
+        base_url: 'https://legacy-openai.test/v1',
+        model_mapping: {},
+        pool_mode: false,
+      },
+      credentials_status: {
+        has_api_key: true,
+        has_access_token: false,
+        has_refresh_token: false,
+        has_cookie: false,
+      },
+      extra: {},
+      concurrency: 11,
+      load_factor: null,
+      priority: 0,
+      group_ids: [],
+      expires_at: null,
+      auto_pause_on_expired: false,
+      upstream_billing_probe_enabled: false,
+      upstream_billing_rate_sync_enabled: false,
+      status: 'inactive',
+      control_version: 1,
+    })
+    expect(JSON.stringify(updated)).not.toContain('legacy-access-secret')
+    const updatedDetail = await test.app.request(`/accounts/${created.data.id}`, {}, test.env)
+    await expect(updatedDetail.json()).resolves.toMatchObject({ data: updated.data })
+
+    const stale = await test.app.request(`/accounts/${created.data.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ notes: 'stale' }),
+    }, test.env)
+    expect(stale.status).toBe(412)
+    await expect(stale.json()).resolves.toMatchObject({ code: 'account_version_conflict' })
+  })
+
   it('filters account lists by group binding and applies stable allowlisted sorting', async () => {
     const test = fixture()
     const ungrouped = await createProvider(test, 'openai')
@@ -350,6 +529,22 @@ describe('admin provider account control plane on D1', () => {
     const invalidSort = await test.app.request('/accounts?sort_by=sql_expression', {}, test.env)
     expect(invalidSort.status).toBe(400)
     await expect(invalidSort.json()).resolves.toMatchObject({ code: 'invalid_sort_by' })
+  })
+
+  it('accepts the original account page empty filter values', async () => {
+    const test = fixture()
+    const account = await createProvider(test, 'openai')
+
+    const response = await test.app.request(
+      '/accounts?page=1&page_size=20&platform=&type=&status=&privacy_mode=&group=&search=&include_scheduler_score=0&sort_by=name&sort_order=asc&lite=1',
+      {},
+      test.env,
+    )
+
+    expect(response.status, await response.clone().text()).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: account.id }] },
+    })
   })
 
   it('keeps legacy OpenAI defaults and rotates provider credentials with versioned AAD', async () => {

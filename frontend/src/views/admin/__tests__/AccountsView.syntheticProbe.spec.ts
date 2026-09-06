@@ -108,7 +108,7 @@ function mountView() {
   })
 }
 
-describe('AccountsView Worker synthetic probes', () => {
+describe('AccountsView restored account actions', () => {
   beforeEach(() => {
     workerContract.enabled = true
     listModels.mockReset()
@@ -118,21 +118,8 @@ describe('AccountsView Worker synthetic probes', () => {
     listAccounts.mockResolvedValue({ items: [account], total: 1, page: 1, page_size: 20, pages: 1 })
   })
 
-  it('opens the Worker-only modal with selected account data and loaded models', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-
-    const trigger = wrapper.get('[data-testid="open-synthetic-probes"]')
-    expect(trigger.attributes('disabled')).toBeDefined()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
-    expect(trigger.attributes('disabled')).toBeUndefined()
-    await trigger.trigger('click')
-
-    expect(wrapper.get('[data-testid="synthetic-modal-stub"]').text()).toBe('account-1:model-alpha')
-  })
-
-  it('does not change the legacy account controls', async () => {
-    workerContract.enabled = false
+  it.each([true, false])('does not inject the removed synthetic-probe entry when Worker mode is %s', async (enabled) => {
+    workerContract.enabled = enabled
     const wrapper = mountView()
     await flushPromises()
 

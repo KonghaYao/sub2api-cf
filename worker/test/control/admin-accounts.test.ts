@@ -82,6 +82,7 @@ class Statement {
         id, platform, name, credential_ref, enabled, max_concurrency,
         created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
         provider_config_json, image_adapter, credential_kind, billing_rate_multiplier_ppm,
+        ui_config_json,
       ] = this.values
       if ([...this.db.accounts.values()].some((row) => row.name === name)) {
         throw new Error('UNIQUE constraint failed: accounts.platform, accounts.name')
@@ -89,7 +90,7 @@ class Statement {
       this.db.accounts.set(String(id), {
         id, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms, base_url,
         platform, protocol, auth_scheme, provider_config_json, image_adapter, credential_kind,
-        billing_rate_multiplier_ppm,
+        billing_rate_multiplier_ppm, ui_config_json,
         config_version: 1,
         control_version: 0, health_status: 'unknown', last_checked_at_ms: null,
         last_latency_ms: null, last_health_error: null,
@@ -107,7 +108,7 @@ class Statement {
     if (this.sql.includes('UPDATE accounts') && this.sql.includes('control_version = CASE')) {
       const [
         name, enabled, max, base, providerConfig, imageAdapter, credentialKind,
-        billingRateMultiplier, config, expected, control, reset, , , , updated, id,
+        billingRateMultiplier, uiConfig, config, expected, control, reset, , , , updated, id,
       ] = this.values
       const row = this.db.accounts.get(String(id))
       if (!row) return result([], 0)
@@ -121,6 +122,7 @@ class Statement {
         image_adapter: imageAdapter,
         credential_kind: credentialKind,
         billing_rate_multiplier_ppm: billingRateMultiplier,
+        ui_config_json: uiConfig,
         config_version: config,
         control_version: control,
         updated_at_ms: updated,
@@ -199,7 +201,7 @@ class MemoryDb {
     const secret = this.secrets.get(String(account.credential_ref)); if (!secret) return null
     const links = [...this.groupLinks.values()].filter((row) => row.account_id === id).map(stripInternal)
     const caps = [...this.modelCaps.values()].filter((row) => row.account_id === id).map(stripInternal)
-    return { ...account, provider_config_json: account.provider_config_json ?? '{}', secret_id: secret.id, key_version: secret.key_version, nonce_b64: secret.nonce_b64, ciphertext_b64: secret.ciphertext_b64, group_links_json: JSON.stringify(links), model_capabilities_json: JSON.stringify(caps) }
+    return { ...account, provider_config_json: account.provider_config_json ?? '{}', ui_config_json: account.ui_config_json ?? '{}', secret_id: secret.id, key_version: secret.key_version, nonce_b64: secret.nonce_b64, ciphertext_b64: secret.ciphertext_b64, group_links_json: JSON.stringify(links), model_capabilities_json: JSON.stringify(caps) }
   }
 }
 

@@ -12,7 +12,7 @@ import {
   type ProviderProtocol,
 } from '../gateway/providers'
 import { credentialAad, validateBaseUrl } from '../gateway/repository'
-import type { AccountCredentialKind, AccountImageAdapter } from '../gateway/types'
+import type { AccountCredentialKind, AccountImageAdapter, UpstreamCredential } from '../gateway/types'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -56,6 +56,7 @@ interface AccountRow {
   created_at_ms: number
   updated_at_ms: number
   billing_rate_multiplier_ppm: number
+  ui_config_json: string
   secret_id: string
   key_version: number
   nonce_b64: string
@@ -89,12 +90,13 @@ interface CreateAccountInput {
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind
   provider_config: ProviderConfig
-  api_key: string
+  credential: StoredAccountCredential
   enabled: boolean
   max_concurrency: number
   billing_rate_multiplier_ppm: number
   group_links: GroupLinkInput[]
   model_capabilities: ModelCapabilityInput[]
+  ui_config: Record<string, unknown>
 }
 
 interface GroupLinkInput {
@@ -114,7 +116,7 @@ interface ModelCapabilityInput {
 interface AccountPatch {
   name?: string
   base_url?: string
-  api_key?: string
+  credential_patch?: Record<string, unknown>
   provider_config?: ProviderConfig
   enabled?: boolean
   max_concurrency?: number
@@ -123,7 +125,10 @@ interface AccountPatch {
   image_adapter?: AccountImageAdapter
   credential_kind?: AccountCredentialKind
   billing_rate_multiplier_ppm?: number
+  ui_config?: Record<string, unknown>
 }
+
+type StoredAccountCredential = UpstreamCredential & Record<string, unknown>
 
 const ACCOUNT_PROJECTION = `
   SELECT a.id, a.platform, a.name, a.credential_ref, a.enabled,
@@ -132,6 +137,7 @@ const ACCOUNT_PROJECTION = `
          a.config_version, a.control_version, a.health_status,
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
          a.created_at_ms, a.updated_at_ms, a.billing_rate_multiplier_ppm,
+         a.ui_config_json,
          s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64,
          COALESCE((
            SELECT json_group_array(json_object(
@@ -184,7 +190,7 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
     ]
     const values: unknown[] = []
     const platform = context.req.query('platform')
-    if (platform !== undefined) {
+    if (platform !== undefined && platform !== '') {
       const supportedPlatform = requireProviderPlatform(platform)
       conditions.push('a.platform = ?')
       values.push(supportedPlatform)
@@ -686,7 +692,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
     await validateLinks(context.env, input.platform, input.group_links, input.model_capabilities)
     const masterKey = requireCredentialsMasterKey(context.env)
     const encrypted = await encryptCredential(
-      { api_key: input.api_key },
+      input.credential,
       masterKey,
       credentialAad(context.env.ENVIRONMENT, accountId, secretId, 1),
     )
@@ -713,6 +719,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       created_at_ms: now,
       updated_at_ms: now,
       credential_key_version: 1,
+      ui_config: input.ui_config,
       group_links: input.group_links.map((value) => ({ ...value, control_version: 0 })),
       model_capabilities: input.model_capabilities.map((value) => ({
         ...value,
@@ -727,8 +734,8 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
            id, platform, name, credential_ref, enabled, max_concurrency,
            created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
            provider_config_json, image_adapter, credential_kind, config_version,
-           billing_rate_multiplier_ppm
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+           billing_rate_multiplier_ppm, ui_config_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       ).bind(
         accountId,
         input.platform,
@@ -745,6 +752,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         input.image_adapter,
         input.credential_kind,
         input.billing_rate_multiplier_ppm,
+        JSON.stringify(input.ui_config),
       ),
       context.env.DB.prepare(
         `INSERT INTO account_secrets (
@@ -790,10 +798,33 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
     const baseUrl = patch.base_url ?? account.base_url
     const providerConfig = patch.provider_config ?? parseProviderConfigProjection(account.provider_config_json)
     const resetHealth = patch.base_url !== undefined ||
-      patch.api_key !== undefined ||
+      patch.credential_patch !== undefined ||
       patch.provider_config !== undefined ||
       patch.image_adapter !== undefined ||
       patch.credential_kind !== undefined
+    let nextUiConfig = patch.ui_config ?? parseUiConfig(account.ui_config_json)
+    let nextCredential: StoredAccountCredential | undefined
+    if (patch.credential_patch !== undefined) {
+      const currentCredential = await decryptCredential(
+        account.nonce_b64,
+        account.ciphertext_b64,
+        requireCredentialsMasterKey(context.env),
+        credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+      )
+      nextCredential = mergeCredentialPatch(currentCredential as StoredAccountCredential, patch.credential_patch)
+      const nextCredentialStatus = credentialStatus(nextCredential)
+      const previousCredentialStatus = nextUiConfig.credentials_status
+      if (previousCredentialStatus !== null && typeof previousCredentialStatus === 'object' && !Array.isArray(previousCredentialStatus)) {
+        for (const key of Object.keys(previousCredentialStatus as Record<string, unknown>)) {
+          if (key.startsWith('has_') && nextCredentialStatus[key] === undefined) nextCredentialStatus[key] = false
+        }
+      }
+      nextUiConfig = {
+        ...nextUiConfig,
+        credentials: publicCredentials(nextCredential),
+        credentials_status: nextCredentialStatus,
+      }
+    }
     const statements: D1PreparedStatement[] = [
       accountCasStatement(context.env, account.id, account.control_version, {
         name: patch.name ?? account.name,
@@ -804,6 +835,7 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
         image_adapter: patch.image_adapter ?? account.image_adapter,
         credential_kind: patch.credential_kind ?? account.credential_kind,
         billing_rate_multiplier_ppm: patch.billing_rate_multiplier_ppm ?? account.billing_rate_multiplier_ppm,
+        ui_config: nextUiConfig,
         config_version: nextConfigVersion,
         control_version: nextControlVersion,
         now,
@@ -811,10 +843,10 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
       }),
     ]
     let nextKeyVersion = account.key_version
-    if (patch.api_key !== undefined) {
+    if (nextCredential !== undefined) {
       nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
       const encrypted = await encryptCredential(
-        { api_key: patch.api_key },
+        nextCredential,
         requireCredentialsMasterKey(context.env),
         credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
       )
@@ -879,6 +911,7 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
         image_adapter: account.image_adapter,
         credential_kind: account.credential_kind,
         billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+        ui_config: parseUiConfig(account.ui_config_json),
         config_version: incrementVersion(account.config_version, 'config_version'),
         control_version: incrementVersion(account.control_version, 'control_version'),
         now,
@@ -1081,6 +1114,7 @@ async function mutateAccountRelation(
       image_adapter: account.image_adapter,
       credential_kind: account.credential_kind,
       billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+      ui_config: parseUiConfig(account.ui_config_json),
       config_version: incrementVersion(account.config_version, 'config_version'),
       control_version: incrementVersion(account.control_version, 'control_version'),
       now,
@@ -1103,6 +1137,7 @@ function accountCasStatement(
     image_adapter: AccountImageAdapter
     credential_kind: AccountCredentialKind
     billing_rate_multiplier_ppm: number
+    ui_config: Record<string, unknown>
     config_version: number
     control_version: number
     now: number
@@ -1113,6 +1148,7 @@ function accountCasStatement(
     `UPDATE accounts
         SET name = ?, enabled = ?, max_concurrency = ?, base_url = ?, provider_config_json = ?,
             image_adapter = ?, credential_kind = ?, billing_rate_multiplier_ppm = ?,
+            ui_config_json = ?,
             config_version = ?,
             control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
             health_status = CASE WHEN ? = 1 THEN 'unknown' ELSE health_status END,
@@ -1130,6 +1166,7 @@ function accountCasStatement(
     value.image_adapter,
     value.credential_kind,
     value.billing_rate_multiplier_ppm,
+    JSON.stringify(value.ui_config),
     value.config_version,
     expectedControlVersion,
     value.control_version,
@@ -1176,16 +1213,34 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
       'platform, protocol, and auth_scheme must use a supported provider contract',
     )
   }
-  const baseUrl = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
+  const submittedCredentials = body.credentials === undefined
+    ? {}
+    : requireCredentialObject(body.credentials, 'credentials', true)
+  const rawBaseUrl = body.base_url ?? submittedCredentials.base_url
+  const baseUrl = normalizeBaseUrl(requireString({ base_url: rawBaseUrl }, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
   const imageAdapter = body.image_adapter === undefined
     ? defaultImageAdapter(platform)
     : requireAccountImageAdapter(body.image_adapter)
   const credentialKind = body.credential_kind === undefined
-    ? defaultCredentialKind(platform)
+    ? credentialKindForType(body.type, platform)
     : requireAccountCredentialKind(body.credential_kind)
   validateAccountExecution(platform, imageAdapter, credentialKind)
-  validateAccountType(body)
+  validateAccountType(body, platform, credentialKind)
+  const rawApiKey = body.api_key ?? submittedCredentials.api_key
+  const apiKey = requireProviderCredential({ api_key: rawApiKey }, 'api_key')
+  const credential = {
+    ...submittedCredentials,
+    ...(body.credentials === undefined ? {} : { base_url: baseUrl }),
+    api_key: apiKey,
+  } as StoredAccountCredential
+  const maxConcurrencyField = body.max_concurrency === undefined ? 'concurrency' : 'max_concurrency'
+  const maxConcurrencyValue = body.max_concurrency ?? body.concurrency
+  const priority = body.priority === undefined ? 0 : requireSafeInteger(body, 'priority', -1_000, 1_000)
+  const groupLinks = body.group_links === undefined
+    ? parseLegacyGroupIds(body.group_ids, priority)
+    : parseGroupLinks(body.group_links)
+  const uiConfig = createUiConfig(body, credential, credentialKind)
   return {
     name: requireString(body, 'name', 128),
     platform,
@@ -1195,20 +1250,21 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     provider_config: parseProviderConfig(body.provider_config, platform),
     image_adapter: imageAdapter,
     credential_kind: credentialKind,
-    api_key: requireProviderCredential(body, 'api_key'),
+    credential,
     enabled,
-    max_concurrency: body.max_concurrency === undefined
+    max_concurrency: maxConcurrencyValue === undefined
       ? 4
-      : requireSafeInteger(body, 'max_concurrency', 1, 1_000),
+      : requireSafeInteger({ [maxConcurrencyField]: maxConcurrencyValue }, maxConcurrencyField, 1, 1_000),
     billing_rate_multiplier_ppm: parseRateMultiplier(body.rate_multiplier ?? 1),
-    group_links: parseGroupLinks(body.group_links),
+    group_links: groupLinks,
     model_capabilities: parseModelCapabilities(body.model_capabilities),
+    ui_config: uiConfig,
   }
 }
 
 function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): AccountPatch {
   rejectUnknownFields(body, UPDATE_ACCOUNT_FIELDS)
-  validateAccountType(body)
+  validateAccountType(body, account.platform, account.credential_kind)
   assertImmutableProviderField(body.platform, account.platform, 'platform', requireProviderPlatform)
   assertImmutableProviderField(body.protocol, account.protocol, 'protocol', requireProviderProtocol)
   assertImmutableProviderField(
@@ -1218,9 +1274,19 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
     requireProviderAuthScheme,
   )
   const patch: AccountPatch = {}
+  const currentUiConfig = parseUiConfig(account.ui_config_json)
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
   if (body.base_url !== undefined) patch.base_url = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
-  if (body.api_key !== undefined) patch.api_key = requireProviderCredential(body, 'api_key')
+  if (body.credentials !== undefined) {
+    patch.credential_patch = requireCredentialObject(body.credentials, 'credentials', false)
+    if (Object.prototype.hasOwnProperty.call(patch.credential_patch, 'base_url')) {
+      patch.base_url = normalizeBaseUrl(requireString(patch.credential_patch, 'base_url', 2_048))
+      patch.credential_patch.base_url = patch.base_url
+    }
+  }
+  if (body.api_key !== undefined) {
+    patch.credential_patch = { ...patch.credential_patch, api_key: requireProviderCredential(body, 'api_key') }
+  }
   if (body.provider_config !== undefined) {
     patch.provider_config = parseProviderConfig(body.provider_config, account.platform)
   }
@@ -1235,17 +1301,34 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
     patch.image_adapter ?? account.image_adapter,
     patch.credential_kind ?? account.credential_kind,
   )
-  if (body.enabled !== undefined || body.status !== undefined) patch.enabled = parseEnabledBody(body, true)
-  if (body.max_concurrency !== undefined) {
-    patch.max_concurrency = requireSafeInteger(body, 'max_concurrency', 1, 1_000)
+  if (body.enabled !== undefined || body.status !== undefined || body.schedulable !== undefined) {
+    if (body.status === 'error') {
+      throw new GatewayError(409, 'status_not_supported', 'Worker accounts cannot be placed in error status manually')
+    }
+    const enabledBody = body.enabled === undefined && body.schedulable !== undefined
+      ? { ...body, enabled: body.schedulable }
+      : body
+    patch.enabled = parseEnabledBody(enabledBody, true)
+  }
+  if (body.max_concurrency !== undefined || body.concurrency !== undefined) {
+    const field = body.max_concurrency === undefined ? 'concurrency' : 'max_concurrency'
+    patch.max_concurrency = requireSafeInteger({ [field]: body.max_concurrency ?? body.concurrency }, field, 1, 1_000)
   }
   if (body.rate_multiplier !== undefined) {
     patch.billing_rate_multiplier_ppm = parseRateMultiplier(body.rate_multiplier)
   }
   if (body.group_links !== undefined) patch.group_links = parseGroupLinks(body.group_links)
+  else if (body.group_ids !== undefined) {
+    const priority = body.priority === undefined
+      ? (typeof currentUiConfig.priority === 'number' ? currentUiConfig.priority : 0)
+      : requireSafeInteger(body, 'priority', -1_000, 1_000)
+    patch.group_links = parseLegacyGroupIds(body.group_ids, priority)
+  }
   if (body.model_capabilities !== undefined) {
     patch.model_capabilities = parseModelCapabilities(body.model_capabilities)
   }
+  const uiPatch = updateUiConfig(currentUiConfig, body)
+  if (uiPatch !== undefined) patch.ui_config = uiPatch
   if (Object.keys(patch).length === 0) {
     throw new GatewayError(400, 'empty_account_update', 'Provide at least one account field to update')
   }
@@ -1256,7 +1339,10 @@ const CREATE_ACCOUNT_FIELDS = new Set([
   'name', 'platform', 'protocol', 'base_url', 'auth_scheme', 'provider_config',
   'api_key', 'enabled', 'status', 'max_concurrency', 'group_links',
   'model_capabilities', 'image_adapter', 'credential_kind', 'type',
-  'rate_multiplier',
+  'rate_multiplier', 'credentials', 'notes', 'extra', 'proxy_id', 'concurrency',
+  'load_factor', 'priority', 'group_ids', 'expires_at', 'auto_pause_on_expired',
+  'upstream_billing_probe_enabled', 'upstream_billing_rate_sync_enabled',
+  'schedulable', 'confirm_mixed_channel_risk',
 ])
 const UPDATE_ACCOUNT_FIELDS = new Set([
   ...CREATE_ACCOUNT_FIELDS,
@@ -1270,10 +1356,187 @@ function rejectUnknownFields(body: Record<string, unknown>, allowed: ReadonlySet
   }
 }
 
-function validateAccountType(body: Record<string, unknown>): void {
-  if (body.type !== undefined && body.type !== 'apikey') {
-    throw new GatewayError(409, 'type_not_supported', 'Only apikey account type is supported')
+function validateAccountType(
+  body: Record<string, unknown>,
+  platform: ProviderPlatform,
+  credentialKind: AccountCredentialKind,
+): void {
+  if (body.type === undefined) return
+  const expected = credentialKind === 'api_key'
+    ? 'apikey'
+    : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'
+  if (body.type !== expected || (platform !== 'codex' && body.type !== 'apikey')) {
+    throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
   }
+}
+
+function credentialKindForType(value: unknown, platform: ProviderPlatform): AccountCredentialKind {
+  if (value === undefined) return defaultCredentialKind(platform)
+  if (value === 'apikey') return 'api_key'
+  if (platform === 'codex' && value === 'oauth') return 'oauth'
+  if (platform === 'codex' && value === 'setup-token') return 'setup_token'
+  throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
+}
+
+const UI_CONFIG_VERSION = 1
+const UI_COMPAT_FIELDS = [
+  'notes', 'extra', 'proxy_id', 'load_factor', 'priority', 'expires_at',
+  'auto_pause_on_expired', 'upstream_billing_probe_enabled',
+  'upstream_billing_rate_sync_enabled',
+] as const
+const SECRET_CREDENTIAL_FIELDS = new Set([
+  'api_key', 'access_token', 'refresh_token', 'id_token', 'session_key', 'cookie',
+  'aws_secret_access_key', 'aws_session_token', 'service_account_json',
+  'service_account', 'private_key', 'client_secret', 'password',
+])
+
+function requireCredentialObject(value: unknown, field: string, requireApiKeyShape: boolean): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must be an object`)
+  }
+  let serialized: string
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must be JSON serializable`)
+  }
+  if (serialized.length > 65_536) {
+    throw new GatewayError(400, `invalid_${field}`, `${field} must not exceed 65536 characters`)
+  }
+  const result = JSON.parse(serialized) as Record<string, unknown>
+  if (requireApiKeyShape && result.api_key !== undefined && typeof result.api_key !== 'string') {
+    throw new GatewayError(400, 'invalid_api_key', 'api_key must be a string')
+  }
+  return result
+}
+
+function parseLegacyGroupIds(value: unknown, priority: number): GroupLinkInput[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new GatewayError(400, 'invalid_group_ids', 'group_ids must be an array with at most 100 entries')
+  }
+  return value.map((groupId) => ({
+    group_id: requireResourceId(typeof groupId === 'number' ? String(groupId) : groupId as string, 'group'),
+    priority,
+    weight: 1,
+  }))
+}
+
+function createUiConfig(
+  body: Record<string, unknown>,
+  credential: StoredAccountCredential,
+  credentialKind: AccountCredentialKind,
+): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    schema_version: UI_CONFIG_VERSION,
+    type: body.type ?? (credentialKind === 'api_key'
+      ? 'apikey'
+      : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'),
+    credentials: publicCredentials(credential),
+    credentials_status: credentialStatus(credential),
+  }
+  for (const field of UI_COMPAT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      assertNoSensitiveUiFields(body[field], field)
+      config[field] = cloneJsonValue(body[field])
+    }
+  }
+  return config
+}
+
+function updateUiConfig(
+  current: Record<string, unknown>,
+  body: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  let changed = false
+  const next: Record<string, unknown> = { ...current, schema_version: UI_CONFIG_VERSION }
+  for (const field of UI_COMPAT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      assertNoSensitiveUiFields(body[field], field)
+      next[field] = cloneJsonValue(body[field])
+      changed = true
+    }
+  }
+  return changed ? next : undefined
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  if (value === undefined) return null
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown
+  } catch {
+    throw new GatewayError(400, 'invalid_account_field', 'Account form field must be JSON serializable')
+  }
+}
+
+function assertNoSensitiveUiFields(value: unknown, path: string): void {
+  if (value === null || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertNoSensitiveUiFields(entry, `${path}[${index}]`))
+    return
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key.startsWith('has_') && typeof entry === 'boolean') continue
+    if (isSensitiveCredentialField(key)) {
+      throw new GatewayError(
+        400,
+        'secret_outside_credentials',
+        `Secret field '${path}.${key}' must be submitted inside credentials`,
+      )
+    }
+    assertNoSensitiveUiFields(entry, `${path}.${key}`)
+  }
+}
+
+function isSensitiveCredentialField(key: string): boolean {
+  const normalized = key.toLowerCase()
+  return SECRET_CREDENTIAL_FIELDS.has(normalized) ||
+    normalized.endsWith('_token') || normalized.endsWith('_secret') ||
+    normalized.endsWith('_password') || normalized.endsWith('_cookie') ||
+    normalized.endsWith('_private_key')
+}
+
+function publicCredentials(value: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (isSensitiveCredentialField(key)) continue
+    result[key] = publicCredentialValue(entry)
+  }
+  return result
+}
+
+function publicCredentialValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(publicCredentialValue)
+  if (value !== null && typeof value === 'object') {
+    return publicCredentials(value as Record<string, unknown>)
+  }
+  return value
+}
+
+function credentialStatus(value: Record<string, unknown>): Record<string, boolean> {
+  const status: Record<string, boolean> = { has_api_key: isPresentSecret(value.api_key) }
+  for (const [key, entry] of Object.entries(value)) {
+    if (isSensitiveCredentialField(key)) status[`has_${key}`] = isPresentSecret(entry)
+  }
+  return status
+}
+
+function isPresentSecret(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== ''
+}
+
+function mergeCredentialPatch(
+  current: StoredAccountCredential,
+  patch: Record<string, unknown>,
+): StoredAccountCredential {
+  const next: Record<string, unknown> = { ...current }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null || value === '') delete next[key]
+    else next[key] = value
+  }
+  const apiKey = requireProviderCredential({ api_key: next.api_key }, 'api_key')
+  next.api_key = apiKey
+  return next as StoredAccountCredential
 }
 
 function requireProviderCredential(body: Record<string, unknown>, field: string): string {
@@ -1397,6 +1660,8 @@ function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boo
 }
 
 function parseEnabledQuery(enabled: string | undefined, status: string | undefined): boolean | undefined {
+  enabled = enabled === '' ? undefined : enabled
+  status = status === '' ? undefined : status
   if (enabled !== undefined && status !== undefined) {
     throw new GatewayError(400, 'ambiguous_status', 'Provide enabled or status, not both')
   }
@@ -1640,6 +1905,7 @@ function publicAccount(row: AccountRow) {
     created_at_ms: row.created_at_ms,
     updated_at_ms: row.updated_at_ms,
     credential_key_version: row.key_version,
+    ui_config: parseUiConfig(row.ui_config_json),
     group_links: groups,
     model_capabilities: capabilities,
   })
@@ -1667,21 +1933,66 @@ function accountResponse(value: {
   created_at_ms: number
   updated_at_ms: number
   credential_key_version: number
+  ui_config: Record<string, unknown>
   group_links: GroupLink[]
   model_capabilities: ModelCapability[]
 }) {
-  const { billing_rate_multiplier_ppm: multiplierPpm, ...publicValue } = value
+  const { billing_rate_multiplier_ppm: multiplierPpm, ui_config: uiConfig, ...publicValue } = value
+  const compatibility = compatibilityProjection(uiConfig, value)
   return {
     ...publicValue,
+    ...compatibility,
     rate_multiplier: multiplierPpm / 1_000_000,
     enabled: value.enabled,
     status: value.enabled ? 'active' as const : 'inactive' as const,
-    credentials_status: { has_api_key: true },
+    credentials_status: compatibility.credentials_status ?? { has_api_key: true },
     provider_account_metadata: {
       quota: { status: 'unsupported' as const, value: null },
       tier: { status: 'unsupported' as const, value: null },
       privacy: { status: 'unsupported' as const, value: null },
     },
+  }
+}
+
+function parseUiConfig(raw: unknown): Record<string, unknown> {
+  // Rows created before migration 0064 (and lightweight test adapters that
+  // model that schema) have no compatibility projection yet.
+  if (raw === undefined || raw === null || raw === '') return {}
+  if (typeof raw !== 'string') {
+    throw new GatewayError(500, 'invalid_account_projection', 'Account UI projection is invalid', 'server_error')
+  }
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object')
+    assertNoSensitiveUiFields(value, 'ui_config_json')
+    return value as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof GatewayError) throw error
+    throw new GatewayError(500, 'invalid_account_projection', 'Account UI projection is invalid', 'server_error')
+  }
+}
+
+function compatibilityProjection(
+  uiConfig: Record<string, unknown>,
+  value: {
+    base_url: string
+    credential_kind: AccountCredentialKind
+    max_concurrency: number
+    group_links: GroupLink[]
+  },
+): Record<string, unknown> {
+  const { schema_version: _schemaVersion, credentials: storedCredentials, ...stored } = uiConfig
+  const credentials = storedCredentials !== null && typeof storedCredentials === 'object' && !Array.isArray(storedCredentials)
+    ? storedCredentials as Record<string, unknown>
+    : {}
+  return {
+    ...stored,
+    type: uiConfig.type ?? (value.credential_kind === 'api_key'
+      ? 'apikey'
+      : value.credential_kind === 'setup_token' ? 'setup-token' : 'oauth'),
+    credentials: { ...credentials, base_url: value.base_url },
+    concurrency: value.max_concurrency,
+    group_ids: value.group_links.map((link) => link.group_id),
   }
 }
 

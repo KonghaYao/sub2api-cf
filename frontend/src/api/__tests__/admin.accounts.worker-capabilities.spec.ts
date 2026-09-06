@@ -25,7 +25,7 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
-  it('keeps only non-empty Worker-supported list filters and sorting', async () => {
+  it('forwards every account-list filter and sort field to the Worker unchanged', async () => {
     get.mockResolvedValueOnce({ data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 } })
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
@@ -46,7 +46,12 @@ describe('admin accounts Worker transport capabilities', () => {
       params: {
         page: 1,
         page_size: 20,
+        platform: 'toString',
+        status: '',
+        type: 'oauth',
         group: 'worker-group',
+        search: '  ',
+        include_scheduler_score: '1',
         sort_by: 'rate_multiplier',
         sort_order: 'desc',
       },
@@ -131,7 +136,87 @@ describe('admin accounts Worker transport capabilities', () => {
     }
   )
 
-  it('never sends proxy or TLS fingerprint fields on create', async () => {
+  it('preserves compatibility fields already projected by the Worker', async () => {
+    const projected = {
+      id: 'account-opaque-id',
+      name: 'Preserved projection',
+      platform: 'openai',
+      protocol: 'openai',
+      auth_scheme: 'bearer',
+      base_url: 'https://worker.example/v1',
+      enabled: true,
+      max_concurrency: 4,
+      type: 'oauth',
+      credentials: { base_url: 'https://compat.example/v1', organization: null },
+      provider_config: { region: 'test-region', nullable: null },
+      proxy_id: 'opaque-proxy',
+      concurrency: 9,
+      priority: 7,
+      status: 'error',
+      error_message: 'preserved health error',
+      last_used_at: '2026-09-06T01:02:03.000Z',
+      expires_at: 1_900_000_000,
+      auto_pause_on_expired: true,
+      created_at: '2026-09-01T00:00:00.000Z',
+      updated_at: '2026-09-02T00:00:00.000Z',
+      group_ids: ['compat-group'],
+      group_links: [{ group_id: 'canonical-group', priority: 2, weight: 1 }],
+      schedulable: false,
+      rate_limited_at: '2026-09-06T02:00:00.000Z',
+      rate_limit_reset_at: '2026-09-06T03:00:00.000Z',
+      overload_until: '2026-09-06T04:00:00.000Z',
+      temp_unschedulable_until: '2026-09-06T05:00:00.000Z',
+      temp_unschedulable_reason: 'maintenance',
+      session_window_start: '2026-09-06T00:00:00.000Z',
+      session_window_end: '2026-09-06T05:00:00.000Z',
+      session_window_status: 'rejected',
+    }
+    get.mockResolvedValueOnce({ data: projected })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { getById } = await import('@/api/admin/accounts')
+
+    await expect(getById('account-opaque-id')).resolves.toMatchObject(projected)
+  })
+
+  it('does not expose plaintext secrets from a Worker account response', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        id: 'account-opaque-id',
+        name: 'Safe projection',
+        platform: 'openai',
+        protocol: 'openai',
+        auth_scheme: 'bearer',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'top-level-secret',
+        credentials: {
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'nested-secret',
+          access_token: 'nested-access-token',
+          organization: 'safe-organization',
+        },
+        credentials_status: { has_api_key: true },
+        enabled: true,
+        max_concurrency: 4,
+        group_links: [],
+      },
+    })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { getById } = await import('@/api/admin/accounts')
+
+    const account = await getById('account-opaque-id')
+    expect(JSON.stringify(account)).not.toContain('top-level-secret')
+    expect(JSON.stringify(account)).not.toContain('nested-secret')
+    expect(JSON.stringify(account)).not.toContain('nested-access-token')
+    expect(account.credentials).toEqual({
+      base_url: 'https://api.openai.com/v1',
+      organization: 'safe-organization',
+    })
+    expect(account.credentials_status).toEqual({ has_api_key: true })
+  })
+
+  it('forwards a complex original account DTO to Worker create without dropping UI fields', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
     const { create } = await import('@/api/admin/accounts')
@@ -154,7 +239,7 @@ describe('admin accounts Worker transport capabilities', () => {
       },
     })
 
-    const account = await create({
+    const request = {
       name: 'primary',
       platform: 'openai',
       protocol: 'openai',
@@ -162,30 +247,29 @@ describe('admin accounts Worker transport capabilities', () => {
       type: 'apikey',
       base_url: 'https://api.openai.com/v1',
       api_key: 'secret-key',
+      credentials: {
+        base_url: 'https://legacy-openai.example/v1',
+        api_key: 'legacy-secret-key',
+        organization: null,
+      },
       enabled: true,
       max_concurrency: 4,
-      group_links: [],
-      model_capabilities: [{ model_id: 'model-1', responses: true }],
-      proxy_id: 9,
+      concurrency: 7,
+      rate_multiplier: 1.25,
+      notes: null,
+      group_ids: ['group-legacy'],
+      group_links: [{ group_id: 'group-1', priority: 2, weight: 3 }],
+      model_capabilities: [{ model_id: 'model-1', responses: true, embeddings: false }],
+      proxy_id: null,
       extra: {
         enable_tls_fingerprint: true,
         tls_fingerprint_profile_id: 2,
+        nullable_override: null,
       },
-    } as never)
+    }
+    const account = await create(request as never)
 
-    expect(post).toHaveBeenCalledWith('/admin/accounts', {
-      name: 'primary',
-      platform: 'openai',
-      protocol: 'openai',
-      auth_scheme: 'bearer',
-      type: 'apikey',
-      base_url: 'https://api.openai.com/v1',
-      api_key: 'secret-key',
-      enabled: true,
-      max_concurrency: 4,
-      group_links: [],
-      model_capabilities: [{ model_id: 'model-1', responses: true }],
-    }, {
+    expect(post).toHaveBeenCalledWith('/admin/accounts', request, {
       headers: {
         'Idempotency-Key': 'admin-account-create-33333333-3333-4333-8333-333333333333',
       },
@@ -222,7 +306,7 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(post.mock.calls[0]?.[2]).toEqual(post.mock.calls[1]?.[2])
   })
 
-  it('keeps the Worker Codex provider_config while removing unsupported fields', async () => {
+  it('keeps the Worker Codex provider_config and UI-only fields', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
     const { create } = await import('@/api/admin/accounts')
@@ -244,26 +328,116 @@ describe('admin accounts Worker transport capabilities', () => {
       platform: 'codex',
       provider_config: { account_id: 'acct_codex' },
     })
-    expect(post.mock.calls[0]?.[1]).not.toHaveProperty('notes')
+    expect(post.mock.calls[0]?.[1]).toHaveProperty('notes', 'legacy-only')
   })
 
-  it('never sends proxy or fingerprint fields on update', async () => {
+  it('forwards original update fields and clear values while moving only CAS metadata to the header', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
     const { update } = await import('@/api/admin/accounts')
 
-    await update(1, {
-      proxy_id: 0,
+    const request = {
+      proxy_id: null,
       name: 'updated',
       expected_control_version: 7,
-      extra: { utls: 'chrome', ja3: 'fingerprint', keep: 'yes' },
-    } as never)
+      notes: null,
+      credentials: { api_key: '', organization: null },
+      extra: { utls: null, ja3: '', keep: 'yes' },
+      group_ids: [],
+      group_links: [{ group_id: 'group-2', priority: 0, weight: 1 }],
+      model_capabilities: [{ model_id: 'model-2', responses: false }],
+    }
+    await update('account-opaque-id', request as never)
 
-    expect(put).toHaveBeenCalledWith('/admin/accounts/1', {
+    expect(put).toHaveBeenCalledWith('/admin/accounts/account-opaque-id', {
+      proxy_id: null,
       name: 'updated',
+      notes: null,
+      credentials: { api_key: '', organization: null },
+      extra: { utls: null, ja3: '', keep: 'yes' },
+      group_ids: [],
+      group_links: [{ group_id: 'group-2', priority: 0, weight: 1 }],
+      model_capabilities: [{ model_id: 'model-2', responses: false }],
     }, {
       headers: { 'If-Match': '"7"' },
     })
+  })
+
+  it('forwards complete account DTOs through Worker batch create and redacts returned secrets', async () => {
+    const request = [{
+      name: 'batch account',
+      platform: 'openai',
+      type: 'apikey',
+      credentials: { base_url: 'https://batch.example/v1', api_key: 'request-secret' },
+      notes: null,
+      proxy_id: null,
+      group_ids: ['group-opaque'],
+      extra: { utls: null, retained: 'yes' },
+    }]
+    post.mockResolvedValueOnce({
+      data: {
+        success: 1,
+        failed: 0,
+        results: [{
+          success: true,
+          account: {
+            id: 'account-opaque-id',
+            name: 'batch account',
+            platform: 'openai',
+            protocol: 'openai',
+            auth_scheme: 'bearer',
+            enabled: true,
+            max_concurrency: 4,
+            credentials: { base_url: 'https://batch.example/v1', api_key: 'response-secret' },
+            credentials_status: { has_api_key: true },
+          },
+        }],
+      },
+    })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchCreate } = await import('@/api/admin/accounts')
+
+    const result = await batchCreate(request as never)
+
+    expect(post).toHaveBeenCalledWith('/admin/accounts/batch', { accounts: request })
+    expect(result.results[0]?.account?.id).toBe('account-opaque-id')
+    expect(JSON.stringify(result)).not.toContain('response-secret')
+    expect(result.results[0]?.account?.credentials_status).toEqual({ has_api_key: true })
+  })
+
+  it('forwards Worker bulk update fields and opaque account IDs unchanged', async () => {
+    const request = {
+      account_ids: ['account-a', 'account-b'],
+      notes: null,
+      proxy_id: null,
+      credentials: { api_key: '', organization: null },
+      extra: { ja3: '', retained: 'yes' },
+    }
+    post.mockResolvedValueOnce({ data: { success: 2, failed: 0, results: [] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkUpdate } = await import('@/api/admin/accounts')
+
+    await bulkUpdate(request)
+
+    expect(post).toHaveBeenCalledWith('/admin/accounts/bulk-update', request)
+  })
+
+  it('keeps opaque account IDs and explicit credential clear values in batch updates', async () => {
+    const request = {
+      account_ids: ['account-a', 'account-b'],
+      field: 'api_key',
+      value: null,
+    }
+    post.mockResolvedValueOnce({ data: { success: 2, failed: 0, results: [] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchUpdateCredentials } = await import('@/api/admin/accounts')
+
+    await batchUpdateCredentials(request)
+
+    expect(post).toHaveBeenCalledWith('/admin/accounts/batch-update-credentials', request)
   })
 
   it('does not expose the absent per-account schedulable route in Worker mode', async () => {

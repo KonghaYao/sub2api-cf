@@ -245,7 +245,7 @@ describe('admin AccountsView bulk edit scope', () => {
     probeUpstreamBillingBatch.mockResolvedValue([])
   })
 
-  it('does not load host proxy, today-stats, or upstream billing APIs in Worker mode', async () => {
+  it('keeps the original account filters, bulk actions, and columns in Worker mode', async () => {
     workerSettings.cloudflareWorkerContract = true
     const wrapper = mountWorkerView()
     await flushPromises()
@@ -253,11 +253,9 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(workerSettings.fetch).toHaveBeenCalledOnce()
     expect(listAccounts).toHaveBeenCalled()
     expect(getAllGroups).toHaveBeenCalledOnce()
-    expect(getAllProxies).not.toHaveBeenCalled()
-    expect(getBatchTodayStats).not.toHaveBeenCalled()
-    expect(getUpstreamBillingProbeSettings).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-test="edit-filtered"]').exists()).toBe(false)
-    expect(wrapper.get('[data-test="account-filters"]').attributes('data-worker')).toBe('true')
+    expect(getAllProxies).toHaveBeenCalledOnce()
+    expect(getUpstreamBillingProbeSettings).toHaveBeenCalledOnce()
+    expect(wrapper.find('[data-test="edit-filtered"]').exists()).toBe(true)
     expect(wrapper.findAll('[data-test="column-key"]').map((node) => node.text())).toEqual([
       'select',
       'name',
@@ -265,14 +263,19 @@ describe('admin AccountsView bulk edit scope', () => {
       'platform_type',
       'capacity',
       'status',
+      'schedulable',
       'groups',
-      'rate_multiplier',
+      'usage',
+      'priority',
+      'upstream_billing_rate',
+      'last_used_at',
       'created_at',
+      'expires_at',
       'actions',
     ])
   })
 
-  it('does not render or call the absent per-account schedulable action in Worker mode', async () => {
+  it('keeps the original per-account schedulable action in Worker mode', async () => {
     workerSettings.cloudflareWorkerContract = true
     listAccounts.mockResolvedValueOnce({
       items: [{
@@ -287,11 +290,18 @@ describe('admin AccountsView bulk edit scope', () => {
     const wrapper = mountWorkerView()
     await flushPromises()
 
-    expect(wrapper.find('[title="admin.accounts.schedulableEnabled"]').exists()).toBe(false)
-    expect(setSchedulable).not.toHaveBeenCalled()
+    const toggle = wrapper.get('[title="admin.accounts.schedulableEnabled"]')
+    expect(wrapper.find('[data-testid="open-synthetic-probes"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="worker-account-health-account-uuid"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="account-actions"]').text()).toContain('common.edit')
+    expect(wrapper.get('[data-test="account-actions"]').text()).toContain('common.delete')
+    expect(wrapper.get('[data-test="account-actions"]').text()).toContain('common.more')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(setSchedulable).toHaveBeenCalledWith('account-uuid', false)
   })
 
-  it('hydrates Worker group links into the restored groups column', async () => {
+  it('keeps the original groups column in Worker mode', async () => {
     workerSettings.cloudflareWorkerContract = true
     getAllGroups.mockResolvedValueOnce([{ id: 'worker-group', name: 'Worker group' }])
     listAccounts.mockResolvedValueOnce({
@@ -303,166 +313,9 @@ describe('admin AccountsView bulk edit scope', () => {
     })
     const wrapper = mountWorkerView()
     await flushPromises()
-    expect(wrapper.get('[data-test="account-groups"]').text()).toBe('Worker group')
+    expect(wrapper.findAll('[data-test="column-key"]').map((node) => node.text())).toContain('groups')
   })
 
-  it('runs a Worker account health check from the row action', async () => {
-    workerSettings.cloudflareWorkerContract = true
-    const account = {
-      id: 'account-uuid',
-      name: 'Anthropic primary',
-      platform: 'anthropic',
-      protocol: 'anthropic',
-      auth_scheme: 'x-api-key',
-      type: 'apikey',
-      credentials: { base_url: 'https://api.anthropic.com' },
-      base_url: 'https://api.anthropic.com',
-      enabled: true,
-      max_concurrency: 3,
-      concurrency: 3,
-      priority: 0,
-      status: 'active',
-      group_ids: [],
-      auto_pause_on_expired: false,
-      created_at: '2026-09-05T00:00:00.000Z',
-      updated_at: '2026-09-05T00:00:00.000Z',
-      control_version: 1,
-    }
-    listAccounts.mockResolvedValueOnce({
-      items: [account],
-      total: 1,
-      page: 1,
-      page_size: 20,
-      pages: 1,
-    })
-    testAccount.mockResolvedValueOnce({
-      ...account,
-      health_status: 'healthy',
-      last_latency_ms: 24,
-      success: true,
-      message: 'Account connectivity test succeeded',
-      latency_ms: 24,
-    })
-    const wrapper = mountWorkerView()
-    await flushPromises()
-
-    await wrapper.get('[data-testid="worker-account-health-account-uuid"]').trigger('click')
-    await flushPromises()
-
-    expect(testAccount).toHaveBeenCalledWith('account-uuid')
-    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.testCompleted')
-  })
-
-  it('opens account cost statistics from a Worker account row', async () => {
-    workerSettings.cloudflareWorkerContract = true
-    const account = {
-      id: 'account-uuid',
-      name: 'Anthropic primary',
-      platform: 'anthropic',
-      protocol: 'anthropic',
-      auth_scheme: 'x-api-key',
-      type: 'apikey',
-      credentials: { base_url: 'https://api.anthropic.com' },
-      base_url: 'https://api.anthropic.com',
-      enabled: true,
-      max_concurrency: 3,
-      concurrency: 3,
-      priority: 0,
-      rate_multiplier: 1.25,
-      status: 'active',
-      group_ids: [],
-      auto_pause_on_expired: false,
-      created_at: '2026-09-05T00:00:00.000Z',
-      updated_at: '2026-09-05T00:00:00.000Z',
-      control_version: 1,
-    }
-    listAccounts.mockResolvedValueOnce({
-      items: [account], total: 1, page: 1, page_size: 20, pages: 1,
-    })
-    const wrapper = mountWorkerView()
-    await flushPromises()
-
-    await wrapper.get('[data-testid="worker-account-stats-account-uuid"]').trigger('click')
-
-    const modal = wrapper.findComponent({ name: 'AccountStatsModal' })
-    expect(modal.exists()).toBe(true)
-    expect(modal.props('show')).toBe(true)
-    expect(modal.props('account')).toMatchObject({ id: 'account-uuid', rate_multiplier: 1.25 })
-  })
-
-  it('merges a partial Worker health response without losing identity and de-duplicates an in-flight probe', async () => {
-    workerSettings.cloudflareWorkerContract = true
-    const account = {
-      id: 'account-uuid',
-      name: 'Anthropic primary',
-      platform: 'anthropic',
-      protocol: 'anthropic',
-      auth_scheme: 'x-api-key',
-      type: 'apikey',
-      credentials: { base_url: 'https://api.anthropic.com' },
-      base_url: 'https://api.anthropic.com',
-      enabled: true,
-      max_concurrency: 3,
-      concurrency: 3,
-      priority: 0,
-      status: 'active',
-      group_ids: [],
-      auto_pause_on_expired: false,
-      created_at: '2026-09-05T00:00:00.000Z',
-      updated_at: '2026-09-05T00:00:00.000Z',
-      control_version: 1,
-    }
-    listAccounts.mockResolvedValueOnce({
-      items: [account],
-      total: 1,
-      page: 1,
-      page_size: 20,
-      pages: 1,
-    })
-
-    let resolveHealth!: (result: Record<string, unknown>) => void
-    testAccount.mockImplementationOnce(() => new Promise((resolve) => {
-      resolveHealth = resolve
-    }))
-    const wrapper = mountWorkerView()
-    await flushPromises()
-
-    ;(wrapper.vm as unknown as { params: { search: string } }).params.search = 'anthropic'
-    const healthButton = wrapper.get('[data-testid="worker-account-health-account-uuid"]')
-    await healthButton.trigger('click')
-
-    expect(healthButton.attributes('disabled')).toBeDefined()
-    await healthButton.trigger('click')
-    expect(testAccount).toHaveBeenCalledTimes(1)
-
-    resolveHealth({
-      id: 'account-uuid',
-      name: undefined,
-      platform: undefined,
-      protocol: undefined,
-      health_status: 'healthy',
-      last_checked_at_ms: 1_788_547_200_000,
-      last_latency_ms: 24,
-      last_health_error: null,
-      config_version: 1,
-      control_version: 2,
-      updated_at: '2026-09-05T00:01:00.000Z',
-      success: true,
-      message: 'Account connectivity test succeeded',
-      latency_ms: 24,
-    })
-    await flushPromises()
-
-    expect(wrapper.get('[data-test="account-identity"]').text()).toBe(
-      'account-uuid|Anthropic primary|anthropic|anthropic'
-    )
-    expect(wrapper.get('[data-test="account-health"]').text()).toBe(
-      'healthy|24|2|2026-09-05T00:01:00.000Z'
-    )
-    expect(healthButton.attributes('disabled')).toBeUndefined()
-    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.testCompleted')
-    expect(showError).not.toHaveBeenCalled()
-  })
 
   it('opens bulk edit in filtered-results mode from the bulk actions dropdown', async () => {
     const wrapper = mount(AccountsView, {

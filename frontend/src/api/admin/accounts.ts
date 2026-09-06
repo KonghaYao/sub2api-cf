@@ -7,9 +7,7 @@ import { apiClient } from '../client'
 import { getBrowserTimeZone } from '@/utils/format'
 import {
   isCloudflareWorkerContractActive,
-  sanitizeCloudflareAccountCreatePayload,
   sanitizeCloudflareAccountPayload,
-  sanitizeCloudflareAccountUpdatePayload,
 } from '@/utils/adminCapabilities'
 import type {
   Account,
@@ -43,14 +41,19 @@ function operationKey(prefix: string): string {
 
 let pendingWorkerCreate: { fingerprint: string; key: string } | null = null
 
-const WORKER_ACCOUNT_CONTRACTS = {
-  openai: { protocol: 'openai', authScheme: 'bearer' },
-  anthropic: { protocol: 'anthropic', authScheme: 'x-api-key' },
-  gemini: { protocol: 'gemini', authScheme: 'x-goog-api-key' },
-  codex: { protocol: 'codex', authScheme: 'bearer' },
-} as const
-
-type WorkerAccountPlatform = keyof typeof WORKER_ACCOUNT_CONTRACTS
+const ACCOUNT_SECRET_FIELDS = new Set([
+  'api_key',
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'session_key',
+  'cookie',
+  'aws_secret_access_key',
+  'aws_session_token',
+  'service_account_json',
+  'service_account',
+  'private_key',
+])
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
@@ -101,83 +104,62 @@ async function workerOperationKey(prefix: string, payload: unknown): Promise<{ c
 function workerAccountListParams(
   page: number,
   pageSize: number,
-  filters?: {
-    platform?: string; status?: string; group?: string; search?: string
-    sort_by?: string; sort_order?: 'asc' | 'desc'
-  }
+  filters?: Record<string, unknown>
 ): Record<string, string | number> {
-  if (!isCloudflareWorkerContractActive()) return { page, page_size: pageSize, ...filters }
-  const params: Record<string, string | number> = { page, page_size: pageSize }
-  if (filters?.platform && Object.prototype.hasOwnProperty.call(WORKER_ACCOUNT_CONTRACTS, filters.platform)) {
-    params.platform = filters.platform
-  }
-  if (filters?.status === 'active' || filters?.status === 'inactive') params.status = filters.status
-  const group = filters?.group?.trim()
-  if (group) params.group = group
-  const search = filters?.search?.trim()
-  if (search) params.search = search
-  const workerSortKeys = new Set([
-    'id', 'name', 'platform', 'platform_type', 'status', 'rate_multiplier',
-    'max_concurrency', 'created_at', 'updated_at'
-  ])
-  if (filters?.sort_by && workerSortKeys.has(filters.sort_by)) params.sort_by = filters.sort_by
-  if (filters?.sort_order === 'asc' || filters?.sort_order === 'desc') params.sort_order = filters.sort_order
-  return params
+  return { page, page_size: pageSize, ...filters } as Record<string, string | number>
+}
+
+function redactAccountSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactAccountSecrets)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !ACCOUNT_SECRET_FIELDS.has(key.toLowerCase()))
+      .map(([key, item]) => [key, redactAccountSecrets(item)])
+  )
 }
 
 function adaptAccount(account: Account): Account {
   if (!isCloudflareWorkerContractActive()) return account
-  const value = account as unknown as Record<string, unknown>
-  const platform = value.platform
-  if (typeof value.id !== 'string' || typeof platform !== 'string') return account
-  if (!Object.prototype.hasOwnProperty.call(WORKER_ACCOUNT_CONTRACTS, platform)) return account
-  const contract = WORKER_ACCOUNT_CONTRACTS[platform as WorkerAccountPlatform]
-  if (!contract || value.protocol !== contract.protocol || value.auth_scheme !== contract.authScheme) {
-    return account
-  }
+  const value = redactAccountSecrets(account) as Record<string, unknown>
 
   const groupLinks = Array.isArray(value.group_links)
     ? value.group_links as Array<{ group_id?: unknown; priority?: unknown }>
     : []
-  const providerConfig = value.provider_config !== null && typeof value.provider_config === 'object'
-    ? value.provider_config as Record<string, unknown>
-    : {}
-  const safeProviderConfig = platform === 'codex' && typeof providerConfig.account_id === 'string'
-    ? { account_id: providerConfig.account_id }
-    : {}
   const createdAt = Number(value.created_at_ms)
   const updatedAt = Number(value.updated_at_ms)
   const enabled = value.enabled === true
+  const adapted: Record<string, unknown> = { ...value }
+  const fallback = (key: string, fallbackValue: unknown) => {
+    if (!Object.prototype.hasOwnProperty.call(adapted, key)) adapted[key] = fallbackValue
+  }
 
-  return {
-    ...value,
-    id: value.id as unknown as number,
-    type: 'apikey',
-    credentials: { base_url: typeof value.base_url === 'string' ? value.base_url : '' },
-    provider_config: safeProviderConfig,
-    proxy_id: null,
-    concurrency: Number(value.max_concurrency) || 1,
-    priority: Number(groupLinks[0]?.priority) || 0,
-    status: enabled ? 'active' : 'inactive',
-    error_message: typeof value.last_health_error === 'string' ? value.last_health_error : null,
-    last_used_at: null,
-    expires_at: null,
-    auto_pause_on_expired: false,
-    created_at: Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : '',
-    updated_at: Number.isFinite(updatedAt) ? new Date(updatedAt).toISOString() : '',
-    group_ids: groupLinks
-      .filter((link) => typeof link.group_id === 'string')
-      .map((link) => link.group_id) as unknown as number[],
-    schedulable: enabled,
-    rate_limited_at: null,
-    rate_limit_reset_at: null,
-    overload_until: null,
-    temp_unschedulable_until: null,
-    temp_unschedulable_reason: null,
-    session_window_start: null,
-    session_window_end: null,
-    session_window_status: null,
-  } as unknown as Account
+  fallback('type', 'apikey')
+  fallback('credentials', { base_url: typeof value.base_url === 'string' ? value.base_url : '' })
+  fallback('provider_config', {})
+  fallback('proxy_id', null)
+  fallback('concurrency', Number(value.max_concurrency) || 1)
+  fallback('priority', Number(groupLinks[0]?.priority) || 0)
+  fallback('status', enabled ? 'active' : 'inactive')
+  fallback('error_message', typeof value.last_health_error === 'string' ? value.last_health_error : null)
+  fallback('last_used_at', null)
+  fallback('expires_at', null)
+  fallback('auto_pause_on_expired', false)
+  fallback('created_at', Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : '')
+  fallback('updated_at', Number.isFinite(updatedAt) ? new Date(updatedAt).toISOString() : '')
+  fallback('group_ids', groupLinks
+    .filter((link) => typeof link.group_id === 'string' || typeof link.group_id === 'number')
+    .map((link) => link.group_id))
+  fallback('schedulable', enabled)
+  fallback('rate_limited_at', null)
+  fallback('rate_limit_reset_at', null)
+  fallback('overload_until', null)
+  fallback('temp_unschedulable_until', null)
+  fallback('temp_unschedulable_reason', null)
+  fallback('session_window_start', null)
+  fallback('session_window_end', null)
+  fallback('session_window_status', null)
+  return adapted as unknown as Account
 }
 
 function adaptAccountList(response: PaginatedResponse<Account>): PaginatedResponse<Account> {
@@ -327,7 +309,7 @@ export async function getById(id: number | string): Promise<Account> {
  */
 export async function create(accountData: CreateAccountRequest): Promise<Account> {
   const workerContract = isCloudflareWorkerContractActive()
-  const payload = sanitizeCloudflareAccountCreatePayload(accountData)
+  const payload = accountData
   const idempotencyKey = workerContract ? await workerCreateOperationKey(payload) : null
   const { data } = await apiClient.post<Account>('/admin/accounts', payload, idempotencyKey
     ? { headers: { 'Idempotency-Key': idempotencyKey } }
@@ -388,12 +370,11 @@ export async function duplicate(id: number): Promise<Account> {
  */
 export async function update(id: number | string, updates: UpdateAccountRequest): Promise<Account> {
   const workerContract = isCloudflareWorkerContractActive()
-  const sanitizedPayload = sanitizeCloudflareAccountUpdatePayload(updates)
-  const sanitizedRecord = sanitizedPayload as unknown as Record<string, unknown>
-  const expectedVersion = sanitizedRecord.expected_control_version
+  const updateRecord = updates as unknown as Record<string, unknown>
+  const expectedVersion = updateRecord.expected_control_version
   const payload = workerContract
-    ? Object.fromEntries(Object.entries(sanitizedRecord).filter(([key]) => key !== 'expected_control_version'))
-    : sanitizedPayload
+    ? Object.fromEntries(Object.entries(updateRecord).filter(([key]) => key !== 'expected_control_version'))
+    : updates
   const { data } = await apiClient.put<Account>(
     `/admin/accounts/${id}`,
     payload,
@@ -706,8 +687,13 @@ export async function batchCreate(accounts: CreateAccountRequest[]): Promise<{
     success: number
     failed: number
     results: Array<{ success: boolean; account?: Account; error?: string }>
-  }>('/admin/accounts/batch', sanitizeCloudflareAccountPayload({ accounts }))
-  return data
+  }>('/admin/accounts/batch', { accounts })
+  return {
+    ...data,
+    results: data.results.map((result) => result.account === undefined
+      ? result
+      : { ...result, account: adaptAccount(result.account) })
+  }
 }
 
 /**
@@ -716,20 +702,29 @@ export async function batchCreate(accounts: CreateAccountRequest[]): Promise<{
  * @returns Results of batch update
  */
 export async function batchUpdateCredentials(request: {
-  account_ids: number[]
+  account_ids: Array<number | string>
   field: string
   value: any
 }): Promise<{
   success: number
   failed: number
-  results: Array<{ account_id: number; success: boolean; error?: string }>
+  results: Array<{ account_id: number | string; success: boolean; error?: string }>
 }> {
   const { data } = await apiClient.post<{
     success: number
     failed: number
-    results: Array<{ account_id: number; success: boolean; error?: string }>
+    results: Array<{ account_id: number | string; success: boolean; error?: string }>
   }>('/admin/accounts/batch-update-credentials', request)
   return data
+}
+
+interface BulkUpdateResult<AccountID extends number | string> {
+  success: number
+  failed: number
+  success_ids?: AccountID[]
+  failed_ids?: AccountID[]
+  long_context_inherited_count?: number
+  results: Array<{ account_id: AccountID; success: boolean; error?: string }>
 }
 
 /**
@@ -738,31 +733,28 @@ export async function batchUpdateCredentials(request: {
  * @param updates - Fields to update
  * @returns Success confirmation
  */
-export async function bulkUpdate(
-  accountIdsOrPayload: number[] | Record<string, unknown>,
+export async function bulkUpdate<AccountID extends number | string>(
+  accountIdsOrPayload: AccountID[],
   updates?: Record<string, unknown>
-): Promise<{
-  success: number
-  failed: number
-  success_ids?: number[]
-  failed_ids?: number[]
-  long_context_inherited_count?: number
-  results: Array<{ account_id: number; success: boolean; error?: string }>
-  }> {
-  const payload = sanitizeCloudflareAccountPayload(Array.isArray(accountIdsOrPayload)
+): Promise<BulkUpdateResult<AccountID>>
+export async function bulkUpdate(
+  accountIdsOrPayload: Record<string, unknown>,
+  updates?: Record<string, unknown>
+): Promise<BulkUpdateResult<number | string>>
+export async function bulkUpdate(
+  accountIdsOrPayload: Array<number | string> | Record<string, unknown>,
+  updates?: Record<string, unknown>
+): Promise<BulkUpdateResult<number | string>> {
+  const payload = Array.isArray(accountIdsOrPayload)
     ? {
         account_ids: accountIdsOrPayload,
         ...(updates ?? {})
       }
-    : accountIdsOrPayload)
-  const { data } = await apiClient.post<{
-    success: number
-    failed: number
-    success_ids?: number[]
-    failed_ids?: number[]
-    long_context_inherited_count?: number
-    results: Array<{ account_id: number; success: boolean; error?: string }>
-  }>('/admin/accounts/bulk-update', payload)
+    : accountIdsOrPayload
+  const { data } = await apiClient.post<BulkUpdateResult<number | string>>(
+    '/admin/accounts/bulk-update',
+    payload
+  )
   return data
 }
 

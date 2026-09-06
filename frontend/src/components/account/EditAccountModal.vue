@@ -6,94 +6,7 @@
     @close="handleClose"
   >
     <form
-      v-if="cloudflareWorker && account"
-      id="edit-worker-account-form"
-      class="space-y-5"
-      @submit.prevent="handleWorkerUpdate"
-    >
-      <div class="grid grid-cols-1 gap-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200 sm:grid-cols-3">
-        <span>
-          Platform:
-          <strong data-testid="worker-account-edit-platform">{{ workerContractDetails.platform }}</strong>
-        </span>
-        <span>
-          Protocol:
-          <strong data-testid="worker-account-edit-protocol">{{ workerContractDetails.protocol }}</strong>
-        </span>
-        <span>
-          Auth:
-          <strong data-testid="worker-account-edit-auth-scheme">{{ workerContractDetails.authScheme }}</strong>
-        </span>
-      </div>
-      <div>
-        <label class="input-label">{{ t('common.name') }}</label>
-        <input v-model="workerForm.name" data-testid="worker-account-edit-name" type="text" required class="input" />
-      </div>
-      <div>
-        <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
-        <input v-model="workerForm.base_url" data-testid="worker-account-edit-base-url" type="url" required class="input" />
-      </div>
-      <div>
-        <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
-        <input
-          v-model="workerForm.api_key"
-          data-testid="worker-account-edit-api-key"
-          type="password"
-          autocomplete="new-password"
-          class="input"
-          :placeholder="t('admin.accounts.apiKeyLeaveEmpty')"
-        />
-      </div>
-      <div v-if="workerContractDetails.platform === 'codex'">
-        <label class="input-label">Account ID</label>
-        <input
-          v-model="workerForm.account_id"
-          data-testid="worker-account-edit-account-id"
-          type="text"
-          class="input"
-          placeholder="Optional Codex account ID"
-        />
-      </div>
-      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div>
-          <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input
-            v-model.number="workerForm.max_concurrency"
-            type="number"
-            min="1"
-            max="1000"
-            required
-            class="input"
-          />
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.billingRateMultiplier') }}</label>
-          <input
-            v-model.number="workerForm.rate_multiplier"
-            data-testid="worker-account-edit-rate-multiplier"
-            type="number"
-            min="0"
-            step="0.000001"
-            required
-            class="input"
-          />
-        </div>
-        <label class="flex items-center gap-3 pt-7 text-sm text-gray-700 dark:text-gray-300">
-          <input v-model="workerForm.enabled" type="checkbox" class="rounded border-gray-300" />
-          {{ t('common.enabled') }}
-        </label>
-      </div>
-      <GroupSelector
-        v-model="workerForm.group_ids"
-        :groups="groups"
-        :platform="account.platform"
-        data-testid="worker-account-group-selector"
-        data-tour="account-form-groups"
-      />
-    </form>
-
-    <form
-      v-else-if="account"
+      v-if="account"
       id="edit-account-form"
       @submit.prevent="handleSubmit"
       class="space-y-5"
@@ -1622,7 +1535,7 @@
         </div>
       </div>
 
-      <div v-if="!cloudflareWorker && !isSparkShadow">
+      <div v-if="!isSparkShadow">
         <div class="mb-1 flex items-center gap-2">
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
           <ProxyAdBanner />
@@ -2688,7 +2601,7 @@
         </div>
 
         <!-- TLS Fingerprint -->
-        <div v-if="!cloudflareWorker" class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+        <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
           <div class="flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.tlsFingerprint.label') }}</label>
@@ -2909,7 +2822,7 @@
         </button>
         <button
           type="submit"
-          :form="cloudflareWorker ? 'edit-worker-account-form' : 'edit-account-form'"
+          form="edit-account-form"
           :disabled="submitting"
           class="btn btn-primary"
           data-tour="account-form-submit"
@@ -2964,7 +2877,6 @@ import type {
   Account,
   Proxy,
   AdminGroup,
-  GroupId,
   CheckMixedChannelResponse,
   OpenAICompactMode,
   OpenAIResponsesMode,
@@ -3039,74 +2951,18 @@ interface Props {
   account: Account | null
   proxies: Proxy[]
   groups: AdminGroup[]
-  cloudflareWorker?: boolean
 }
 
-const props = withDefaults(defineProps<Props>(), {
-  cloudflareWorker: false,
-})
+const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
   updated: [account: Account]
 }>()
 
-const workerForm = reactive({
-  name: '',
-  base_url: 'https://api.openai.com/v1',
-  api_key: '',
-  account_id: '',
-  enabled: true,
-  max_concurrency: 4,
-  rate_multiplier: 1,
-  group_ids: [] as GroupId[],
-})
-
-const workerContractDetails = computed(() => {
-  const account = props.account as unknown as Record<string, unknown> | null
-  return {
-    platform: typeof account?.platform === 'string' ? account.platform : '',
-    protocol: typeof account?.protocol === 'string' ? account.protocol : '',
-    authScheme: typeof account?.auth_scheme === 'string' ? account.auth_scheme : '',
-  }
-})
-
 const { t } = useI18n()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const browserTimeZone = getBrowserTimeZone()
-
-watch(
-  [() => props.show, () => props.account],
-  ([show, account]) => {
-    if (!show || !account || !props.cloudflareWorker) return
-    const workerAccount = account as unknown as Record<string, unknown>
-    workerForm.name = account.name
-    workerForm.base_url = typeof workerAccount.base_url === 'string'
-      ? workerAccount.base_url
-      : String(account.credentials?.base_url ?? 'https://api.openai.com/v1')
-    workerForm.api_key = ''
-    const providerConfig = workerAccount.provider_config !== null && typeof workerAccount.provider_config === 'object'
-      ? workerAccount.provider_config as Record<string, unknown>
-      : {}
-    workerForm.account_id = account.platform === 'codex' && typeof providerConfig.account_id === 'string'
-      ? providerConfig.account_id
-      : ''
-    workerForm.enabled = workerAccount.enabled === true || account.status === 'active'
-    workerForm.max_concurrency = Number(workerAccount.max_concurrency ?? account.concurrency) || 4
-    workerForm.rate_multiplier = Number.isFinite(Number(account.rate_multiplier))
-      ? Number(account.rate_multiplier)
-      : 1
-    const links = Array.isArray(workerAccount.group_links)
-      ? workerAccount.group_links as Array<Record<string, unknown>>
-      : []
-    workerForm.group_ids = links.length > 0
-      ? links
-        .map((link) => link.group_id)
-        .filter((id): id is GroupId => typeof id === 'string' || typeof id === 'number')
-      : (Array.isArray(account.group_ids) ? [...account.group_ids] : [])
-  },
-  { immediate: true }
-)
 
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
@@ -4238,7 +4094,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 }
 
 async function loadTLSProfiles() {
-  if (props.cloudflareWorker) return
   try {
     const profiles = await adminAPI.tlsFingerprintProfiles.list()
     tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name }))
@@ -4769,59 +4624,6 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
       })
       return
     }
-    appStore.showError(error.message || t('admin.accounts.failedToUpdate'))
-  } finally {
-    submitting.value = false
-  }
-}
-
-const handleWorkerUpdate = async () => {
-  if (!props.account) return
-  const workerAccount = props.account as unknown as Record<string, unknown>
-  const controlVersion = Number(workerAccount.control_version)
-  if (!Number.isSafeInteger(controlVersion)) {
-    appStore.showError('Reload the account before updating it')
-    return
-  }
-  if (!Number.isFinite(workerForm.rate_multiplier) || workerForm.rate_multiplier < 0) {
-    appStore.showError(t('admin.accounts.rateMultiplierInvalid'))
-    return
-  }
-
-  submitting.value = true
-  try {
-    const payload: Record<string, unknown> = {
-      name: workerForm.name.trim(),
-      base_url: workerForm.base_url.trim(),
-      enabled: workerForm.enabled,
-      max_concurrency: workerForm.max_concurrency,
-      rate_multiplier: workerForm.rate_multiplier,
-      group_links: workerForm.group_ids.map((groupId) => {
-        const previous = Array.isArray(workerAccount.group_links)
-          ? (workerAccount.group_links as Array<Record<string, unknown>>)
-            .find((link) => String(link.group_id) === String(groupId))
-          : undefined
-        const priority = Number(previous?.priority)
-        const weight = Number(previous?.weight)
-        return {
-          group_id: String(groupId),
-          priority: Number.isSafeInteger(priority) && priority >= 0 ? priority : 0,
-          weight: Number.isSafeInteger(weight) && weight > 0 ? weight : 1,
-        }
-      }),
-      expected_control_version: controlVersion,
-    }
-    if (workerForm.api_key.trim()) payload.api_key = workerForm.api_key.trim()
-    if (workerContractDetails.value.platform === 'codex') {
-      payload.provider_config = workerForm.account_id.trim()
-        ? { account_id: workerForm.account_id.trim() }
-        : {}
-    }
-    const updatedAccount = await adminAPI.accounts.update(props.account.id, payload as never)
-    appStore.showSuccess(t('admin.accounts.accountUpdated'))
-    emit('updated', updatedAccount)
-    handleClose()
-  } catch (error: any) {
     appStore.showError(error.message || t('admin.accounts.failedToUpdate'))
   } finally {
     submitting.value = false

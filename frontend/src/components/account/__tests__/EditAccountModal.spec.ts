@@ -336,7 +336,8 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
-  it('keeps the original group binding control in Worker mode and persists edited links', async () => {
+  it('renders the original edit form and fields used by the Worker page', async () => {
+    authIsSimpleMode.value = false
     const account = {
       ...buildAccount(),
       id: 'account-uuid',
@@ -361,7 +362,6 @@ describe('EditAccountModal', () => {
           { id: 'group-1', name: 'Current Plan', platform: 'openai' },
           { id: 'group-2', name: 'Replacement Plan', platform: 'openai' },
         ],
-        cloudflareWorker: true,
       },
       global: {
         stubs: {
@@ -372,80 +372,12 @@ describe('EditAccountModal', () => {
       },
     })
 
-    expect(wrapper.get('[data-testid="group-selector-value"]').text()).toBe('group-1')
-    await wrapper.get('[data-testid="set-worker-group"]').trigger('click')
-    await wrapper.get('[data-testid="worker-account-edit-name"]').setValue('Updated worker')
-    await wrapper.get('[data-testid="worker-account-edit-api-key"]').setValue('replacement-key')
-    expect((wrapper.get('[data-testid="worker-account-edit-rate-multiplier"]').element as HTMLInputElement).value)
-      .toBe('1.25')
-    await wrapper.get('[data-testid="worker-account-edit-rate-multiplier"]').setValue('1.5')
-    await wrapper.get('form#edit-worker-account-form').trigger('submit.prevent')
-
-    expect(updateAccountMock).toHaveBeenCalledWith('account-uuid', {
-      name: 'Updated worker',
-      base_url: 'https://api.openai.com/v1',
-      api_key: 'replacement-key',
-      enabled: true,
-      max_concurrency: 4,
-      rate_multiplier: 1.5,
-      group_links: [{ group_id: 'group-2', priority: 0, weight: 1 }],
-      expected_control_version: 6,
-    })
-    expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('openai')
-    expect(wrapper.get('[data-testid="worker-account-edit-protocol"]').text()).toBe('openai')
-    expect(wrapper.get('[data-testid="worker-account-edit-auth-scheme"]').text()).toBe('bearer')
-    expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
-  })
-
-  it('hydrates and updates the optional Codex account_id without changing its contract tuple', async () => {
-    const account = {
-      ...buildAccount(),
-      id: 'codex-uuid',
-      name: 'Codex account',
-      platform: 'codex',
-      protocol: 'codex',
-      auth_scheme: 'bearer',
-      base_url: 'https://chatgpt.com',
-      provider_config: { account_id: 'acct_old' },
-      enabled: true,
-      max_concurrency: 2,
-      control_version: 8,
-    }
-    updateAccountMock.mockReset().mockResolvedValue(account)
-    const wrapper = mount(EditAccountModal, {
-      props: {
-        show: true,
-        account,
-        proxies: [],
-        groups: [],
-        cloudflareWorker: true,
-      },
-      global: {
-        stubs: {
-          BaseDialog: BaseDialogStub,
-          Icon: true,
-        },
-      },
-    })
-
-    expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('codex')
-    expect(wrapper.get('[data-testid="worker-account-edit-protocol"]').text()).toBe('codex')
-    expect((wrapper.get('[data-testid="worker-account-edit-account-id"]').element as HTMLInputElement).value)
-      .toBe('acct_old')
-
-    await wrapper.get('[data-testid="worker-account-edit-account-id"]').setValue('acct_new')
-    await wrapper.get('form#edit-worker-account-form').trigger('submit.prevent')
-
-    expect(updateAccountMock).toHaveBeenCalledWith('codex-uuid', {
-      name: 'Codex account',
-      base_url: 'https://chatgpt.com',
-      enabled: true,
-      max_concurrency: 2,
-      rate_multiplier: 1,
-      group_links: [],
-      provider_config: { account_id: 'acct_new' },
-      expected_control_version: 8,
-    })
+    expect(wrapper.get('form#edit-account-form').exists()).toBe(true)
+    expect(wrapper.find('form#edit-worker-account-form').exists()).toBe(false)
+    expect(wrapper.text()).toContain('admin.accounts.notes')
+    expect(wrapper.text()).toContain('admin.accounts.priority')
+    expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'GroupSelector' }).exists()).toBe(true)
   })
 
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {

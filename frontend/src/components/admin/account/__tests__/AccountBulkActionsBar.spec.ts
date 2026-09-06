@@ -48,11 +48,11 @@ describe('AccountBulkActionsBar', () => {
     expect(wrapper.emitted('probe-upstream-billing')).toHaveLength(1)
   })
 
-  it('retains only contracted batch controls in Worker mode', async () => {
+  it('keeps the original batch controls in Worker mode', async () => {
     const wrapper = mount(AccountBulkActionsBar, {
       props: {
         selectedIds: [1],
-        totalResults: 1,
+        totalResults: 2,
         selectingAll: false,
         allResultsSelected: false,
         cloudflareWorker: true,
@@ -62,15 +62,12 @@ describe('AccountBulkActionsBar', () => {
     const labels = wrapper.findAll('button').map((button) => button.text())
     expect(labels).toContain('admin.accounts.bulkActions.enableScheduling')
     expect(labels).toContain('admin.accounts.bulkActions.disableScheduling')
-    expect(labels).toContain('admin.accounts.testConnection')
-    expect(labels).not.toContain('admin.accounts.bulkActions.delete')
-    expect(labels).not.toContain('admin.accounts.bulkActions.refreshToken')
-    expect(labels).not.toContain('admin.accounts.bulkActions.probeUpstreamBilling')
-    expect(labels).not.toContain('admin.accounts.bulkEdit.submit')
-
-    await wrapper.findAll('button').find((button) =>
-      button.text() === 'admin.accounts.testConnection'
-    )!.trigger('click')
-    expect(wrapper.emitted('health-probe')).toHaveLength(1)
+    expect(labels).toContain('admin.accounts.bulkActions.delete')
+    expect(labels).toContain('admin.accounts.bulkActions.refreshToken')
+    expect(labels).toContain('admin.accounts.bulkActions.probeUpstreamBilling')
+    expect(labels).toContain('admin.accounts.bulkActions.edit')
+    expect(labels).toContain('admin.accounts.bulkEdit.submit')
+    expect(labels).toContain('admin.accounts.bulkActions.selectAllResults')
+    expect(labels).not.toContain('admin.accounts.testConnection')
   })
 })

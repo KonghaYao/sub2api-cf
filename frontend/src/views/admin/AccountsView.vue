@@ -7,7 +7,6 @@
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"
-            :cloudflare-worker="cloudflareWorkerContract"
             @update:filters="(newFilters) => Object.assign(params, newFilters)"
             @change="debouncedReload"
             @update:searchQuery="debouncedReload"
@@ -18,17 +17,6 @@
             @create="showCreate = true"
           >
             <template #after>
-              <button
-                v-if="cloudflareWorkerContract"
-                data-testid="open-synthetic-probes"
-                class="btn btn-secondary px-2 md:px-3"
-                :disabled="selectedSyntheticProbeAccounts.length === 0"
-                :title="t('admin.accounts.syntheticProbe.open')"
-                @click="showSyntheticProbe = true"
-              >
-                <Icon name="refresh" size="sm" />
-                <span class="hidden md:inline">{{ t('admin.accounts.syntheticProbe.open') }}</span>
-              </button>
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
                 <button
@@ -95,24 +83,24 @@
                     @click.stop
                   >
                     <div class="overflow-y-auto p-2" :style="{ maxHeight: `${accountToolsDropdownPosition.maxHeight}px` }">
-                      <div v-if="!cloudflareWorkerContract" class="px-2 py-2">
+                      <div class="px-2 py-2">
                         <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
                           {{ t('admin.accounts.dataActions') }}
                         </div>
                       </div>
-                      <button v-if="!cloudflareWorkerContract" class="account-tools-menu-item" @click="openSyncFromCrs">
+                      <button class="account-tools-menu-item" @click="openSyncFromCrs">
                         <span class="account-tools-menu-icon bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">
                           <Icon name="sync" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.accounts.syncFromCrs') }}</span>
                       </button>
-                      <button v-if="!cloudflareWorkerContract" class="account-tools-menu-item" @click="openImportData">
+                      <button class="account-tools-menu-item" @click="openImportData">
                         <span class="account-tools-menu-icon bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300">
                           <Icon name="upload" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.accounts.dataImport') }}</span>
                       </button>
-                      <button v-if="!cloudflareWorkerContract" class="account-tools-menu-item" @click="openExportDataDialogFromMenu">
+                      <button class="account-tools-menu-item" @click="openExportDataDialogFromMenu">
                         <span class="account-tools-menu-icon bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300">
                           <Icon name="download" size="sm" />
                         </span>
@@ -127,19 +115,19 @@
                         </span>
                       </button>
 
-                      <div v-if="!cloudflareWorkerContract" class="my-2 border-t border-gray-100 dark:border-dark-700"></div>
-                      <div v-if="!cloudflareWorkerContract" class="px-2 py-2">
+                      <div class="my-2 border-t border-gray-100 dark:border-dark-700"></div>
+                      <div class="px-2 py-2">
                         <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
                           {{ t('admin.accounts.toolActions') }}
                         </div>
                       </div>
-                      <button v-if="!cloudflareWorkerContract" class="account-tools-menu-item" @click="openErrorPassthrough">
+                      <button class="account-tools-menu-item" @click="openErrorPassthrough">
                         <span class="account-tools-menu-icon bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300">
                           <Icon name="shield" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.errorPassthrough.title') }}</span>
                       </button>
-                      <button v-if="!cloudflareWorkerContract" class="account-tools-menu-item" @click="openTLSFingerprintProfiles">
+                      <button class="account-tools-menu-item" @click="openTLSFingerprintProfiles">
                         <span class="account-tools-menu-icon bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200">
                           <Icon name="lock" size="sm" />
                         </span>
@@ -188,17 +176,14 @@
       </template>
       <template #table>
         <AccountBulkActionsBar
-          v-if="!cloudflareWorkerContract || selIds.length > 0"
           :selected-ids="selIds"
           :total-results="pagination.total"
           :selecting-all="selectingAllResults"
           :all-results-selected="allResultsSelected"
-          :cloudflare-worker="cloudflareWorkerContract"
           @delete="handleBulkDelete"
           @reset-status="handleBulkResetStatus"
           @refresh-token="handleBulkRefreshToken"
           @probe-upstream-billing="handleBulkProbeUpstreamBilling"
-          @health-probe="handleWorkerBulkHealthProbe"
           @edit-selected="openBulkEditSelected"
           @edit-filtered="openBulkEditFiltered"
           @clear="clearSelection"
@@ -210,7 +195,7 @@
         <DataTable
           ref="dataTableRef"
           :columns="cols"
-          :data="tableAccounts"
+          :data="accounts"
           :loading="loading"
           row-key="id"
           :server-side-sort="true"
@@ -307,7 +292,7 @@
             </div>
           </template>
           <template #cell-schedulable="{ row }">
-            <button v-if="!cloudflareWorkerContract" @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -446,29 +431,6 @@
           </template>
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
-              <button
-                v-if="cloudflareWorkerContract"
-                :data-testid="`worker-account-health-${row.id}`"
-                :disabled="workerHealthTests.has(String(row.id))"
-                :title="t('admin.accounts.testConnection')"
-                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-emerald-900/20 dark:hover:text-emerald-400"
-                @click="handleWorkerHealthTest(row)"
-              >
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                </svg>
-                <span class="text-xs">{{ t('admin.accounts.testConnection') }}</span>
-              </button>
-              <button
-                v-if="cloudflareWorkerContract"
-                :data-testid="`worker-account-stats-${row.id}`"
-                :title="t('admin.accounts.viewStats')"
-                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-900/20 dark:hover:text-indigo-400"
-                @click="handleViewStats(row)"
-              >
-                <Icon name="chart" size="sm" />
-                <span class="text-xs">{{ t('admin.accounts.viewStats') }}</span>
-              </button>
               <button @click="handleEdit(row)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400">
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                 <span class="text-xs">{{ t('common.edit') }}</span>
@@ -477,7 +439,7 @@
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                 <span class="text-xs">{{ t('common.delete') }}</span>
               </button>
-              <button v-if="!cloudflareWorkerContract" @click="openMenu(row, $event)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-dark-700 dark:hover:text-white">
+              <button @click="openMenu(row, $event)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-dark-700 dark:hover:text-white">
                 <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" /></svg>
                 <span class="text-xs">{{ t('common.more') }}</span>
               </button>
@@ -488,22 +450,15 @@
       </template>
       <template #pagination><Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" /></template>
     </TablePageLayout>
-    <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" :worker-models="workerModels" :cloudflare-worker="cloudflareWorkerContract" @close="showCreate = false" @created="reload" />
-    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" :cloudflare-worker="cloudflareWorkerContract" @close="showEdit = false" @updated="handleAccountUpdated" />
-    <ReAuthAccountModal v-if="!cloudflareWorkerContract" :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
-    <AccountTestModal v-if="!cloudflareWorkerContract" :show="showTest" :account="testingAcc" @close="closeTestModal" />
+    <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
+    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
+    <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
+    <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
-    <SyntheticProbeModal
-      v-if="cloudflareWorkerContract"
-      :show="showSyntheticProbe"
-      :accounts="selectedSyntheticProbeAccounts"
-      :models="workerModels"
-      @close="showSyntheticProbe = false"
-    />
-    <ScheduledTestsPanel v-if="!cloudflareWorkerContract" :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu v-if="!cloudflareWorkerContract" :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
-    <SyncFromCrsModal v-if="!cloudflareWorkerContract" :show="showSync" @close="showSync = false" @synced="reload" />
-    <ImportDataModal v-if="!cloudflareWorkerContract" :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
+    <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
+    <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
       :show="showBulkEdit"
       :account-ids="selIds"
@@ -512,11 +467,10 @@
       :target="bulkEditTarget ?? undefined"
       :proxies="proxies"
       :groups="groups"
-      :cloudflare-worker="cloudflareWorkerContract"
       @close="showBulkEdit = false"
       @updated="handleBulkUpdated"
     />
-    <TempUnschedStatusModal v-if="!cloudflareWorkerContract" :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
+    <TempUnschedStatusModal :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
     <ConfirmDialog :show="showDeleteDialog" :title="t('admin.accounts.deleteAccount')" :message="t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })" :confirm-text="t('common.delete')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmDelete" @cancel="showDeleteDialog = false" />
     <ConfirmDialog :show="showCreateShadowDialog" :title="t('admin.accounts.createSparkShadow')" :message="t('admin.accounts.createSparkShadowConfirm', { name: creatingShadowAcc?.name })" @confirm="confirmCreateSparkShadow" @cancel="showCreateShadowDialog = false" />
     <ConfirmDialog :show="showExportDataDialog" :title="t('admin.accounts.dataExport')" :message="t('admin.accounts.dataExportConfirmMessage')" :confirm-text="t('admin.accounts.dataExportConfirm')" :cancel-text="t('common.cancel')" @confirm="handleExportData" @cancel="showExportDataDialog = false">
@@ -525,8 +479,8 @@
         <span>{{ t('admin.accounts.dataExportIncludeProxies') }}</span>
       </label>
     </ConfirmDialog>
-    <ErrorPassthroughRulesModal v-if="!cloudflareWorkerContract" :show="showErrorPassthrough" @close="showErrorPassthrough = false" />
-    <TLSFingerprintProfilesModal v-if="!cloudflareWorkerContract" :show="showTLSFingerprintProfiles" @close="showTLSFingerprintProfiles = false" />
+    <ErrorPassthroughRulesModal :show="showErrorPassthrough" @close="showErrorPassthrough = false" />
+    <TLSFingerprintProfilesModal :show="showTLSFingerprintProfiles" @close="showTLSFingerprintProfiles = false" />
     <TotpStepUpDialog :controller="accountExportStepUp" />
   </AppLayout>
 </template>
@@ -539,7 +493,6 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
 import { adminAPI } from '@/api/admin'
-import type { WorkerAdminModel } from '@/api/admin/models'
 import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
@@ -561,7 +514,6 @@ import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vu
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
-import SyntheticProbeModal from '@/components/admin/account/SyntheticProbeModal.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
@@ -591,7 +543,6 @@ const cloudflareWorkerContract = computed(() => adminSettingsStore.cloudflareWor
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
-const workerModels = ref<WorkerAdminModel[]>([])
 const accountTableRef = ref<HTMLElement | null>(null)
 const dataTableRef = ref<InstanceType<typeof DataTable> | null>(null)
 type AccountBulkEditTarget =
@@ -647,7 +598,6 @@ const showCreateShadowDialog = ref(false)
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
-const showSyntheticProbe = ref(false)
 const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
 const edAcc = ref<Account | null>(null)
@@ -664,7 +614,6 @@ const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
 const probingUpstreamBilling = reactive(new Set<number>())
-const workerHealthTests = reactive(new Set<string>())
 const upstreamBillingProbeGloballyEnabled = ref<boolean | undefined>(undefined)
 const upstreamBillingNow = ref(Date.now())
 const upstreamBillingRateETag = ref<string | null>(null)
@@ -912,8 +861,6 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
 }
 
 const refreshTodayStatsBatch = async () => {
-  if (cloudflareWorkerContract.value) return
-
   // Why this checks both columns:
   // - today_stats column shows dedicated today's metrics.
   // - usage column also embeds today's stats for Key/Bedrock rows.
@@ -1141,25 +1088,6 @@ const {
   }
 })
 
-// Worker account rows carry relation IDs (`group_ids`/`group_links`), while the
-// legacy cell expects hydrated group objects. Resolve only the current page
-// against the groups already loaded for the filter and account forms.
-const tableAccounts = computed(() => {
-  if (!cloudflareWorkerContract.value) return accounts.value
-  const groupsById = new Map(groups.value.map((group) => [String(group.id), group]))
-  return accounts.value.map((account) => {
-    if (account.groups && account.groups.length > 0) return account
-    const raw = account as unknown as { group_links?: Array<{ group_id?: unknown }>; group_ids?: unknown[] }
-    const ids = raw.group_ids ?? raw.group_links?.map((link) => link.group_id) ?? []
-    const linkedGroups = ids
-      .map((id) => groupsById.get(String(id)))
-      .filter((group): group is AdminGroup => group !== undefined)
-    return linkedGroups.length === 0
-      ? account
-      : { ...account, groups: linkedGroups as unknown as Account['groups'] }
-  })
-})
-
 const {
   selectedSet,
   selectedIds: selIds,
@@ -1177,11 +1105,6 @@ const {
 } = useTableSelection<Account>({
   rows: accounts,
   getId: (account) => account.id
-})
-
-const selectedSyntheticProbeAccounts = computed(() => {
-  const selected = new Set(selIds.value.map((id) => String(id)))
-  return accounts.value.filter((account) => selected.has(String(account.id)))
 })
 
 const selectingAllResults = ref(false)
@@ -1448,7 +1371,6 @@ const isAnyModalOpen = computed(() => {
     showReAuth.value ||
     showTest.value ||
     showStats.value ||
-    showSyntheticProbe.value ||
     showSchedulePanel.value ||
     showErrorPassthrough.value ||
     showTLSFingerprintProfiles.value
@@ -1566,8 +1488,6 @@ const handleManualRefresh = async () => {
 }
 
 const loadUpstreamBillingProbeGlobalState = async () => {
-  if (cloudflareWorkerContract.value) return
-
   try {
     const settings = await adminAPI.accounts.getUpstreamBillingProbeSettings()
     upstreamBillingProbeGloballyEnabled.value = settings.enabled
@@ -1874,7 +1794,7 @@ const allColumns = computed(() => {
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
-  if (!authStore.isSimpleMode || cloudflareWorkerContract.value) {
+  if (!authStore.isSimpleMode) {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
@@ -1890,20 +1810,7 @@ const allColumns = computed(() => {
     { key: 'notes', label: t('admin.accounts.columns.notes'), sortable: false },
     { key: 'actions', label: t('admin.accounts.columns.actions'), sortable: false }
   )
-  if (!cloudflareWorkerContract.value) return c
-  const workerColumns = new Set([
-    'select',
-    'name',
-    'id',
-    'platform_type',
-    'capacity',
-    'status',
-    'groups',
-    'rate_multiplier',
-    'created_at',
-    'actions'
-  ])
-  return c.filter((column) => workerColumns.has(column.key))
+  return c
 })
 
 // Columns that can be toggled (exclude select, name, and actions)
@@ -1914,9 +1821,7 @@ const toggleableColumns = computed(() =>
 // Filtered columns based on visibility
 const cols = computed(() =>
   allColumns.value.filter(col =>
-    col.key === 'select' || col.key === 'name' || col.key === 'actions'
-      || (cloudflareWorkerContract.value && (col.key === 'groups' || col.key === 'rate_multiplier'))
-      || !hiddenColumns.has(col.key)
+    col.key === 'select' || col.key === 'name' || col.key === 'actions' || !hiddenColumns.has(col.key)
   )
 )
 
@@ -2146,26 +2051,6 @@ const selectedWorkerOperationAccounts = () => {
     throw new Error(t('admin.accounts.bulkSchedulableResultUnknown'))
   }
   return targets as Array<{ id: number | string; control_version: number }>
-}
-
-const handleWorkerBulkHealthProbe = async () => {
-  try {
-    const result = await adminAPI.accounts.queueHealthProbes(selectedWorkerOperationAccounts())
-    if (result.failed > 0) {
-      appStore.showError(t('admin.accounts.workerHealthProbePartial', {
-        queued: result.queued,
-        failed: result.failed
-      }))
-      setSelectedIds(result.failed_ids as unknown as number[])
-    } else {
-      appStore.showSuccess(t('admin.accounts.workerHealthProbeQueued', { count: result.queued }))
-      clearSelection()
-    }
-    await load()
-  } catch (error) {
-    console.error('Failed to queue Worker account health probes:', error)
-    appStore.showError(error instanceof Error ? error.message : t('common.error'))
-  }
 }
 
 const handleBulkToggleSchedulable = async (schedulable: boolean) => {
@@ -2444,54 +2329,6 @@ const handleProbeUpstreamBilling = async (account: Account) => {
 const handleAccountUpdated = (updatedAccount: Account) => {
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
-}
-const WORKER_HEALTH_PATCH_FIELDS = [
-  'health_status',
-  'last_checked_at_ms',
-  'last_latency_ms',
-  'last_health_error',
-  'config_version',
-  'control_version',
-  'updated_at',
-  'updated_at_ms',
-] as const
-const patchWorkerHealthResult = (account: Account, result: Record<string, unknown>) => {
-  const currentAccount = accounts.value.find(item => item.id === account.id) ?? account
-  const patched = { ...currentAccount } as unknown as Record<string, unknown>
-  for (const field of WORKER_HEALTH_PATCH_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(result, field) && result[field] !== undefined) {
-      patched[field] = result[field]
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(result, 'last_health_error')
-    && result.last_health_error !== undefined) {
-    patched.error_message = result.last_health_error
-  }
-  if (!Object.prototype.hasOwnProperty.call(result, 'updated_at')
-    && typeof result.updated_at_ms === 'number'
-    && Number.isFinite(result.updated_at_ms)) {
-    patched.updated_at = new Date(result.updated_at_ms).toISOString()
-  }
-  patchAccountInList(patched as unknown as Account)
-  enterAutoRefreshSilentWindow()
-}
-const handleWorkerHealthTest = async (account: Account) => {
-  const accountID = String(account.id)
-  if (workerHealthTests.has(accountID)) return
-  workerHealthTests.add(accountID)
-  try {
-    const result = await adminAPI.accounts.testAccount(account.id)
-    if ('id' in result) patchWorkerHealthResult(account, result as unknown as Record<string, unknown>)
-    if (result.success) {
-      appStore.showSuccess(t('admin.accounts.testCompleted'))
-    } else {
-      appStore.showError(result.message || t('admin.accounts.testFailed'))
-    }
-  } catch (error) {
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.testFailed')))
-  } finally {
-    workerHealthTests.delete(accountID)
-  }
 }
 const formatExportTimestamp = () => {
   const now = new Date()
@@ -2775,27 +2612,15 @@ onMounted(async () => {
   }
 
   load()
-  if (!cloudflareWorkerContract.value) {
-    loadUpstreamBillingProbeGlobalState()
-  }
-  const groupsPromise = adminAPI.groups.getAll()
-  const proxiesPromise = cloudflareWorkerContract.value
-    ? Promise.resolve<AccountProxy[]>([])
-    : adminAPI.proxies.getAll()
-  const modelsPromise = cloudflareWorkerContract.value
-    ? adminAPI.models.list(1, 100)
-    : Promise.resolve({ items: [] as WorkerAdminModel[] })
-  const [proxiesResult, groupsResult, modelsResult] = await Promise.allSettled([
-    proxiesPromise,
-    groupsPromise,
-    modelsPromise,
+  loadUpstreamBillingProbeGlobalState()
+  const [proxiesResult, groupsResult] = await Promise.allSettled([
+    adminAPI.proxies.getAll(),
+    adminAPI.groups.getAll()
   ])
   if (proxiesResult.status === 'fulfilled') proxies.value = proxiesResult.value
   else console.error('Failed to load proxies:', proxiesResult.reason)
   if (groupsResult.status === 'fulfilled') groups.value = groupsResult.value
   else console.error('Failed to load groups:', groupsResult.reason)
-  if (modelsResult.status === 'fulfilled') workerModels.value = modelsResult.value.items
-  else console.error('Failed to load models:', modelsResult.reason)
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', handleViewportResize)
   document.addEventListener('click', handleClickOutside)
