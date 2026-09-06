@@ -1,6 +1,7 @@
 import { app } from './app'
 import { recoverPendingSubscriptionState } from './control/subscriptions'
 import { scheduleAccountHealthLifecycle } from './control/account-lifecycle'
+import { recoverAccountSyntheticProbes } from './control/account-synthetic-probes'
 import type { Env } from './env'
 import { consumeEvents } from './gateway/queue'
 import { recoverPendingSettlements } from './gateway/recovery'
@@ -33,6 +34,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverExpiredPaymentOrders(env),
     recoverPendingRefundClawbacks(env),
     scheduleAccountHealthLifecycle(env),
+    recoverAccountSyntheticProbes(env),
     cleanupExpiredOAuthState(env),
     scanPaymentReconciliationIssues(env),
     recoverPendingAffiliateRebates(env),
@@ -55,6 +57,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'payment_order_expiry',
           'refund_clawbacks',
           'account_health_lifecycle',
+          'account_synthetic_probes',
           'oauth_state_cleanup',
           'payment_reconciliation',
           'affiliate_rebates',

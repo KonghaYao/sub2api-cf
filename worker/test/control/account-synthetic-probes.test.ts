@@ -12,6 +12,7 @@ import type { Env, PlatformEvent } from '../../src/env'
 import { encryptCredential } from '../../src/gateway/crypto'
 import { credentialAad } from '../../src/gateway/repository'
 import { apiKeyDigest } from '../../src/gateway/crypto'
+import { runScheduledRecovery } from '../../src/index'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const NOW = Date.UTC(2026, 8, 6, 8, 0, 0)
@@ -21,7 +22,14 @@ const MASTER_KEY = 'synthetic-probe-master-key-32-bytes'
 
 class QueueCapture {
   messages: PlatformEvent[] = []
-  async send(value: PlatformEvent): Promise<void> { this.messages.push(structuredClone(value)) }
+  failuresRemaining = 0
+  async send(value: PlatformEvent): Promise<void> {
+    if (this.failuresRemaining > 0) {
+      this.failuresRemaining -= 1
+      throw new Error('queue unavailable')
+    }
+    this.messages.push(structuredClone(value))
+  }
 }
 
 interface Fixture { raw: any; env: Env; queue: QueueCapture; app: Hono<{ Bindings: Env }> }
@@ -51,10 +59,21 @@ async function fixture(): Promise<Fixture> {
   return { raw, env, queue, app }
 }
 
-async function seedTarget(test: Fixture, suffix = 'one', capability = 'responses'): Promise<void> {
+async function seedTarget(
+  test: Fixture,
+  suffix = 'one',
+  capability = 'responses',
+  platform: 'openai' | 'anthropic' | 'gemini' | 'codex' = 'openai',
+): Promise<void> {
   const accountId = `account-${suffix}`
   const modelId = `model-${suffix}`
   const secretId = `secret-${suffix}`
+  const provider = {
+    openai: { protocol: 'openai', authScheme: 'bearer', baseUrl: 'https://openai.example.test/v1' },
+    anthropic: { protocol: 'anthropic', authScheme: 'x-api-key', baseUrl: 'https://anthropic.example.test' },
+    gemini: { protocol: 'gemini', authScheme: 'x-goog-api-key', baseUrl: 'https://gemini.example.test' },
+    codex: { protocol: 'codex', authScheme: 'bearer', baseUrl: 'https://chatgpt.example.test' },
+  }[platform]
   const encrypted = await encryptCredential(
     { api_key: `provider-secret-${suffix}` }, MASTER_KEY,
     credentialAad('test', accountId, secretId, 1),
@@ -64,9 +83,11 @@ async function seedTarget(test: Fixture, suffix = 'one', capability = 'responses
       id, platform, name, credential_ref, enabled, max_concurrency,
       created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
       config_version, control_version
-    ) VALUES (?, 'openai', ?, ?, 1, 4, ?, ?, 'openai',
-      'https://upstream.example.test/v1', 'bearer', 1, 2)
-  `).run(accountId, accountId, secretId, NOW, NOW)
+    ) VALUES (?, ?, ?, ?, 1, 4, ?, ?, ?, ?, ?, 1, 2)
+  `).run(
+    accountId, platform, accountId, secretId, NOW, NOW,
+    provider.protocol, provider.baseUrl, provider.authScheme,
+  )
   test.raw.prepare(`
     INSERT INTO account_secrets (
       id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
@@ -75,15 +96,15 @@ async function seedTarget(test: Fixture, suffix = 'one', capability = 'responses
   test.raw.prepare(`
     INSERT INTO models (
       id, platform, public_name, upstream_name, endpoint, enabled, created_at_ms, updated_at_ms
-    ) VALUES (?, 'openai', ?, ?, 'both', 1, ?, ?)
-  `).run(modelId, modelId, `upstream-${suffix}`, NOW, NOW)
+    ) VALUES (?, ?, ?, ?, 'both', 1, ?, ?)
+  `).run(modelId, platform, modelId, `upstream-${suffix}`, NOW, NOW)
   test.raw.prepare(`
     INSERT INTO account_models (
       account_id, model_id, chat_completions, responses, embeddings,
       created_at_ms, updated_at_ms
-    ) VALUES (?, ?, ?, ?, 0, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(accountId, modelId, capability === 'chat_completions' ? 1 : 0,
-    capability === 'responses' ? 1 : 0, NOW, NOW)
+    capability === 'responses' ? 1 : 0, capability === 'embeddings' ? 1 : 0, NOW, NOW)
 }
 
 async function post(test: Fixture, targets: unknown[], key = 'synthetic-1'): Promise<Response> {
@@ -166,7 +187,9 @@ describe('account model synthetic probes', () => {
         .mockResolvedValueOnce(new Response(null, { status: 503 }))
         .mockResolvedValueOnce(new Response(null, { status: 503 }))
         .mockResolvedValueOnce(new Response(null, { status: 503 }))
-        .mockResolvedValueOnce(Response.json({ output: [{ type: 'message' }] })))
+        .mockResolvedValueOnce(Response.json({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+        })))
 
       for (let generation = 1; generation <= 4; generation += 1) {
         const response = await post(test, [target()], `synthetic-run-${generation}`)
@@ -204,11 +227,93 @@ describe('account model synthetic probes', () => {
     } finally { test.raw.close() }
   })
 
+  it.each([
+    ['openai', 'chat_completions', '/v1/chat/completions', 'messages', { choices: [{ message: { content: 'OK' } }] }],
+    ['openai', 'responses', '/v1/responses', 'input', { output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }] }],
+    ['openai', 'embeddings', '/v1/embeddings', 'input', { data: [{ embedding: [0.25] }] }],
+    ['anthropic', 'chat_completions', '/v1/messages', 'messages', { content: [{ type: 'text', text: 'OK' }] }],
+    ['anthropic', 'responses', '/v1/messages', 'messages', { content: [{ type: 'text', text: 'OK' }] }],
+    ['gemini', 'chat_completions', ':generateContent', 'contents', { candidates: [{ content: { parts: [{ text: 'OK' }] } }] }],
+    ['gemini', 'responses', ':generateContent', 'contents', { candidates: [{ content: { parts: [{ text: 'OK' }] } }] }],
+    ['gemini', 'embeddings', ':embedContent', 'content', { embedding: { values: [0.25] } }],
+    ['codex', 'chat_completions', '/backend-api/codex/responses', 'input', { output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }] }],
+    ['codex', 'responses', '/backend-api/codex/responses', 'input', { output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }] }],
+  ] as const)(
+    'uses the provider-native request plan for %s %s',
+    async (platform, capability, expectedPath, expectedBodyField, providerBody) => {
+      const test = await fixture()
+      try {
+        const suffix = `${platform}-${capability}`
+        await seedTarget(test, suffix, capability, platform)
+        const fetch = vi.fn().mockResolvedValue(Response.json(providerBody))
+        vi.stubGlobal('fetch', fetch)
+
+        await post(test, [target(suffix, capability)], `native-${suffix}`)
+        await consumeAccountSyntheticProbe(
+          test.queue.messages.at(-1) as AccountSyntheticProbeEvent, test.env, NOW + 1,
+        )
+
+        expect(fetch).toHaveBeenCalledTimes(1)
+        expect(new URL(fetch.mock.calls[0]![0] as string).pathname).toContain(expectedPath)
+        const init = fetch.mock.calls[0]![1] as RequestInit
+        expect(JSON.parse(init.body as string)).toHaveProperty(expectedBodyField)
+        expect(test.raw.prepare(`
+          SELECT outcome, error_code FROM account_synthetic_probe_history
+        `).get()).toEqual({ outcome: 'succeeded', error_code: null })
+      } finally { test.raw.close() }
+    },
+  )
+
+  it.each([
+    ['openai', 'chat_completions', { choices: [{ message: { content: '' } }] }],
+    ['openai', 'responses', { output: [{ type: 'reasoning', summary: [] }] }],
+    ['anthropic', 'responses', { content: [{ type: 'thinking', thinking: 'internal' }] }],
+    ['gemini', 'responses', { candidates: [{ content: { parts: [{}] } }] }],
+  ] as const)('rejects an empty %s %s success envelope', async (platform, capability, providerBody) => {
+    const test = await fixture()
+    try {
+      const suffix = `empty-${platform}-${capability}`
+      await seedTarget(test, suffix, capability, platform)
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(providerBody)))
+      await post(test, [target(suffix, capability)], `empty-${suffix}`)
+      await consumeAccountSyntheticProbe(
+        test.queue.messages.at(-1) as AccountSyntheticProbeEvent, test.env, NOW + 1,
+      )
+      expect(test.raw.prepare(`
+        SELECT outcome, error_code FROM account_synthetic_probe_history
+      `).get()).toEqual({ outcome: 'failed', error_code: 'upstream_invalid_response' })
+    } finally { test.raw.close() }
+  })
+
+  it.each([
+    ['openai', '{"data":[{"embedding":[1e400]}]}'],
+    ['gemini', '{"embedding":{"values":[1e400]}}'],
+  ] as const)('rejects non-finite %s embeddings', async (platform, rawBody) => {
+    const test = await fixture()
+    try {
+      const suffix = `nonfinite-${platform}`
+      await seedTarget(test, suffix, 'embeddings', platform)
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(rawBody, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })))
+      await post(test, [target(suffix, 'embeddings')], `nonfinite-${suffix}`)
+      await consumeAccountSyntheticProbe(
+        test.queue.messages.at(-1) as AccountSyntheticProbeEvent, test.env, NOW + 1,
+      )
+      expect(test.raw.prepare(`
+        SELECT outcome, error_code FROM account_synthetic_probe_history
+      `).get()).toEqual({ outcome: 'failed', error_code: 'upstream_invalid_response' })
+    } finally { test.raw.close() }
+  })
+
   it('ignores stale and replayed deliveries and pages history with an opaque cursor', async () => {
     const test = await fixture()
     try {
       await seedTarget(test)
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ output: [{ type: 'message' }] })))
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+      })))
       await post(test, [target()], 'stale-first')
       const stale = test.queue.messages.at(-1) as AccountSyntheticProbeEvent
       await post(test, [target()], 'stale-second')
@@ -228,6 +333,154 @@ describe('account model synthetic probes', () => {
       expect(page.data.items).toHaveLength(1)
       expect(page.data.items[0]).not.toHaveProperty('health_error')
       expect(page.data.next_cursor).toBeNull()
+    } finally { test.raw.close() }
+  })
+
+  it('treats a concurrent duplicate delivery as an idempotent no-op while a live probe owns the lease', async () => {
+    const test = await fixture()
+    try {
+      await seedTarget(test)
+      let releaseUpstream!: (response: Response) => void
+      const upstream = new Promise<Response>((resolve) => { releaseUpstream = resolve })
+      const fetch = vi.fn().mockReturnValue(upstream)
+      vi.stubGlobal('fetch', fetch)
+      await post(test, [target()], 'concurrent-delivery')
+      const event = test.queue.messages.at(-1) as AccountSyntheticProbeEvent
+
+      const winner = consumeAccountSyntheticProbe(event, test.env, NOW + 1)
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+      await consumeAccountSyntheticProbe(event, test.env, NOW + 2)
+      releaseUpstream(Response.json({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+      }))
+      await winner
+
+      const history = await test.app.request(
+        '/synthetic-probes/history?account_id=account-one',
+        { headers: { authorization: `Bearer ${TOKEN}` } }, test.env,
+      )
+      await expect(history.json()).resolves.toMatchObject({ data: {
+        items: [{ outcome: 'succeeded', account_id: 'account-one' }],
+      } })
+      expect(fetch).toHaveBeenCalledTimes(1)
+    } finally { test.raw.close() }
+  })
+
+  it('does not let an expired old consumer stale the Cron-redelivered winner', async () => {
+    const test = await fixture()
+    try {
+      await seedTarget(test)
+      let releaseOld!: (response: Response) => void
+      let releaseWinner!: (response: Response) => void
+      const oldUpstream = new Promise<Response>((resolve) => { releaseOld = resolve })
+      const winnerUpstream = new Promise<Response>((resolve) => { releaseWinner = resolve })
+      const fetch = vi.fn()
+        .mockReturnValueOnce(oldUpstream)
+        .mockReturnValueOnce(winnerUpstream)
+      vi.stubGlobal('fetch', fetch)
+      await post(test, [target()], 'expired-consumer')
+      const original = test.queue.messages.at(-1) as AccountSyntheticProbeEvent
+      test.queue.messages = []
+
+      const expiredConsumer = consumeAccountSyntheticProbe(original, test.env, NOW + 1)
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+      vi.setSystemTime(NOW + 60_000)
+      await runScheduledRecovery(test.env)
+      const redelivered = test.queue.messages.find(isAccountSyntheticProbeEvent)
+      expect(redelivered).toBeDefined()
+      const winner = consumeAccountSyntheticProbe(redelivered!, test.env, NOW + 60_001)
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+
+      releaseOld(Response.json({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'old' }] }],
+      }))
+      await expiredConsumer
+      releaseWinner(Response.json({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'new' }] }],
+      }))
+      await winner
+
+      expect(test.raw.prepare(`
+        SELECT outcome, alert_transition FROM account_synthetic_probe_history
+      `).all()).toEqual([{ outcome: 'succeeded', alert_transition: null }])
+      expect(test.raw.prepare(`
+        SELECT status FROM account_synthetic_probe_jobs
+      `).get()).toEqual({ status: 'completed' })
+    } finally { test.raw.close() }
+  })
+
+  it('recovers a failed Queue send from Cron and records one history and alert transition', async () => {
+    const test = await fixture()
+    try {
+      await seedTarget(test)
+      test.queue.failuresRemaining = 1
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 503 })))
+
+      const response = await post(test, [target()], 'cron-redelivery')
+      expect(response.status).toBe(202)
+      expect(test.queue.messages.filter(isAccountSyntheticProbeEvent)).toHaveLength(0)
+      test.raw.prepare(`
+        UPDATE account_synthetic_probe_monitors SET consecutive_failures = 2
+         WHERE account_id = 'account-one' AND model_id = 'model-one' AND capability = 'responses'
+      `).run()
+
+      vi.setSystemTime(NOW + 60_000)
+      await runScheduledRecovery(test.env)
+      const recovered = test.queue.messages.filter(isAccountSyntheticProbeEvent)
+      expect(recovered).toHaveLength(1)
+      expect(JSON.stringify(recovered[0])).not.toContain('provider-secret')
+      await consumeAccountSyntheticProbe(
+        recovered[0], test.env, NOW + 60_001,
+      )
+
+      expect(test.raw.prepare(`
+        SELECT outcome, alert_transition FROM account_synthetic_probe_history
+      `).all()).toEqual([{ outcome: 'failed', alert_transition: 'firing' }])
+      expect(test.raw.prepare(`SELECT status FROM account_synthetic_alert_events`).all())
+        .toEqual([{ status: 'firing' }])
+    } finally { test.raw.close() }
+  })
+
+  it('requeues an expired probe lease and stops at processing and dispatch attempt bounds', async () => {
+    const test = await fixture()
+    try {
+      await seedTarget(test, 'retryable')
+      await seedTarget(test, 'processing-exhausted')
+      await seedTarget(test, 'dispatch-exhausted')
+      await post(test, [
+        target('retryable'), target('processing-exhausted'), target('dispatch-exhausted'),
+      ], 'cron-attempt-bounds')
+      test.queue.messages = []
+      test.raw.prepare(`
+        UPDATE account_synthetic_probe_jobs
+           SET status = 'probing', processing_attempts = 1,
+               run_token = 'abandoned', run_lease_until_ms = ?
+         WHERE account_id = 'account-retryable'
+      `).run(NOW - 1)
+      test.raw.prepare(`
+        UPDATE account_synthetic_probe_jobs
+           SET status = 'probing', processing_attempts = 5,
+               run_token = 'exhausted', run_lease_until_ms = ?
+         WHERE account_id = 'account-processing-exhausted'
+      `).run(NOW - 1)
+      test.raw.prepare(`
+        UPDATE account_synthetic_probe_jobs
+           SET status = 'queued', dispatch_attempts = 8, next_dispatch_at_ms = ?
+         WHERE account_id = 'account-dispatch-exhausted'
+      `).run(NOW - 1)
+
+      await runScheduledRecovery(test.env)
+      const recovered = test.queue.messages.filter(isAccountSyntheticProbeEvent)
+      expect(recovered.map((event) => event.payload.account_id))
+        .toEqual(['account-retryable'])
+      expect(test.raw.prepare(`
+        SELECT account_id, status, processing_attempts, dispatch_attempts
+          FROM account_synthetic_probe_jobs ORDER BY account_id
+      `).all()).toEqual([
+        { account_id: 'account-dispatch-exhausted', status: 'failed', processing_attempts: 0, dispatch_attempts: 8 },
+        { account_id: 'account-processing-exhausted', status: 'failed', processing_attempts: 5, dispatch_attempts: 1 },
+        { account_id: 'account-retryable', status: 'queued', processing_attempts: 1, dispatch_attempts: 2 },
+      ])
     } finally { test.raw.close() }
   })
 })

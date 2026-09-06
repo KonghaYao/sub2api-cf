@@ -39,6 +39,10 @@ const LEASE_MS = 30_000
 const NEXT_PROBE_MS = 5 * 60_000
 const ALERT_FAILURE_THRESHOLD = 3
 const MAX_HISTORY_CURSOR_BYTES = 1_024
+const MAX_DISPATCH_ATTEMPTS = 8
+const MAX_PROCESSING_ATTEMPTS = 5
+const RECOVERY_BATCH_SIZE = 5
+const DISPATCH_RETRY_MS = 15_000
 
 interface Target {
   account_id: string
@@ -90,6 +94,10 @@ interface JobRow {
   requested_by_user_id: string
   status: 'queued' | 'probing' | 'completed' | 'stale' | 'failed'
   processing_attempts: number
+}
+
+interface DispatchJobRow extends AccountSyntheticProbePayload {
+  dispatch_attempts: number
 }
 
 interface ProbeAccountRow extends JobRow {
@@ -233,7 +241,7 @@ export async function consumeAccountSyntheticProbe(
   nowMs = Date.now(),
 ): Promise<void> {
   if (!isAccountSyntheticProbeEvent(event)) return
-  let job = await findJob(env, event.payload.job_id)
+  const job = await findJob(env, event.payload.job_id)
   if (job === null || ['completed', 'stale', 'failed'].includes(job.status)) return
   if (!sameIdentity(job, event.payload)) {
     await markStale(env, job.id, nowMs)
@@ -268,11 +276,11 @@ export async function consumeAccountSyntheticProbe(
         )`,
   ).bind(runToken, nowMs + LEASE_MS, nowMs, job.id).run()
   if (claimed.meta.changes !== 1) {
-    await markStale(env, job.id, nowMs)
+    await markStaleIfConfigurationChanged(env, job.id, nowMs)
     return
   }
   const account = await loadProbeAccount(env, job.id, runToken)
-  if (account === null) { await markStale(env, job.id, nowMs); return }
+  if (account === null) { await markStaleIfOwned(env, job.id, runToken, nowMs); return }
   const observation = await observeProvider(env, account, nowMs)
   const failures = observation.outcome === 'succeeded' ? 0 : account.consecutive_failures + 1
   const transition = observation.outcome === 'failed' && failures >= ALERT_FAILURE_THRESHOLD && account.alert_state === 'resolved'
@@ -344,8 +352,7 @@ export async function consumeAccountSyntheticProbe(
       transition, failures, observation.checkedAtMs, transition, historyId,
     ),
   ])
-  job = await findJob(env, job.id)
-  if (job?.status === 'probing') await markStale(env, job.id, observation.checkedAtMs)
+  await markStaleIfOwned(env, job.id, runToken, observation.checkedAtMs)
 }
 
 async function queueShard(
@@ -493,16 +500,95 @@ async function dispatchJobs(
   nowMs: number,
 ): Promise<void> {
   if (jobs.length === 0) return
+  const failed = new Set<string>()
   for (const job of jobs) {
-    await env.EVENTS_QUEUE.send(createEvent(job, nowMs)).catch(() => undefined)
+    try {
+      await env.EVENTS_QUEUE.send(createEvent(job, nowMs))
+    } catch {
+      failed.add(job.job_id)
+    }
   }
   const placeholders = jobs.map(() => '?').join(', ')
+  const failureCases = jobs.map(() => 'WHEN ? THEN ?').join(' ')
   await env.DB.prepare(
     `UPDATE account_synthetic_probe_jobs
         SET dispatch_attempts = MIN(dispatch_attempts + 1, 8),
-            next_dispatch_at_ms = ?, updated_at_ms = ?
-      WHERE id IN (${placeholders}) AND status = 'queued'`,
-  ).bind(nowMs + 15_000, nowMs, ...jobs.map((job) => job.job_id)).run()
+            next_dispatch_at_ms = ?, updated_at_ms = ?,
+            last_internal_error = CASE id ${failureCases} ELSE last_internal_error END
+      WHERE id IN (${placeholders}) AND status = 'queued' AND dispatch_attempts = 0`,
+  ).bind(
+    nowMs + DISPATCH_RETRY_MS,
+    nowMs,
+    ...jobs.flatMap((job) => [job.job_id, failed.has(job.job_id) ? 'Queue dispatch failed' : null]),
+    ...jobs.map((job) => job.job_id),
+  ).run()
+}
+
+export async function recoverAccountSyntheticProbes(env: Env, nowMs = Date.now()): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE account_synthetic_probe_jobs
+          SET status = 'queued', run_token = NULL, run_lease_until_ms = NULL,
+              next_dispatch_at_ms = ?, updated_at_ms = ?,
+              last_internal_error = 'Expired consumer lease recovered'
+        WHERE status = 'probing' AND run_lease_until_ms <= ?
+          AND processing_attempts < ?`,
+    ).bind(nowMs, nowMs, nowMs, MAX_PROCESSING_ATTEMPTS),
+    env.DB.prepare(
+      `UPDATE account_synthetic_probe_jobs
+          SET status = 'failed', run_token = NULL, run_lease_until_ms = NULL,
+              updated_at_ms = ?, last_internal_error = 'Probe processing attempts exhausted'
+        WHERE status = 'probing' AND run_lease_until_ms <= ?
+          AND processing_attempts >= ?`,
+    ).bind(nowMs, nowMs, MAX_PROCESSING_ATTEMPTS),
+    env.DB.prepare(
+      `UPDATE account_synthetic_probe_jobs
+          SET status = 'failed', updated_at_ms = ?,
+              last_internal_error = 'Queue dispatch attempts exhausted'
+        WHERE status = 'queued' AND next_dispatch_at_ms <= ?
+          AND dispatch_attempts >= ?`,
+    ).bind(nowMs, nowMs, MAX_DISPATCH_ATTEMPTS),
+  ])
+
+  const due = await env.DB.prepare(
+    `SELECT id AS job_id, account_id, model_id, capability, generation, dispatch_attempts
+       FROM account_synthetic_probe_jobs
+      WHERE status = 'queued' AND next_dispatch_at_ms <= ? AND dispatch_attempts < ?
+      ORDER BY next_dispatch_at_ms ASC, created_at_ms ASC, id ASC
+      LIMIT ?`,
+  ).bind(nowMs, MAX_DISPATCH_ATTEMPTS, RECOVERY_BATCH_SIZE).all<DispatchJobRow>()
+  if (due.results.length === 0) return
+
+  const outcomes: Array<DispatchJobRow & { error: string | null }> = []
+  for (const job of due.results) {
+    let error: string | null = null
+    try {
+      await env.EVENTS_QUEUE.send(createEvent(job, nowMs))
+    } catch {
+      error = 'Queue dispatch failed'
+    }
+    outcomes.push({ ...job, error })
+  }
+  const updateCases = outcomes.map(() => 'WHEN ? THEN ?').join(' ')
+  const guards = outcomes.map(() => '(id = ? AND dispatch_attempts = ?)').join(' OR ')
+  await env.DB.prepare(
+    `UPDATE account_synthetic_probe_jobs
+        SET dispatch_attempts = dispatch_attempts + 1,
+            next_dispatch_at_ms = CASE id ${updateCases} ELSE next_dispatch_at_ms END,
+            updated_at_ms = ?,
+            last_internal_error = CASE id ${updateCases} ELSE last_internal_error END
+      WHERE status = 'queued' AND (${guards}) AND dispatch_attempts < ?`,
+  ).bind(
+    ...outcomes.flatMap((job) => [job.job_id, nextDispatchAt(nowMs, job.dispatch_attempts + 1)]),
+    nowMs,
+    ...outcomes.flatMap((job) => [job.job_id, job.error]),
+    ...outcomes.flatMap((job) => [job.job_id, job.dispatch_attempts]),
+    MAX_DISPATCH_ATTEMPTS,
+  ).run()
+}
+
+function nextDispatchAt(nowMs: number, attempts: number): number {
+  return nowMs + Math.min(5 * 60_000, DISPATCH_RETRY_MS * 2 ** Math.max(0, attempts - 1))
 }
 
 function createEvent(
@@ -597,9 +683,10 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
 }
 
 function providerOperation(platform: ProviderPlatform, capability: SyntheticProbeCapability): ProviderOperation {
-  if (platform === 'anthropic' && capability === 'chat_completions') return 'messages'
-  if (platform === 'gemini' && capability === 'chat_completions') return 'generate_content'
-  if (platform === 'codex' && capability === 'responses') return 'responses'
+  if (capability === 'embeddings') return 'embeddings'
+  if (platform === 'anthropic') return 'messages'
+  if (platform === 'gemini') return 'generate_content'
+  if (platform === 'codex') return 'responses'
   return capability
 }
 
@@ -617,6 +704,7 @@ function minimalProbeBody(
       ? { content: { parts: [{ text: prompt }] } }
       : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1 } }
   }
+  if (platform === 'codex') return { model, input: prompt, max_output_tokens: 1, stream: false }
   if (capability === 'responses') return { model, input: prompt, max_output_tokens: 1, stream: false }
   if (capability === 'embeddings') return { model, input: prompt }
   return { model, messages: [{ role: 'user', content: prompt }], max_tokens: 1, stream: false }
@@ -658,17 +746,52 @@ function validProviderResponse(
   const body = value as Record<string, unknown>
   if (capability === 'embeddings') {
     if (platform === 'gemini') {
-      const embedding = body.embedding
-      return embedding !== null && typeof embedding === 'object' && !Array.isArray(embedding) &&
-        Array.isArray((embedding as Record<string, unknown>).values) &&
-        ((embedding as Record<string, unknown>).values as unknown[]).length > 0
+      return hasFiniteEmbeddingValue(objectRecord(body.embedding)?.values)
     }
-    return Array.isArray(body.data) && body.data.length > 0
+    return Array.isArray(body.data) && body.data.some((item) =>
+      hasFiniteEmbeddingValue(objectRecord(item)?.embedding))
   }
-  if (platform === 'anthropic') return Array.isArray(body.content) && body.content.length > 0
-  if (platform === 'gemini') return Array.isArray(body.candidates) && body.candidates.length > 0
-  if (capability === 'responses') return Array.isArray(body.output) && body.output.length > 0
-  return Array.isArray(body.choices) && body.choices.length > 0
+  if (platform === 'anthropic') {
+    return Array.isArray(body.content) && body.content.some((item) => {
+      const part = objectRecord(item)
+      return part?.type === 'text' && nonEmptyText(part.text)
+    })
+  }
+  if (platform === 'gemini') {
+    return Array.isArray(body.candidates) && body.candidates.some((candidate) => {
+      const parts = objectRecord(objectRecord(candidate)?.content)?.parts
+      return Array.isArray(parts) && parts.some((part) => nonEmptyText(objectRecord(part)?.text))
+    })
+  }
+  if (platform === 'codex' || capability === 'responses') {
+    return Array.isArray(body.output) && body.output.some((item) => {
+      const output = objectRecord(item)
+      if (output?.type !== 'message' || !Array.isArray(output.content)) return false
+      return output.content.some((part) => {
+        const content = objectRecord(part)
+        return content?.type === 'output_text' && nonEmptyText(content.text)
+      })
+    })
+  }
+  return Array.isArray(body.choices) && body.choices.some((choice) => {
+    const content = objectRecord(objectRecord(choice)?.message)?.content
+    if (nonEmptyText(content)) return true
+    return Array.isArray(content) && content.some((part) => nonEmptyText(objectRecord(part)?.text))
+  })
+}
+
+function hasFiniteEmbeddingValue(value: unknown): boolean {
+  return Array.isArray(value) && value.some((entry) => typeof entry === 'number' && Number.isFinite(entry))
+}
+
+function nonEmptyText(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
 }
 
 function observation(
@@ -697,6 +820,45 @@ async function markStale(env: Env, id: string, nowMs: number): Promise<void> {
         SET status = 'stale', run_token = NULL, run_lease_until_ms = NULL,
             updated_at_ms = ?, last_internal_error = NULL
       WHERE id = ? AND status IN ('queued', 'probing')`,
+  ).bind(nowMs, id).run()
+}
+
+async function markStaleIfOwned(env: Env, id: string, runToken: string, nowMs: number): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE account_synthetic_probe_jobs
+        SET status = 'stale', run_token = NULL, run_lease_until_ms = NULL,
+            updated_at_ms = ?, last_internal_error = NULL
+      WHERE id = ? AND status = 'probing' AND run_token = ?`,
+  ).bind(nowMs, id, runToken).run()
+}
+
+async function markStaleIfConfigurationChanged(env: Env, id: string, nowMs: number): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE account_synthetic_probe_jobs AS job
+        SET status = 'stale', run_token = NULL, run_lease_until_ms = NULL,
+            updated_at_ms = ?, last_internal_error = NULL
+      WHERE id = ? AND status IN ('queued', 'probing')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM account_synthetic_probe_monitors monitor
+            JOIN accounts account ON account.id = monitor.account_id
+            JOIN account_models relation
+              ON relation.account_id = monitor.account_id AND relation.model_id = monitor.model_id
+            JOIN models model ON model.id = relation.model_id
+           WHERE monitor.account_id = job.account_id AND monitor.model_id = job.model_id
+             AND monitor.capability = job.capability AND monitor.generation = job.generation
+             AND monitor.enabled = 1 AND account.enabled = 1
+             AND account.config_version = job.account_config_version
+             AND account.control_version = job.account_control_version
+             AND account.credential_ref = job.credential_ref
+             AND relation.control_version = job.account_model_control_version
+             AND model.updated_at_ms = job.model_updated_at_ms AND model.enabled = 1
+             AND model.platform = account.platform AND model.upstream_name = job.upstream_model
+             AND CASE job.capability
+               WHEN 'chat_completions' THEN relation.chat_completions
+               WHEN 'responses' THEN relation.responses
+               WHEN 'embeddings' THEN relation.embeddings END = 1
+        )`,
   ).bind(nowMs, id).run()
 }
 

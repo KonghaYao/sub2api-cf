@@ -368,6 +368,8 @@ describe('user API keys', () => {
       { ip_whitelist: ['10.0.0.1/33'] },
       { ip_whitelist: ['010.0.0.1'] },
       { ip_blacklist: ['2001:db8::1/129'] },
+      { ip_whitelist: [':1:2:3:4:5:6:7:8'] },
+      { ip_blacklist: ['1:2:3:4:5:6:7:8:'] },
       { ip_whitelist: '10.0.0.1' },
       { ip_blacklist: Array.from({ length: 65 }, (_, value) => `10.0.0.${value}`) },
     ].entries()) {

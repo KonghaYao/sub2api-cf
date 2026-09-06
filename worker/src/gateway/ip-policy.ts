@@ -145,6 +145,7 @@ function parseIpv6(input: string): bigint | null {
   if (!/^[0-9a-f:]+$/.test(expandedInput)) return null
   const double = expandedInput.indexOf('::')
   if (double !== -1 && double !== expandedInput.lastIndexOf('::')) return null
+  if (double === -1 && (expandedInput.startsWith(':') || expandedInput.endsWith(':'))) return null
   const left = (double === -1 ? expandedInput : expandedInput.slice(0, double))
     .split(':').filter(Boolean)
   const right = (double === -1 ? '' : expandedInput.slice(double + 2))

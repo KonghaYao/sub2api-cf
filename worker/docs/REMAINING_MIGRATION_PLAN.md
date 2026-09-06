@@ -121,8 +121,10 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
   history and firing/recovery alert events in D1. Queue consumers re-read
   encrypted credentials, reject stale configuration at claim and persistence,
   classify invalid 2xx responses as failures, and never turn one model failure
-  into whole-account health failure. Cron outbox recovery, frontend controls,
-  unified audit projection and alert delivery remain outstanding.
+  into whole-account health failure. Bounded Cron recovery resends failed
+  outbox dispatches and reclaims expired consumer leases without allowing an
+  older delivery to cancel a newer winner. Frontend controls, unified audit
+  projection and alert delivery remain outstanding.
 - Codex Responses forwarding now normalizes native function, custom,
   tool-search, local-shell and MCP call identities without breaking call/output
   or item-reference pairing. Invalid replay IDs and reasoning-only IDs are
@@ -147,7 +149,7 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Admin usage and finance | Immutable per-user balance/debt history and bounded operator-driven batch coordination now exist; automatic discovery, broader aggregates and correction/export workflows are incomplete. | Add scheduled discovery, hour/day D1 rollups, Queue projections and R2 streaming exports around the immutable ledger. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | Custom tokens and IPv4/IPv6 policy are complete locally; deployed proof and optional last-used-IP observability remain. | Keep keyed HMAC tokens, one-time plaintext display and D1 CIDR rules sourced only from trusted `CF-Connecting-IP`; retain `last_used_ip: null` until a privacy-reviewed projection exists. | Deployed custom-token, IPv4/IPv6, spoofing and concurrent-update tests pass without persisting plaintext or source IP. |
-| Channel monitor and alerts | Manual per-model probes, immutable history and firing/recovery state are complete locally; Cron recovery, UI, silences, reports and delivery are not. | Add a bounded Cron outbox dispatcher, then D1 silences, R2 evidence/reports and replay-safe email/webhook delivery around the existing Queue consumer. | Failed Queue sends recover without duplicate alerts; silence/recovery/DLQ and deployed per-model inference probes pass. |
+| Channel monitor and alerts | Manual per-model probes, bounded Cron outbox recovery, immutable history and firing/recovery state are complete locally; UI, silences, reports and delivery are not. | Add D1 silences, R2 evidence/reports and replay-safe email/webhook delivery around the existing Queue consumer and recovery dispatcher. | Silence/DLQ and deployed per-model inference probes pass without duplicate alerts. |
 | Payment closure | Stripe is implemented; retained Alipay, WeChat Pay, EasyPay or Airwallex behavior is not. | Separate Worker adapters with D1 webhook inbox/order/refund state, Queue fulfilment and R2 evidence. | Every retained provider passes signature, replay, out-of-order, late payment, refund and sandbox E2E. Non-retained providers disappear from the UI. |
 | Settings, audit and compliance | Several legacy settings and audit sources have no Worker contract; risk actions are incomplete. | Typed D1 settings, KV version cache, append-only D1 audit and R2 large details. | Every unsafe admin mutation emits actor audit; settings have defaults, CAS, secret redaction and hot-path effect tests. |
 | Cross-domain retention and DLQ | Individual recovery jobs exist without one complete replay/retention surface. | Bounded D1 cursors/inboxes, Queue DLQs and R2 quarantine/evidence. | Poison, duplicate and out-of-order messages are observable and safely replayable; every job has a tested write/read budget. |
