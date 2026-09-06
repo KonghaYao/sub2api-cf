@@ -1365,8 +1365,8 @@ function messageToResponsesItems(message: AnthropicMessage): Array<Record<string
   if (message.role === 'assistant') {
     const result: Array<Record<string, unknown>> = []
     for (const block of message.content) {
-      if (block.type !== 'thinking' && block.type !== 'redacted_thinking') continue
-      const signature = (block.type === 'thinking' ? block.signature : block.data).trim()
+      if (block.type !== 'thinking') continue
+      const signature = block.signature.trim()
       if (signature === '' || signature.startsWith('gAAAA')) continue
       result.push({ type: 'reasoning', encrypted_content: signature })
     }

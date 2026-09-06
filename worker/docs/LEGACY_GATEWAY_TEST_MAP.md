@@ -201,8 +201,9 @@ The following classifications apply test-by-test by behavioral family in
 2. Complete custom/freeform tools, namespace tools, `tool_search` and object
    arguments in both directions.
 3. Complete Anthropic cache-token accounting and remaining URL/file media
-   variants; v0.34 already covers signed/redacted thinking, bounded cache
-   breakpoints, base64 tool-result images and Responses SSE conversion.
+   variants; v0.34 already covers compatible signed thinking, native redacted
+   blocks, bounded cache breakpoints, base64 tool-result images and Responses
+   SSE conversion.
 4. Add production-binding E2E for the remaining embeddings providers and error classes.
 5. Add deployed Worker E2E for complex Claude tools and both cross-provider
    Claude↔Gemini paths.

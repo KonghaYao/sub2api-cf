@@ -196,7 +196,7 @@ describe('Anthropic Messages request codec', () => {
     ])
   })
 
-  it('replays redacted Anthropic thinking as encrypted Responses reasoning', () => {
+  it('does not replay provider-specific redacted thinking into Responses', () => {
     const anthropic = parseAnthropicMessagesRequest({
       model: 'claude-public',
       max_tokens: 128,
@@ -210,7 +210,6 @@ describe('Anthropic Messages request codec', () => {
     })
 
     expect(toOpenAIResponsesRequest(anthropic, 'gpt-upstream').input).toEqual([
-      { type: 'reasoning', encrypted_content: 'redacted-provider-payload' },
       { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Continuing.' }] },
     ])
   })

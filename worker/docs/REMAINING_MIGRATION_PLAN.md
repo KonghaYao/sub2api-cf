@@ -51,9 +51,9 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 ## Completed locally in v0.34
 
 - Anthropic Messages now retains up to four validated cache breakpoints and
-  round-trips signed and redacted thinking through the Responses reasoning
-  contract in buffered and streamed paths. Native Anthropic forwarding keeps
-  the original blocks; no synthetic provider signature is created.
+  round-trips compatible signed thinking through the Responses reasoning
+  contract in buffered and streamed paths. Native Anthropic forwarding also
+  keeps provider-specific redacted blocks; no synthetic signature is created.
 - Pre-0055 financial history can now be rebuilt through a privileged,
   environment-bound signed cursor. Each request exports at most 100 frozen DO
   ledger rows; D1 immutable rows are compared field by field, and completeness
