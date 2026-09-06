@@ -21,6 +21,7 @@ import {
 import {
   errorResponse,
   json,
+  optionalString,
   readJsonObject,
   requireBoolean,
   requireSafeInteger,
@@ -28,7 +29,13 @@ import {
   requireString,
   StateApiError,
 } from "./http";
-import type { Env, PlatformEvent, UserStateChangedPayload } from "../env";
+import type {
+  Env,
+  PlatformEvent,
+  UserFinancialEventPayload,
+  UserFinancialEventSource,
+  UserStateChangedPayload,
+} from "../env";
 import { isProviderPlatform } from "../gateway/platform";
 import { groupAccessPredicate } from "../user/group-access";
 
@@ -93,6 +100,8 @@ export interface AdjustUserBalanceCommand {
   schema_version: typeof STATE_SCHEMA_VERSION;
   mutation_id: string;
   amount_delta_micros: number;
+  actor_user_id?: string;
+  actor_session_id?: string;
 }
 
 export interface SetUserEnabledCommand {
@@ -337,7 +346,13 @@ export class UserStateDO {
       this.persistProfile(nextProfile);
       this.appendLedgerEntry(ledgerEntry);
       const stateVersion = this.advanceStateVersion();
-      this.appendStateProjection(nextProfile, stateVersion, command.mutation_id, nowMs);
+      this.appendStateProjection(
+        nextProfile,
+        stateVersion,
+        command.mutation_id,
+        nowMs,
+        createFinancialProjection(ledgerEntry, profile, nextProfile, command),
+      );
       return json({
         schema_version: STATE_SCHEMA_VERSION,
         idempotent: false,
@@ -483,15 +498,20 @@ export class UserStateDO {
       const transition = applyUserCommand(current, command, nowMs);
       this.persistProfile(transition.state.profile);
       if (transition.state.request !== null) this.persistRequest(transition.state.request);
+      let financialEvent: UserFinancialEventPayload | undefined;
       if (command.type === "settle" && !transition.idempotent) {
-        this.appendLedgerEntry(
-          createSettlementLedgerEntry({
-            user_id: transition.state.profile.user_id,
-            request_id: requestId,
-            amount_micros: command.amount_micros,
-            balance_after_micros: transition.state.profile.balance_micros,
-            now_ms: nowMs,
-          }),
+        const ledgerEntry = createSettlementLedgerEntry({
+          user_id: transition.state.profile.user_id,
+          request_id: requestId,
+          amount_micros: command.amount_micros,
+          balance_after_micros: transition.state.profile.balance_micros,
+          now_ms: nowMs,
+        });
+        this.appendLedgerEntry(ledgerEntry);
+        financialEvent = createFinancialProjection(
+          ledgerEntry,
+          profile,
+          transition.state.profile,
         );
       }
       const stateVersion = command.type === "settle" && !transition.idempotent
@@ -513,6 +533,7 @@ export class UserStateDO {
           stateVersion,
           `settlement:${requestId}`,
           nowMs,
+          financialEvent,
         );
       }
 
@@ -953,6 +974,7 @@ export class UserStateDO {
     stateVersion: number,
     mutationId: string,
     nowMs: number,
+    financialEvent?: UserFinancialEventPayload,
   ): void {
     if (this.env?.EVENTS_QUEUE === undefined) return;
     const payload: UserStateChangedPayload = {
@@ -963,6 +985,7 @@ export class UserStateDO {
       spend_debt_micros: profile.spend_debt_micros,
       enabled: profile.enabled,
       updated_at_ms: profile.updated_at_ms,
+      ...(financialEvent === undefined ? {} : { financial_event: financialEvent }),
     };
     const event: PlatformEvent<UserStateChangedPayload> = {
       schema_version: 1,
@@ -1043,6 +1066,56 @@ export class UserStateDO {
   }
 }
 
+function createFinancialProjection(
+  entry: UserLedgerEntry,
+  previous: UserProfileState,
+  next: UserProfileState,
+  actor?: Pick<AdjustUserBalanceCommand, "actor_user_id" | "actor_session_id">,
+): UserFinancialEventPayload {
+  if (entry.entry_type !== "balance_adjustment" && entry.entry_type !== "settlement") {
+    throw new StateMachineError(
+      "invalid_financial_event",
+      "Only balance adjustments and settlements can be projected as financial events",
+    );
+  }
+  const source = financialSource(entry);
+  return {
+    event_type: entry.entry_type,
+    ...source,
+    request_id: entry.request_id,
+    actor_user_id: actor?.actor_user_id ?? null,
+    actor_session_id: actor?.actor_session_id ?? null,
+    amount_delta_micros: next.balance_micros - previous.balance_micros,
+    gross_amount_micros: entry.entry_type === "settlement"
+      ? -entry.amount_delta_micros
+      : entry.amount_delta_micros,
+    spend_debt_delta_micros: next.spend_debt_micros - previous.spend_debt_micros,
+    balance_after_micros: next.balance_micros,
+    spend_debt_after_micros: next.spend_debt_micros,
+  };
+}
+
+function financialSource(
+  entry: UserLedgerEntry,
+): { source_type: UserFinancialEventSource; source_id: string } {
+  if (entry.entry_type === "settlement") {
+    return { source_type: "usage_settlement", source_id: entry.request_id ?? entry.mutation_id };
+  }
+  const prefixes = [
+    ["admin-balance:", "admin_adjustment"],
+    ["redeem:", "redeem_code"],
+    ["affiliate-transfer:", "affiliate_transfer"],
+    ["affiliate-refund-clawback:", "affiliate_refund_clawback"],
+    ["auth-source-grant:", "auth_source_entitlement"],
+  ] as const satisfies ReadonlyArray<readonly [string, UserFinancialEventSource]>;
+  for (const [prefix, sourceType] of prefixes) {
+    if (entry.mutation_id.startsWith(prefix) && entry.mutation_id.length > prefix.length) {
+      return { source_type: sourceType, source_id: entry.mutation_id.slice(prefix.length) };
+    }
+  }
+  return { source_type: "other_adjustment", source_id: entry.mutation_id };
+}
+
 function parseOptionalUsageEvent(value: unknown, requestId: string): Record<string, unknown> | null {
   if (value === undefined) return null;
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -1098,6 +1171,15 @@ export function parseAdjustUserBalanceCommand(
   body: Record<string, unknown>,
 ): AdjustUserBalanceCommand {
   requireSchemaVersion(body);
+  const actorUserId = optionalString(body, "actor_user_id");
+  const actorSessionId = optionalString(body, "actor_session_id");
+  if ((actorUserId === undefined) !== (actorSessionId === undefined)) {
+    throw new StateApiError(
+      400,
+      "invalid_financial_actor",
+      "actor_user_id and actor_session_id must be supplied together",
+    );
+  }
   const amountDeltaMicros = requireSafeInteger(body, "amount_delta_micros", {
     minimum: Number.MIN_SAFE_INTEGER,
   });
@@ -1112,6 +1194,10 @@ export function parseAdjustUserBalanceCommand(
     schema_version: STATE_SCHEMA_VERSION,
     mutation_id: requireString(body, "mutation_id"),
     amount_delta_micros: amountDeltaMicros,
+    ...(actorUserId === undefined ? {} : {
+      actor_user_id: actorUserId,
+      actor_session_id: actorSessionId,
+    }),
   };
 }
 

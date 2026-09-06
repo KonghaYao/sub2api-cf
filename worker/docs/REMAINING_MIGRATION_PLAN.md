@@ -19,6 +19,35 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 - Channel-specific image/video pricing remains intentionally fail-closed until
   its separate media pricing contract is migrated.
 
+## Completed locally in v0.33
+
+- Remote deployments now use a recoverable, fail-closed D1 migration runner.
+  It validates both migration ledgers as continuous prefixes, imports one SQL
+  file at a time, verifies the project version/name, and repairs the safe
+  "SQL committed, Wrangler registration missing" interruption state. Empty,
+  0031, 0034 and 0053 checkpoints and a real isolated Wrangler D1 run pass.
+- OpenAI and OpenAI-compatible Codex requests retain bounded, allow-listed
+  diagnostics from deterministic upstream HTTP 400 responses. Credential-like,
+  URL-bearing, malformed, non-JSON, oversized and stalled bodies still reduce
+  to the generic public error and never trigger account failover.
+- Anthropic Messages accepts strict generation controls for direct accounts and
+  maps `output_config.effort` plus compatible sampling controls to Responses
+  and Chat fallbacks. Generation-only fields are accepted but excluded from
+  count-token forwarding.
+- Migration 0055 adds an immutable D1 `user_financial_events` projection fed by
+  the existing UserStateDO transactional outbox. Admin adjustment, redeem-code,
+  affiliate transfer/refund clawback, auth-source entitlement and usage
+  settlement sources retain exact integer-micros balance/debt facts. The
+  administrator read API uses `admin.users.read` and a stable tuple cursor; the
+  legacy Vue modal adapts UUID event IDs without changing its sequential
+  previous/next UI.
+- This ledger begins with financial state events emitted after 0055 is deployed.
+  Older Durable Object ledger entries are not backfilled from the bounded
+  `/snapshot` response, because that response exposes only the latest 100 rows
+  and would falsely imply completeness. A separate privileged, cursorized DO
+  export/backfill is still required if pre-0055 history must be retained during
+  a production data cutover.
+
 ## P0: required before the Worker becomes the only production backend
 
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
@@ -35,7 +64,7 @@ removed. The detailed compatibility ledger remains `MIGRATION_MATRIX.md`.
 | Slice | Current gap | Cloudflare implementation | Acceptance gate |
 | --- | --- | --- | --- |
 | Account operations | Batch actions, provider quota/tier/privacy sync and per-model probes are incomplete. | D1 control state, Pool DO cooldown, Queue/Cron probes and versioned health projections. | Retained buttons have Worker contracts; stale probes cannot overwrite newer configuration; unavailable quota is `unknown`, never zero. |
-| Admin usage and finance | User aggregates are stronger than the admin dashboard; correction/export workflows are incomplete. | Hour/day D1 rollups, Queue projections and R2 streaming exports. | Dashboard totals reconcile to immutable ledgers; corrections use compensating entries and immutable audit. |
+| Admin usage and finance | Immutable per-user balance/debt history and its admin cursor API now exist for post-0055 events; pre-0055 backfill, broader aggregates and correction/export workflows are incomplete. | Privileged cursorized DO export for optional historical backfill, hour/day D1 rollups, Queue projections and R2 streaming exports. | Dashboard totals reconcile to immutable ledgers; backfill manifests prove their source range; corrections use compensating entries and immutable audit. |
 | Prompt audit and guard | Redaction and image moderation do not implement the original cross-protocol prompt policy. | Versioned D1 policy/events, Queue scanning, short-lived encrypted R2 payloads and DO bulkheads. | Blocking decisions happen before account selection/reservation; async failure never breaks the main request; full prompts and tokens never enter logs or D1. |
 | API-key custom token/IP policy | The frontend still exposes fields that Worker mode rejects. | Either retain with HMAC tokens and D1 CIDR rules using trusted `CF-Connecting-IP`, or remove from API and UI together. | The retained decision has IPv4/IPv6, spoofing, cache invalidation and concurrent-update tests. |
 | Channel monitor and alerts | Generic account health exists; model probes, alert rules, silences and reports do not. | Cron to Queue probes, D1 rules/history/silences, R2 evidence/reports and replay-safe delivery. | Duplicate schedules do not duplicate alerts; silence/recovery/DLQ behavior and per-model inference probes pass. |

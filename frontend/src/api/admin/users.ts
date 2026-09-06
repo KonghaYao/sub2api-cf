@@ -477,25 +477,61 @@ export async function getUserUsageStats(
  * Balance history item returned from the API
  */
 export interface BalanceHistoryItem {
-  id: number
+  id: AdminUserId
   code: string
   type: string
   value: number
   status: string
-  used_by: number | null
+  used_by: AdminUserId | null
   used_at: string | null
   created_at: string
   group_id: number | null
   validity_days: number
   notes: string
-  user?: { id: number; email: string } | null
+  user?: { id: AdminUserId; email: string } | null
   group?: { id: number; name: string } | null
+  amount_delta_micros?: number
+  gross_amount_micros?: number
+  spend_debt_delta_micros?: number
+  balance_after_micros?: number
+  spend_debt_after_micros?: number
 }
 
 // Balance history response extends pagination with total_recharged summary
 export interface BalanceHistoryResponse extends PaginatedResponse<BalanceHistoryItem> {
   total_recharged: number
+  history_complete?: boolean
+  history_available_from?: string
 }
+
+interface WorkerFinancialEvent {
+  event_id: string
+  user_id: string
+  state_version: number
+  event_type: 'opening_balance' | 'balance_adjustment' | 'settlement'
+  source_type: string
+  source_id: string
+  request_id: string | null
+  amount_delta_micros: number
+  gross_amount_micros: number
+  spend_debt_delta_micros: number
+  balance_after_micros: number
+  spend_debt_after_micros: number
+  occurred_at_ms: number
+}
+
+interface WorkerBalanceHistoryResponse {
+  items: WorkerFinancialEvent[]
+  total: number
+  limit: number
+  has_more: boolean
+  next_cursor: string | null
+  total_recharged_micros: number
+  history_complete: boolean
+  history_available_from_ms: number
+}
+
+const workerBalanceHistoryCursors = new Map<string, Map<number, string | null>>()
 
 /**
  * Get user's balance/concurrency change history
@@ -506,11 +542,45 @@ export interface BalanceHistoryResponse extends PaginatedResponse<BalanceHistory
  * @returns Paginated balance history with total_recharged
  */
 export async function getUserBalanceHistory(
-  id: number,
+  id: AdminUserId,
   page: number = 1,
   pageSize: number = 20,
   type?: string
 ): Promise<BalanceHistoryResponse> {
+  if (isCloudflareWorkerContractActive()) {
+    const cursorKey = `${String(id)}\u0000${type ?? ''}\u0000${pageSize}`
+    let cursors = workerBalanceHistoryCursors.get(cursorKey)
+    if (page === 1) {
+      cursors = new Map([[1, null]])
+      workerBalanceHistoryCursors.set(cursorKey, cursors)
+    }
+    const cursor = cursors?.get(page)
+    if (cursor === undefined) {
+      throw Object.assign(
+        new Error('Worker balance history pages must be traversed in order'),
+        { code: 'balance_history_cursor_unavailable' }
+      )
+    }
+    const params: Record<string, string | number> = { limit: pageSize }
+    if (type) params.type = type
+    if (cursor !== null) params.cursor = cursor
+    const { data } = await apiClient.get<WorkerBalanceHistoryResponse>(
+      `/admin/users/${id}/balance-history`,
+      { params }
+    )
+    if (data.next_cursor !== null) cursors?.set(page + 1, data.next_cursor)
+    else cursors?.delete(page + 1)
+    return {
+      items: data.items.map(adaptWorkerFinancialEvent),
+      total: data.total,
+      page,
+      page_size: data.limit,
+      pages: data.total === 0 ? 0 : Math.ceil(data.total / data.limit),
+      total_recharged: data.total_recharged_micros / 1_000_000,
+      history_complete: data.history_complete,
+      history_available_from: timestampToIso(data.history_available_from_ms),
+    }
+  }
   const params: Record<string, any> = { page, page_size: pageSize }
   if (type) params.type = type
   const { data } = await apiClient.get<BalanceHistoryResponse>(
@@ -518,6 +588,35 @@ export async function getUserBalanceHistory(
     { params }
   )
   return data
+}
+
+function adaptWorkerFinancialEvent(event: WorkerFinancialEvent): BalanceHistoryItem {
+  const occurredAt = timestampToIso(event.occurred_at_ms)
+  return {
+    id: event.event_id,
+    code: event.source_id,
+    type: event.source_type === 'admin_adjustment'
+      ? 'admin_balance'
+      : event.source_type === 'affiliate_transfer' ||
+          event.source_type === 'affiliate_refund_clawback'
+        ? 'affiliate_balance'
+        : 'balance',
+    value: event.amount_delta_micros / 1_000_000,
+    status: 'used',
+    used_by: null,
+    used_at: occurredAt,
+    created_at: occurredAt,
+    group_id: null,
+    validity_days: 0,
+    notes: '',
+    user: null,
+    group: null,
+    amount_delta_micros: event.amount_delta_micros,
+    gross_amount_micros: event.gross_amount_micros,
+    spend_debt_delta_micros: event.spend_debt_delta_micros,
+    balance_after_micros: event.balance_after_micros,
+    spend_debt_after_micros: event.spend_debt_after_micros,
+  }
 }
 
 /**

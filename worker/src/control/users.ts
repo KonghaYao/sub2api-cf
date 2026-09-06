@@ -3,6 +3,7 @@ import type { Env } from '../env'
 import { hashPassword, PasswordValidationError, validateNewPassword } from '../auth/password'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { authenticateAdminSession } from './admin-auth'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -59,6 +60,31 @@ interface UserUpdatePatch {
   rpm_limit?: number
   password?: string
 }
+
+interface UserFinancialEventRow {
+  event_id: string
+  user_id: string
+  state_version: number
+  event_type: 'opening_balance' | 'balance_adjustment' | 'settlement'
+  source_type: string
+  source_id: string
+  request_id: string | null
+  actor_user_id: string | null
+  amount_delta_micros: number
+  gross_amount_micros: number
+  spend_debt_delta_micros: number
+  balance_after_micros: number
+  spend_debt_after_micros: number
+  occurred_at_ms: number
+}
+
+interface BalanceHistoryCursor {
+  v: 1
+  occurred_at_ms: number
+  event_id: string
+}
+
+const MAX_BALANCE_HISTORY_CURSOR_BYTES = 1_024
 
 export async function createAdminUser(context: Context<ControlBindings>): Promise<Response> {
   try {
@@ -239,10 +265,107 @@ export async function getAdminUser(context: Context<ControlBindings>): Promise<R
   }
 }
 
+/**
+ * Read the immutable D1 projection of authoritative UserStateDO financial
+ * transitions. Cursor ordering is a complete tuple, so concurrent newer writes
+ * never shift or duplicate an already-started traversal.
+ */
+export async function listAdminUserBalanceHistory(
+  context: Context<ControlBindings>,
+): Promise<Response> {
+  try {
+    const userId = requireResourceId(context.req.param('id'), 'user')
+    const limit = queryInteger(context.req.query('limit'), 'limit', 20, 1, 100)
+    const cursorRaw = context.req.query('cursor')
+    const cursor = cursorRaw === undefined ? null : decodeBalanceHistoryCursor(cursorRaw)
+    const type = parseBalanceHistoryType(context.req.query('type'))
+    const user = await findUserById(context.env, userId)
+    if (user === null) {
+      throw new GatewayError(404, 'user_not_found', 'User was not found')
+    }
+
+    const conditions = ['user_id = ?']
+    const values: unknown[] = [userId]
+    appendBalanceHistoryTypeCondition(conditions, values, type)
+    if (cursor !== null) {
+      conditions.push('(occurred_at_ms < ? OR (occurred_at_ms = ? AND event_id < ?))')
+      values.push(cursor.occurred_at_ms, cursor.occurred_at_ms, cursor.event_id)
+    }
+    const where = conditions.join(' AND ')
+    const typeOnlyConditions = ['user_id = ?']
+    const typeOnlyValues: unknown[] = [userId]
+    appendBalanceHistoryTypeCondition(typeOnlyConditions, typeOnlyValues, type)
+    const typeOnlyWhere = typeOnlyConditions.join(' AND ')
+
+    const [rowsResult, summaryResult] = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `SELECT event_id, user_id, state_version, event_type, source_type, source_id,
+                request_id, actor_user_id,
+                amount_delta_micros, gross_amount_micros,
+                spend_debt_delta_micros, balance_after_micros,
+                spend_debt_after_micros, occurred_at_ms
+           FROM user_financial_events
+          WHERE ${where}
+          ORDER BY occurred_at_ms DESC, event_id DESC
+          LIMIT ?`,
+      ).bind(...values, limit + 1),
+      context.env.DB.prepare(
+        `SELECT COUNT(*) AS total,
+                (SELECT COALESCE(SUM(amount_delta_micros), 0)
+                   FROM user_financial_events AS recharge
+                  WHERE recharge.user_id = ?
+                    AND recharge.event_type = 'balance_adjustment'
+                    AND recharge.amount_delta_micros > 0
+                ) AS total_recharged_micros,
+                (SELECT applied_at_ms FROM schema_migrations WHERE version = 55)
+                  AS history_available_from_ms
+           FROM user_financial_events
+          WHERE ${typeOnlyWhere}`,
+      ).bind(userId, ...typeOnlyValues),
+    ])
+    const rows = rowsResult.results as unknown as UserFinancialEventRow[]
+    const summary = summaryResult.results[0] as {
+      total?: unknown
+      total_recharged_micros?: unknown
+      history_available_from_ms?: unknown
+    } | undefined
+    if (
+      !Number.isSafeInteger(summary?.total) || (summary!.total as number) < 0 ||
+      !Number.isSafeInteger(summary?.total_recharged_micros) ||
+      (summary!.total_recharged_micros as number) < 0 ||
+      !Number.isSafeInteger(summary?.history_available_from_ms) ||
+      (summary!.history_available_from_ms as number) < 0
+    ) {
+      throw new GatewayError(
+        500,
+        'invalid_balance_history_projection',
+        'Balance history projection is invalid',
+        'server_error',
+      )
+    }
+    const hasMore = rows.length > limit
+    const items = rows.slice(0, limit)
+    const last = items.at(-1)
+    return controlSuccess({
+      items,
+      total: summary!.total,
+      limit,
+      has_more: hasMore,
+      next_cursor: hasMore && last !== undefined ? encodeBalanceHistoryCursor(last) : null,
+      total_recharged_micros: summary!.total_recharged_micros,
+      history_complete: user.created_at_ms >= (summary!.history_available_from_ms as number),
+      history_available_from_ms: summary!.history_available_from_ms,
+    })
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 export async function adjustAdminUserBalance(context: Context<ControlBindings>): Promise<Response> {
   try {
     const userId = requireResourceId(context.req.param('id'), 'user')
     const idempotencyKey = requireIdempotencyKey(context.req.raw)
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
     const body = await readJsonObject(context.req.raw)
     const amountDeltaMicros = requireSafeInteger(
       body,
@@ -272,6 +395,8 @@ export async function adjustAdminUserBalance(context: Context<ControlBindings>):
       schema_version: 1,
       mutation_id: `admin-balance:${mutationDigest}`,
       amount_delta_micros: amountDeltaMicros,
+      actor_user_id: actor.user_id,
+      actor_session_id: actor.session_id,
     })
     if (!adjusted.ok) throw await stateError(adjusted)
     const state = await parseUserState(adjusted, user.id)
@@ -566,6 +691,90 @@ function applyUserUpdatePatch(
     concurrency: patch.concurrency ?? current.concurrency,
     rpm_limit: patch.rpm_limit ?? current.rpm_limit,
   }
+}
+
+function parseBalanceHistoryType(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim() === '') return null
+  const value = raw.trim()
+  if (![
+    'balance',
+    'affiliate_balance',
+    'admin_balance',
+    'concurrency',
+    'admin_concurrency',
+    'subscription',
+  ].includes(value)) {
+    throw new GatewayError(400, 'invalid_type', 'Balance history type is invalid')
+  }
+  return value
+}
+
+function appendBalanceHistoryTypeCondition(
+  conditions: string[],
+  values: unknown[],
+  type: string | null,
+): void {
+  if (type === null) return
+  if (type === 'admin_balance') {
+    conditions.push('source_type = ?')
+    values.push('admin_adjustment')
+    return
+  }
+  if (type === 'affiliate_balance') {
+    conditions.push('source_type IN (?, ?)')
+    values.push('affiliate_transfer', 'affiliate_refund_clawback')
+    return
+  }
+  if (type === 'balance') {
+    conditions.push("source_type NOT IN ('admin_adjustment', 'affiliate_transfer', 'affiliate_refund_clawback')")
+    return
+  }
+  // The Worker financial ledger intentionally does not synthesize concurrency
+  // or subscription events. Preserve the legacy filter contract as an empty set.
+  conditions.push('0 = 1')
+}
+
+function encodeBalanceHistoryCursor(
+  row: Pick<UserFinancialEventRow, 'occurred_at_ms' | 'event_id'>,
+): string {
+  const bytes = new TextEncoder().encode(JSON.stringify({
+    v: 1,
+    occurred_at_ms: row.occurred_at_ms,
+    event_id: row.event_id,
+  } satisfies BalanceHistoryCursor))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function decodeBalanceHistoryCursor(raw: string): BalanceHistoryCursor {
+  if (
+    raw.length === 0 || raw.length > MAX_BALANCE_HISTORY_CURSOR_BYTES ||
+    !/^[A-Za-z0-9_-]+$/.test(raw)
+  ) throw invalidBalanceHistoryCursor()
+  try {
+    const padded = raw.replace(/-/g, '+').replace(/_/g, '/') +
+      '='.repeat((4 - raw.length % 4) % 4)
+    const binary = atob(padded)
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    const value = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+    ) as Partial<BalanceHistoryCursor> | null
+    if (
+      value === null || typeof value !== 'object' || Array.isArray(value) ||
+      value.v !== 1 || !Number.isSafeInteger(value.occurred_at_ms) ||
+      (value.occurred_at_ms as number) < 0 ||
+      typeof value.event_id !== 'string' || value.event_id.length === 0 ||
+      value.event_id.length > 256 || /[\u0000-\u001f\u007f]/.test(value.event_id)
+    ) throw invalidBalanceHistoryCursor()
+    return value as BalanceHistoryCursor
+  } catch {
+    throw invalidBalanceHistoryCursor()
+  }
+}
+
+function invalidBalanceHistoryCursor(): GatewayError {
+  return new GatewayError(400, 'invalid_cursor', 'Balance history cursor is invalid')
 }
 
 function optionalNewPassword(body: Record<string, unknown>): string | undefined {

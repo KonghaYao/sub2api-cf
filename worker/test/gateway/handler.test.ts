@@ -2102,6 +2102,270 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
   })
 
+  it('preserves a safe deterministic OpenAI 400 without trying another account', async () => {
+    const { env, database, user, pool, limit } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const upstream = vi.fn(async () => Response.json({
+      error: {
+        message: "Invalid schema for function 'lookup': object schema is required.",
+        type: 'invalid_request_error',
+        code: 'invalid_function_parameters',
+        param: 'tools[0].function.parameters',
+      },
+    }, { status: 400 }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        message: "Invalid schema for function 'lookup': object schema is required.",
+        type: 'invalid_request_error',
+        code: 'invalid_function_parameters',
+        param: 'tools[0].function.parameters',
+      },
+    })
+    expect(upstream).toHaveBeenCalledOnce()
+    expect(pool.calls.filter((call) => call.path === '/failure')).toHaveLength(0)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/reserve')).toHaveLength(1)
+    expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(0)
+    expect(user.calls.filter((call) => call.path === '/cancel')).toHaveLength(1)
+    expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
+    const outcome = database.bindings.find(({ query }) =>
+      query.includes('UPDATE request_observations') && query.includes('error_owner = ?'))
+    expect(outcome?.values).toMatchObject({
+      11: 'upstream',
+      13: 'provider',
+      14: 'upstream',
+    })
+  })
+
+  it('does not invent OpenAI code or param when a safe 400 only provides a message', async () => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: { message: "Invalid 'input': expected an array." },
+    }, { status: 400 })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        message: "Invalid 'input': expected an array.",
+        type: 'invalid_request_error',
+      },
+    })
+  })
+
+  it('rejects a non-string OpenAI 400 diagnostic as an untrusted structure', async () => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: {
+        message: 'A superficially safe message',
+        type: 'invalid_request_error',
+        code: { nested: 'invalid_function_parameters' },
+        param: 'tools[0].function.parameters',
+      },
+    }, { status: 400 })))
+
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        message: 'Upstream rejected the request',
+        type: 'invalid_request_error',
+        code: 'upstream_request_error',
+      },
+    })
+  })
+
+  it.each([
+    'Authorization: Bearer upstream-token-1234',
+    'Incorrect API key provided: sk-proj-upstream-secret',
+    'Request failed for key=upstream-secret-1234',
+    'Account request failed at https://upstream.example/v1/accounts/private',
+  ])('does not reflect sensitive OpenAI 400 diagnostics: %s', async (message) => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: {
+        message,
+        type: 'invalid_request_error',
+        code: 'invalid_request',
+        param: 'input',
+      },
+    }, { status: 400 })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(text)).toEqual({
+      error: {
+        message: 'Upstream rejected the request',
+        type: 'invalid_request_error',
+        code: 'upstream_request_error',
+      },
+    })
+    expect(text).not.toContain(message)
+  })
+
+  it('bounds and cancels an oversized OpenAI 400 diagnostic without waiting for EOF', async () => {
+    const { env } = await harness()
+    let cancelled = false
+    const oversized = JSON.stringify({
+      error: {
+        message: 'x'.repeat(70 * 1024),
+        type: 'invalid_request_error',
+        code: 'invalid_request',
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(oversized))
+        },
+        cancel() {
+          cancelled = true
+        },
+      }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )))
+
+    let guard: ReturnType<typeof setTimeout> | undefined
+    let response: Response
+    try {
+      response = await Promise.race([
+        createApp().request('/v1/responses', {
+          method: 'POST',
+          headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+        }, env),
+        new Promise<never>((_resolve, reject) => {
+          guard = setTimeout(() => reject(new Error('OpenAI error diagnostic read did not finish')), 750)
+        }),
+      ])
+    } finally {
+      if (guard !== undefined) clearTimeout(guard)
+    }
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        message: 'Upstream rejected the request',
+        code: 'upstream_request_error',
+      },
+    })
+    expect(cancelled).toBe(true)
+  })
+
+  it('does not treat an HTML OpenAI 400 as JSON through MIME declaration smuggling', async () => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        message: 'This value came from an HTML response',
+        type: 'invalid_request_error',
+        code: 'invalid_request',
+      },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'text/html; application/json' },
+    })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        message: 'Upstream rejected the request',
+        code: 'upstream_request_error',
+      },
+    })
+  })
+
+  it.each([
+    ['HTML', 'text/html', '<html>sk-proj-body-secret</html>'],
+    ['non-JSON', 'application/json', 'not-json sk-proj-body-secret'],
+  ])('falls back for a %s OpenAI 400 body without reflecting response metadata', async (_kind, contentType, body) => {
+    const { env } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, {
+      status: 400,
+      headers: {
+        'content-type': contentType,
+        authorization: 'Bearer response-header-secret',
+        'x-api-key': 'response-api-key-secret',
+        'x-account-url': 'https://private-account.example/v1',
+      },
+    })))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(text)).toMatchObject({
+      error: {
+        message: 'Upstream rejected the request',
+        code: 'upstream_request_error',
+      },
+    })
+    expect(text).not.toContain('sk-proj-body-secret')
+    expect(text).not.toContain('response-header-secret')
+    expect(text).not.toContain('response-api-key-secret')
+    expect(text).not.toContain('private-account.example')
+  })
+
+  it('times out and cancels a stalled OpenAI 400 diagnostic body', async () => {
+    const { env } = await harness()
+    let cancelled = false
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled = true
+        },
+      }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )))
+
+    const response = await createApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'upstream_request_error' },
+    })
+    expect(cancelled).toBe(true)
+  })
+
   it('classifies an upstream 429 as a provider-owned observation', async () => {
     const { env, database } = await harness()
     vi.stubGlobal(
@@ -2961,6 +3225,44 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('preserves a safe deterministic 400 from an OpenAI-compatible Codex upstream', async () => {
+    const { env, database } = await harness()
+    Object.assign(database.principal, { platform: 'codex' })
+    Object.assign(database.credential, {
+      platform: 'codex',
+      protocol: 'codex',
+      auth_scheme: 'bearer',
+      provider_config_json: '{"account_id":"workspace-123"}',
+      base_url: 'https://chatgpt.example',
+    })
+    const upstream = vi.fn(async () => Response.json({
+      error: {
+        message: "Invalid schema for function 'automation_update'.",
+        type: 'invalid_request_error',
+        code: 'invalid_function_parameters',
+        param: 'input[8].tools[1].tools[2].parameters',
+      },
+    }, { status: 400 }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        message: "Invalid schema for function 'automation_update'.",
+        type: 'invalid_request_error',
+        code: 'invalid_function_parameters',
+        param: 'input[8].tools[1].tools[2].parameters',
+      },
+    })
+    expect(upstream).toHaveBeenCalledOnce()
+  })
+
   it('bridges Chat Completions through a Responses-only Codex account with Codex body rules', async () => {
     const { env, database, user, pool } = await harness()
     database.responsesOnly = true
@@ -3614,6 +3916,39 @@ describe('OpenAI-compatible gateway', () => {
       input_tokens: expect.any(Number),
     })
     expect(upstream).not.toHaveBeenCalled()
+    expectZeroCostBillingLifecycle(user)
+    expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('preserves a safe deterministic 400 from the official Responses input_tokens route', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.credential, { base_url: 'https://api.openai.com/v1' })
+    const upstream = vi.fn(async () => Response.json({
+      error: {
+        message: "Invalid 'input': expected an array.",
+        type: 'invalid_request_error',
+        code: 'invalid_type',
+        param: 'input',
+      },
+    }, { status: 400 }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await createApp().request('/v1/responses/input_tokens', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', input: 'hello' }),
+    }, env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        message: "Invalid 'input': expected an array.",
+        type: 'invalid_request_error',
+        code: 'invalid_type',
+        param: 'input',
+      },
+    })
+    expect(upstream).toHaveBeenCalledOnce()
     expectZeroCostBillingLifecycle(user)
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })

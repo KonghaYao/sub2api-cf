@@ -707,8 +707,11 @@ export async function handleResponsesInputTokens(
           ),
         )
       }
-      await bestEffort(async () => acquired?.response.body?.cancel())
-      throw mapUpstreamStatus(acquired.response)
+      const upstreamError = await mapOpenAiUpstreamStatus(acquired.response)
+      if (!acquired.response.bodyUsed) {
+        await bestEffort(async () => acquired?.response.body?.cancel())
+      }
+      throw upstreamError
     }
 
     const bytes = await readResponseLimited(
@@ -1222,10 +1225,16 @@ async function dispatchGateway(
           ),
         )
       }
-      await bestEffort(async () => acquired.response.body?.cancel())
+      const upstreamError = (provider === 'openai' || provider === 'codex') &&
+        errorResponse === gatewayErrorResponse
+        ? await mapOpenAiUpstreamStatus(acquired.response)
+        : mapUpstreamStatus(acquired.response)
+      if (!acquired.response.bodyUsed) {
+        await bestEffort(async () => acquired.response.body?.cancel())
+      }
       await bestEffort(() => releasePoolLease(pool, acquired.leaseId))
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
-      throw mapUpstreamStatus(acquired.response)
+      throw upstreamError
     }
 
     const contentType = acquired.response.headers.get('content-type') ?? ''
@@ -1399,7 +1408,7 @@ function observationError(error: GatewayError): NonNullable<Parameters<typeof re
   // `rate_limit_exceeded` is emitted only by mapUpstreamStatus for an upstream
   // 429. Keep it provider-owned even though its legacy public error code lacks
   // the `upstream_` prefix.
-  const upstream = error.code.startsWith('upstream_') || error.code === 'rate_limit_exceeded'
+  const upstream = error.upstream || error.code.startsWith('upstream_') || error.code === 'rate_limit_exceeded'
   const auth = error.code.includes('api_key') || error.code.includes('auth') || error.status === 401
   const routing = error.code.includes('model') || error.code.includes('capacity') || error.code.includes('provider')
   return {
@@ -3282,6 +3291,129 @@ function mapUpstreamStatus(response: Response): GatewayError {
     return new GatewayError(502, 'upstream_error', 'Upstream service failed', 'server_error', retryAfter)
   }
   return new GatewayError(response.status, 'upstream_request_error', 'Upstream rejected the request')
+}
+
+async function mapOpenAiUpstreamStatus(response: Response): Promise<GatewayError> {
+  const fallback = mapUpstreamStatus(response)
+  if (response.status !== 400) return fallback
+  const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  if (mediaType !== 'application/json' && !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+\+json$/u.test(mediaType)) {
+    return fallback
+  }
+  try {
+    const text = await readOpenAiErrorDiagnostic(response)
+    if (text === null) return fallback
+    const root = objectValue(JSON.parse(text))
+    const error = objectValue(root?.error)
+    if (
+      root === null || error === null ||
+      Object.keys(root).some((field) => field !== 'error') ||
+      Object.keys(error).some((field) => !['message', 'type', 'code', 'param'].includes(field)) ||
+      typeof error.message !== 'string' || !isSafeOpenAiDiagnostic(error.message, 2_048)
+    ) return fallback
+    if (
+      !isAbsentOrSafeOpenAiField(error.type, isSafeOpenAiIdentifier) ||
+      !isAbsentOrSafeOpenAiField(error.code, isSafeOpenAiIdentifier) ||
+      !isAbsentOrSafeOpenAiField(error.param, isSafeOpenAiParam)
+    ) return fallback
+    const type = typeof error.type === 'string' && error.type.trim() !== ''
+      ? error.type.trim()
+      : fallback.type
+    const publicCode = typeof error.code === 'string' && error.code.trim() !== ''
+      ? error.code.trim()
+      : null
+    const code = publicCode ?? fallback.code
+    const param = typeof error.param === 'string' && error.param.trim() !== ''
+      ? error.param.trim()
+      : undefined
+    return new GatewayError(400, code, error.message.trim(), type, undefined, param, true, publicCode)
+  } catch {
+    return fallback
+  }
+}
+
+const OPENAI_ERROR_DIAGNOSTIC_BYTES = 16 * 1024
+const OPENAI_ERROR_DIAGNOSTIC_TIMEOUT_MS = 250
+
+async function readOpenAiErrorDiagnostic(response: Response): Promise<string | null> {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > OPENAI_ERROR_DIAGNOSTIC_BYTES) {
+    void response.body?.cancel().catch(() => undefined)
+    return null
+  }
+  const reader = response.body?.getReader()
+  if (reader === undefined) return ''
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let bytesRead = 0
+  let text = ''
+  let pendingRead = false
+  try {
+    while (true) {
+      pendingRead = true
+      const result = await readOpenAiErrorChunk(reader)
+      if (result === null) {
+        void reader.cancel().catch(() => undefined)
+        return null
+      }
+      pendingRead = false
+      if (result.done) return text + decoder.decode()
+      bytesRead += result.value.byteLength
+      if (bytesRead > OPENAI_ERROR_DIAGNOSTIC_BYTES) {
+        void reader.cancel().catch(() => undefined)
+        return null
+      }
+      text += decoder.decode(result.value, { stream: true })
+    }
+  } catch {
+    void reader.cancel().catch(() => undefined)
+    return null
+  } finally {
+    if (!pendingRead) reader.releaseLock()
+  }
+}
+
+async function readOpenAiErrorChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadableStreamReadResult<Uint8Array> | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(resolve, OPENAI_ERROR_DIAGNOSTIC_TIMEOUT_MS, null)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function isAbsentOrSafeOpenAiField(
+  value: unknown,
+  predicate: (candidate: string) => boolean,
+): boolean {
+  return value === undefined || value === null || typeof value === 'string' && predicate(value)
+}
+
+function isSafeOpenAiDiagnostic(value: string, maxLength: number): boolean {
+  const trimmed = value.trim()
+  return trimmed.length > 0 &&
+    trimmed.length <= maxLength &&
+    !/[\u0000-\u001f\u007f]/u.test(trimmed) &&
+    !/(?:https?|wss?):\/\//iu.test(trimmed) &&
+    !/\b(?:authorization|proxy-authorization|x-api-key|api[_ -]?key|cookie|set-cookie)\b/iu.test(trimmed) &&
+    !/\b(?:key|token|secret|password)\s*[:=]\s*["']?[^\s"',;]{4,}/iu.test(trimmed) &&
+    !/\b(?:sk|sess|rk|pk)-[a-z0-9_-]{4,}/iu.test(trimmed)
+}
+
+function isSafeOpenAiIdentifier(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed.length <= 128 && /^[a-z0-9][a-z0-9_.-]*$/iu.test(trimmed)
+}
+
+function isSafeOpenAiParam(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed.length <= 512 && /^[a-z0-9_$.[\]-]+$/iu.test(trimmed)
 }
 
 function isRetryableStatus(status: number): boolean {

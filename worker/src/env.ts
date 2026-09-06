@@ -108,6 +108,38 @@ export interface UserStateChangedPayload {
   spend_debt_micros?: number
   enabled: boolean
   updated_at_ms: number
+  /**
+   * Exact financial transition emitted from the same Durable Object
+   * transaction as the authoritative ledger entry. Missing only on legacy
+   * events and non-financial enabled-state changes.
+   */
+  financial_event?: UserFinancialEventPayload
+}
+
+export type UserFinancialEventSource =
+  | 'opening_balance'
+  | 'admin_adjustment'
+  | 'redeem_code'
+  | 'affiliate_transfer'
+  | 'affiliate_refund_clawback'
+  | 'auth_source_entitlement'
+  | 'usage_settlement'
+  | 'other_adjustment'
+
+export interface UserFinancialEventPayload {
+  event_type: 'opening_balance' | 'balance_adjustment' | 'settlement'
+  source_type: UserFinancialEventSource
+  source_id: string
+  request_id: string | null
+  actor_user_id: string | null
+  actor_session_id: string | null
+  /** Exact balance change; this can differ from gross when debt is involved. */
+  amount_delta_micros: number
+  /** Requested adjustment or total settled charge before debt allocation. */
+  gross_amount_micros: number
+  spend_debt_delta_micros: number
+  balance_after_micros: number
+  spend_debt_after_micros: number
 }
 
 /** Idempotent D1 projection delta emitted by the authoritative subscription Durable Object. */

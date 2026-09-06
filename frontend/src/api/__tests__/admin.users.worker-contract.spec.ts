@@ -239,6 +239,98 @@ describe('admin users Cloudflare Worker contract', () => {
     expect(post).not.toHaveBeenCalled()
   })
 
+  it('adapts UUID financial events and traverses Worker cursor pages', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          event_id: 'user-state:alice:4',
+          user_id: WORKER_USER_ID,
+          state_version: 4,
+          event_type: 'balance_adjustment',
+          source_type: 'admin_adjustment',
+          source_id: 'adjust-4',
+          request_id: null,
+          amount_delta_micros: 1_250_000,
+          gross_amount_micros: 1_250_000,
+          spend_debt_delta_micros: 0,
+          balance_after_micros: 13_750_000,
+          spend_debt_after_micros: 0,
+          occurred_at_ms: 1_788_480_000_001,
+        }],
+        total: 2,
+        limit: 1,
+        has_more: true,
+        next_cursor: 'cursor-page-2',
+        total_recharged_micros: 2_000_000,
+        history_complete: false,
+        history_available_from_ms: 1_788_307_200_000,
+      },
+    }).mockResolvedValueOnce({
+      data: {
+        items: [{
+          event_id: 'user-state:alice:3',
+          user_id: WORKER_USER_ID,
+          state_version: 3,
+          event_type: 'settlement',
+          source_type: 'usage_settlement',
+          source_id: 'request-3',
+          request_id: 'request-3',
+          amount_delta_micros: -500_000,
+          gross_amount_micros: 500_000,
+          spend_debt_delta_micros: 0,
+          balance_after_micros: 12_500_000,
+          spend_debt_after_micros: 0,
+          occurred_at_ms: 1_788_479_000_000,
+        }],
+        total: 2,
+        limit: 1,
+        has_more: false,
+        next_cursor: null,
+        total_recharged_micros: 2_000_000,
+      },
+    })
+    const { getUserBalanceHistory } = await import('@/api/admin/users')
+
+    const first = await getUserBalanceHistory(WORKER_USER_ID, 1, 1, 'admin_balance')
+    const second = await getUserBalanceHistory(WORKER_USER_ID, 2, 1, 'admin_balance')
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      `/admin/users/${WORKER_USER_ID}/balance-history`,
+      { params: { limit: 1, type: 'admin_balance' } },
+    )
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      `/admin/users/${WORKER_USER_ID}/balance-history`,
+      { params: { limit: 1, type: 'admin_balance', cursor: 'cursor-page-2' } },
+    )
+    expect(first).toMatchObject({
+      items: [{
+        id: 'user-state:alice:4',
+        code: 'adjust-4',
+        type: 'admin_balance',
+        value: 1.25,
+        amount_delta_micros: 1_250_000,
+        balance_after_micros: 13_750_000,
+        created_at: '2026-09-04T00:00:00.001Z',
+      }],
+      total: 2,
+      page: 1,
+      page_size: 1,
+      pages: 2,
+      total_recharged: 2,
+      history_complete: false,
+      history_available_from: '2026-09-02T00:00:00.000Z',
+    })
+    expect(second.items[0]).toMatchObject({
+      id: 'user-state:alice:3',
+      code: 'request-3',
+      type: 'balance',
+      value: -0.5,
+      amount_delta_micros: -500_000,
+    })
+  })
+
   it('uses Worker quota control versions and idempotency for replace and reset', async () => {
     const quotaResponse = {
       schema_version: 1,

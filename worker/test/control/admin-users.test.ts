@@ -534,6 +534,8 @@ describe('admin users', () => {
     expect(state.calls[1].body).toMatchObject({
       schema_version: 1,
       amount_delta_micros: 500_000,
+      actor_user_id: 'admin-1',
+      actor_session_id: 'session-1',
     })
     expect(String(state.calls[1].body.mutation_id)).toContain('admin-balance:')
     expect(database.users.get('user-1')).toMatchObject({

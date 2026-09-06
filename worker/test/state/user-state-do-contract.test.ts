@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Env } from "../../src/env";
 import { UserStateDO } from "../../src/state/user-state-do";
@@ -45,11 +45,22 @@ interface StoredRequest {
   updated_at_ms: number;
 }
 
+interface StoredOutboxEvent {
+  event_id: string;
+  request_id: string;
+  payload_json: string;
+  attempts: number;
+  available_at_ms: number;
+  published_at_ms: number | null;
+  created_at_ms: number;
+}
+
 class FakeUserStateStorage {
   profile: StoredProfile | null = null;
   stateVersion = 0;
   readonly ledger = new Map<string, StoredLedgerEntry>();
   readonly requests = new Map<string, StoredRequest>();
+  readonly outbox = new Map<string, StoredOutboxEvent>();
   readonly profileColumns = new Set([
     "schema_version", "user_id", "enabled", "balance_micros", "reserved_micros",
     "settled_micros", "spend_debt_micros", "updated_at_ms",
@@ -144,7 +155,58 @@ class FakeUserStateStorage {
       return request === undefined ? [] : [{ ...request }];
     }
     if (normalized.includes("FROM user_outbox")) {
-      if (normalized.includes("MIN(available_at_ms)")) return [{ next_alarm_ms: null }];
+      if (normalized.includes("MIN(available_at_ms)")) {
+        const pending = [...this.outbox.values()]
+          .filter((row) => row.published_at_ms === null)
+          .map((row) => row.available_at_ms);
+        return [{ next_alarm_ms: pending.length === 0 ? null : Math.min(...pending) }];
+      }
+      if (normalized.includes("WHERE request_id = ?")) {
+        const row = this.outbox.get(params[0] as string);
+        return row === undefined ? [] : [{ payload_json: row.payload_json }];
+      }
+      if (normalized.includes("published_at_ms IS NULL") && normalized.includes("LIMIT 10")) {
+        const now = params[0] as number;
+        return [...this.outbox.values()]
+          .filter((row) => row.published_at_ms === null && row.available_at_ms <= now)
+          .sort((left, right) => left.available_at_ms - right.available_at_ms ||
+            left.event_id.localeCompare(right.event_id))
+          .slice(0, 10)
+          .map(({ event_id, payload_json, attempts }) => ({ event_id, payload_json, attempts }));
+      }
+      return [];
+    }
+    if (normalized.startsWith("INSERT INTO user_outbox")) {
+      const row: StoredOutboxEvent = {
+        event_id: params[0] as string,
+        request_id: params[1] as string,
+        payload_json: params[2] as string,
+        attempts: 0,
+        available_at_ms: params[3] as number,
+        published_at_ms: null,
+        created_at_ms: params[4] as number,
+      };
+      this.outbox.set(row.request_id, row);
+      return [];
+    }
+    if (normalized.startsWith("UPDATE user_outbox SET published_at_ms")) {
+      const row = [...this.outbox.values()].find((value) => value.event_id === params[1]);
+      if (row !== undefined && row.published_at_ms === null) row.published_at_ms = params[0] as number;
+      return [];
+    }
+    if (normalized.startsWith("UPDATE user_outbox SET attempts")) {
+      const row = [...this.outbox.values()].find((value) => value.event_id === params[1]);
+      if (row !== undefined && row.published_at_ms === null) {
+        row.attempts += 1;
+        row.available_at_ms = params[0] as number;
+      }
+      return [];
+    }
+    if (normalized.startsWith("DELETE FROM user_outbox")) {
+      const cutoff = params[0] as number;
+      for (const [key, row] of this.outbox) {
+        if (row.published_at_ms !== null && row.published_at_ms < cutoff) this.outbox.delete(key);
+      }
       return [];
     }
     if (normalized.startsWith("INSERT INTO user_profile")) {
@@ -384,6 +446,158 @@ describe("UserStateDO balance contract", () => {
     await expect(conflict.json()).resolves.toMatchObject({
       error: { code: "mutation_conflict" },
     });
+  });
+
+  it("publishes an exact debt-aware financial event after a balance adjustment", async () => {
+    const sent: unknown[] = [];
+    const queue = { send: vi.fn(async (event: unknown) => { sent.push(event); }) };
+    const { object } = createHarness({ EVENTS_QUEUE: queue } as unknown as Env);
+    await post(object, "/configure", {
+      ...opening,
+      spend_debt_micros: 300,
+    });
+
+    const response = await post(object, "/balance/adjust", {
+      schema_version: 1,
+      mutation_id: "affiliate-transfer:transfer-1",
+      amount_delta_micros: 500,
+      actor_user_id: "admin-1",
+      actor_session_id: "session-1",
+    });
+
+    expect(response.status).toBe(200);
+    expect(queue.send).toHaveBeenCalledOnce();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        event_id: "user-state:user-1:1",
+        event_type: "user.state.changed.v1",
+        aggregate_id: "user-1",
+        payload: expect.objectContaining({
+          mutation_id: "affiliate-transfer:transfer-1",
+          balance_micros: 1_200,
+          spend_debt_micros: 0,
+          financial_event: {
+            event_type: "balance_adjustment",
+            source_type: "affiliate_transfer",
+            source_id: "transfer-1",
+            request_id: null,
+            amount_delta_micros: 200,
+            gross_amount_micros: 500,
+            spend_debt_delta_micros: -300,
+            balance_after_micros: 1_200,
+            spend_debt_after_micros: 0,
+            actor_user_id: "admin-1",
+            actor_session_id: "session-1",
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it.each([
+    ["admin-balance:adjust-1", "admin_adjustment", "adjust-1"],
+    ["redeem:redemption-1", "redeem_code", "redemption-1"],
+    ["affiliate-transfer:transfer-1", "affiliate_transfer", "transfer-1"],
+    ["affiliate-refund-clawback:refund-1", "affiliate_refund_clawback", "refund-1"],
+    ["auth-source-grant:grant-1", "auth_source_entitlement", "grant-1"],
+    ["compensation-1", "other_adjustment", "compensation-1"],
+  ])(
+    "classifies %s as %s without source-specific D1 writes",
+    async (mutationId, sourceType, sourceId) => {
+      const sent: any[] = [];
+      const queue = { send: vi.fn(async (event: unknown) => { sent.push(event); }) };
+      const { object } = createHarness({ EVENTS_QUEUE: queue } as unknown as Env);
+      await post(object, "/configure", opening);
+
+      const response = await post(object, "/balance/adjust", {
+        schema_version: 1,
+        mutation_id: mutationId,
+        amount_delta_micros: 100,
+      });
+
+      expect(response.status).toBe(200);
+      expect(sent[0]?.payload?.financial_event).toMatchObject({
+        source_type: sourceType,
+        source_id: sourceId,
+        amount_delta_micros: 100,
+      });
+    },
+  );
+
+  it("publishes the funded balance and overdelivery debt for a settlement", async () => {
+    const { raw, d1 } = createSqliteD1();
+    applyMigrations(raw);
+    const now = Date.now();
+    raw.exec(`
+      INSERT INTO users (
+        id, email, display_name, balance_micros, created_at_ms, updated_at_ms
+      ) VALUES ('user-1', 'user-1@example.test', 'User 1', 1000, ${now}, ${now});
+      INSERT INTO "groups" (
+        id, name, platform, enabled, group_type, is_exclusive, created_at_ms, updated_at_ms
+      ) VALUES ('group-1', 'Group 1', 'openai', 1, 'standard', 1, ${now}, ${now});
+      INSERT INTO api_keys (
+        id, user_id, key_hash, name, enabled, created_at_ms, updated_at_ms,
+        group_id, key_prefix, auth_version
+      ) VALUES (
+        'key-1', 'user-1', '${"a".repeat(64)}', 'Key 1', 1, ${now}, ${now},
+        'group-1', 'sk-sub2api-test', 1
+      );
+    `);
+    const sent: unknown[] = [];
+    const queue = { send: vi.fn(async (event: unknown) => { sent.push(event); }) };
+    const { object } = createHarness({
+      DB: d1,
+      EVENTS_QUEUE: queue,
+    } as unknown as Env);
+    await post(object, "/configure", opening);
+    expect((await post(object, "/authorize", {
+      schema_version: 1,
+      request_id: "request-debt-history",
+      user_id: "user-1",
+      api_key_id: "key-1",
+      api_key_auth_version: 1,
+    })).status).toBe(200);
+    expect((await post(object, "/reserve", {
+      schema_version: 1,
+      request_id: "request-debt-history",
+      amount_micros: 1_000,
+    })).status).toBe(200);
+    expect((await post(object, "/ensure", {
+      schema_version: 1,
+      request_id: "request-debt-history",
+      target_amount_micros: 1_200,
+    })).status).toBe(200);
+
+    const response = await post(object, "/settle", {
+      schema_version: 1,
+      request_id: "request-debt-history",
+      amount_micros: 1_200,
+    });
+
+    expect(response.status).toBe(200);
+    expect(queue.send).toHaveBeenCalledOnce();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        event_id: "user-state:user-1:1",
+        payload: expect.objectContaining({
+          mutation_id: "settlement:request-debt-history",
+          financial_event: {
+            event_type: "settlement",
+            source_type: "usage_settlement",
+            source_id: "request-debt-history",
+            request_id: "request-debt-history",
+            actor_user_id: null,
+            actor_session_id: null,
+            amount_delta_micros: -1_000,
+            gross_amount_micros: 1_200,
+            spend_debt_delta_micros: 200,
+            balance_after_micros: 0,
+            spend_debt_after_micros: 200,
+          },
+        }),
+      }),
+    ]);
+    raw.close();
   });
 
   it("commits an underfunded reservation through POST /ensure", async () => {

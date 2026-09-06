@@ -71,6 +71,7 @@ import {
   adjustAdminUserBalance,
   createAdminUser,
   getAdminUser,
+  listAdminUserBalanceHistory,
   listAdminUsers,
   updateAdminUser,
 } from './control/users'
@@ -549,6 +550,7 @@ export function createApp() {
   app.get('/api/v1/admin/users', listAdminUsers)
   app.post('/api/v1/admin/users', createAdminUser)
   app.get('/api/v1/admin/users/:id', getAdminUser)
+  app.get('/api/v1/admin/users/:id/balance-history', listAdminUserBalanceHistory)
   app.put('/api/v1/admin/users/:id', updateAdminUser)
   app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
   app.get('/api/v1/admin/users/:id/platform-quotas', getAdminUserPlatformQuotas)

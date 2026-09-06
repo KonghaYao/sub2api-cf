@@ -36,6 +36,7 @@ Status vocabulary:
 | Same: abnormal EOF is finalized once; truncated tool use keeps `tool_use` termination | Retain | `test/gateway/protocols/anthropic.test.ts` — explicit finalizers |
 | `responses_to_anthropic_tool_pairing_test.go`: `tool_use` / `tool_result` identity and pairing | Retain | `test/gateway/protocols/anthropic.test.ts` — paired Responses and Chat projections |
 | Anthropic upstream HTTP error classes and non-reflection of provider payloads | Retain | `test/gateway/legacy-anthropic-contract.test.ts` |
+| `openai_upstream_client_error_test.go`: deterministic OpenAI-compatible 400 diagnostics retain safe message/type/code/param without failover, while credentials and provider details stay private | Retain | v0.33 `test/gateway/handler.test.ts` covers OpenAI, Codex and input-token responders plus malformed, oversized, stalled, non-JSON, URL and credential-bearing fallbacks |
 | `gemini_chat_completions_compat_service_test.go`: supported inline image output is retained and invalid media is omitted | Retain | `test/gateway/legacy-gemini-contract.test.ts` |
 | Gemini semantic error status (`RESOURCE_EXHAUSTED`, etc.) overrides a generic transport status | Retain | `test/gateway/legacy-gemini-contract.test.ts`; complete class matrix in `test/gateway/protocols/gemini.test.ts` |
 | Gemini model names cannot inject paths, queries or fragments | Retain | `test/gateway/legacy-gemini-contract.test.ts`; `test/gateway/protocols/gemini.test.ts` |
@@ -156,16 +157,16 @@ The following classifications apply test-by-test by behavioral family in
 | `chatcompletions_responses_bridge_test.go` | Retain | Developer/system roles, formats, parallel tools and invalid history are represented in Worker protocol tests |
 | `chatcompletions_responses_request_invariants_test.go` | Retain | Pairing behavior is represented; every original fixture sequence is not duplicated |
 | `chatcompletions_responses_stream_lifecycle_test.go` | Retain | Balanced text/reasoning/tool lifecycle and idempotent terminal behavior are represented |
-| `chatcompletions_responses_bridge_custom_tools_test.go` | Retain + Pending | Codex-native function/custom/tool-search call-ID family normalization is retained; custom/freeform, namespace and client `tool_search` lowering/restoration remains incomplete |
+| `chatcompletions_responses_bridge_custom_tools_test.go` | Retain | Codex-native custom/freeform, namespace and client `tool_search` declarations, history, choices, buffered results and SSE identity restoration are covered by `test/gateway/protocols/responses-client-tools.test.ts` and public handler fixtures |
 | `chatcompletions_responses_reasoning_cache_test.go` | Replace + Pending | Stateless wire reasoning is retained; cross-request reasoning cache must be a DO/KV design and is not complete |
 | `chatcompletions_responses_tool_output_media_test.go` | Retain | `test/gateway/protocols/responses.test.ts` covers nested/JSON/data-URL images, ordered multimodal reinjection, duplicate call IDs and preservation of structured siblings |
 | `chatcompletions_x_search_test.go` | Pending | `x_search` request projection exists in Chat→Responses, but full round-trip and billing are not proven |
 | `responses_to_chatcompletions_tool_name_test.go` | Retain | First tool delta requires a name; subsequent empty names are not emitted |
 | `responses_to_chatcompletions_codex_events_test.go` | Pending | Custom tool and Codex-specific reasoning event families are not complete |
 | `responses_created_at_wire_test.go` | Retain | Stable timestamp and required presence represented |
-| `responses_stream_event_wire_test.go` | Retain + Pending | Standard function/message/reasoning wire fields represented; `custom_tool_call` and object-valued `tool_search` arguments remain Pending |
-| `responses_namespace_test.go` | Pending | Namespace collision detection and restoration are not implemented |
-| `responses_client_tools*.go` | Pending | Client tool manifest/item-id restoration is not implemented |
+| `responses_stream_event_wire_test.go` | Retain | Standard and custom function/message/reasoning wire fields, object-valued `tool_search` arguments and stable item IDs are represented by the protocol wire suites |
+| `responses_namespace_test.go` | Retain | `test/gateway/protocols/responses-client-tools.test.ts` covers reversible flattening, duplicate/collision rejection, ambiguous mappings, long names and tool choices |
+| `responses_client_tools*.go` | Retain | `test/gateway/protocols/responses-client-tools.test.ts` covers client manifests, completed discovery promotion, history, buffered/SSE restoration and stable item IDs |
 | `service_tier_passthrough_test.go` | Retain | Standard Chat↔Responses buffered and streaming paths represented |
 | `streaming_stop_reason_test.go` | Retain | Max tokens, content filter and completed terminal mapping represented |
 | `chatcompletions_anthropic_bridge_test.go` | Retain + Pending | Text/function tools and streams retained; `test/gateway/protocols/anthropic.test.ts` covers base64 image-bearing tool results for Responses and Chat upstreams. URL/file media and remaining bridge variants are Pending |

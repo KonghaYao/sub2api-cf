@@ -22,6 +22,13 @@ describe('Anthropic Messages request codec', () => {
       messages: [],
       max_tokens: 999,
       stream: true,
+      temperature: 0.4,
+      top_p: 0.9,
+      top_k: 20,
+      stop_sequences: ['END'],
+      metadata: { user_id: 'count-client' },
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+      output_config: { effort: 'high' },
       tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
     })
 
@@ -79,6 +86,57 @@ describe('Anthropic Messages request codec', () => {
       reasoning: { effort: 'medium', summary: 'auto' },
       text: { verbosity: 'medium' },
     })
+  })
+
+  it('retains Anthropic generation controls and maps output effort safely', () => {
+    const anthropic = parseAnthropicMessagesRequest({
+      model: 'claude-public',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: 'Think carefully.' }],
+      temperature: 0.25,
+      top_p: 0.8,
+      top_k: 40,
+      stop_sequences: ['END'],
+      metadata: { user_id: 'customer-42' },
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+      output_config: { effort: 'max' },
+    })
+
+    expect(anthropic).toMatchObject({
+      temperature: 0.25,
+      top_p: 0.8,
+      top_k: 40,
+      stop_sequences: ['END'],
+      metadata: { user_id: 'customer-42' },
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+      output_config: { effort: 'max' },
+    })
+    expect(toOpenAIResponsesRequest(anthropic, 'gpt-5.4')).not.toHaveProperty('temperature')
+    expect(toOpenAIResponsesRequest(anthropic, 'gpt-5.4')).toMatchObject({
+      reasoning: { effort: 'xhigh', summary: 'auto' },
+    })
+    expect(toOpenAIChatCompletionsRequest(anthropic, 'third-party-model')).toMatchObject({
+      temperature: 0.25,
+      top_p: 0.8,
+      reasoning_effort: 'xhigh',
+    })
+  })
+
+  it('rejects malformed Anthropic generation controls', () => {
+    const base = {
+      model: 'claude-public',
+      max_tokens: 128,
+      messages: [{ role: 'user', content: 'Hello' }],
+    }
+
+    expect(() => parseAnthropicMessagesRequest({ ...base, temperature: 1.1 }))
+      .toThrowError(/\$\.temperature/)
+    expect(() => parseAnthropicMessagesRequest({ ...base, thinking: { type: 'enabled' } }))
+      .toThrowError(/budget_tokens/)
+    expect(() => parseAnthropicMessagesRequest({ ...base, output_config: { effort: 'ultra' } }))
+      .toThrowError(/output_config\.effort/)
+    expect(() => parseAnthropicMessagesRequest({ ...base, metadata: { email: 'secret@example.com' } }))
+      .toThrowError(/metadata\.email/)
   })
 
   it('rejects unknown request and content fields instead of forwarding them', () => {

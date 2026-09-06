@@ -132,6 +132,27 @@ apply the target D1 migrations, and only then deploy the Worker. The default
 `pnpm run deploy` intentionally targets production through the same guarded
 pipeline; do not invoke `wrangler deploy` directly for a release.
 
+Remote releases use the repository's recoverable D1 migration runner rather
+than `wrangler d1 migrations apply`. It imports each SQL file independently
+with `wrangler d1 execute --file`, verifies the exact `version` and `name` in
+the project's `schema_migrations` ledger, and only then registers the filename
+in Wrangler's `d1_migrations` ledger. If an earlier attempt committed the SQL
+but stopped before Wrangler registration, the next run repairs the missing
+registration without executing that SQL again. Unknown or contradictory rows
+in either ledger stop the release before another migration is imported.
+
+Run only one migration/deploy command for a target database at a time. Before a
+production schema release, retain the current Time Travel bookmark in the
+release record:
+
+```sh
+wrangler d1 time-travel info DB --env production --json
+pnpm run deploy:production
+```
+
+The first command is read-only. The second command is resumable after a failed
+file import or an interruption between the verified import and registration.
+
 ## Durable Object state contracts
 
 `UserStateDO` stores money only as safe integer micro-units. Its internal

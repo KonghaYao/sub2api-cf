@@ -6,6 +6,8 @@ export class GatewayError extends Error {
     readonly type = 'invalid_request_error',
     readonly retryAfter?: string,
     readonly param?: string,
+    readonly upstream = false,
+    readonly publicCode: string | null = code,
   ) {
     super(message)
     this.name = 'GatewayError'
@@ -24,7 +26,7 @@ export function gatewayErrorResponse(error: GatewayError, requestId?: string): R
       error: {
         message: error.message,
         type: error.type,
-        code: error.code,
+        ...(error.publicCode === null ? {} : { code: error.publicCode }),
         ...(error.param === undefined ? {} : { param: error.param }),
       },
     }),

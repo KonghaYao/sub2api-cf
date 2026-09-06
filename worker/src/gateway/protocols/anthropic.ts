@@ -78,6 +78,21 @@ export type AnthropicToolChoice =
   | { type: 'auto' | 'any' | 'none' }
   | { type: 'tool'; name: string }
 
+export type AnthropicEffort = 'low' | 'medium' | 'high' | 'max'
+
+export type AnthropicThinking =
+  | { type: 'enabled'; budget_tokens: number }
+  | { type: 'adaptive'; budget_tokens?: number }
+  | { type: 'disabled' }
+
+export interface AnthropicOutputConfig {
+  effort?: AnthropicEffort
+}
+
+export interface AnthropicMetadata {
+  user_id?: string
+}
+
 export interface AnthropicMessagesRequest {
   model: string
   max_tokens: number
@@ -86,6 +101,13 @@ export interface AnthropicMessagesRequest {
   stream: boolean
   tools?: AnthropicTool[]
   tool_choice?: AnthropicToolChoice
+  temperature?: number
+  top_p?: number
+  top_k?: number
+  stop_sequences?: string[]
+  metadata?: AnthropicMetadata
+  thinking?: AnthropicThinking
+  output_config?: AnthropicOutputConfig
 }
 
 export interface AnthropicCountTokensRequest {
@@ -104,8 +126,10 @@ export interface OpenAIResponsesRequest {
   store: false
   parallel_tool_calls: true
   include: ['reasoning.encrypted_content']
-  reasoning: { effort: 'medium'; summary: 'auto' }
+  reasoning: { effort: 'low' | 'medium' | 'high' | 'xhigh'; summary: 'auto' }
   text: { verbosity: 'medium' }
+  temperature?: number
+  top_p?: number
   tools?: Array<Record<string, unknown>>
   tool_choice?: string | Record<string, unknown>
 }
@@ -123,7 +147,9 @@ export interface OpenAIChatCompletionsRequest {
   max_completion_tokens: number
   stream: boolean
   parallel_tool_calls: true
-  reasoning_effort: 'medium'
+  reasoning_effort: 'low' | 'medium' | 'high' | 'xhigh'
+  temperature?: number
+  top_p?: number
   tools?: Array<Record<string, unknown>>
   tool_choice?: string | Record<string, unknown>
 }
@@ -177,6 +203,13 @@ export function parseAnthropicMessagesRequest(value: unknown): AnthropicMessages
     'stream',
     'tools',
     'tool_choice',
+    'temperature',
+    'top_p',
+    'top_k',
+    'stop_sequences',
+    'metadata',
+    'thinking',
+    'output_config',
   ], '$')
   const model = nonEmptyString(root.model, '$.model', 256)
   const maxTokens = integerInRange(root.max_tokens, '$.max_tokens', 1, 1_000_000)
@@ -192,6 +225,24 @@ export function parseAnthropicMessagesRequest(value: unknown): AnthropicMessages
   const toolChoice = root.tool_choice === undefined
     ? undefined
     : parseToolChoice(root.tool_choice, '$.tool_choice')
+  const temperature = root.temperature === undefined
+    ? undefined
+    : numberInRange(root.temperature, '$.temperature', 0, 1)
+  const topP = root.top_p === undefined
+    ? undefined
+    : numberInRange(root.top_p, '$.top_p', 0, 1)
+  const topK = root.top_k === undefined
+    ? undefined
+    : integerInRange(root.top_k, '$.top_k', 0, 1_000_000)
+  const stopSequences = root.stop_sequences === undefined
+    ? undefined
+    : arrayAt(root.stop_sequences, '$.stop_sequences', 256)
+        .map((sequence, index) => nonEmptyString(sequence, `$.stop_sequences[${index}]`, 16_384))
+  const metadata = root.metadata === undefined ? undefined : parseMetadata(root.metadata, '$.metadata')
+  const thinking = root.thinking === undefined ? undefined : parseThinking(root.thinking, '$.thinking')
+  const outputConfig = root.output_config === undefined
+    ? undefined
+    : parseOutputConfig(root.output_config, '$.output_config')
   return {
     model,
     max_tokens: maxTokens,
@@ -200,6 +251,13 @@ export function parseAnthropicMessagesRequest(value: unknown): AnthropicMessages
     stream,
     ...(tools === undefined ? {} : { tools }),
     ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(topP === undefined ? {} : { top_p: topP }),
+    ...(topK === undefined ? {} : { top_k: topK }),
+    ...(stopSequences === undefined ? {} : { stop_sequences: stopSequences }),
+    ...(metadata === undefined ? {} : { metadata }),
+    ...(thinking === undefined ? {} : { thinking }),
+    ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
   }
 }
 
@@ -215,6 +273,13 @@ export function parseAnthropicCountTokensRequest(value: unknown): AnthropicCount
     // counting. These fields are accepted but deliberately not forwarded.
     'max_tokens',
     'stream',
+    'temperature',
+    'top_p',
+    'top_k',
+    'stop_sequences',
+    'metadata',
+    'thinking',
+    'output_config',
   ], '$')
   const model = nonEmptyString(root.model, '$.model', 256)
   const messages = arrayAt(root.messages, '$.messages', MAX_MESSAGES)
@@ -262,8 +327,12 @@ export function toOpenAIResponsesRequest(
     store: false,
     parallel_tool_calls: true,
     include: ['reasoning.encrypted_content'],
-    reasoning: { effort: 'medium', summary: 'auto' },
+    reasoning: { effort: responsesEffort(request.output_config?.effort), summary: 'auto' },
     text: { verbosity: 'medium' },
+  }
+  if (!canonicalModel(result.model).startsWith('gpt-5')) {
+    if (request.temperature !== undefined) result.temperature = request.temperature
+    if (request.top_p !== undefined) result.top_p = request.top_p
   }
   if (tools !== undefined && tools.length > 0) result.tools = tools
   if (request.tool_choice !== undefined && tools !== undefined && tools.length > 0) {
@@ -318,7 +387,11 @@ export function toOpenAIChatCompletionsRequest(
     max_completion_tokens: request.max_tokens,
     stream: request.stream,
     parallel_tool_calls: true,
-    reasoning_effort: 'medium',
+    reasoning_effort: responsesEffort(request.output_config?.effort),
+  }
+  if (!canonicalModel(result.model).startsWith('gpt-5')) {
+    if (request.temperature !== undefined) result.temperature = request.temperature
+    if (request.top_p !== undefined) result.top_p = request.top_p
   }
   if (tools !== undefined && tools.length > 0) result.tools = tools
   if (request.tool_choice !== undefined && tools !== undefined && tools.length > 0) {
@@ -914,6 +987,64 @@ export function formatAnthropicSseEvent(event: AnthropicSseEvent): string {
   return `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`
 }
 
+function parseMetadata(value: unknown, path: string): AnthropicMetadata {
+  const metadata = objectAt(value, path)
+  exactKeys(metadata, ['user_id'], path)
+  if (metadata.user_id === undefined) return {}
+  return { user_id: nonEmptyString(metadata.user_id, `${path}.user_id`, 256) }
+}
+
+function parseThinking(value: unknown, path: string): AnthropicThinking {
+  const thinking = objectAt(value, path)
+  if (thinking.type === 'enabled') {
+    exactKeys(thinking, ['type', 'budget_tokens'], path)
+    if (thinking.budget_tokens === undefined) fail(`${path}.budget_tokens`, 'is required when thinking is enabled')
+    return {
+      type: 'enabled',
+      budget_tokens: integerInRange(thinking.budget_tokens, `${path}.budget_tokens`, 1, 1_000_000),
+    }
+  }
+  if (thinking.type === 'adaptive') {
+    exactKeys(thinking, ['type', 'budget_tokens'], path)
+    return {
+      type: 'adaptive',
+      ...(thinking.budget_tokens === undefined
+        ? {}
+        : { budget_tokens: integerInRange(thinking.budget_tokens, `${path}.budget_tokens`, 1, 1_000_000) }),
+    }
+  }
+  exactKeys(thinking, ['type'], path)
+  if (thinking.type !== 'disabled') {
+    fail(`${path}.type`, 'must be "enabled", "adaptive", or "disabled"')
+  }
+  return { type: 'disabled' }
+}
+
+function parseOutputConfig(value: unknown, path: string): AnthropicOutputConfig {
+  const outputConfig = objectAt(value, path)
+  exactKeys(outputConfig, ['effort'], path)
+  if (outputConfig.effort === undefined) return {}
+  if (
+    outputConfig.effort !== 'low' &&
+    outputConfig.effort !== 'medium' &&
+    outputConfig.effort !== 'high' &&
+    outputConfig.effort !== 'max'
+  ) {
+    fail(`${path}.effort`, 'must be "low", "medium", "high", or "max"')
+  }
+  return { effort: outputConfig.effort }
+}
+
+function responsesEffort(effort: AnthropicEffort | undefined): 'low' | 'medium' | 'high' | 'xhigh' {
+  if (effort === 'max') return 'xhigh'
+  return effort ?? 'medium'
+}
+
+function canonicalModel(model: string): string {
+  const value = model.trim().toLowerCase()
+  return value.slice(value.lastIndexOf('/') + 1)
+}
+
 function parseMessage(value: unknown, path: string): AnthropicMessage {
   const message = objectAt(value, path)
   exactKeys(message, ['role', 'content'], path)
@@ -1349,6 +1480,13 @@ function integerInRange(value: unknown, path: string, minimum: number, maximum: 
     fail(path, `must be an integer between ${minimum} and ${maximum}`)
   }
   return value as number
+}
+
+function numberInRange(value: unknown, path: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+    fail(path, `must be a finite number between ${minimum} and ${maximum}`)
+  }
+  return value
 }
 
 function fail(path: string, message: string): never {

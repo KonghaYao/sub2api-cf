@@ -3,6 +3,7 @@ import type {
   PlatformEvent,
   UsageSettledPayload,
   UserStateChangedPayload,
+  UserFinancialEventPayload,
   SubscriptionStateChangedPayload,
 } from '../env'
 import { fulfillPaymentOrder, isPaymentFulfillmentEvent } from '../payment/fulfillment'
@@ -432,7 +433,7 @@ async function projectUserStateEvent(
     return
   }
   const payload = event.payload
-  await env.DB.batch([
+  const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `UPDATE users
           SET balance_micros = ?,
@@ -449,11 +450,43 @@ async function projectUserStateEvent(
       payload.user_id,
       payload.state_version,
     ),
+  ]
+  if (payload.financial_event !== undefined) {
+    const financial = payload.financial_event
+    statements.push(env.DB.prepare(
+      `INSERT INTO user_financial_events (
+         event_id, user_id, state_version, event_type, source_type, source_id,
+         request_id, actor_user_id, actor_session_id,
+         amount_delta_micros, gross_amount_micros,
+         spend_debt_delta_micros, balance_after_micros, spend_debt_after_micros,
+         occurred_at_ms, projected_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      event.event_id,
+      payload.user_id,
+      payload.state_version,
+      financial.event_type,
+      financial.source_type,
+      financial.source_id,
+      financial.request_id,
+      financial.actor_user_id,
+      financial.actor_session_id,
+      financial.amount_delta_micros,
+      financial.gross_amount_micros,
+      financial.spend_debt_delta_micros,
+      financial.balance_after_micros,
+      financial.spend_debt_after_micros,
+      event.occurred_at_ms,
+      Date.now(),
+    ))
+  }
+  statements.push(
     env.DB.prepare(
       `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
        VALUES (?, ?, ?, ?)`,
     ).bind(USER_STATE_CONSUMER, event.event_id, Date.now(), digest),
-  ])
+  )
+  await env.DB.batch(statements)
 }
 
 function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
@@ -749,6 +782,109 @@ function isUserStateEvent(
     (payload.updated_at_ms as number) >= 0 &&
     payload.updated_at_ms === event.occurred_at_ms &&
     typeof payload.mutation_id === 'string' &&
-    event.event_id === `user-state:${payload.user_id}:${payload.state_version}`
+    event.event_id === `user-state:${payload.user_id}:${payload.state_version}` &&
+    (payload.financial_event === undefined || isUserFinancialEvent(
+      payload.financial_event,
+      payload,
+    ))
   )
+}
+
+function isUserFinancialEvent(
+  value: unknown,
+  state: Partial<UserStateChangedPayload>,
+): value is UserFinancialEventPayload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const event = value as Partial<UserFinancialEventPayload>
+  if (
+    !['opening_balance', 'balance_adjustment', 'settlement'].includes(event.event_type ?? '') ||
+    ![
+      'opening_balance', 'admin_adjustment', 'redeem_code',
+      'affiliate_transfer', 'affiliate_refund_clawback',
+      'auth_source_entitlement', 'usage_settlement', 'other_adjustment',
+    ].includes(event.source_type ?? '') ||
+    typeof event.source_id !== 'string' || event.source_id.length === 0 ||
+    event.source_id.length > 256 ||
+    (event.request_id !== null && (
+      typeof event.request_id !== 'string' || event.request_id.length === 0 ||
+      event.request_id.length > 256
+    )) ||
+    !isNullableIdentifier(event.actor_user_id, 128) ||
+    !isNullableIdentifier(event.actor_session_id, 128) ||
+    ((event.actor_user_id === null) !== (event.actor_session_id === null))
+  ) return false
+  for (const field of [
+    'amount_delta_micros',
+    'gross_amount_micros',
+    'spend_debt_delta_micros',
+    'balance_after_micros',
+    'spend_debt_after_micros',
+  ] as const) {
+    if (!Number.isSafeInteger(event[field])) return false
+  }
+  if (
+    event.balance_after_micros! < 0 || event.spend_debt_after_micros! < 0 ||
+    event.balance_after_micros !== state.balance_micros ||
+    (state.spend_debt_micros !== undefined &&
+      event.spend_debt_after_micros !== state.spend_debt_micros)
+  ) return false
+
+  const expectedSource = financialSourceForMutation(
+    state.mutation_id ?? '',
+    event.event_type!,
+    event.request_id,
+  )
+  if (
+    event.source_type !== expectedSource.source_type ||
+    event.source_id !== expectedSource.source_id
+  ) return false
+
+  if (event.event_type === 'settlement') {
+    return event.request_id !== null &&
+      event.source_type === 'usage_settlement' &&
+      event.amount_delta_micros! <= 0 &&
+      event.gross_amount_micros! >= 0 &&
+      event.spend_debt_delta_micros! >= 0 &&
+      event.gross_amount_micros ===
+        -event.amount_delta_micros! + event.spend_debt_delta_micros!
+  }
+  if (event.event_type === 'opening_balance') {
+    return event.request_id === null && event.amount_delta_micros! >= 0
+  }
+  return event.request_id === null &&
+    event.gross_amount_micros !== 0 &&
+    event.spend_debt_delta_micros! <= 0 &&
+    event.gross_amount_micros ===
+      event.amount_delta_micros! - event.spend_debt_delta_micros!
+}
+
+function isNullableIdentifier(value: unknown, maximum: number): value is string | null {
+  return value === null || (
+    typeof value === 'string' && value.length > 0 && value.length <= maximum &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  )
+}
+
+function financialSourceForMutation(
+  mutationId: string,
+  eventType: UserFinancialEventPayload['event_type'],
+  requestId: string | null | undefined,
+): Pick<UserFinancialEventPayload, 'source_type' | 'source_id'> {
+  if (eventType === 'settlement') {
+    return { source_type: 'usage_settlement', source_id: requestId ?? '' }
+  }
+  const prefixes = [
+    ['admin-balance:', 'admin_adjustment'],
+    ['redeem:', 'redeem_code'],
+    ['affiliate-transfer:', 'affiliate_transfer'],
+    ['affiliate-refund-clawback:', 'affiliate_refund_clawback'],
+    ['auth-source-grant:', 'auth_source_entitlement'],
+    ['d1-user:', 'opening_balance'],
+  ] as const
+  for (const [prefix, sourceType] of prefixes) {
+    if (mutationId.startsWith(prefix) && mutationId.length > prefix.length) {
+      return { source_type: sourceType, source_id: mutationId.slice(prefix.length) }
+    }
+  }
+  return { source_type: 'other_adjustment', source_id: mutationId }
 }
