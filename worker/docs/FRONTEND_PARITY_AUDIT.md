@@ -357,3 +357,18 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: 30 focused Worker SQLite/state-machine tests, 34 frontend adapter
   tests, Worker/frontend typechecks and Cloudflare SPA build passed. Template,
   style, classes, and visible button labels are unchanged.
+
+## v0.42.16 Pool recovery projection and test infrastructure — 2026-09-07
+
+- Health-probe pool fan-out now carries `recovery_revision`, so both gateway
+  routing and asynchronous health synchronization clear a pool cooldown only
+  after an administrative reset. The test covers the nonzero projection.
+- Health/pool expectations now encode the production scheduling rule: a paid
+  OpenAI OAuth subscription uses group priority plus 1000 when enabled; other
+  accounts use group priority plus 3001. Composite route and public-settings
+  adapter tests were updated to the Worker endpoints and current setting shape.
+- The gateway test D1 double now models the composite-route query's four binds,
+  filtering and ordering exactly, instead of treating it as unsupported.
+- Validation: Worker full suite 175 files / 1715 tests, binding suite 8 / 15,
+  Accounts/Groups frontend suite 56 / 527, Worker/frontend typechecks, and
+  Cloudflare SPA build passed. No frontend template, style, or class changed.

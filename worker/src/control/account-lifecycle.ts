@@ -108,6 +108,7 @@ interface PoolMemberRow {
   max_concurrency: number
   priority: number
   weight: number
+  recovery_revision: number
 }
 
 interface RevisionRow {
@@ -899,7 +900,7 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
         ? 'am.embeddings'
         : 'am.image_generation'
   return env.DB.prepare(
-    `SELECT a.id AS account_id, a.max_concurrency,
+    `SELECT a.id AS account_id, a.max_concurrency, a.recovery_revision,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -930,6 +931,7 @@ async function syncPoolSnapshot(
     max_concurrency: member.max_concurrency,
     priority: member.priority,
     weight: member.weight,
+    recovery_revision: member.recovery_revision,
   }))
   const fingerprint = await sha256Hex(JSON.stringify(configured))
   const stub = env.POOL_STATE.get(env.POOL_STATE.idFromName(
@@ -1103,7 +1105,8 @@ function validatePoolMembers(rows: PoolMemberRow[]): void {
       typeof row.account_id !== 'string' || row.account_id.length === 0 ||
       !positiveSafeInteger(row.max_concurrency) ||
       !nonNegativeSafeInteger(row.priority) ||
-      !positiveSafeInteger(row.weight)
+      !positiveSafeInteger(row.weight) ||
+      !nonNegativeSafeInteger(row.recovery_revision)
     ) throw new Error('Pool membership projection is invalid')
   }
 }

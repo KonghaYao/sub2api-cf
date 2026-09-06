@@ -471,6 +471,7 @@ describe('scheduled account health lifecycle', () => {
       UPDATE models SET image_generation = 1 WHERE id = 'model-openai';
       UPDATE account_models SET image_generation = 1
        WHERE account_id = '${accountId}' AND model_id = 'model-openai';
+      UPDATE accounts SET recovery_revision = 5 WHERE id = '${accountId}';
     `)
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')))
     const before = test.raw.prepare(
@@ -492,7 +493,7 @@ describe('scheduled account health lifecycle', () => {
           schema_version: 1,
           config_revision: after,
           config_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
-          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 }],
+          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 3008, weight: 3, recovery_revision: 5 }],
         }),
       }),
       expect.objectContaining({
@@ -500,7 +501,7 @@ describe('scheduled account health lifecycle', () => {
         body: expect.objectContaining({
           schema_version: 1,
           config_revision: after,
-          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 }],
+          accounts: [{ account_id: accountId, max_concurrency: 4, priority: 3008, weight: 3, recovery_revision: 5 }],
         }),
       }),
     ]))
@@ -618,6 +619,16 @@ describe('scheduled account health lifecycle', () => {
         ('${anthropicId}', 'model-composite-anthropic', 0, 1, 0, ${NOW}, ${NOW});
       UPDATE accounts SET next_health_probe_at_ms = ${NOW + 24 * 60 * 60_000}
        WHERE id IN ('${backupId}', '${anthropicId}');
+      UPDATE accounts
+         SET credential_kind = 'oauth', provider_config_json = '{"subscription_plan":"pro"}'
+       WHERE id = '${primaryId}';
+      UPDATE system_settings
+         SET public_json = json_set(
+           public_json,
+           '$.openai_advanced_scheduler_subscription_priority_enabled',
+           json('true')
+         )
+       WHERE id = 'global';
     `)
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')))
 
@@ -629,8 +640,8 @@ describe('scheduled account health lifecycle', () => {
         name: 'group:group-composite:platform:openai:model:model-composite-openai:endpoint:responses:shard:0',
         body: expect.objectContaining({
           accounts: [
-            { account_id: primaryId, max_concurrency: 4, priority: 1, weight: 3 },
-            { account_id: backupId, max_concurrency: 4, priority: 2, weight: 2 },
+            { account_id: primaryId, max_concurrency: 4, priority: 1001, weight: 3, recovery_revision: 0 },
+            { account_id: backupId, max_concurrency: 4, priority: 3003, weight: 2, recovery_revision: 0 },
           ],
         }),
       }),
@@ -654,7 +665,7 @@ describe('scheduled account health lifecycle', () => {
     await scheduleAccountHealthLifecycle(test.env, NOW)
     await consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
     expect(test.pool.calls[0].body.accounts).toEqual([
-      { account_id: unknownBackupId, max_concurrency: 4, priority: 7, weight: 3 },
+      { account_id: unknownBackupId, max_concurrency: 4, priority: 3008, weight: 3, recovery_revision: 0 },
     ])
     expect(account(test, accountId)).toMatchObject({
       health_status: 'unhealthy', consecutive_health_failures: 1,
@@ -665,8 +676,8 @@ describe('scheduled account health lifecycle', () => {
     await scheduleAccountHealthLifecycle(test.env, retryAt)
     await consumeAccountHealthProbe(test.queue.messages[1] as AccountHealthProbeEvent, test.env, retryAt)
     expect(test.pool.calls[1].body.accounts).toEqual(expect.arrayContaining([
-      { account_id: accountId, max_concurrency: 4, priority: 7, weight: 3 },
-      { account_id: unknownBackupId, max_concurrency: 4, priority: 7, weight: 3 },
+      { account_id: accountId, max_concurrency: 4, priority: 3008, weight: 3, recovery_revision: 0 },
+      { account_id: unknownBackupId, max_concurrency: 4, priority: 3008, weight: 3, recovery_revision: 0 },
     ]))
     expect(test.pool.calls[1].body.config_revision)
       .toBeGreaterThan(test.pool.calls[0].body.config_revision)

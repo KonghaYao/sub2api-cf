@@ -116,6 +116,35 @@ class FakeStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
+    if (this.query.includes('FROM composite_model_routes WHERE group_id=?')) {
+      const [groupId, endpoint, publicModel, prefixModel] = this.values
+      if (
+        typeof groupId !== 'string' || typeof endpoint !== 'string' ||
+        typeof publicModel !== 'string' || prefixModel !== publicModel ||
+        this.values.length !== 4
+      ) {
+        throw new Error(`Unexpected composite-route bindings: ${JSON.stringify(this.values)}`)
+      }
+      const route = this.database.compositeRoutes
+        .filter((candidate) =>
+          candidate.group_id === groupId && candidate.enabled === 1 &&
+          (candidate.endpoint === 'any' || candidate.endpoint === endpoint) &&
+          ((candidate.match_type === 'exact' && candidate.public_model === publicModel) ||
+            (candidate.match_type === 'prefix' && publicModel.startsWith(candidate.public_model))),
+        )
+        .sort((left, right) =>
+          left.priority - right.priority ||
+          (left.match_type === right.match_type ? 0 : left.match_type === 'exact' ? -1 : 1) ||
+          right.public_model.length - left.public_model.length ||
+          left.id.localeCompare(right.id),
+        )
+        .slice(0, 1)
+      return {
+        success: true,
+        results: route as T[],
+        meta: {} as D1Meta & Record<string, unknown>,
+      }
+    }
     if (this.query.includes('FROM resolved_alias resolved')) {
       const credentials = [
         this.database.credential,
@@ -199,6 +228,17 @@ class FakeDatabase {
   readonly batchQueries: string[][] = []
   credential: Record<string, unknown> = {}
   readonly additionalCredentials = new Map<string, Record<string, unknown>>()
+  readonly compositeRoutes: Array<{
+    id: string
+    group_id: string
+    public_model: string
+    match_type: 'exact' | 'prefix'
+    target_platform: 'openai' | 'anthropic' | 'gemini' | 'codex'
+    upstream_model: string
+    endpoint: string
+    priority: number
+    enabled: number
+  }> = []
   recovery: Record<string, unknown> | null = null
   failRecoveryWrites = false
   chatOnly = false

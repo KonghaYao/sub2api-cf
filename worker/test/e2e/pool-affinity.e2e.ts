@@ -26,8 +26,8 @@ describe('PoolStateDO session affinity binding', () => {
       config_revision: 1,
       config_fingerprint: '1'.repeat(64),
       accounts: [
-        { account_id: 'account-1', max_concurrency: 2, priority: 1, weight: 1 },
-        { account_id: 'account-2', max_concurrency: 2, priority: 0, weight: 1 },
+        { account_id: 'account-1', max_concurrency: 2, priority: 1, weight: 1, recovery_revision: 0 },
+        { account_id: 'account-2', max_concurrency: 2, priority: 0, weight: 1, recovery_revision: 0 },
       ],
     })
     const first = await command(stub, '/reserve', {
@@ -43,8 +43,8 @@ describe('PoolStateDO session affinity binding', () => {
       config_revision: 2,
       config_fingerprint: '2'.repeat(64),
       accounts: [
-        { account_id: 'account-1', max_concurrency: 2, priority: 0, weight: 1 },
-        { account_id: 'account-2', max_concurrency: 2, priority: 1, weight: 1 },
+        { account_id: 'account-1', max_concurrency: 2, priority: 0, weight: 1, recovery_revision: 0 },
+        { account_id: 'account-2', max_concurrency: 2, priority: 1, weight: 1, recovery_revision: 0 },
       ],
     })
     const sticky = await command(stub, '/reserve', {
@@ -73,7 +73,7 @@ describe('PoolStateDO session affinity binding', () => {
       config_revision: 3,
       config_fingerprint: '3'.repeat(64),
       accounts: [
-        { account_id: 'account-2', max_concurrency: 2, priority: 0, weight: 1 },
+        { account_id: 'account-2', max_concurrency: 2, priority: 0, weight: 1, recovery_revision: 0 },
       ],
     })
     const rebound = await command(stub, '/reserve', {

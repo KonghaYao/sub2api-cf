@@ -294,25 +294,46 @@ describe('admin groups Cloudflare Worker contract', () => {
     expect(put.mock.calls[1][1]).toEqual({ updates: [{ id: 'opaque-group', sort_order: 1, control_version: 4 }] })
   })
 
-  it('blocks every legacy-only group route before an HTTP request is sent', async () => {
+  it('blocks only group routes that the Worker does not implement', async () => {
     const groups = await import('@/api/admin/groups')
 
     await expect(groups.getLiveCapability()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getStats(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getGroupApiKeys(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.listCompositeRoutes(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.createCompositeRoute(1, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.updateCompositeRoute(1, 2, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.deleteCompositeRoute(1, 2)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.previewCompositeRoute(1, {} as never)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.getGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.clearGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.batchSetGroupRateMultipliers(1, [])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-
     expect(get).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
     expect(put).not.toHaveBeenCalled()
     expect(deleteRequest).not.toHaveBeenCalled()
+  })
+
+  it('uses the Worker composite-route endpoints with cached route CAS versions', async () => {
+    const route = {
+      id: 'route-opaque', public_model: 'gpt-public', match_type: 'exact',
+      target_platform: 'openai', upstream_model: 'gpt-upstream', endpoint: 'responses',
+      priority: 10, enabled: true, notes: '', control_version: 4,
+    }
+    get.mockResolvedValueOnce({ data: [route] })
+    post.mockResolvedValue({ data: route })
+    put.mockResolvedValueOnce({ data: { ...route, control_version: 5 } })
+    deleteRequest.mockResolvedValueOnce({ data: { message: 'Composite route deleted successfully' } })
+    const groups = await import('@/api/admin/groups')
+
+    await groups.listCompositeRoutes('group-opaque')
+    await groups.previewCompositeRoute('group-opaque', { model: 'gpt-public', endpoint: 'responses' } as never)
+    await groups.updateCompositeRoute('group-opaque', 'route-opaque', route as never)
+    await groups.deleteCompositeRoute('group-opaque', 'route-opaque')
+
+    expect(get).toHaveBeenCalledWith('/admin/groups/group-opaque/composite-routes')
+    expect(post).toHaveBeenCalledWith('/admin/groups/group-opaque/composite-routes/preview', {
+      model: 'gpt-public', endpoint: 'responses',
+    })
+    expect(put).toHaveBeenCalledWith('/admin/groups/group-opaque/composite-routes/route-opaque', {
+      ...route, expected_control_version: 4,
+    }, { headers: { 'Idempotency-Key': 'composite-route-update-33333333-3333-4333-8333-333333333333' } })
+    expect(deleteRequest).toHaveBeenCalledWith('/admin/groups/group-opaque/composite-routes/route-opaque', {
+      data: { expected_control_version: 4 },
+      headers: { 'Idempotency-Key': 'composite-route-delete-33333333-3333-4333-8333-333333333333' },
+    })
   })
 
   it('keeps null capacity dimensions explicit instead of coercing them to zero', async () => {
