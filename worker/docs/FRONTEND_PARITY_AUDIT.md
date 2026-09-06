@@ -372,3 +372,17 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: Worker full suite 175 files / 1715 tests, binding suite 8 / 15,
   Accounts/Groups frontend suite 56 / 527, Worker/frontend typechecks, and
   Cloudflare SPA build passed. No frontend template, style, or class changed.
+
+## v0.42.17 Channels requested/upstream billing sources — 2026-09-07
+
+- The original Channels billing-source form now exposes `requested` and
+  `upstream` in Worker mode. The Worker persists both with idempotency and CAS;
+  `response_model` remains unavailable until its response-stream settlement
+  semantics are migrated.
+- Pricing and `restrict_models` now use the configured source: `requested`
+  matches the client model before a channel mapping; `upstream` matches the
+  final mapped target, or the catalog upstream name if unmapped. This applies
+  to both catalog routes and external channel aliases.
+- Validation: focused Worker Channels/repository SQLite tests (51), focused
+  Channels frontend tests (18), Worker/frontend typechecks, and Cloudflare SPA
+  build passed. No D1 migration.

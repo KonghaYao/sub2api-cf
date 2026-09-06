@@ -1050,8 +1050,15 @@ function externalAliasCte(
              COALESCE(gm.upstream_name_override, m.upstream_name) = mapping.expanded_target COLLATE NOCASE
            )
       ), resolved_alias AS (
-        SELECT backing.*, COUNT(*) OVER () AS match_count
+        SELECT backing.*,
+               CASE backing.billing_model_source
+                 WHEN 'requested' THEN request.requested_model
+                 WHEN 'upstream' THEN backing.backing_upstream_name
+                 ELSE backing.expanded_target
+               END AS billing_model,
+               COUNT(*) OVER () AS match_count
           FROM backing_matches backing
+          CROSS JOIN request_input request
       )`,
     bindings,
   }
@@ -1078,9 +1085,9 @@ function externalAliasModelStatement(
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
               pricing.time_pricing_json AS pricing_time_pricing_json,
               allowed.model_pattern AS pricing_model_pattern,
-              ${channelPricingMatchPhaseSql('alias.expanded_target')} AS match_phase,
+              ${channelPricingMatchPhaseSql('alias.billing_model')} AS match_phase,
               DENSE_RANK() OVER (
-                ORDER BY ${channelPricingMatchPhaseSql('alias.expanded_target')} ASC,
+                ORDER BY ${channelPricingMatchPhaseSql('alias.billing_model')} ASC,
                          allowed.is_wildcard ASC,
                          CASE WHEN allowed.is_wildcard = 1
                            THEN length(allowed.model_pattern) ELSE 0 END DESC
@@ -1090,7 +1097,7 @@ function externalAliasModelStatement(
            ON pricing.channel_id = alias.channel_id AND pricing.platform = alias.platform
          JOIN channel_pricing_models allowed ON allowed.pricing_id = pricing.id
         WHERE alias.match_count = 1
-          AND ${channelPricingMatchPhaseSql('alias.expanded_target')} IS NOT NULL
+          AND ${channelPricingMatchPhaseSql('alias.billing_model')} IS NOT NULL
      ), best_pricing AS (
        SELECT matched.*, COUNT(*) OVER () AS pricing_match_count
          FROM pricing_pattern_matches matched
@@ -1115,7 +1122,7 @@ function externalAliasModelStatement(
             COALESCE(user_rate.rate_multiplier_ppm, alias.group_rate_multiplier_ppm) AS rate_multiplier_ppm,
             alias.max_output_tokens, alias.default_max_output_tokens,
             alias.channel_id, alias.channel_control_version,
-            alias.expanded_target AS billing_model,
+            alias.billing_model,
             COALESCE(pricing.pricing_match_count, 0) AS pricing_match_count,
             pricing.pricing_id, pricing.pricing_control_version,
             pricing.pricing_billing_mode, pricing.pricing_model_pattern,
@@ -1310,7 +1317,7 @@ interface ChannelModelPolicyRow extends PricingProjectionRow {
 }
 
 function assertSupportedChannelBillingSource(value: string): void {
-  if (value !== 'channel_mapped') {
+  if (!['channel_mapped', 'requested', 'upstream'].includes(value)) {
     throw new GatewayError(
       409,
       'unsupported_billing_model_source',
@@ -1343,7 +1350,8 @@ function channelModelPolicyStatement(
     `WITH active_channel AS (
        SELECT c.id, c.control_version, c.billing_model_source, c.restrict_models,
               gm.group_id,
-              resolved.platform AS target_platform
+              resolved.platform AS target_platform,
+              COALESCE(gm.upstream_name_override, resolved.upstream_name) AS upstream_model
          FROM channel_groups cg
          JOIN channels c ON c.id = cg.channel_id
          JOIN "groups" g ON g.id = cg.group_id
@@ -1381,20 +1389,18 @@ function channelModelPolicyStatement(
                        ELSE ''
                      END
                 ELSE mapping.target_pattern
-              END AS expanded_target,
-              CASE WHEN mapping.target_pattern IS NOT NULL AND mapping.target_pattern <> ''
-                THEN CASE WHEN mapping.target_is_wildcard = 1
-                  THEN substr(mapping.target_pattern, 1, length(mapping.target_pattern) - 1) ||
-                       CASE WHEN mapping.source_is_wildcard = 1
-                         THEN substr(?, length(mapping.source_pattern))
-                         ELSE ''
-                       END
-                  ELSE mapping.target_pattern
-                END
-                ELSE ?
-              END AS billing_model
+              END AS expanded_target
          FROM active_channel channel
          LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
+     ), pricing_policy AS (
+       SELECT target.*,
+              CASE channel.billing_model_source
+                WHEN 'requested' THEN ?
+                WHEN 'upstream' THEN COALESCE(target.expanded_target, channel.upstream_model)
+                ELSE COALESCE(target.expanded_target, ?)
+              END AS billing_model
+         FROM route_policy target
+         JOIN active_channel channel ON 1 = 1
      ), account_cost_matches AS (
        SELECT account_cost_price.id AS price_id,
               account_cost_price.version AS price_version,
@@ -1403,7 +1409,7 @@ function channelModelPolicyStatement(
               account_cost_price.cache_read_micros_per_million,
               account_cost_price.per_request_micros,
               COUNT(*) OVER () AS match_count
-         FROM route_policy target
+         FROM pricing_policy target
          JOIN group_models account_cost_group_model
            ON account_cost_group_model.group_id = target.group_id
          JOIN models account_cost_model
@@ -1441,7 +1447,7 @@ function channelModelPolicyStatement(
                          CASE WHEN allowed.is_wildcard = 1
                            THEN length(allowed.model_pattern) ELSE 0 END DESC
               ) AS specificity_rank
-         FROM route_policy target
+         FROM pricing_policy target
          JOIN active_channel channel ON 1 = 1
          JOIN channel_model_pricing pricing
            ON pricing.channel_id = channel.id AND pricing.platform = target.target_platform
@@ -1503,7 +1509,7 @@ function channelModelPolicyStatement(
               AS account_cost_base_per_request_micros
        FROM active_channel channel
       LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
-      JOIN route_policy policy ON 1 = 1
+      JOIN pricing_policy policy ON 1 = 1
       LEFT JOIN account_cost_matches account_cost ON 1 = 1
       LEFT JOIN best_pricing pricing ON 1 = 1
       LIMIT 1`,

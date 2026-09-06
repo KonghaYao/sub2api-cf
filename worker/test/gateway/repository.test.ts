@@ -489,15 +489,34 @@ describe('gateway repository channel model policy', () => {
     raw.close()
   })
 
-  it.each(['requested', 'upstream', 'response_model'])(
-    'fails closed when an active channel selects unsupported %s billing',
-    async (billingSource) => {
+  it.each([
+    ['requested', 'requested-price', 'openai-public'],
+    ['upstream', 'upstream-price', 'vendor-target'],
+  ])(
+    'matches channel pricing against the %s model source',
+    async (billingSource, pricingId, matchedModel) => {
       const { raw, d1 } = createSqliteD1()
       applyMigrations(raw)
       seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}')
-      seedChannel(raw, { restrictModels: false })
-      raw.prepare('UPDATE channels SET billing_model_source = ? WHERE id = ?')
-        .run(billingSource, 'channel-openai')
+      seedChannel(raw, { restrictModels: true })
+      raw.exec(`
+        UPDATE channels SET billing_model_source = '${billingSource}' WHERE id = 'channel-openai';
+        INSERT INTO channel_model_mappings (
+          channel_id, platform, source_pattern, target_pattern,
+          source_is_wildcard, target_is_wildcard, sort_order, created_at_ms
+        ) VALUES ('channel-openai', 'openai', 'openai-public', 'vendor-target', 0, 0, 0, 1);
+        INSERT INTO channel_model_pricing (
+          id, channel_id, platform, billing_mode, per_request_micros,
+          control_version, created_at_ms, updated_at_ms
+        ) VALUES
+          ('requested-price', 'channel-openai', 'openai', 'per_request', 11, 1, 1, 1),
+          ('upstream-price', 'channel-openai', 'openai', 'per_request', 22, 1, 1, 1);
+        INSERT INTO channel_pricing_models (
+          pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+        ) VALUES
+          ('requested-price', 'openai-public', 0, 0, 1),
+          ('upstream-price', 'vendor-target', 0, 0, 1);
+      `)
 
       await expect(resolveGatewayRoute(
         { DB: d1 } as Env,
@@ -505,9 +524,9 @@ describe('gateway repository channel model policy', () => {
         'openai-public',
         'responses',
         'user-1',
-      )).rejects.toMatchObject({
-        status: 409,
-        code: 'unsupported_billing_model_source',
+      )).resolves.toMatchObject({
+        model: { upstream_name: 'vendor-target' },
+        customer_pricing: { pricing_id: pricingId, matched_model_pattern: matchedModel },
       })
       raw.close()
     },
@@ -1043,6 +1062,41 @@ describe('gateway repository channel model policy', () => {
       platform: 'openai', billing_model: 'per_request', per_request_micros: 55,
     })
     expect(batchSizes).toEqual([4, 3])
+
+    raw.exec(`
+      UPDATE channels SET billing_model_source = 'requested' WHERE id = 'channel-openai';
+      INSERT INTO channel_model_pricing (
+        id, channel_id, platform, billing_mode, per_request_micros,
+        control_version, created_at_ms, updated_at_ms
+      ) VALUES
+        ('external-requested-price', 'channel-openai', 'openai', 'per_request', 66, 1, 1, 1),
+        ('external-upstream-price', 'channel-openai', 'openai', 'per_request', 77, 1, 1, 1);
+      INSERT INTO channel_pricing_models (
+        pricing_id, model_pattern, is_wildcard, sort_order, created_at_ms
+      ) VALUES
+        ('external-requested-price', 'external-alias', 0, 0, 1),
+        ('external-upstream-price', 'openai-upstream', 0, 0, 1);
+    `)
+    batchSizes.length = 0
+    await expect(resolveGatewayRoute(
+      { DB: counted } as Env, 'group-openai', 'external-alias', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'external-requested-price', matched_model_pattern: 'external-alias',
+        per_request_micros: 66,
+      },
+    })
+
+    raw.prepare("UPDATE channels SET billing_model_source = 'upstream' WHERE id = 'channel-openai'").run()
+    await expect(resolveGatewayRoute(
+      { DB: counted } as Env, 'group-openai', 'external-alias', 'responses', 'user-1',
+    )).resolves.toMatchObject({
+      customer_pricing: {
+        pricing_id: 'external-upstream-price', matched_model_pattern: 'openai-upstream',
+        per_request_micros: 77,
+      },
+    })
+    expect(batchSizes).toEqual([4, 3, 4, 3])
     raw.close()
   })
 

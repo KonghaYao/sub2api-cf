@@ -725,15 +725,10 @@ const statusEditOptions = computed(() => [
 ])
 
 const billingModelSourceOptions = computed(() => {
-  const supported = [
-    { value: 'channel_mapped', label: t('admin.channels.form.billingModelSourceChannelMapped', 'Bill by channel-mapped model') }
-  ]
-  if (workerContractActive) return supported
   return [
-    ...supported,
+    { value: 'channel_mapped', label: t('admin.channels.form.billingModelSourceChannelMapped', 'Bill by channel-mapped model') },
     { value: 'requested', label: t('admin.channels.form.billingModelSourceRequested', 'Bill by requested model') },
-    { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') },
-    { value: 'response_model', label: t('admin.channels.form.billingModelSourceResponse', 'Bill by upstream response model') }
+    { value: 'upstream', label: t('admin.channels.form.billingModelSourceUpstream', 'Bill by final upstream model') }
   ]
 })
 
@@ -1391,9 +1386,7 @@ async function openEditDialog(channel: Channel) {
   form.description = channel.description || ''
   form.status = channel.status
   form.restrict_models = channel.restrict_models || false
-  form.billing_model_source = workerContractActive
-    ? 'channel_mapped'
-    : channel.billing_model_source || 'channel_mapped'
+  form.billing_model_source = channel.billing_model_source || 'channel_mapped'
   form.apply_pricing_to_account_stats = channel.apply_pricing_to_account_stats || false
   // Must load groups first so apiToForm can map groupID → platform
   await Promise.all([loadGroups(), loadAllChannelsForConflict()])

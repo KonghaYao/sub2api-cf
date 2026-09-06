@@ -258,22 +258,26 @@ describe('admin channels HTTP contract', () => {
     }
   })
 
-  it('rejects billing model sources that are not implemented by the Worker runtime', async () => {
+  it('persists requested and upstream billing sources while rejecting response-model billing', async () => {
     const test = await fixture()
-    for (const billingModelSource of ['requested', 'upstream', 'response_model']) {
+    for (const billingModelSource of ['requested', 'upstream']) {
       const response = await request(test, '/api/v1/admin/channels', {
         method: 'POST', headers: mutationHeaders(`channel-billing-source-${billingModelSource}`),
         body: JSON.stringify({
-          name: `Unsupported ${billingModelSource}`,
+          name: `Supported ${billingModelSource}`,
           billing_model_source: billingModelSource,
         }),
       })
-      expect(response.status).toBe(409)
-      expect((await json(response)).error).toMatchObject({
-        code: 'billing_model_source_not_supported',
-      })
+      expect(response.status).toBe(201)
+      expect((await json(response)).data).toMatchObject({ billing_model_source: billingModelSource })
     }
-    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 0 })
+    const response = await request(test, '/api/v1/admin/channels', {
+      method: 'POST', headers: mutationHeaders('channel-billing-source-response-model'),
+      body: JSON.stringify({ name: 'Unsupported response model', billing_model_source: 'response_model' }),
+    })
+    expect(response.status).toBe(409)
+    expect((await json(response)).error).toMatchObject({ code: 'billing_model_source_not_supported' })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM channels').get()).toEqual({ total: 2 })
   })
 
   it('creates and reads a normalized channel graph exactly, with idempotency and audit', async () => {

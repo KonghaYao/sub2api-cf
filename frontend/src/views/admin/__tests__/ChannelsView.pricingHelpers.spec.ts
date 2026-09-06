@@ -80,7 +80,7 @@ describe('ChannelsView Worker pricing helpers', () => {
     expect(update).not.toHaveBeenCalled()
   })
 
-  it('offers only the Worker-supported billing source and exposes account-stat pricing controls', async () => {
+  it('offers every route-time Worker billing source and exposes account-stat pricing controls', async () => {
     const wrapper = shallowMount(ChannelsView, {
       global: {
         stubs: {
@@ -100,9 +100,11 @@ describe('ChannelsView Worker pricing helpers', () => {
 
     const billingSource = wrapper.findComponent('[data-testid="channel-billing-model-source"]')
     expect(billingSource.exists()).toBe(true)
-    expect(billingSource.props('options')).toEqual([
+    expect(billingSource.props('options')).toEqual(expect.arrayContaining([
       expect.objectContaining({ value: 'channel_mapped' }),
-    ])
+      expect.objectContaining({ value: 'requested' }),
+      expect.objectContaining({ value: 'upstream' }),
+    ]))
 
     const anthropicLabel = wrapper.findAll('label').find((label) => label.text() === 'anthropic')
     const anthropic = anthropicLabel?.find('input[type="checkbox"]')
