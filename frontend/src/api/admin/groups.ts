@@ -796,9 +796,8 @@ export async function getUsageSummary(): Promise<
  * Get capacity summary (concurrency/sessions/RPM) for all active groups
  */
 export async function getCapacitySummary(): Promise<
-  { group_id: number; concurrency_used: number; concurrency_max: number; sessions_used: number; sessions_max: number; rpm_used: number; rpm_max: number }[]
+  { group_id: number | string; concurrency_status?: 'known' | 'unknown'; concurrency_used: number | null; concurrency_max: number; sessions_status?: 'known' | 'unknown'; sessions_used: number | null; sessions_max: number | null; rpm_status?: 'known' | 'unknown'; rpm_used: number | null; rpm_max: number | null }[]
 > {
-  requireLegacyGroupFeature('Group capacity summary')
   const { data } = await apiClient.get<
     { group_id: number; concurrency_used: number; concurrency_max: number; sessions_used: number; sessions_max: number; rpm_used: number; rpm_max: number }[]
   >('/admin/groups/capacity-summary')

@@ -308,11 +308,19 @@ describe('admin groups Cloudflare Worker contract', () => {
     await expect(groups.getGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.clearGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.batchSetGroupRateMultipliers(1, [])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.getCapacitySummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
 
     expect(get).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
     expect(put).not.toHaveBeenCalled()
     expect(deleteRequest).not.toHaveBeenCalled()
+  })
+
+  it('keeps null capacity dimensions explicit instead of coercing them to zero', async () => {
+    get.mockResolvedValueOnce({ data: [{ group_id: 'opaque', concurrency_status: 'known', concurrency_used: 2,
+      concurrency_max: 4, sessions_status: 'unknown', sessions_used: null, sessions_max: null,
+      rpm_status: 'unknown', rpm_used: null, rpm_max: null }] })
+    const { getCapacitySummary } = await import('@/api/admin/groups')
+    await expect(getCapacitySummary()).resolves.toMatchObject([{ group_id: 'opaque', sessions_used: null, rpm_used: null }])
+    expect(get).toHaveBeenCalledWith('/admin/groups/capacity-summary')
   })
 })

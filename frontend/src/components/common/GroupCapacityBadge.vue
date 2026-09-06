@@ -18,11 +18,11 @@
     </div>
 
     <!-- 会话数 -->
-    <div v-if="sessionsMax > 0" class="flex items-center gap-1">
+    <div v-if="hasSessions" class="flex items-center gap-1">
       <span
         :class="[
           'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium',
-          capacityClass(sessionsUsed, sessionsMax)
+          capacityClass(sessionsUsed!, sessionsMax!)
         ]"
       >
         <svg class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -35,11 +35,11 @@
     </div>
 
     <!-- RPM -->
-    <div v-if="rpmMax > 0" class="flex items-center gap-1">
+    <div v-if="hasRpm" class="flex items-center gap-1">
       <span
         :class="[
           'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium',
-          capacityClass(rpmUsed, rpmMax)
+          capacityClass(rpmUsed!, rpmMax!)
         ]"
       >
         <svg class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -54,16 +54,17 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 interface Props {
   concurrencyUsed: number
   concurrencyMax: number
-  sessionsUsed: number
-  sessionsMax: number
-  rpmUsed: number
-  rpmMax: number
+  sessionsUsed: number | null
+  sessionsMax: number | null
+  rpmUsed: number | null
+  rpmMax: number | null
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   concurrencyUsed: 0,
   concurrencyMax: 0,
   sessionsUsed: 0,
@@ -71,6 +72,9 @@ withDefaults(defineProps<Props>(), {
   rpmUsed: 0,
   rpmMax: 0
 })
+
+const hasSessions = computed(() => props.sessionsMax !== null && props.sessionsMax > 0 && props.sessionsUsed !== null)
+const hasRpm = computed(() => props.rpmMax !== null && props.rpmMax > 0 && props.rpmUsed !== null)
 
 function capacityClass(used: number, max: number): string {
   if (max > 0 && used >= max) {

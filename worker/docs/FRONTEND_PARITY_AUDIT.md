@@ -167,5 +167,24 @@ explicit typed error. It must never silently discard a submitted field or return
   API-key listing, live discovery, composite routes, user multipliers and advanced
   configuration execution. Capacity values are not inferred from usage.
 - v0.42.2 deployed as `56c263de-2f99-43ed-a3ff-9a624d943322`.
-- Worker typecheck and SPA build passed. D1 pre-migration bookmark:
-  `00000029-00000455-000050de-7c491dd9b00f31460d05931aec5ebfe6`.
+
+## v0.42.4 Groups concurrency capacity — 2026-09-06
+
+- Restored the capacity-summary request with real active upstream concurrency
+  from authoritative POOL_STATE lease snapshots. D1 0067 records only pools
+  configured by successful routing, so administrator reads cannot create empty
+  Durable Objects while discovering capacity.
+- The handler reads all eligible account ceilings and registered pools in one D1
+  batch, then fetches pool snapshots with at most 16 concurrent calls. Snapshot
+  reclamation removes expired leases before returning counts. A failed snapshot
+  changes the entire group's concurrency status to `unknown`; it never becomes 0.
+- Worker has no recoverable counterpart to the legacy Redis active-session or
+  account-RPM authorities. Those values are explicitly `unknown` and null. The
+  original UI renders only the proven concurrency badge and does not infer values
+  from usage records.
+- Validation: 4 Worker D1/DO-boundary tests and 20 frontend contract, column and
+  parity tests passed; Worker typecheck passed. Remaining: session/RPM authority,
+  detailed group stats/API-key listing, live discovery, composite routes, user
+  multipliers and advanced configuration execution.
+- Worker typecheck and SPA build passed. D1 0067 pre-migration bookmark:
+  `00000029-0000048f-000050de-3a9f1845c7e1921cd9aad86ae7df8791`.

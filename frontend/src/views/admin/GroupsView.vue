@@ -5078,14 +5078,14 @@ const usageMap = ref<Map<number, GroupUsageSummary>>(new Map());
 const usageLoading = ref(false);
 const capacityMap = ref<
   Map<
-    number,
+    number | string,
     {
       concurrencyUsed: number;
       concurrencyMax: number;
-      sessionsUsed: number;
-      sessionsMax: number;
-      rpmUsed: number;
-      rpmMax: number;
+      sessionsUsed: number | null;
+      sessionsMax: number | null;
+      rpmUsed: number | null;
+      rpmMax: number | null;
     }
   >
 >(new Map());
@@ -5946,17 +5946,18 @@ const loadCapacitySummary = async () => {
   try {
     const data = await adminAPI.groups.getCapacitySummary();
     const map = new Map<
-      number,
+      number | string,
       {
         concurrencyUsed: number;
         concurrencyMax: number;
-        sessionsUsed: number;
-        sessionsMax: number;
-        rpmUsed: number;
-        rpmMax: number;
+        sessionsUsed: number | null;
+        sessionsMax: number | null;
+        rpmUsed: number | null;
+        rpmMax: number | null;
       }
     >();
     for (const item of data) {
+      if (item.concurrency_status === "unknown" || item.concurrency_used === null) continue;
       map.set(item.group_id, {
         concurrencyUsed: item.concurrency_used,
         concurrencyMax: item.concurrency_max,

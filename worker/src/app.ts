@@ -1,4 +1,5 @@
 import { getAdminGroupUsageSummary } from './control/group-usage'
+import { getAdminGroupCapacitySummary } from './control/group-capacity'
 import { Hono } from 'hono'
 import {
   currentUser,
@@ -625,6 +626,7 @@ export function createApp() {
   app.get('/api/v1/admin/groups', listAdminGroups)
   app.get('/api/v1/admin/groups/all', allAdminGroups)
   app.get('/api/v1/admin/groups/usage-summary', getAdminGroupUsageSummary)
+  app.get('/api/v1/admin/groups/capacity-summary', getAdminGroupCapacitySummary)
   app.post('/api/v1/admin/groups', createAdminGroup)
   app.post('/api/v1/admin/groups/:id/duplicate', duplicateAdminGroup)
   app.put('/api/v1/admin/groups/sort-order', updateAdminGroupSortOrder)

@@ -623,6 +623,13 @@ export async function syncPoolAccounts(
       })),
     }),
   )
+  // Observability must not make a gateway request fail. A missing row simply
+  // causes the admin capacity endpoint to report an explicit unknown later.
+  await env.DB.prepare(`INSERT INTO pool_state_registry
+    (group_id, model_id, endpoint, config_revision, last_synced_at_ms) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(group_id, model_id, endpoint) DO UPDATE SET
+      config_revision = excluded.config_revision, last_synced_at_ms = excluded.last_synced_at_ms`
+  ).bind(groupId, modelId, endpoint, configRevision, Date.now()).run().catch(() => undefined)
   return stub
 }
 
