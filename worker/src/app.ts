@@ -37,6 +37,7 @@ import {
 } from './control/api-keys'
 import {
   createAdminAccount,
+  duplicateAdminAccount,
   deleteAdminAccount,
   deleteAdminAccountGroupLink,
   deleteAdminAccountModelCapability,
@@ -677,6 +678,7 @@ export function createApp() {
   app.delete('/api/v1/admin/channels/:id', deleteAdminChannel)
   app.get('/api/v1/admin/accounts', listAdminAccounts)
   app.post('/api/v1/admin/accounts', createAdminAccount)
+  app.post('/api/v1/admin/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
   app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)

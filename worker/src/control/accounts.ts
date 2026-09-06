@@ -925,6 +925,63 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
   }
 }
 
+export async function duplicateAdminAccount(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const idempotencyKey = requireIdempotencyKey(context.req.raw)
+    const source = await requireAccount(context.env, context.req.param('id'))
+    const idempotency = await controlIdempotency('admin.accounts.duplicate.v1', idempotencyKey, { source_id: source.id })
+    const previous = await findControlIdempotency(context.env, idempotency)
+    if (previous !== null) return controlSuccess(safeIdempotentAccount(previous))
+
+    const accountId = await deterministicUuid('admin.accounts.duplicate.v1', idempotencyKey)
+    const secretId = await deterministicUuid('admin.account-secrets.duplicate.v1', idempotencyKey)
+    if ((await findAccount(context.env, accountId)) !== null) {
+      throw new GatewayError(409, 'idempotency_record_missing', 'Duplicated account exists without its idempotency record')
+    }
+    const credential = await decryptCredential(
+      source.nonce_b64, source.ciphertext_b64, requireCredentialsMasterKey(context.env),
+      credentialAad(context.env.ENVIRONMENT, source.id, source.secret_id, source.key_version),
+    ) as StoredAccountCredential
+    const encrypted = await encryptCredential(
+      credential, requireCredentialsMasterKey(context.env), credentialAad(context.env.ENVIRONMENT, accountId, secretId, 1),
+    )
+    const groups = parseProjectionArray<GroupLink>(source.group_links_json, 'group links')
+    const capabilities = parseProjectionArray<ModelCapability>(source.model_capabilities_json, 'model capabilities')
+    const now = Date.now()
+    const name = `${source.name.slice(0, 92)} copy ${accountId.slice(0, 8)}`
+    const safe = accountResponse({
+      id: accountId, platform: source.platform, name, enabled: source.enabled === 1,
+      max_concurrency: source.max_concurrency, billing_rate_multiplier_ppm: source.billing_rate_multiplier_ppm,
+      protocol: source.protocol, base_url: source.base_url, auth_scheme: source.auth_scheme,
+      image_adapter: source.image_adapter, credential_kind: source.credential_kind,
+      provider_config: accountProviderConfig(source), config_version: 1, control_version: 0,
+      health_status: 'unknown', last_checked_at_ms: null, last_latency_ms: null, last_health_error: null,
+      created_at_ms: now, updated_at_ms: now, credential_key_version: 1, ui_config: parseUiConfig(source.ui_config_json),
+      group_links: groups.map(({ group_id, priority, weight }) => ({ group_id, priority, weight, control_version: 0 })),
+      model_capabilities: capabilities.map((capability) => ({ ...capability, control_version: 0 })),
+    })
+    await context.env.DB.batch([
+      context.env.DB.prepare(
+        `INSERT INTO accounts (id, platform, name, credential_ref, enabled, max_concurrency, created_at_ms, updated_at_ms,
+           protocol, base_url, auth_scheme, provider_config_json, image_adapter, credential_kind, config_version,
+           billing_rate_multiplier_ppm, ui_config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      ).bind(accountId, source.platform, name, secretId, source.enabled, source.max_concurrency, now, now,
+        source.protocol, source.base_url, source.auth_scheme, source.provider_config_json, source.image_adapter,
+        source.credential_kind, source.billing_rate_multiplier_ppm, source.ui_config_json),
+      context.env.DB.prepare(
+        `INSERT INTO account_secrets (id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms)
+         VALUES (?, ?, 1, ?, ?, ?, ?)`,
+      ).bind(secretId, accountId, encrypted.nonce_b64, encrypted.ciphertext_b64, now, now),
+      ...groupInsertStatements(context.env, accountId, groups, now),
+      ...capabilityInsertStatements(context.env, accountId, capabilities, now),
+      controlIdempotencyInsert(context.env, idempotency, 'account', accountId, safe, now),
+    ])
+    return controlSuccess(safe, 201)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
 export async function deleteAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const expectedVersion = requireExpectedControlVersion(context.req.raw, {})

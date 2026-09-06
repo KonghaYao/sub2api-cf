@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createAdminAccount,
+  duplicateAdminAccount,
   getAdminAccount,
   listAdminAccounts,
   putAdminAccountModelCapability,
@@ -29,6 +30,7 @@ function fixture(): Fixture {
   const app = new Hono<{ Bindings: Env }>()
   app.get('/accounts', listAdminAccounts)
   app.post('/accounts', createAdminAccount)
+  app.post('/accounts/:id/duplicate', duplicateAdminAccount)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
   app.put('/accounts/:id/models/:model_id', putAdminAccountModelCapability)
@@ -629,6 +631,24 @@ describe('admin provider account control plane on D1', () => {
       MASTER_KEY,
       credentialAad('test', secret.id, secret.credential_ref, 2),
     )).resolves.toEqual({ api_key: 'rotated-codex-secret' })
+  })
+
+  it('duplicates an account transactionally and replays the same idempotent response', async () => {
+    const test = fixture()
+    const source = await createProvider(test, 'openai')
+    const request = () => test.app.request(`/accounts/${source.id}/duplicate`, {
+      method: 'POST', headers: { 'idempotency-key': 'duplicate-openai-provider' },
+    }, test.env)
+    const first = await request()
+    const duplicated = (await first.json() as any).data
+    expect(first.status).toBe(201)
+    expect(duplicated).toMatchObject({ platform: 'openai', provider_config: {}, group_links: [], model_capabilities: [] })
+    expect(duplicated.id).not.toBe(source.id)
+    expect(duplicated.name).toContain('copy')
+    const replay = await request()
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({ data: { id: duplicated.id } })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 2 })
   })
 
   it('persists a typed OpenAI OAuth subscription plan and rejects other account kinds', async () => {

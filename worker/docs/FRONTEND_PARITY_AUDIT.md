@@ -272,3 +272,12 @@ explicit typed error. It must never silently discard a submitted field or return
 - The Accounts template/style/class parity fixture passed unchanged. Validation:
   59 targeted Worker SQLite/control/gateway tests, Worker/frontend typechecks,
   58 frontend account parity/modal tests and the SPA build passed.
+
+## v0.42.10 Accounts duplicate action — 2026-09-07
+
+- The original Accounts action-menu duplicate operation now has a Worker route.
+  It atomically re-encrypts the copied credential under a new secret ID and
+  preserves group links, model capabilities and safe UI configuration.
+- Duplicate requests use a deterministic idempotency record: retries return the
+  same copied account rather than creating a second clone. The original menu,
+  list refresh, template and styles are unchanged.
