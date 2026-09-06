@@ -16,6 +16,58 @@ function message(body: unknown) {
 }
 
 describe('user financial event projection', () => {
+  it('projects a shared-classifier opening event without mistaking a legacy snapshot for completeness', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    raw.exec(`
+      INSERT INTO users (
+        id, email, balance_micros, spend_debt_micros,
+        state_version, created_at_ms, updated_at_ms
+      ) VALUES ('user-1', 'user-1@example.test', 0, 0, 0, 1, 1)
+    `)
+    const env = { DB: d1 } as Env
+    const opening = userStateEvent({
+      stateVersion: 0,
+      balanceMicros: 1_000_000,
+      spendDebtMicros: 300_000,
+      mutationId: 'd1-user:0',
+      financialEvent: {
+        event_type: 'opening_balance',
+        source_type: 'opening_balance',
+        source_id: '0',
+        request_id: null,
+        actor_user_id: null,
+        actor_session_id: null,
+        amount_delta_micros: 1_000_000,
+        gross_amount_micros: 1_000_000,
+        spend_debt_delta_micros: 300_000,
+        balance_after_micros: 1_000_000,
+        spend_debt_after_micros: 300_000,
+      },
+    })
+
+    const delivery = message(opening)
+    await consumeEvents(
+      { queue: 'events', messages: [delivery] } as unknown as MessageBatch<unknown>,
+      env,
+    )
+
+    expect(delivery.ack).toHaveBeenCalledOnce()
+    expect(raw.prepare(`
+      SELECT event_type, source_type, source_id, spend_debt_after_micros
+        FROM user_financial_events WHERE event_id = 'user-state:user-1:0'
+    `).get()).toEqual({
+      event_type: 'opening_balance',
+      source_type: 'opening_balance',
+      source_id: '0',
+      spend_debt_after_micros: 300_000,
+    })
+    expect(raw.prepare(
+      `SELECT financial_history_complete FROM users WHERE id = 'user-1'`,
+    ).get()).toEqual({ financial_history_complete: 0 })
+    raw.close()
+  })
+
   it('projects exact balance and debt deltas once from the UserStateDO outbox', async () => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)

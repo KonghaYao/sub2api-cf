@@ -1,5 +1,10 @@
 PRAGMA foreign_keys = ON;
 
+-- Existing users remain conservatively incomplete. New Worker code writes 1
+-- explicitly at creation, avoiding any migration/deployment timestamp race.
+ALTER TABLE users ADD COLUMN financial_history_complete INTEGER NOT NULL DEFAULT 0
+  CHECK (financial_history_complete IN (0, 1));
+
 -- Durable Objects remain the balance authority. This table is the immutable,
 -- query-optimized history projected from their transactional outbox events.
 -- All monetary values use integer micros; no floating-point amount is stored.

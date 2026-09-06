@@ -239,13 +239,14 @@ export async function prepareCommercialRegistration(
 export function commercialRegistrationInsertSql(active: boolean): string {
   const columns = `(id, email, display_name, role, status, balance_micros,
     state_version, created_at_ms, updated_at_ms, password_credential,
-    auth_version, password_changed_at_ms, last_login_at_ms, email_verified_at_ms)`
+    auth_version, password_changed_at_ms, last_login_at_ms, email_verified_at_ms,
+    financial_history_complete)`
   if (!active) {
     return `INSERT INTO users ${columns}
-      VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?)`
+      VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?, 1)`
   }
   return `INSERT INTO users ${columns}
-    SELECT ?, ?, ?, 'user', 'active', ?, 0, ?, ?, ?, 1, ?, ?, ?
+    SELECT ?, ?, ?, 'user', 'active', ?, 0, ?, ?, ?, 1, ?, ?, ?, 1
       FROM commercial_registration_claims WHERE user_id = ?`
 }
 

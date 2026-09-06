@@ -84,10 +84,15 @@ describe('admin user Worker identity and admission contract', () => {
     expect(JSON.stringify(payload)).not.toContain('password_credential')
 
     const stored = test.raw.prepare(
-      `SELECT password_credential, password_changed_at_ms, concurrency, rpm_limit
+      `SELECT password_credential, password_changed_at_ms, concurrency, rpm_limit,
+              financial_history_complete
          FROM users WHERE id = ?`,
     ).get(payload.data.id) as Record<string, unknown>
-    expect(stored).toMatchObject({ concurrency: 7, rpm_limit: 42 })
+    expect(stored).toMatchObject({
+      concurrency: 7,
+      rpm_limit: 42,
+      financial_history_complete: 1,
+    })
     expect(stored.password_changed_at_ms).toEqual(expect.any(Number))
     await expect(verifyPassword(
       'correct horse battery staple',

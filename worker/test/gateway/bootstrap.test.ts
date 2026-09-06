@@ -158,6 +158,10 @@ describe('gateway bootstrap', () => {
         WHERE assignment.active = 1
         GROUP BY role.system_key`,
     ).all()).toEqual([{ system_key: 'super_admin', count: 1 }])
+    expect(database.raw.prepare(
+      `SELECT financial_history_complete FROM users
+        WHERE email = 'fresh-admin@example.com'`,
+    ).get()).toEqual({ financial_history_complete: 1 })
     database.raw.close()
   })
 })

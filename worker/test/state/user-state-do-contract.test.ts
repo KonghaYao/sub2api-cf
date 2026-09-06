@@ -406,6 +406,47 @@ describe("UserStateDO balance contract", () => {
     });
   });
 
+  it("publishes one debt-aware opening event as the financial history watermark", async () => {
+    const sent: unknown[] = [];
+    const queue = { send: vi.fn(async (event: unknown) => { sent.push(event); }) };
+    const { object } = createHarness({ EVENTS_QUEUE: queue } as unknown as Env);
+    const command = {
+      ...opening,
+      mutation_id: "d1-user:7",
+      balance_micros: 1_000,
+      spend_debt_micros: 300,
+      initial_state_version: 7,
+    };
+
+    expect((await post(object, "/configure", command)).status).toBe(200);
+    expect((await post(object, "/configure", command)).status).toBe(200);
+
+    expect(queue.send).toHaveBeenCalledOnce();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        event_id: "user-state:user-1:7",
+        event_type: "user.state.changed.v1",
+        payload: expect.objectContaining({
+          mutation_id: "d1-user:7",
+          state_version: 7,
+          financial_event: {
+            event_type: "opening_balance",
+            source_type: "opening_balance",
+            source_id: "7",
+            request_id: null,
+            actor_user_id: null,
+            actor_session_id: null,
+            amount_delta_micros: 1_000,
+            gross_amount_micros: 1_000,
+            spend_debt_delta_micros: 300,
+            balance_after_micros: 1_000,
+            spend_debt_after_micros: 300,
+          },
+        }),
+      }),
+    ]);
+  });
+
   it("adjusts balances by a signed delta and retries idempotently", async () => {
     const { object, storage } = createHarness();
     await post(object, "/configure", opening);
@@ -456,6 +497,8 @@ describe("UserStateDO balance contract", () => {
       ...opening,
       spend_debt_micros: 300,
     });
+    sent.length = 0;
+    queue.send.mockClear();
 
     const response = await post(object, "/balance/adjust", {
       schema_version: 1,
@@ -508,6 +551,8 @@ describe("UserStateDO balance contract", () => {
       const queue = { send: vi.fn(async (event: unknown) => { sent.push(event); }) };
       const { object } = createHarness({ EVENTS_QUEUE: queue } as unknown as Env);
       await post(object, "/configure", opening);
+      sent.length = 0;
+      queue.send.mockClear();
 
       const response = await post(object, "/balance/adjust", {
         schema_version: 1,
@@ -550,6 +595,8 @@ describe("UserStateDO balance contract", () => {
       EVENTS_QUEUE: queue,
     } as unknown as Env);
     await post(object, "/configure", opening);
+    sent.length = 0;
+    queue.send.mockClear();
     expect((await post(object, "/authorize", {
       schema_version: 1,
       request_id: "request-debt-history",

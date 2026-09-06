@@ -3403,7 +3403,19 @@ function isSafeOpenAiDiagnostic(value: string, maxLength: number): boolean {
     !/(?:https?|wss?):\/\//iu.test(trimmed) &&
     !/\b(?:authorization|proxy-authorization|x-api-key|api[_ -]?key|cookie|set-cookie)\b/iu.test(trimmed) &&
     !/\b(?:key|token|secret|password)\s*[:=]\s*["']?[^\s"',;]{4,}/iu.test(trimmed) &&
-    !/\b(?:sk|sess|rk|pk)-[a-z0-9_-]{4,}/iu.test(trimmed)
+    !containsCredentialLikeValue(trimmed)
+}
+
+function containsCredentialLikeValue(value: string): boolean {
+  return /\b(?:sk|sess|rk|pk)-[a-z0-9_-]{4,}/iu.test(value) ||
+    /\b(?:sk|pk|rk)_(?:live|test)_[a-z0-9]{12,}/iu.test(value) ||
+    /\b(?:gh[pousr]|github_pat)_[a-z0-9_]{20,}/iu.test(value) ||
+    /\b(?:AKIA|ASIA|A3T[A-Z0-9]|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}\b/u.test(value) ||
+    /\bAIza[a-z0-9_-]{20,}\b/iu.test(value) ||
+    /\bxox[baprs]-[a-z0-9-]{20,}\b/iu.test(value) ||
+    /\bbearer\s+[a-z0-9._~+/=-]{8,}/iu.test(value) ||
+    /\beyJ[a-z0-9_-]{4,}\.eyJ[a-z0-9_-]{4,}\.[a-z0-9_-]{4,}\b/iu.test(value) ||
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u.test(value)
 }
 
 function isSafeOpenAiIdentifier(value: string): boolean {

@@ -56,8 +56,8 @@ export async function bootstrapGateway(request: Request, env: Env): Promise<Resp
     env.DB.prepare(
       `INSERT INTO users (
          id, email, display_name, role, status, balance_micros,
-         state_version, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, 'admin', 'active', ?, 0, ?, ?)`,
+         state_version, created_at_ms, updated_at_ms, financial_history_complete
+       ) VALUES (?, ?, ?, 'admin', 'active', ?, 0, ?, ?, 1)`,
     ).bind(
       userId,
       requireEmail(body.user.email),

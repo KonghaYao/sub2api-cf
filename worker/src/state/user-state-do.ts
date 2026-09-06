@@ -33,11 +33,11 @@ import type {
   Env,
   PlatformEvent,
   UserFinancialEventPayload,
-  UserFinancialEventSource,
   UserStateChangedPayload,
 } from "../env";
 import { isProviderPlatform } from "../gateway/platform";
 import { groupAccessPredicate } from "../user/group-access";
+import { financialSourceForMutation } from "../shared/user-financial-event";
 
 interface UserProfileRow {
   schema_version: number;
@@ -132,7 +132,7 @@ export class UserStateDO {
       if (request.method === "GET" && url.pathname === "/health") return this.health();
       if (request.method === "GET" && url.pathname === "/snapshot") return this.snapshot();
       if (request.method === "POST" && url.pathname === "/configure") {
-        return this.configure(await readJsonObject(request));
+        return await this.configure(await readJsonObject(request));
       }
       if (request.method === "POST" && url.pathname === "/balance/adjust") {
         return await this.adjustBalance(await readJsonObject(request));
@@ -208,11 +208,11 @@ export class UserStateDO {
     });
   }
 
-  private configure(body: Record<string, unknown>): Response {
+  private async configure(body: Record<string, unknown>): Promise<Response> {
     const command = parseConfigureUserCommand(body);
     const nowMs = Date.now();
 
-    return this.state.storage.transactionSync(() => {
+    const response = this.state.storage.transactionSync(() => {
       this.expireDueReservations(nowMs);
       const existing = this.loadProfile();
       const mutationKey = `balance:${command.mutation_id}`;
@@ -268,6 +268,13 @@ export class UserStateDO {
       this.persistProfile(profile);
       this.appendLedgerEntry(ledgerEntry);
       this.setStateVersion(command.initial_state_version);
+      this.appendStateProjection(
+        profile,
+        command.initial_state_version,
+        command.mutation_id,
+        nowMs,
+        createOpeningFinancialProjection(ledgerEntry, profile),
+      );
       return json({
         schema_version: STATE_SCHEMA_VERSION,
         idempotent: false,
@@ -275,6 +282,9 @@ export class UserStateDO {
         profile,
       });
     });
+    await this.publishPendingOutbox();
+    await this.scheduleNextReservationAlarm();
+    return response;
   }
 
   private async adjustBalance(body: Record<string, unknown>): Promise<Response> {
@@ -1078,7 +1088,11 @@ function createFinancialProjection(
       "Only balance adjustments and settlements can be projected as financial events",
     );
   }
-  const source = financialSource(entry);
+  const source = financialSourceForMutation(
+    entry.mutation_id,
+    entry.entry_type,
+    entry.request_id,
+  );
   return {
     event_type: entry.entry_type,
     ...source,
@@ -1095,25 +1109,28 @@ function createFinancialProjection(
   };
 }
 
-function financialSource(
+function createOpeningFinancialProjection(
   entry: UserLedgerEntry,
-): { source_type: UserFinancialEventSource; source_id: string } {
-  if (entry.entry_type === "settlement") {
-    return { source_type: "usage_settlement", source_id: entry.request_id ?? entry.mutation_id };
+  profile: UserProfileState,
+): UserFinancialEventPayload {
+  if (entry.entry_type !== "opening_balance") {
+    throw new StateMachineError(
+      "invalid_financial_event",
+      "Only an opening balance can create the financial history watermark",
+    );
   }
-  const prefixes = [
-    ["admin-balance:", "admin_adjustment"],
-    ["redeem:", "redeem_code"],
-    ["affiliate-transfer:", "affiliate_transfer"],
-    ["affiliate-refund-clawback:", "affiliate_refund_clawback"],
-    ["auth-source-grant:", "auth_source_entitlement"],
-  ] as const satisfies ReadonlyArray<readonly [string, UserFinancialEventSource]>;
-  for (const [prefix, sourceType] of prefixes) {
-    if (entry.mutation_id.startsWith(prefix) && entry.mutation_id.length > prefix.length) {
-      return { source_type: sourceType, source_id: entry.mutation_id.slice(prefix.length) };
-    }
-  }
-  return { source_type: "other_adjustment", source_id: entry.mutation_id };
+  return {
+    event_type: "opening_balance",
+    ...financialSourceForMutation(entry.mutation_id, "opening_balance", null),
+    request_id: null,
+    actor_user_id: null,
+    actor_session_id: null,
+    amount_delta_micros: profile.balance_micros,
+    gross_amount_micros: profile.balance_micros,
+    spend_debt_delta_micros: profile.spend_debt_micros,
+    balance_after_micros: profile.balance_micros,
+    spend_debt_after_micros: profile.spend_debt_micros,
+  };
 }
 
 function parseOptionalUsageEvent(value: unknown, requestId: string): Record<string, unknown> | null {

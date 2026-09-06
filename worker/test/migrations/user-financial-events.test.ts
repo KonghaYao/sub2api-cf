@@ -9,6 +9,22 @@ afterEach(() => {
 })
 
 describe('user financial event projection migration', () => {
+  it('marks users that predate financial event tracking as incomplete', () => {
+    const { raw } = createSqliteD1()
+    databases.push(raw)
+    applyMigrations(raw, 54)
+    raw.exec(`
+      INSERT INTO users (id, email, created_at_ms, updated_at_ms)
+      VALUES ('legacy-user', 'legacy@example.test', 1, 1)
+    `)
+
+    applyMigrations(raw)
+
+    expect(raw.prepare(
+      `SELECT financial_history_complete FROM users WHERE id = 'legacy-user'`,
+    ).get()).toEqual({ financial_history_complete: 0 })
+  })
+
   it('creates an immutable integer-micros ledger with a tuple-cursor index', () => {
     const { raw } = createSqliteD1()
     databases.push(raw)
@@ -35,6 +51,10 @@ describe('user financial event projection migration', () => {
         250000, 250000, 0, 1250000, 0, 10, 11
       );
     `)
+
+    expect(raw.prepare(
+      `SELECT financial_history_complete FROM users WHERE id = 'user-finance'`,
+    ).get()).toEqual({ financial_history_complete: 0 })
 
     expect(raw.prepare(`
       SELECT event_id, user_id, event_type, source_type, actor_user_id,

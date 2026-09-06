@@ -39,6 +39,7 @@ import {
   isMediaProviderJobAdvanceEvent,
 } from '../media/provider-job'
 import { consumeImageTaskExecute, isImageTaskExecuteEvent } from '../media/image-task'
+import { financialSourceForMutation } from '../shared/user-financial-event'
 
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
@@ -849,7 +850,13 @@ function isUserFinancialEvent(
         -event.amount_delta_micros! + event.spend_debt_delta_micros!
   }
   if (event.event_type === 'opening_balance') {
-    return event.request_id === null && event.amount_delta_micros! >= 0
+    return event.request_id === null &&
+      event.source_type === 'opening_balance' &&
+      event.actor_user_id === null && event.actor_session_id === null &&
+      event.amount_delta_micros! >= 0 &&
+      event.amount_delta_micros === event.balance_after_micros &&
+      event.gross_amount_micros === event.amount_delta_micros &&
+      event.spend_debt_delta_micros === event.spend_debt_after_micros
   }
   return event.request_id === null &&
     event.gross_amount_micros !== 0 &&
@@ -863,28 +870,4 @@ function isNullableIdentifier(value: unknown, maximum: number): value is string 
     typeof value === 'string' && value.length > 0 && value.length <= maximum &&
     !/[\u0000-\u001f\u007f]/.test(value)
   )
-}
-
-function financialSourceForMutation(
-  mutationId: string,
-  eventType: UserFinancialEventPayload['event_type'],
-  requestId: string | null | undefined,
-): Pick<UserFinancialEventPayload, 'source_type' | 'source_id'> {
-  if (eventType === 'settlement') {
-    return { source_type: 'usage_settlement', source_id: requestId ?? '' }
-  }
-  const prefixes = [
-    ['admin-balance:', 'admin_adjustment'],
-    ['redeem:', 'redeem_code'],
-    ['affiliate-transfer:', 'affiliate_transfer'],
-    ['affiliate-refund-clawback:', 'affiliate_refund_clawback'],
-    ['auth-source-grant:', 'auth_source_entitlement'],
-    ['d1-user:', 'opening_balance'],
-  ] as const
-  for (const [prefix, sourceType] of prefixes) {
-    if (mutationId.startsWith(prefix) && mutationId.length > prefix.length) {
-      return { source_type: sourceType, source_id: mutationId.slice(prefix.length) }
-    }
-  }
-  return { source_type: 'other_adjustment', source_id: mutationId }
 }

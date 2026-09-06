@@ -131,8 +131,9 @@ export async function createAdminUser(context: Context<ControlBindings>): Promis
           `INSERT INTO users (
              id, email, display_name, role, status, balance_micros,
              concurrency, rpm_limit, state_version, created_at_ms, updated_at_ms,
-             password_credential, password_changed_at_ms, email_verified_at_ms
-           ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+             password_credential, password_changed_at_ms, email_verified_at_ms,
+             financial_history_complete
+           ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?, 1)`,
         ).bind(
           user.id,
           user.email,
@@ -311,30 +312,40 @@ export async function listAdminUserBalanceHistory(
       ).bind(...values, limit + 1),
       context.env.DB.prepare(
         `SELECT COUNT(*) AS total,
-                (SELECT COALESCE(SUM(amount_delta_micros), 0)
+                (SELECT COALESCE(SUM(gross_amount_micros), 0)
                    FROM user_financial_events AS recharge
                   WHERE recharge.user_id = ?
                     AND recharge.event_type = 'balance_adjustment'
-                    AND recharge.amount_delta_micros > 0
+                    AND recharge.gross_amount_micros > 0
                 ) AS total_recharged_micros,
                 (SELECT applied_at_ms FROM schema_migrations WHERE version = 55)
-                  AS history_available_from_ms
+                  AS history_available_from_ms,
+                (SELECT financial_history_complete FROM users WHERE id = ?)
+                  AS financial_history_complete,
+                EXISTS (
+                  SELECT 1 FROM user_financial_events AS opening
+                   WHERE opening.user_id = ? AND opening.event_type = 'opening_balance'
+                ) AS has_opening_event
            FROM user_financial_events
           WHERE ${typeOnlyWhere}`,
-      ).bind(userId, ...typeOnlyValues),
+      ).bind(userId, userId, userId, ...typeOnlyValues),
     ])
     const rows = rowsResult.results as unknown as UserFinancialEventRow[]
     const summary = summaryResult.results[0] as {
       total?: unknown
       total_recharged_micros?: unknown
       history_available_from_ms?: unknown
+      financial_history_complete?: unknown
+      has_opening_event?: unknown
     } | undefined
     if (
       !Number.isSafeInteger(summary?.total) || (summary!.total as number) < 0 ||
       !Number.isSafeInteger(summary?.total_recharged_micros) ||
       (summary!.total_recharged_micros as number) < 0 ||
       !Number.isSafeInteger(summary?.history_available_from_ms) ||
-      (summary!.history_available_from_ms as number) < 0
+      (summary!.history_available_from_ms as number) < 0 ||
+      (summary?.financial_history_complete !== 0 && summary?.financial_history_complete !== 1) ||
+      (summary?.has_opening_event !== 0 && summary?.has_opening_event !== 1)
     ) {
       throw new GatewayError(
         500,
@@ -353,7 +364,8 @@ export async function listAdminUserBalanceHistory(
       has_more: hasMore,
       next_cursor: hasMore && last !== undefined ? encodeBalanceHistoryCursor(last) : null,
       total_recharged_micros: summary!.total_recharged_micros,
-      history_complete: user.created_at_ms >= (summary!.history_available_from_ms as number),
+      history_complete:
+        summary!.financial_history_complete === 1 && summary!.has_opening_event === 1,
       history_available_from_ms: summary!.history_available_from_ms,
     })
   } catch (error) {

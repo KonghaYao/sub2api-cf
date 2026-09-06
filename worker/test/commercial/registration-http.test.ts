@@ -56,9 +56,11 @@ describe('commercial registration HTTP contract', () => {
     expect(response.status, JSON.stringify(await response.clone().json())).toBe(201)
     await expect(response.json()).resolves.toMatchObject({ data: { user: { balance: 5 } } })
     const user = test.raw.prepare(
-      `SELECT id, balance_micros FROM users WHERE email = 'buyer@example.test'`,
-    ).get() as { id: string; balance_micros: number }
+      `SELECT id, balance_micros, financial_history_complete
+         FROM users WHERE email = 'buyer@example.test'`,
+    ).get() as { id: string; balance_micros: number; financial_history_complete: number }
     expect(user.balance_micros).toBe(5_000_000)
+    expect(user.financial_history_complete).toBe(1)
     expect(test.raw.prepare(
       `SELECT COUNT(*) AS total FROM promotion_code_usages WHERE user_id = ?`,
     ).get(user.id)).toEqual({ total: 1 })

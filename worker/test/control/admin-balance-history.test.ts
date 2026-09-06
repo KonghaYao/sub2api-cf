@@ -45,7 +45,7 @@ describe('admin user balance history', () => {
     )
     seedEvent('event-a', 1, 'redeem_code', 'redeem-a', 100, 100_000, 100_000)
     seedEvent('event-b', 2, 'usage_settlement', 'request-b', 200, -25_000, 75_000, 'request-b')
-    seedEvent('event-c', 3, 'admin_adjustment', 'adjust-c', 300, 50_000, 125_000)
+    seedEvent('event-c', 3, 'admin_adjustment', 'adjust-c', 300, 50_000, 125_000, null, 80_000)
 
     env = {
       APP_VERSION: 'test',
@@ -91,7 +91,7 @@ describe('admin user balance history', () => {
         total: 3,
         limit: 2,
         has_more: true,
-        total_recharged_micros: 150_000,
+        total_recharged_micros: 180_000,
         history_complete: false,
         history_available_from_ms: expect.any(Number),
       },
@@ -112,7 +112,7 @@ describe('admin user balance history', () => {
         limit: 2,
         has_more: false,
         next_cursor: null,
-        total_recharged_micros: 220_000,
+        total_recharged_micros: 250_000,
       },
     })
   })
@@ -152,8 +152,25 @@ describe('admin user balance history', () => {
       data: {
         items: [{ event_id: 'event-c', source_type: 'admin_adjustment' }],
         total: 1,
-        total_recharged_micros: 150_000,
+        total_recharged_micros: 180_000,
       },
+    })
+  })
+
+  it('declares complete history only for tracking-enabled users with a projected opening event', async () => {
+    raw.prepare(
+      `UPDATE users SET financial_history_complete = 1 WHERE id = 'history-user'`,
+    ).run()
+
+    const beforeOpening = await request('/api/v1/admin/users/history-user/balance-history')
+    await expect(beforeOpening.json()).resolves.toMatchObject({
+      data: { history_complete: false },
+    })
+
+    seedOpeningEvent('event-opening', 0, 50, 0)
+    const afterOpening = await request('/api/v1/admin/users/history-user/balance-history')
+    await expect(afterOpening.json()).resolves.toMatchObject({
+      data: { history_complete: true },
     })
   })
 
@@ -185,8 +202,11 @@ describe('admin user balance history', () => {
     amountDeltaMicros: number,
     balanceAfterMicros: number,
     requestId: string | null = null,
+    grossAmountMicros: number = eventTypeFor(sourceType) === 'settlement'
+      ? -amountDeltaMicros
+      : amountDeltaMicros,
   ): void {
-    const eventType = sourceType === 'usage_settlement' ? 'settlement' : 'balance_adjustment'
+    const eventType = eventTypeFor(sourceType)
     raw.prepare(`
       INSERT INTO user_financial_events (
         event_id, user_id, state_version, event_type, source_type, source_id,
@@ -202,11 +222,41 @@ describe('admin user balance history', () => {
       sourceId,
       requestId,
       amountDeltaMicros,
-      eventType === 'settlement' ? -amountDeltaMicros : amountDeltaMicros,
+      grossAmountMicros,
       balanceAfterMicros,
       occurredAtMs,
       occurredAtMs,
     )
+  }
+
+  function seedOpeningEvent(
+    eventId: string,
+    stateVersion: number,
+    occurredAtMs: number,
+    balanceAfterMicros: number,
+  ): void {
+    raw.prepare(`
+      INSERT INTO user_financial_events (
+        event_id, user_id, state_version, event_type, source_type, source_id,
+        request_id, amount_delta_micros, gross_amount_micros,
+        spend_debt_delta_micros, balance_after_micros, spend_debt_after_micros,
+        occurred_at_ms, projected_at_ms
+      ) VALUES (?, 'history-user', ?, 'opening_balance', 'opening_balance', ?,
+                NULL, ?, ?, 0, ?, 0, ?, ?)
+    `).run(
+      eventId,
+      stateVersion,
+      `opening-${stateVersion}`,
+      balanceAfterMicros,
+      balanceAfterMicros,
+      balanceAfterMicros,
+      occurredAtMs,
+      occurredAtMs,
+    )
+  }
+
+  function eventTypeFor(sourceType: string): 'settlement' | 'balance_adjustment' {
+    return sourceType === 'usage_settlement' ? 'settlement' : 'balance_adjustment'
   }
 
   function request(path: string): Promise<Response> {

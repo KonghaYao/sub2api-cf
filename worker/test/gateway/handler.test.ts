@@ -2200,6 +2200,11 @@ describe('OpenAI-compatible gateway', () => {
     'Incorrect API key provided: sk-proj-upstream-secret',
     'Request failed for key=upstream-secret-1234',
     'Account request failed at https://upstream.example/v1/accounts/private',
+    'Credential ghp_1234567890abcdefghijklmnopqrstuvwxyz was rejected',
+    'AWS access key AKIAIOSFODNN7EXAMPLE is not authorized',
+    'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWJ5dGVz',
+    'Slack credential xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx',
+    'Google credential AIzaSyDUMMY0123456789abcdefghijklmnop',
   ])('does not reflect sensitive OpenAI 400 diagnostics: %s', async (message) => {
     const { env } = await harness()
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
