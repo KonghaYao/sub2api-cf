@@ -937,20 +937,101 @@ export async function refreshAdminAccountCredentials(context: Context<ControlBin
       throw new GatewayError(400, 'invalid_oauth_refresh_request', 'OAuth refresh does not accept a request body')
     }
     const expectedVersion = requireExpectedControlVersion(context.req.raw, body)
+    const accountId = requireResourceId(context.req.param('id'), 'account')
     const idempotency = await controlIdempotency('admin.accounts.oauth-refresh.v1', requireIdempotencyKey(context.req.raw), {
-      account_id: requireResourceId(context.req.param('id'), 'account'), expected_control_version: expectedVersion,
+      account_id: accountId, expected_control_version: expectedVersion,
     })
-    const existing = await findControlIdempotency(context.env, idempotency)
-    if (existing !== null) return controlSuccess(parseIdempotentResponse(existing, 'account'))
+    return controlSuccess(await refreshOpenAIOAuthAccount(
+      context.env, accountId, expectedVersion, idempotency,
+    ))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
 
-    const account = await requireAccount(context.env, context.req.param('id'))
+interface OAuthRefreshTarget {
+  id: string
+  expected_control_version: number
+}
+
+interface OAuthRefreshBatchResult {
+  account_id: string
+  success: boolean
+  control_version?: number
+  error?: { code: string; message: string }
+}
+
+export async function batchRefreshAdminAccountCredentials(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    if (Object.keys(body).some((key) => key !== 'accounts')) {
+      throw new GatewayError(400, 'invalid_oauth_refresh_request', 'OAuth batch refresh accepts only accounts')
+    }
+    const accounts = parseOAuthRefreshTargets(body.accounts)
+    const idempotency = await controlIdempotency(
+      'admin.accounts.oauth-refresh-batch.v1', requireIdempotencyKey(context.req.raw), { accounts },
+    )
+    const existing = await findControlIdempotency(context.env, idempotency)
+    if (existing !== null) return controlSuccess(parseIdempotentResponse(existing, 'account_batch_refresh'))
+
+    const results = await runWithConcurrency(accounts, 5, async (target, index): Promise<OAuthRefreshBatchResult> => {
+      const itemIdempotency = await controlIdempotency(
+        'admin.accounts.oauth-refresh-batch.item.v1', `${idempotency.key_hash}:${index}`,
+        { parent_request_hash: idempotency.request_hash, target },
+      )
+      try {
+        const account = await refreshOpenAIOAuthAccount(
+          context.env, target.id, target.expected_control_version, itemIdempotency,
+        )
+        return { account_id: target.id, success: true, control_version: account.control_version }
+      } catch (error) {
+        const mapped = asGatewayError(error)
+        return { account_id: target.id, success: false, error: { code: mapped.code, message: mapped.message } }
+      }
+    })
+    const response = {
+      total: results.length,
+      success: results.filter((result) => result.success).length,
+      failed: results.filter((result) => !result.success).length,
+      success_ids: results.filter((result) => result.success).map((result) => result.account_id),
+      failed_ids: results.filter((result) => !result.success).map((result) => result.account_id),
+      errors: results.filter((result) => !result.success).map((result) => ({
+        account_id: result.account_id,
+        error: result.error!.message,
+      })),
+      results,
+    }
+    try {
+      await controlIdempotencyInsert(
+        context.env, idempotency, 'account_batch_refresh', idempotency.key_hash, response, Date.now(),
+      ).run()
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idempotency)
+      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'account_batch_refresh'))
+      throw error
+    }
+    return controlSuccess(response)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+async function refreshOpenAIOAuthAccount(
+  env: Env,
+  accountId: string,
+  expectedVersion: number,
+  idempotency: Awaited<ReturnType<typeof controlIdempotency>>,
+): Promise<ReturnType<typeof accountResponse>> {
+    const existing = await findControlIdempotency(env, idempotency)
+    if (existing !== null) return parseIdempotentResponse(existing, 'account')
+    const account = await requireAccount(env, accountId)
     assertVersion(account, expectedVersion)
     if (account.platform !== 'openai' || account.credential_kind !== 'oauth') {
       throw new GatewayError(409, 'oauth_refresh_not_supported', 'Credential refresh is currently supported only for OpenAI OAuth accounts')
     }
     const currentCredential = await decryptCredential(
-      account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
-      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+      account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(env),
+      credentialAad(env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     ) as StoredAccountCredential
     const refreshToken = typeof currentCredential.refresh_token === 'string' ? currentCredential.refresh_token.trim() : ''
     if (!refreshToken) {
@@ -963,8 +1044,8 @@ export async function refreshAdminAccountCredentials(context: Context<ControlBin
     const nextControlVersion = incrementVersion(account.control_version, 'control_version')
     const now = Date.now()
     const encrypted = await encryptCredential(
-      nextCredential, requireCredentialsMasterKey(context.env),
-      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
+      nextCredential, requireCredentialsMasterKey(env),
+      credentialAad(env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
     )
     const uiConfig = {
       ...parseUiConfig(account.ui_config_json),
@@ -984,28 +1065,63 @@ export async function refreshAdminAccountCredentials(context: Context<ControlBin
       model_capabilities: parseModelCapabilitiesProjection(account.model_capabilities_json),
     })
     try {
-      await runAccountBatch(context.env, [
-        accountCasStatement(context.env, account.id, account.control_version, {
+      await runAccountBatch(env, [
+        accountCasStatement(env, account.id, account.control_version, {
           name: account.name, enabled: account.enabled === 1, max_concurrency: account.max_concurrency,
           base_url: account.base_url, provider_config: accountProviderConfig(account), image_adapter: account.image_adapter,
           credential_kind: account.credential_kind, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
           ui_config: uiConfig, config_version: nextConfigVersion, control_version: nextControlVersion, now, reset_health: true,
         }),
-        context.env.DB.prepare(
+        env.DB.prepare(
           `UPDATE account_secrets SET key_version = CASE WHEN key_version = ? THEN ? ELSE 0 END,
              nonce_b64 = ?, ciphertext_b64 = ?, updated_at_ms = ? WHERE id = ? AND account_id = ?`,
         ).bind(account.key_version, nextKeyVersion, encrypted.nonce_b64, encrypted.ciphertext_b64, now, account.secret_id, account.id),
-        controlIdempotencyInsert(context.env, idempotency, 'account', account.id, safe, now),
+        controlIdempotencyInsert(env, idempotency, 'account', account.id, safe, now),
       ], account.id, account.control_version)
     } catch (error) {
-      const recovered = await findControlIdempotency(context.env, idempotency)
-      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'account'))
+      const recovered = await findControlIdempotency(env, idempotency)
+      if (recovered !== null) return parseIdempotentResponse(recovered, 'account')
       throw mapAccountWriteError(error)
     }
-    return controlSuccess(safe)
-  } catch (error) {
-    return controlError(asGatewayError(error))
+    return safe
+}
+
+function parseOAuthRefreshTargets(value: unknown): OAuthRefreshTarget[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 25) {
+    throw new GatewayError(400, 'invalid_accounts', 'accounts must contain between 1 and 25 entries')
   }
+  const seen = new Set<string>()
+  return value.map((item, index) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new GatewayError(400, 'invalid_accounts', `accounts[${index}] must be an object`)
+    }
+    const row = item as Record<string, unknown>
+    if (Object.keys(row).some((key) => key !== 'id' && key !== 'expected_control_version')) {
+      throw new GatewayError(400, 'invalid_accounts', `accounts[${index}] has an unknown field`)
+    }
+    const id = requireResourceId(typeof row.id === 'string' ? row.id : undefined, 'account')
+    if (seen.has(id)) throw new GatewayError(400, 'duplicate_account_id', 'accounts contains a duplicate id')
+    seen.add(id)
+    if (!Number.isSafeInteger(row.expected_control_version) || (row.expected_control_version as number) < 0) {
+      throw new GatewayError(400, 'invalid_expected_control_version', `accounts[${index}] has an invalid control version`)
+    }
+    return { id, expected_control_version: row.expected_control_version as number }
+  })
+}
+
+async function runWithConcurrency<T, R>(
+  values: T[], limit: number, task: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length)
+  let cursor = 0
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await task(values[index]!, index)
+    }
+  }))
+  return results
 }
 
 export async function duplicateAdminAccount(context: Context<ControlBindings>): Promise<Response> {

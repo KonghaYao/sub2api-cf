@@ -1304,12 +1304,26 @@ export async function batchClearError(accountIds: number[]): Promise<BatchOperat
  * @param accountIds - Array of account IDs
  * @returns Batch operation result
  */
-export async function batchRefresh(accountIds: number[]): Promise<BatchOperationResult> {
-  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-refresh', {
-    account_ids: accountIds,
-  }, {
-    timeout: 120000  // 120s timeout for large batch refreshes
+export async function batchRefresh(
+  accountIds: Array<number | string> | WorkerAccountOperationTarget[],
+): Promise<BatchOperationResult> {
+  if (!isCloudflareWorkerContractActive()) {
+    const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-refresh', {
+      account_ids: accountIds,
+    }, { timeout: 120000 })
+    return data
+  }
+  if (!accountIds.every((account): account is WorkerAccountOperationTarget =>
+    typeof account === 'object' && account !== null && 'control_version' in account,
+  )) {
+    throw new Error('Worker batch credential refresh requires account control versions')
+  }
+  const payload = { accounts: workerOperationAccounts(accountIds) }
+  const operation = await workerOperationKey('admin-account-oauth-batch-refresh', payload)
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-refresh', payload, {
+    headers: { 'Idempotency-Key': operation.key }, timeout: 120000,
   })
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
   return data
 }
 

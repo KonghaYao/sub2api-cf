@@ -39,6 +39,7 @@ import {
   createAdminAccount,
   duplicateAdminAccount,
   batchDeleteAdminAccounts,
+  batchRefreshAdminAccountCredentials,
   refreshAdminAccountCredentials,
   deleteAdminAccount,
   deleteAdminAccountGroupLink,
@@ -682,6 +683,7 @@ export function createApp() {
   app.post('/api/v1/admin/accounts', createAdminAccount)
   app.post('/api/v1/admin/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/api/v1/admin/accounts/:id/refresh', refreshAdminAccountCredentials)
+  app.post('/api/v1/admin/accounts/batch-refresh', batchRefreshAdminAccountCredentials)
   app.post('/api/v1/admin/accounts/batch-delete', batchDeleteAdminAccounts)
   app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)

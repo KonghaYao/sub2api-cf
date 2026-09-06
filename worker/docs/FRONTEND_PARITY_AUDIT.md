@@ -324,3 +324,17 @@ explicit typed error. It must never silently discard a submitted field or return
 - Validation: 24 focused Worker SQLite tests, 39 frontend adapter/template
   parity tests, Worker typecheck and Cloudflare SPA build passed. No schema or
   template/style/class change.
+
+## v0.42.14 Accounts OpenAI OAuth batch refresh — 2026-09-07
+
+- The existing Accounts bulk “refresh token” action now uses the Worker rather
+  than a missing legacy endpoint. It accepts up to 25 opaque account IDs with
+  their control versions, refreshes at most five upstream OAuth requests at a
+  time, and reloads the original list after completion.
+- Each account has its own atomic vault/CAS/idempotency transaction. A rejected,
+  stale, unsupported or failed account reports a typed per-account error without
+  affecting successful siblings; retrying the batch replays completed account
+  results without another upstream token exchange.
+- Validation: 25 focused Worker SQLite tests, 40 frontend adapter/template
+  parity tests, Worker/frontend typechecks and Cloudflare SPA build passed. No
+  schema or template/style/class change.

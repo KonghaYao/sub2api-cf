@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   batchDeleteAdminAccounts,
+  batchRefreshAdminAccountCredentials,
   createAdminAccount,
   duplicateAdminAccount,
   getAdminAccount,
@@ -34,6 +35,7 @@ function fixture(): Fixture {
   app.post('/accounts', createAdminAccount)
   app.post('/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/accounts/batch-delete', batchDeleteAdminAccounts)
+  app.post('/accounts/batch-refresh', batchRefreshAdminAccountCredentials)
   app.post('/accounts/:id/refresh', refreshAdminAccountCredentials)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
@@ -767,6 +769,51 @@ describe('admin provider account control plane on D1', () => {
     const replay = await request()
     expect(replay.status).toBe(200)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes OpenAI OAuth accounts in a CAS-protected idempotent batch', async () => {
+    const test = fixture()
+    const createOauth = async (name: string) => {
+      const response = await test.app.request('/accounts', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `batch-refresh-create-${name}` },
+        body: JSON.stringify({ name, platform: 'openai', type: 'oauth', credential_kind: 'oauth', base_url: 'https://api.openai.test/v1', api_key: `${name}-old`, credentials: { access_token: `${name}-old`, refresh_token: `${name}-refresh` } }),
+      }, test.env)
+      return (await response.json() as any).data
+    }
+    const first = await createOauth('batch-first')
+    const second = await createOauth('batch-second')
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe('https://auth.openai.com/oauth/token')
+      expect(new URLSearchParams(init.body as string).get('grant_type')).toBe('refresh_token')
+      return new Response(JSON.stringify({ access_token: `fresh-${fetchMock.mock.calls.length}`, expires_in: 3600 }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const request = () => test.app.request('/accounts/batch-refresh', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-batch-refresh' },
+      body: JSON.stringify({ accounts: [
+        { id: first.id, expected_control_version: 0 },
+        { id: second.id, expected_control_version: 0 },
+      ] }),
+    }, test.env)
+    const refreshed = await request()
+    expect(refreshed.status, await refreshed.clone().text()).toBe(200)
+    await expect(refreshed.json()).resolves.toMatchObject({
+      data: { total: 2, success: 2, failed: 0, success_ids: [first.id, second.id] },
+    })
+    expect(test.raw.prepare('SELECT control_version FROM accounts WHERE id = ?').get(first.id)).toEqual({ control_version: 1 })
+    expect(test.raw.prepare('SELECT control_version FROM accounts WHERE id = ?').get(second.id)).toEqual({ control_version: 1 })
+    const replay = await request()
+    expect(replay.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    const stale = await test.app.request('/accounts/batch-refresh', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'oauth-batch-refresh-stale' },
+      body: JSON.stringify({ accounts: [{ id: first.id, expected_control_version: 0 }] }),
+    }, test.env)
+    await expect(stale.json()).resolves.toMatchObject({
+      data: { total: 1, success: 0, failed: 1, results: [{ error: { code: 'account_version_conflict' } }] },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('does not modify credentials when OAuth refresh cannot run or the provider rejects it', async () => {

@@ -1923,7 +1923,9 @@ const handleBulkResetStatus = async () => {
 const handleBulkRefreshToken = async () => {
   if (!confirm(t('common.confirm'))) return
   try {
-    const result = await adminAPI.accounts.batchRefresh(selIds.value)
+    const result = await adminAPI.accounts.batchRefresh(
+      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts() : selIds.value,
+    )
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', { success: result.success, failed: result.failed }))
     } else {
@@ -2057,6 +2059,27 @@ const selectedWorkerOperationAccounts = () => {
 
 const selectedWorkerDeleteAccounts = async () => {
   if (selIds.value.length === 0 || selIds.value.length > 500) {
+    throw new Error(t('admin.accounts.workerBatchLimit'))
+  }
+  const selected = Array.from(new Set(selIds.value.map(id => String(id))))
+  const loaded = new Map(accounts.value.map(account => [String(account.id), account]))
+  const missing = selected.filter(id => !loaded.has(id))
+  if (missing.length > 0) {
+    const fetched = await Promise.all(missing.map(id => adminAPI.accounts.getById(id)))
+    fetched.forEach(account => loaded.set(String(account.id), account))
+  }
+  const targets = selected.map((id) => {
+    const account = loaded.get(id)
+    return { id, control_version: (account as unknown as { control_version?: number })?.control_version }
+  })
+  if (targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)) {
+    throw new Error(t('admin.accounts.bulkSchedulableResultUnknown'))
+  }
+  return targets as Array<{ id: number | string; control_version: number }>
+}
+
+const selectedWorkerRefreshAccounts = async () => {
+  if (selIds.value.length === 0 || selIds.value.length > 25) {
     throw new Error(t('admin.accounts.workerBatchLimit'))
   }
   const selected = Array.from(new Set(selIds.value.map(id => String(id))))

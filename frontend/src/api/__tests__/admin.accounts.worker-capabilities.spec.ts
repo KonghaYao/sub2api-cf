@@ -677,6 +677,23 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
+  it('sends Worker OAuth batch refresh with all account versions', async () => {
+    post.mockResolvedValueOnce({ data: { total: 2, success: 2, failed: 0 } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchRefresh } = await import('@/api/admin/accounts')
+
+    await batchRefresh([{ id: 'account-a', control_version: 2 }, { id: 'account-b', control_version: 5 }])
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/batch-refresh',
+      { accounts: [
+        { id: 'account-a', expected_control_version: 2 },
+        { id: 'account-b', expected_control_version: 5 },
+      ] },
+      { headers: { 'Idempotency-Key': 'admin-account-oauth-batch-refresh-33333333-3333-4333-8333-333333333333' }, timeout: 120000 },
+    )
+  })
+
   it('rejects unversioned or duplicate Worker batch-delete targets before transport', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
