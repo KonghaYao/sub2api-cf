@@ -57,6 +57,8 @@ export interface PublicSystemSettings {
   home_content: string
   compact_home_enabled: boolean
   hide_ccs_import_button: boolean
+  custom_menu_items: Array<{ id: string; label: string; icon_svg: string; url: string; visibility: 'user' | 'admin'; sort_order: number }>
+  custom_endpoints: Array<{ name: string; endpoint: string; description: string }>
   registration_enabled: boolean
   registration_email_suffix_whitelist: string[]
   email_verification_enabled: boolean
@@ -99,6 +101,8 @@ interface PublicSettingsPatch {
   home_content?: string
   compact_home_enabled?: boolean
   hide_ccs_import_button?: boolean
+  custom_menu_items?: PublicSystemSettings['custom_menu_items']
+  custom_endpoints?: PublicSystemSettings['custom_endpoints']
   registration_enabled?: boolean
   registration_email_suffix_whitelist?: string[]
   email_verification_enabled?: boolean
@@ -484,6 +488,54 @@ export async function readAuthSourceDefaults(env: Env): Promise<AuthSourceDefaul
   return result
 }
 
+function parseCustomMenuItems(value: unknown): PublicSystemSettings['custom_menu_items'] {
+  if (!Array.isArray(value) || value.length > 20) throw new GatewayError(400, 'invalid_custom_menu_items', 'custom_menu_items is invalid')
+  return value.map((raw, index) => {
+    const row = requireObject(raw, `custom_menu_items.${index}`)
+    const id = settingString(row.id, `custom_menu_items.${index}.id`, 64, false)
+    if (!/^[a-z0-9-]+$/.test(id)) throw new GatewayError(400, 'invalid_custom_menu_items', 'custom menu id is invalid')
+    const visibility = row.visibility === 'user' || row.visibility === 'admin' ? row.visibility : null
+    if (visibility === null) throw new GatewayError(400, 'invalid_custom_menu_items', 'custom menu visibility is invalid')
+    return {
+      id, visibility, sort_order: index,
+      label: settingString(row.label, `custom_menu_items.${index}.label`, 128, false),
+      icon_svg: settingString(row.icon_svg ?? '', `custom_menu_items.${index}.icon_svg`, 65_536, true),
+      url: settingPublicUrl(row.url, `custom_menu_items.${index}.url`),
+    }
+  })
+}
+
+function parseCustomEndpoints(value: unknown): PublicSystemSettings['custom_endpoints'] {
+  if (!Array.isArray(value) || value.length > 20) throw new GatewayError(400, 'invalid_custom_endpoints', 'custom_endpoints is invalid')
+  return value.map((raw, index) => {
+    const row = requireObject(raw, `custom_endpoints.${index}`)
+    return {
+      name: settingString(row.name, `custom_endpoints.${index}.name`, 128, false),
+      endpoint: settingPublicUrl(row.endpoint, `custom_endpoints.${index}.endpoint`),
+      description: settingString(row.description ?? '', `custom_endpoints.${index}.description`, 512, true),
+    }
+  })
+}
+
+function settingPublicUrl(value: unknown, field: string): string {
+  const url = settingString(value, field, 2_048, false)
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error('protocol')
+    return url
+  } catch {
+    throw new GatewayError(400, `invalid_${field}`, `${field} is invalid`)
+  }
+}
+
+function safeCustomMenuItems(value: unknown): PublicSystemSettings['custom_menu_items'] {
+  try { return value === undefined ? [] : parseCustomMenuItems(value) } catch { return [] }
+}
+
+function safeCustomEndpoints(value: unknown): PublicSystemSettings['custom_endpoints'] {
+  try { return value === undefined ? [] : parseCustomEndpoints(value) } catch { return [] }
+}
+
 function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const settings = value as Record<string, unknown>
@@ -524,6 +576,8 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     home_content: typeof settings.home_content === 'string' ? settings.home_content : '',
     compact_home_enabled: settings.compact_home_enabled === true,
     hide_ccs_import_button: settings.hide_ccs_import_button === true,
+    custom_menu_items: safeCustomMenuItems(settings.custom_menu_items),
+    custom_endpoints: safeCustomEndpoints(settings.custom_endpoints),
     registration_enabled: settings.registration_enabled,
     registration_email_suffix_whitelist: registrationEmailSuffixWhitelist,
     email_verification_enabled: settings.email_verification_enabled,
@@ -578,6 +632,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'site_name',
       'backend_mode_enabled', 'site_subtitle', 'api_base_url', 'contact_info', 'doc_url',
       'site_logo', 'home_content', 'compact_home_enabled', 'hide_ccs_import_button',
+      'custom_menu_items', 'custom_endpoints',
       'registration_enabled',
       'registration_email_suffix_whitelist',
       'email_verification_enabled',
@@ -603,6 +658,8 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     for (const field of ['backend_mode_enabled', 'compact_home_enabled', 'hide_ccs_import_button'] as const) {
       if (value[field] !== undefined) publicPatch[field] = settingBoolean(value[field], field)
     }
+    if (value.custom_menu_items !== undefined) publicPatch.custom_menu_items = parseCustomMenuItems(value.custom_menu_items)
+    if (value.custom_endpoints !== undefined) publicPatch.custom_endpoints = parseCustomEndpoints(value.custom_endpoints)
     if (value.registration_enabled !== undefined) {
       publicPatch.registration_enabled = settingBoolean(value.registration_enabled, 'registration_enabled')
     }

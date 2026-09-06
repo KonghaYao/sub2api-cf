@@ -27,6 +27,8 @@ interface SettingsResponse {
       backend_mode_enabled: boolean
       site_subtitle: string
       api_base_url: string
+      custom_menu_items: unknown[]
+      custom_endpoints: unknown[]
       contact_info: string
       doc_url: string
       site_logo: string
@@ -162,6 +164,7 @@ describe('admin system settings', () => {
           backend_mode_enabled: false,
           site_subtitle: '', api_base_url: '', contact_info: '', doc_url: '', site_logo: '', home_content: '',
           compact_home_enabled: false, hide_ccs_import_button: false,
+          custom_menu_items: [], custom_endpoints: [],
           registration_enabled: false,
           registration_email_suffix_whitelist: [],
           email_verification_enabled: false,
@@ -411,6 +414,8 @@ describe('admin system settings', () => {
           home_content: '# Welcome',
           compact_home_enabled: true,
           hide_ccs_import_button: true,
+          custom_menu_items: [{ id: 'docs', label: 'Docs', icon_svg: '', url: 'https://docs.example.test', visibility: 'user', sort_order: 99 }],
+          custom_endpoints: [{ name: 'Primary', endpoint: 'https://api.example.test/v1', description: 'Public API' }],
           registration_enabled: true,
           registration_email_suffix_whitelist: ['example.com', '@EXAMPLE.com', '*.EDU.cn'],
           email_verification_enabled: true,
@@ -446,6 +451,8 @@ describe('admin system settings', () => {
         home_content: '# Welcome',
         compact_home_enabled: true,
         hide_ccs_import_button: true,
+        custom_menu_items: [{ id: 'docs', label: 'Docs', icon_svg: '', url: 'https://docs.example.test', visibility: 'user', sort_order: 0 }],
+        custom_endpoints: [{ name: 'Primary', endpoint: 'https://api.example.test/v1', description: 'Public API' }],
         registration_enabled: true,
         registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
         email_verification_enabled: true,
@@ -476,6 +483,8 @@ describe('admin system settings', () => {
       home_content: '# Welcome',
       compact_home_enabled: true,
       hide_ccs_import_button: true,
+      custom_menu_items: [{ id: 'docs', visibility: 'user', sort_order: 0, label: 'Docs', icon_svg: '', url: 'https://docs.example.test' }],
+      custom_endpoints: [{ name: 'Primary', endpoint: 'https://api.example.test/v1', description: 'Public API' }],
       registration_enabled: true,
       registration_email_suffix_whitelist: ['@example.com', '*.edu.cn'],
       email_verification_enabled: true,
@@ -521,6 +530,8 @@ describe('admin system settings', () => {
       'public.backend_mode_enabled',
       'public.compact_home_enabled',
       'public.contact_info',
+      'public.custom_endpoints',
+      'public.custom_menu_items',
       'public.doc_url',
       'public.email_verification_enabled',
       'public.hide_ccs_import_button',

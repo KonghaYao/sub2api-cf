@@ -10935,8 +10935,6 @@ async function loadSettings() {
       workerUnsupportedGeneralBaseline.value = JSON.stringify({
         table_default_page_size: form.table_default_page_size,
         table_page_size_options: tablePageSizeOptionsInput.value,
-        custom_endpoints: form.custom_endpoints,
-        custom_menu_items: form.custom_menu_items,
       });
     }
 
@@ -11088,8 +11086,6 @@ async function saveSettings() {
       const unsupportedGeneral = JSON.stringify({
         table_default_page_size: form.table_default_page_size,
         table_page_size_options: tablePageSizeOptionsInput.value,
-        custom_endpoints: form.custom_endpoints,
-        custom_menu_items: form.custom_menu_items,
       });
       if (unsupportedGeneral !== workerUnsupportedGeneralBaseline.value) {
         throw Object.assign(
@@ -11108,6 +11104,8 @@ async function saveSettings() {
         home_content: form.home_content,
         compact_home_enabled: form.compact_home_enabled,
         hide_ccs_import_button: form.hide_ccs_import_button,
+        custom_menu_items: form.custom_menu_items,
+        custom_endpoints: form.custom_endpoints,
         registration_enabled: form.registration_enabled,
         email_verify_enabled: form.email_verify_enabled,
         turnstile_enabled: form.turnstile_enabled,

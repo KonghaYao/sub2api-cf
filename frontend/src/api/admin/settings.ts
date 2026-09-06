@@ -1090,6 +1090,8 @@ interface WorkerAdminSettings {
     home_content: string;
     compact_home_enabled: boolean;
     hide_ccs_import_button: boolean;
+    custom_menu_items: CustomMenuItem[];
+    custom_endpoints: CustomEndpoint[];
     registration_enabled: boolean;
     email_verification_enabled: boolean;
     turnstile_enabled: boolean;
@@ -1177,6 +1179,8 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     home_content: settings.public.home_content ?? "",
     compact_home_enabled: settings.public.compact_home_enabled === true,
     hide_ccs_import_button: settings.public.hide_ccs_import_button === true,
+    custom_menu_items: settings.public.custom_menu_items ?? [],
+    custom_endpoints: settings.public.custom_endpoints ?? [],
     registration_enabled: settings.public.registration_enabled,
     email_verify_enabled: settings.public.email_verification_enabled,
     turnstile_enabled: settings.public.turnstile_enabled,
@@ -1244,6 +1248,7 @@ export async function updateSettings(
   for (const field of [
     "backend_mode_enabled", "site_subtitle", "api_base_url", "contact_info", "doc_url", "site_logo",
     "home_content", "compact_home_enabled", "hide_ccs_import_button",
+    "custom_menu_items", "custom_endpoints",
   ] as const) {
     if (settings[field] !== undefined) publicPatch[field] = settings[field] as never;
   }
