@@ -101,7 +101,10 @@ async function workerOperationKey(prefix: string, payload: unknown): Promise<{ c
 function workerAccountListParams(
   page: number,
   pageSize: number,
-  filters?: { platform?: string; status?: string; search?: string }
+  filters?: {
+    platform?: string; status?: string; group?: string; search?: string
+    sort_by?: string; sort_order?: 'asc' | 'desc'
+  }
 ): Record<string, string | number> {
   if (!isCloudflareWorkerContractActive()) return { page, page_size: pageSize, ...filters }
   const params: Record<string, string | number> = { page, page_size: pageSize }
@@ -109,8 +112,16 @@ function workerAccountListParams(
     params.platform = filters.platform
   }
   if (filters?.status === 'active' || filters?.status === 'inactive') params.status = filters.status
+  const group = filters?.group?.trim()
+  if (group) params.group = group
   const search = filters?.search?.trim()
   if (search) params.search = search
+  const workerSortKeys = new Set([
+    'id', 'name', 'platform', 'platform_type', 'status', 'rate_multiplier',
+    'max_concurrency', 'created_at', 'updated_at'
+  ])
+  if (filters?.sort_by && workerSortKeys.has(filters.sort_by)) params.sort_by = filters.sort_by
+  if (filters?.sort_order === 'asc' || filters?.sort_order === 'desc') params.sort_order = filters.sort_order
   return params
 }
 

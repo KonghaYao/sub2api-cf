@@ -839,7 +839,7 @@ const attributeColumns = computed<Column[]>(() =>
 )
 
 // Get formatted attribute value for display in table
-const getAttributeValue = (userId: number, attrId: number): string => {
+const getAttributeValue = (userId: string | number, attrId: string | number): string => {
   const userAttrs = userAttributeValues.value[userId]
   if (!userAttrs) return '-'
   const value = userAttrs[attrId]
@@ -1126,7 +1126,7 @@ const filters = reactive({
   group: '',  // group name for fuzzy match, '' = all
   apiKeyGroup: null as number | null  // group id bound to the user's API keys, null = all
 })
-const activeAttributeFilters = reactive<Record<number, string>>({})
+const activeAttributeFilters = reactive<Record<string, string>>({})
 
 // Visible filters tracking (which filters are shown in the UI)
 // Keys: 'role', 'status', 'attr_${id}'
@@ -1203,7 +1203,7 @@ const saveFiltersToStorage = () => {
 }
 
 // Get attribute definition by ID
-const getAttributeDefinition = (attrId: number): UserAttributeDefinition | undefined => {
+const getAttributeDefinition = (attrId: string | number): UserAttributeDefinition | undefined => {
   return attributeDefinitions.value.find(d => d.id === attrId)
 }
 const usageStats = ref<Record<string, BatchUserUsageStats>>({})
@@ -1324,7 +1324,7 @@ const getUserSelectionLabel = (user: AdminUser) =>
 
 // User attribute definitions and values
 const attributeDefinitions = ref<UserAttributeDefinition[]>([])
-const userAttributeValues = ref<Record<number, Record<number, string>>>({})
+const userAttributeValues = ref<Record<string, Record<string, string>>>({})
 const pagination = reactive({
   page: 1,
   page_size: getPersistedPageSize(),
@@ -1676,7 +1676,7 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 }
 
 // Filter helpers
-const getAttributeDefinitionName = (attrId: number): string => {
+const getAttributeDefinitionName = (attrId: string | number): string => {
   const def = attributeDefinitions.value.find(d => d.id === attrId)
   return def?.name || String(attrId)
 }
@@ -1704,18 +1704,18 @@ const toggleAttributeFilter = (attr: UserAttributeDefinition) => {
   const key = `attr_${attr.id}`
   if (visibleFilters.has(key)) {
     visibleFilters.delete(key)
-    delete activeAttributeFilters[attr.id]
+    delete activeAttributeFilters[String(attr.id)]
   } else {
     visibleFilters.add(key)
-    activeAttributeFilters[attr.id] = ''
+    activeAttributeFilters[String(attr.id)] = ''
   }
   saveFiltersToStorage()
   pagination.page = 1
   loadUsers()
 }
 
-const updateAttributeFilter = (attrId: number, value: string) => {
-  activeAttributeFilters[attrId] = value
+const updateAttributeFilter = (attrId: string | number, value: string) => {
+  activeAttributeFilters[String(attrId)] = value
 }
 
 // Apply filter and save to localStorage

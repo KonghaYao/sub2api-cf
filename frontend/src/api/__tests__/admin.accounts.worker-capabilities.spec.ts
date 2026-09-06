@@ -25,7 +25,7 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
-  it('sends only non-empty Worker-supported list filters', async () => {
+  it('keeps only non-empty Worker-supported list filters and sorting', async () => {
     get.mockResolvedValueOnce({ data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 } })
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
@@ -35,13 +35,21 @@ describe('admin accounts Worker transport capabilities', () => {
       platform: 'toString',
       status: '',
       type: 'oauth',
-      group: 'legacy-group',
+      group: 'worker-group',
       search: '  ',
       include_scheduler_score: '1',
+      sort_by: 'rate_multiplier',
+      sort_order: 'desc',
     })
 
     expect(get).toHaveBeenCalledWith('/admin/accounts', {
-      params: { page: 1, page_size: 20 },
+      params: {
+        page: 1,
+        page_size: 20,
+        group: 'worker-group',
+        sort_by: 'rate_multiplier',
+        sort_order: 'desc',
+      },
       signal: undefined,
     })
   })

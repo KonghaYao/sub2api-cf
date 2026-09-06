@@ -291,7 +291,7 @@ const getButtonByText = (wrapper: VueWrapper, text: string) => {
 }
 
 describe('user KeysView column settings', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear()
 
     listKeys.mockReset()
@@ -325,6 +325,8 @@ describe('user KeysView column settings', () => {
     updateKey.mockImplementation(async (_id, _updates, version) =>
       createApiKey({ id: 'worker-key', control_version: (version ?? 0) + 1 })
     )
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
   })
 
   it('uses the default API key columns with low-frequency columns hidden', async () => {
@@ -436,9 +438,19 @@ describe('user KeysView column settings', () => {
     expect(wrapper.get('[data-test="current-concurrency"]').text()).toBe('3')
   })
 
-  it('marks current concurrency as sortable', async () => {
+  it('disables current concurrency sorting for the Worker because the value lives in a Durable Object', async () => {
     const wrapper = await mountView()
 
+    const currentConcurrencyColumn = visibleColumnMeta(wrapper).find(
+      (column) => column.key === 'current_concurrency'
+    )
+    expect(currentConcurrencyColumn?.sortable).toBe(false)
+  })
+
+  it('keeps current concurrency sortable against the legacy API', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(false)
+    const wrapper = await mountView()
     const currentConcurrencyColumn = visibleColumnMeta(wrapper).find(
       (column) => column.key === 'current_concurrency'
     )

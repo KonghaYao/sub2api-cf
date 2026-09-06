@@ -5,7 +5,8 @@ export const PASSWORD_MAX_CODE_POINTS = 256
 export const PASSWORD_MAX_UTF8_BYTES = 1_024
 
 const PASSWORD_VERSION = 1
-const PBKDF2_ITERATIONS = 210_000
+// Cloudflare Workers WebCrypto rejects PBKDF2 iteration counts above 100,000.
+const PBKDF2_ITERATIONS = 100_000
 const MIN_ACCEPTED_ITERATIONS = 100_000
 const MAX_ACCEPTED_ITERATIONS = 1_000_000
 const SALT_BYTES = 16

@@ -361,7 +361,7 @@ const handleSave = async () => {
     }
 
     if (editingAttribute.value) {
-      await adminAPI.userAttributes.updateDefinition(editingAttribute.value.id, data)
+      await adminAPI.userAttributes.updateDefinition(editingAttribute.value.id, data, editingAttribute.value.control_version)
       appStore.showSuccess(t('admin.users.attributes.updated'))
     } else {
       await adminAPI.userAttributes.createDefinition(data)
@@ -389,7 +389,7 @@ const handleDelete = async () => {
   if (!deletingAttribute.value) return
 
   try {
-    await adminAPI.userAttributes.deleteDefinition(deletingAttribute.value.id)
+    await adminAPI.userAttributes.deleteDefinition(deletingAttribute.value.id, deletingAttribute.value.control_version)
     appStore.showSuccess(t('admin.users.attributes.deleted'))
     showDeleteDialog.value = false
     deletingAttribute.value = null

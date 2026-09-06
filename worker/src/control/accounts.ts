@@ -200,6 +200,41 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       conditions.push(`a.name LIKE ? ESCAPE '\\'`)
       values.push(`%${escapeLike(search)}%`)
     }
+    const group = context.req.query('group')
+    if (group !== undefined && group !== '') {
+      if (group === 'ungrouped') {
+        conditions.push('NOT EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id)')
+      } else {
+        const groupId = requireResourceId(group, 'group')
+        conditions.push('EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)')
+        values.push(groupId)
+      }
+    }
+    const sortBy = context.req.query('sort_by') ?? 'updated_at'
+    const sortColumns: Record<string, string> = {
+      id: 'a.id',
+      name: 'a.name',
+      platform: 'a.platform',
+      platform_type: 'a.platform',
+      status: 'a.enabled',
+      rate_multiplier: 'a.billing_rate_multiplier_ppm',
+      max_concurrency: 'a.max_concurrency',
+      created_at: 'a.created_at_ms',
+      updated_at: 'a.updated_at_ms',
+    }
+    const sortColumn = sortColumns[sortBy]
+    if (sortColumn === undefined) {
+      throw new GatewayError(400, 'invalid_sort_by', 'sort_by is invalid')
+    }
+    const defaultSortOrder = sortBy === 'updated_at' ? 'desc' : 'asc'
+    const sortOrder = context.req.query('sort_order') ?? defaultSortOrder
+    if (sortOrder !== 'asc' && sortOrder !== 'desc') {
+      throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+    }
+    const direction = sortOrder.toUpperCase()
+    const orderBy = sortBy === 'id'
+      ? `${sortColumn} ${direction}`
+      : `${sortColumn} ${direction}, a.id ${direction}`
     const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
     const [countResult, rowsResult] = await context.env.DB.batch([
       context.env.DB.prepare(
@@ -211,7 +246,7 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       ).bind(...values),
       context.env.DB.prepare(
         `${ACCOUNT_PROJECTION} ${where}
-         ORDER BY a.updated_at_ms DESC, a.id DESC
+         ORDER BY ${orderBy}
          LIMIT ? OFFSET ?`,
       ).bind(...values, pageSize, (page - 1) * pageSize),
     ])

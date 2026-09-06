@@ -1,22 +1,48 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { get, put } = vi.hoisted(() => ({
+const { get, post, put } = vi.hoisted(() => ({
   get: vi.fn(),
+  post: vi.fn(),
   put: vi.fn()
 }))
 
 vi.mock('@/api/client', () => ({
-  apiClient: { get, put }
+  apiClient: { get, post, put }
 }))
 
 describe('admin settings Cloudflare Worker contract', () => {
   beforeEach(() => {
     vi.resetModules()
     get.mockReset()
+    post.mockReset()
     put.mockReset()
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
       '22222222-2222-4222-8222-222222222222'
     )
+  })
+
+  it('keeps removed host web-search emulation calls off the Worker API', async () => {
+    const {
+      getWebSearchEmulationConfig,
+      resetWebSearchUsage,
+      testWebSearchEmulation,
+      updateWebSearchEmulationConfig,
+    } = await import('@/api/admin/settings')
+
+    await expect(getWebSearchEmulationConfig()).resolves.toEqual({
+      enabled: false,
+      providers: [],
+    })
+    await expect(updateWebSearchEmulationConfig({ enabled: true, providers: [] }))
+      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(testWebSearchEmulation('query'))
+      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+    await expect(resetWebSearchUsage({ provider_type: 'tavily' }))
+      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
+
+    expect(get).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
   })
 
   it('adapts the versioned Worker response to the existing settings form', async () => {

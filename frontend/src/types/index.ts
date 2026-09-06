@@ -102,6 +102,8 @@ export interface User {
   created_at: string
   updated_at: string
   deleted_at?: string | null
+  // Present on Worker control-plane responses and used for optimistic writes.
+  control_version?: number
 }
 
 export interface AdminUser extends User {
@@ -2302,28 +2304,30 @@ export interface UserAttributeValidation {
 }
 
 export interface UserAttributeDefinition {
-  id: number
+  id: string | number
   key: string
   name: string
-  description: string
+  description: string | null
   type: UserAttributeType
   options: UserAttributeOption[]
   required: boolean
   validation: UserAttributeValidation
-  placeholder: string
+  placeholder: string | null
   display_order: number
   enabled: boolean
+  control_version?: number
   created_at: string
   updated_at: string
 }
 
 export interface UserAttributeValue {
-  id: number
-  user_id: number
-  attribute_id: number
+  id: string | number
+  user_id: string | number
+  attribute_id: string | number
   value: string
   created_at: string
   updated_at: string
+  control_version?: number
 }
 
 export interface CreateUserAttributeRequest {
@@ -2353,7 +2357,7 @@ export interface UpdateUserAttributeRequest {
 }
 
 export interface UserAttributeValuesMap {
-  [attributeId: number]: string
+  [attributeId: string]: string
 }
 
 // ==================== Promo Code Types ====================

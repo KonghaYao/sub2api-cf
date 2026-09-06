@@ -4,10 +4,10 @@
       <template #filters>
         <div class="flex flex-wrap-reverse items-start justify-between gap-3">
           <AccountTableFilters
-            v-if="!cloudflareWorkerContract"
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"
+            :cloudflare-worker="cloudflareWorkerContract"
             @update:filters="(newFilters) => Object.assign(params, newFilters)"
             @change="debouncedReload"
             @update:searchQuery="debouncedReload"
@@ -210,7 +210,7 @@
         <DataTable
           ref="dataTableRef"
           :columns="cols"
-          :data="accounts"
+          :data="tableAccounts"
           :loading="loading"
           row-key="id"
           :server-side-sort="true"
@@ -1141,6 +1141,25 @@ const {
   }
 })
 
+// Worker account rows carry relation IDs (`group_ids`/`group_links`), while the
+// legacy cell expects hydrated group objects. Resolve only the current page
+// against the groups already loaded for the filter and account forms.
+const tableAccounts = computed(() => {
+  if (!cloudflareWorkerContract.value) return accounts.value
+  const groupsById = new Map(groups.value.map((group) => [String(group.id), group]))
+  return accounts.value.map((account) => {
+    if (account.groups && account.groups.length > 0) return account
+    const raw = account as unknown as { group_links?: Array<{ group_id?: unknown }>; group_ids?: unknown[] }
+    const ids = raw.group_ids ?? raw.group_links?.map((link) => link.group_id) ?? []
+    const linkedGroups = ids
+      .map((id) => groupsById.get(String(id)))
+      .filter((group): group is AdminGroup => group !== undefined)
+    return linkedGroups.length === 0
+      ? account
+      : { ...account, groups: linkedGroups as unknown as Account['groups'] }
+  })
+})
+
 const {
   selectedSet,
   selectedIds: selIds,
@@ -1855,7 +1874,7 @@ const allColumns = computed(() => {
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
-  if (!authStore.isSimpleMode) {
+  if (!authStore.isSimpleMode || cloudflareWorkerContract.value) {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
@@ -1873,11 +1892,14 @@ const allColumns = computed(() => {
   )
   if (!cloudflareWorkerContract.value) return c
   const workerColumns = new Set([
+    'select',
     'name',
     'id',
     'platform_type',
     'capacity',
     'status',
+    'groups',
+    'rate_multiplier',
     'created_at',
     'actions'
   ])
@@ -1892,7 +1914,9 @@ const toggleableColumns = computed(() =>
 // Filtered columns based on visibility
 const cols = computed(() =>
   allColumns.value.filter(col =>
-    col.key === 'select' || col.key === 'name' || col.key === 'actions' || !hiddenColumns.has(col.key)
+    col.key === 'select' || col.key === 'name' || col.key === 'actions'
+      || (cloudflareWorkerContract.value && (col.key === 'groups' || col.key === 'rate_multiplier'))
+      || !hiddenColumns.has(col.key)
   )
 )
 

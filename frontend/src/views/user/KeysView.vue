@@ -1176,6 +1176,7 @@ import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1211,7 +1212,12 @@ const allColumns = computed<Column[]>(() => [
   { key: 'id', label: t('keys.id'), sortable: true },
   { key: 'key', label: t('keys.apiKey'), sortable: false },
   { key: 'group', label: t('keys.group'), sortable: false },
-  { key: 'current_concurrency', label: t('keys.currentConcurrency'), sortable: true },
+  {
+    key: 'current_concurrency',
+    label: t('keys.currentConcurrency'),
+    // Worker values are read from Durable Objects and cannot be globally ordered in D1.
+    sortable: !isCloudflareWorkerContractActive(),
+  },
   { key: 'usage', label: t('keys.usage'), sortable: false },
   { key: 'rate_limit', label: t('keys.rateLimitColumn'), sortable: false },
   { key: 'expires_at', label: t('keys.expiresAt'), sortable: true },

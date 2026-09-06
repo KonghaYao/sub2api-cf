@@ -34,10 +34,10 @@ vi.mock('vue-i18n', async (importOriginal) => ({
   })
 }))
 
-const mountModal = (concurrency: number) => mount(UserEditModal, {
+const mountModal = (concurrency: number, withCustomAttribute = false) => mount(UserEditModal, {
   props: {
     show: true,
-    user: { id: 7, email: 'user@example.test', username: 'user', notes: '', role: 'user', concurrency, rpm_limit: 0 } as never
+    user: { id: 7, email: 'user@example.test', username: 'user', notes: '', role: 'user', concurrency, rpm_limit: 0, control_version: 7 } as never
   },
   global: {
     stubs: {
@@ -47,7 +47,9 @@ const mountModal = (concurrency: number) => mount(UserEditModal, {
       },
       Select: true,
       Icon: true,
-      UserAttributeForm: true,
+      UserAttributeForm: withCustomAttribute
+        ? { template: '<button data-test="custom-attribute" @click="$emit(\'update:modelValue\', { 4: \'eng\' })" />' }
+        : true,
       TotpStepUpDialog: true
     }
   }
@@ -86,5 +88,14 @@ describe('UserEditModal concurrency', () => {
 
     expect(showError).toHaveBeenCalledWith('admin.users.concurrencyNonNegative')
     expect(update).not.toHaveBeenCalled()
+  })
+
+  it('uses the version returned by the user update when saving custom attributes', async () => {
+    update.mockResolvedValueOnce({ control_version: 8 })
+    const wrapper = mountModal(3, true)
+    await wrapper.get('[data-test="custom-attribute"]').trigger('click')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(updateUserAttributeValues).toHaveBeenCalledWith(7, { 4: 'eng' }, 8)
   })
 })

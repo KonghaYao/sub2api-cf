@@ -92,7 +92,7 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
   return { adminSession, groupId: setup.group_id }
 }
 
-test('user registers, logs in, creates a key, completes Chat billing into Usage, and persists an R2 avatar', async ({ page, request }) => {
+test('user registers, logs in, completes the API-key lifecycle and gateway billing, and persists an R2 avatar', async ({ page, request }) => {
   const setup = await prepareFreshWorker(request)
 
   await page.goto('/register')
@@ -215,4 +215,22 @@ test('user registers, logs in, creates a key, completes Chat billing into Usage,
 
   await page.reload()
   await expect(page.getByTestId('profile-avatar-preview')).toHaveAttribute('src', avatarUrl!)
+
+  await page.goto('/keys')
+  const createdKeyRow = page.locator('tr').filter({ hasText: 'Browser-created key' })
+  await expect(createdKeyRow).toHaveCount(1)
+  await createdKeyRow.getByRole('button', { name: /^delete$/i }).click()
+  const deleteDialog = page.getByRole('dialog').filter({ hasText: /Browser-created key/ })
+  await expect(deleteDialog).toBeVisible()
+  const deleteResponse = page.waitForResponse((response) =>
+    response.url().includes('/api/v1/keys/') && response.request().method() === 'DELETE'
+  )
+  const refreshedList = page.waitForResponse((response) =>
+    response.url().includes('/api/v1/keys?') && response.request().method() === 'GET'
+  )
+  await deleteDialog.getByRole('button', { name: /^delete$/i }).click()
+  const revoked = await expectData<{ id: string; status: string }>(await deleteResponse)
+  expect(revoked.status).toBe('inactive')
+  await expectData(await refreshedList)
+  await expect(createdKeyRow).toHaveCount(0)
 })

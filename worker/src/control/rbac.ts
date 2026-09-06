@@ -200,6 +200,9 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   if (/^\/api\/v1\/admin\/(?:settings$|oauth-providers(?:\/|$))/.test(pathname)) {
     return [category('admin.settings.read', 'admin.settings.write')]
   }
+  if (/^\/api\/v1\/admin\/user-attributes(?:\/|$)/.test(pathname)) {
+    return [category('admin.users.read', 'admin.users.write')]
+  }
   if (
     /^\/api\/v1\/admin\/(?:groups|users)\/[^/]+\/subscriptions$/.test(pathname)
   ) {

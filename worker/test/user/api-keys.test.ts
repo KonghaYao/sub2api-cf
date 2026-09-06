@@ -104,14 +104,41 @@ function runBeforeFirstBatch(database: D1Database, beforeBatch: () => void): D1D
 
 function seedKey(
   raw: any,
-  input: { id: string; userId: string; name: string; hashByte: string },
+  input: {
+    id: string
+    userId: string
+    name: string
+    hashByte: string
+    enabled?: boolean
+    groupId?: string | null
+    createdAtMs?: number
+    updatedAtMs?: number
+    lastUsedAtMs?: number | null
+    expiresAtMs?: number | null
+    revokedAtMs?: number | null
+  },
 ): void {
+  const createdAtMs = input.createdAtMs ?? 100
   raw.prepare(
     `INSERT INTO api_keys (
        id, user_id, key_hash, name, enabled, expires_at_ms,
-       created_at_ms, updated_at_ms, group_id, key_prefix
-     ) VALUES (?, ?, ?, ?, 1, NULL, 100, 100, 'group-a', ?)`,
-  ).run(input.id, input.userId, input.hashByte.repeat(64), input.name, `sk-sub2api-${input.hashByte.repeat(5)}`)
+       last_used_at_ms, created_at_ms, updated_at_ms, group_id, key_prefix,
+       revoked_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.userId,
+    input.hashByte.repeat(64),
+    input.name,
+    input.enabled === false ? 0 : 1,
+    input.expiresAtMs ?? null,
+    input.lastUsedAtMs ?? null,
+    createdAtMs,
+    input.updatedAtMs ?? createdAtMs,
+    input.groupId === undefined ? 'group-a' : input.groupId,
+    `sk-sub2api-${input.hashByte.repeat(5)}`,
+    input.revokedAtMs ?? null,
+  )
 }
 
 describe('user API keys', () => {
@@ -643,6 +670,174 @@ describe('user API keys', () => {
       `SELECT COUNT(*) AS total FROM auth_audit_events
        WHERE event_type = 'user.api_keys.revoke' AND user_id = 'alice'`,
     ).get()).toEqual({ total: 1 })
+  })
+
+  it('removes a revoked key from the default owner list while preserving idempotent audit', async () => {
+    const test = await fixture()
+    seedKey(test.raw, { id: 'alice-keep', userId: 'alice', name: 'Keep', hashByte: 'a' })
+    const created = await app().request('/keys', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': 'alice-create-then-delete-0001',
+      },
+      body: JSON.stringify({ name: 'Delete', group_id: 'group-a' }),
+    }, test.env)
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as { data: { id: string } }
+
+    const request = {
+      method: 'DELETE',
+      headers: { authorization: test.authorization.alice },
+    }
+    const first = await app().request(`/keys/${createdBody.data.id}`, request, test.env)
+    const replay = await app().request(`/keys/${createdBody.data.id}`, request, test.env)
+    const listed = await app().request('/keys', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+
+    expect(first.status).toBe(200)
+    expect(replay.status).toBe(200)
+    await expect(listed.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        items: [expect.objectContaining({ id: 'alice-keep' })],
+        total: 1,
+        page: 1,
+        page_size: 10,
+        pages: 1,
+      },
+    })
+    expect(test.raw.prepare(
+      `SELECT COUNT(*) AS total FROM auth_audit_events
+       WHERE event_type = 'user.api_keys.revoke' AND user_id = 'alice'`,
+    ).get()).toEqual({ total: 1 })
+  })
+
+  it('applies literal search, status, group, stable sorting, pagination, and owner isolation', async () => {
+    const test = await fixture()
+    seedKey(test.raw, {
+      id: 'alice-alpha', userId: 'alice', name: 'Alpha_100% literal', hashByte: 'a',
+      groupId: 'group-a', createdAtMs: 500, lastUsedAtMs: 1_000, expiresAtMs: 9_000_000_005_000,
+    })
+    seedKey(test.raw, {
+      id: 'alice-disabled', userId: 'alice', name: 'Alpha disabled', hashByte: 'b',
+      enabled: false, groupId: 'group-a', createdAtMs: 400,
+    })
+    seedKey(test.raw, {
+      id: 'alice-beta-a', userId: 'alice', name: 'Beta', hashByte: 'c',
+      groupId: 'group-b', createdAtMs: 300, expiresAtMs: 9_000_000_003_000,
+    })
+    seedKey(test.raw, {
+      id: 'alice-beta-b', userId: 'alice', name: 'Beta', hashByte: 'd',
+      groupId: 'group-b', createdAtMs: 300, expiresAtMs: 9_000_000_003_000,
+    })
+    seedKey(test.raw, {
+      id: 'alice-revoked', userId: 'alice', name: 'Beta revoked', hashByte: 'e',
+      enabled: false, groupId: 'group-b', createdAtMs: 600, revokedAtMs: 700,
+    })
+    seedKey(test.raw, {
+      id: 'bob-hidden', userId: 'bob', name: 'Beta', hashByte: 'f',
+      groupId: 'group-b', createdAtMs: 900,
+    })
+
+    const request = async (query: string) => {
+      const response = await app().request(`/keys?${query}`, {
+        headers: { authorization: test.authorization.alice },
+      }, test.env)
+      expect(response.status).toBe(200)
+      return response.json() as Promise<{
+        code: number
+        data: { items: Array<Record<string, unknown>>; total: number; page: number; pages: number }
+      }>
+    }
+
+    const literal = await request(`search=${encodeURIComponent('_100%')}`)
+    expect(literal.data.total).toBe(1)
+    expect(literal.data.items.map((item) => item.id)).toEqual(['alice-alpha'])
+    const prefix = await request('search=SUB2API-CCCCC')
+    expect(prefix.data.total).toBe(1)
+    expect(prefix.data.items.map((item) => item.id)).toEqual(['alice-beta-a'])
+
+    const active = await request('status=active&sort_by=created_at&sort_order=desc')
+    expect(active.data.total).toBe(3)
+    expect(active.data.items.map((item) => item.id)).toEqual([
+      'alice-alpha', 'alice-beta-b', 'alice-beta-a',
+    ])
+
+    const inactive = await request('status=inactive')
+    expect(inactive.data.total).toBe(1)
+    expect(inactive.data.items.map((item) => item.id)).toEqual(['alice-disabled'])
+
+    const group = await request('group_id=group-b&sort_by=name&sort_order=asc')
+    expect(group.data.total).toBe(2)
+    expect(group.data.items.map((item) => item.id)).toEqual(['alice-beta-a', 'alice-beta-b'])
+
+    const byStatus = await request('sort_by=status&sort_order=asc')
+    expect(byStatus.data.items.map((item) => item.id)).toEqual([
+      'alice-disabled', 'alice-alpha', 'alice-beta-a', 'alice-beta-b',
+    ])
+    const byExpiry = await request('sort_by=expires_at&sort_order=desc')
+    expect(byExpiry.data.items.map((item) => item.id)).toEqual([
+      'alice-alpha', 'alice-beta-b', 'alice-beta-a', 'alice-disabled',
+    ])
+    const byLastUsed = await request('sort_by=last_used_at&sort_order=desc')
+    expect(byLastUsed.data.items[0]?.id).toBe('alice-alpha')
+
+    const first = await request(
+      'search=BETA&status=active&group_id=group-b&sort_by=id&sort_order=desc&page=1&page_size=1',
+    )
+    expect(first.data).toMatchObject({ total: 2, page: 1, pages: 2 })
+    expect(first.data.items.map((item) => item.id)).toEqual(['alice-beta-b'])
+    const second = await request(
+      'search=BETA&status=active&group_id=group-b&sort_by=id&sort_order=desc&page=2&page_size=1',
+    )
+    expect(second.data).toMatchObject({ total: 2, page: 2, pages: 2 })
+    expect(second.data.items.map((item) => item.id)).toEqual(['alice-beta-a'])
+    const serialized = JSON.stringify({
+      literal,
+      prefix,
+      active,
+      inactive,
+      group,
+      byStatus,
+      byExpiry,
+      byLastUsed,
+      first,
+      second,
+    })
+    expect(serialized)
+      .not.toContain('bob-hidden')
+    expect(serialized)
+      .not.toContain('key_hash')
+  })
+
+  it('rejects unsupported or unbounded API key list query parameters', async () => {
+    const test = await fixture()
+    const checks = [
+      ['status=revoked', 'invalid_status'],
+      ['sort_by=key_hash', 'invalid_sort_by'],
+      ['sort_by=current_concurrency', 'invalid_sort_by'],
+      ['sort_order=sideways', 'invalid_sort_order'],
+      [`search=${'x'.repeat(101)}`, 'invalid_search'],
+      ['group_id=invalid%21', 'invalid_group_id'],
+      ['page_size=101', 'invalid_page_size'],
+    ] as const
+
+    for (const [query, code] of checks) {
+      const response = await app().request(`/keys?${query}`, {
+        headers: { authorization: test.authorization.alice },
+      }, test.env)
+      expect(response.status, query).toBe(400)
+      await expect(response.json(), query).resolves.toMatchObject({ code })
+    }
+
+    const empty = await app().request('/keys?search=&status=&group_id=', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    expect(empty.status).toBe(200)
+    await expect(empty.json()).resolves.toMatchObject({ data: { items: [], total: 0 } })
   })
 
   it('creates integer monetary limits and exposes the complete effective projection', async () => {

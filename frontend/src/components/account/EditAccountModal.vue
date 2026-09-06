@@ -83,6 +83,13 @@
           {{ t('common.enabled') }}
         </label>
       </div>
+      <GroupSelector
+        v-model="workerForm.group_ids"
+        :groups="groups"
+        :platform="account.platform"
+        data-testid="worker-account-group-selector"
+        data-tour="account-form-groups"
+      />
     </form>
 
     <form
@@ -2957,6 +2964,7 @@ import type {
   Account,
   Proxy,
   AdminGroup,
+  GroupId,
   CheckMixedChannelResponse,
   OpenAICompactMode,
   OpenAIResponsesMode,
@@ -3050,6 +3058,7 @@ const workerForm = reactive({
   enabled: true,
   max_concurrency: 4,
   rate_multiplier: 1,
+  group_ids: [] as GroupId[],
 })
 
 const workerContractDetails = computed(() => {
@@ -3087,6 +3096,14 @@ watch(
     workerForm.rate_multiplier = Number.isFinite(Number(account.rate_multiplier))
       ? Number(account.rate_multiplier)
       : 1
+    const links = Array.isArray(workerAccount.group_links)
+      ? workerAccount.group_links as Array<Record<string, unknown>>
+      : []
+    workerForm.group_ids = links.length > 0
+      ? links
+        .map((link) => link.group_id)
+        .filter((id): id is GroupId => typeof id === 'string' || typeof id === 'number')
+      : (Array.isArray(account.group_ids) ? [...account.group_ids] : [])
   },
   { immediate: true }
 )
@@ -4779,6 +4796,19 @@ const handleWorkerUpdate = async () => {
       enabled: workerForm.enabled,
       max_concurrency: workerForm.max_concurrency,
       rate_multiplier: workerForm.rate_multiplier,
+      group_links: workerForm.group_ids.map((groupId) => {
+        const previous = Array.isArray(workerAccount.group_links)
+          ? (workerAccount.group_links as Array<Record<string, unknown>>)
+            .find((link) => String(link.group_id) === String(groupId))
+          : undefined
+        const priority = Number(previous?.priority)
+        const weight = Number(previous?.weight)
+        return {
+          group_id: String(groupId),
+          priority: Number.isSafeInteger(priority) && priority >= 0 ? priority : 0,
+          weight: Number.isSafeInteger(weight) && weight > 0 ? weight : 1,
+        }
+      }),
       expected_control_version: controlVersion,
     }
     if (workerForm.api_key.trim()) payload.api_key = workerForm.api_key.trim()

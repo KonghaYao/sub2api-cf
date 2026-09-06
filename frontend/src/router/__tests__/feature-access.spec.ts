@@ -223,13 +223,26 @@ describe('feature route guard', () => {
   })
 
   it.each([
-    '/admin/dashboard',
     '/admin/channels/monitor',
     '/admin/plugins',
     '/admin/proxies',
+  ])('redirects removed or replaced legacy Worker admin route %s to the account operations page', async (path) => {
+    authStore.isAdmin = true
+    adminSettingsStore.cloudflareWorkerContract = true
+
+    const { navigation, next } = runGuard({ requiresAdmin: true }, path)
+    await navigation
+
+    expect(adminSettingsStore.fetch).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledWith('/admin/accounts')
+  })
+
+  it.each([
+    '/admin/dashboard',
     '/admin/risk-control',
     '/admin/prompt-audit',
-  ])('redirects unsupported Worker admin route %s to the supported admin home', async (path) => {
+  ])('keeps the unmigrated host-only admin route %s fail-closed', async (path) => {
     authStore.isAdmin = true
     adminSettingsStore.cloudflareWorkerContract = true
 

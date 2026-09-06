@@ -61,6 +61,17 @@ import {
   requireAdminSession,
   requireAdminToken,
 } from './control/admin-auth'
+import { acceptAdminCompliance, getAdminComplianceStatus } from './control/admin-compliance'
+import {
+  batchGetAdminUserAttributes,
+  createUserAttributeDefinition,
+  deleteUserAttributeDefinition,
+  getAdminUserAttributes,
+  listUserAttributeDefinitions,
+  reorderUserAttributeDefinitions,
+  updateAdminUserAttributes,
+  updateUserAttributeDefinition,
+} from './control/user-attributes'
 import {
   assignAdminUserRole,
   createAdminRole,
@@ -541,8 +552,20 @@ export function createApp() {
     requireAdminRoutePermission,
     requireAdminMutationSecurity,
   )
+  // These must precede /admin/users/:id: Hono's parameter route also matches
+  // a longer path prefix in some adapters.
+  app.get('/api/v1/admin/user-attributes', listUserAttributeDefinitions)
+  app.post('/api/v1/admin/user-attributes', createUserAttributeDefinition)
+  app.post('/api/v1/admin/user-attributes/batch', batchGetAdminUserAttributes)
+  app.put('/api/v1/admin/user-attributes/reorder', reorderUserAttributeDefinitions)
+  app.put('/api/v1/admin/user-attributes/:id', updateUserAttributeDefinition)
+  app.delete('/api/v1/admin/user-attributes/:id', deleteUserAttributeDefinition)
+  app.get('/api/v1/admin/users/:id/attributes', getAdminUserAttributes)
+  app.put('/api/v1/admin/users/:id/attributes', updateAdminUserAttributes)
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  app.get('/api/v1/admin/compliance', getAdminComplianceStatus)
+  app.post('/api/v1/admin/compliance/accept', acceptAdminCompliance)
   app.get('/api/v1/admin/usage', listAdminUsage)
   app.get('/api/v1/admin/ops/requests', listAdminRequests)
   app.get('/api/v1/admin/ops/request-errors', listAdminRequestErrors)

@@ -12,7 +12,7 @@
         v-model="localValues[attr.id]"
         :type="attr.type === 'text' ? 'text' : attr.type"
         :required="attr.required"
-        :placeholder="attr.placeholder"
+          :placeholder="attr.placeholder || undefined"
         class="input"
         @input="emitChange"
       />
@@ -23,7 +23,7 @@
         v-model.number="localValues[attr.id]"
         type="number"
         :required="attr.required"
-        :placeholder="attr.placeholder"
+          :placeholder="attr.placeholder || undefined"
         :min="attr.validation?.min"
         :max="attr.validation?.max"
         class="input"
@@ -45,7 +45,7 @@
         v-else-if="attr.type === 'textarea'"
         v-model="localValues[attr.id]"
         :required="attr.required"
-        :placeholder="attr.placeholder"
+          :placeholder="attr.placeholder || undefined"
         rows="3"
         class="input"
         @input="emitChange"
@@ -98,7 +98,7 @@ import type { UserAttributeDefinition, UserAttributeValuesMap } from '@/types'
 import Select from '@/components/common/Select.vue'
 
 interface Props {
-  userId?: number
+  userId?: string | number
   modelValue: UserAttributeValuesMap
 }
 
@@ -144,7 +144,7 @@ const emitChange = () => {
   emit('update:modelValue', { ...localValues.value })
 }
 
-const isOptionSelected = (attrId: number, optionValue: string): boolean => {
+const isOptionSelected = (attrId: string | number, optionValue: string): boolean => {
   const value = localValues.value[attrId]
   if (!value) return false
   try {
@@ -155,7 +155,7 @@ const isOptionSelected = (attrId: number, optionValue: string): boolean => {
   }
 }
 
-const toggleMultiSelectOption = (attrId: number, optionValue: string) => {
+const toggleMultiSelectOption = (attrId: string | number, optionValue: string) => {
   let arr: string[] = []
   const value = localValues.value[attrId]
   if (value) {

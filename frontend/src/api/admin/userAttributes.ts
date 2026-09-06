@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import type {
   UserAttributeDefinition,
   UserAttributeValue,
@@ -11,6 +12,32 @@ import type {
   UpdateUserAttributeRequest,
   UserAttributeValuesMap
 } from '@/types'
+
+export type UserAttributeId = string | number
+export type UserAttributeUserId = string | number
+
+function operationKey(scope: string, resourceId?: UserAttributeId): string {
+  const requestId = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return resourceId === undefined ? `${scope}-${requestId}` : `${scope}-${resourceId}-${requestId}`
+}
+
+function workerMutationHeaders(scope: string, controlVersion?: number) {
+  if (controlVersion !== undefined && (!Number.isSafeInteger(controlVersion) || controlVersion < 0)) {
+    throw new Error('A valid control version is required for this Worker mutation')
+  }
+  return {
+    'Idempotency-Key': operationKey(scope),
+    ...(controlVersion === undefined ? {} : { 'If-Match': `"${controlVersion}"` })
+  }
+}
+
+function requireWorkerControlVersion(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('Reload this resource before changing it: its Worker control version is unavailable')
+  }
+  return value
+}
 
 /**
  * Get all attribute definitions
@@ -36,7 +63,11 @@ export async function listEnabledDefinitions(): Promise<UserAttributeDefinition[
 export async function createDefinition(
   request: CreateUserAttributeRequest
 ): Promise<UserAttributeDefinition> {
-  const { data } = await apiClient.post<UserAttributeDefinition>('/admin/user-attributes', request)
+  const { data } = isCloudflareWorkerContractActive()
+    ? await apiClient.post<UserAttributeDefinition>('/admin/user-attributes', request, {
+      headers: workerMutationHeaders('admin-user-attribute-create')
+    })
+    : await apiClient.post<UserAttributeDefinition>('/admin/user-attributes', request)
   return data
 }
 
@@ -44,38 +75,52 @@ export async function createDefinition(
  * Update an attribute definition
  */
 export async function updateDefinition(
-  id: number,
-  request: UpdateUserAttributeRequest
+  id: UserAttributeId,
+  request: UpdateUserAttributeRequest,
+  controlVersion?: number,
 ): Promise<UserAttributeDefinition> {
-  const { data } = await apiClient.put<UserAttributeDefinition>(
-    `/admin/user-attributes/${id}`,
-    request
-  )
+  const worker = isCloudflareWorkerContractActive()
+  const expected = worker ? requireWorkerControlVersion(controlVersion) : undefined
+  const { data } = worker
+    ? await apiClient.put<UserAttributeDefinition>(`/admin/user-attributes/${id}`, {
+      ...request, expected_control_version: expected
+    }, { headers: workerMutationHeaders(`admin-user-attribute-update-${id}`, expected) })
+    : await apiClient.put<UserAttributeDefinition>(`/admin/user-attributes/${id}`, request)
   return data
 }
 
 /**
  * Delete an attribute definition
  */
-export async function deleteDefinition(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/user-attributes/${id}`)
+export async function deleteDefinition(id: UserAttributeId, controlVersion?: number): Promise<{ message: string }> {
+  const worker = isCloudflareWorkerContractActive()
+  const expected = worker ? requireWorkerControlVersion(controlVersion) : undefined
+  const { data } = worker
+    ? await apiClient.delete<{ message: string }>(`/admin/user-attributes/${id}`, {
+      data: { expected_control_version: expected }, headers: workerMutationHeaders(`admin-user-attribute-delete-${id}`, expected)
+    })
+    : await apiClient.delete<{ message: string }>(`/admin/user-attributes/${id}`)
   return data
 }
 
 /**
  * Reorder attribute definitions
  */
-export async function reorderDefinitions(ids: number[]): Promise<{ message: string }> {
-  const { data } = await apiClient.put<{ message: string }>('/admin/user-attributes/reorder', {
-    ids
-  })
+export async function reorderDefinitions(ids: UserAttributeId[], controlVersion?: number): Promise<{ message: string }> {
+  const worker = isCloudflareWorkerContractActive()
+  const expected = worker ? requireWorkerControlVersion(controlVersion) : undefined
+  const { data } = worker
+    ? await apiClient.put<{ message: string }>('/admin/user-attributes/reorder', {
+      ids, expected_control_version: expected
+    }, { headers: workerMutationHeaders('admin-user-attribute-reorder', expected) })
+    : await apiClient.put<{ message: string }>('/admin/user-attributes/reorder', { ids })
   return data
 }
 
 /**
  * Get user's attribute values
  */
-export async function getUserAttributeValues(userId: number): Promise<UserAttributeValue[]> {
+export async function getUserAttributeValues(userId: UserAttributeUserId): Promise<UserAttributeValue[]> {
   const { data } = await apiClient.get<UserAttributeValue[]>(
     `/admin/users/${userId}/attributes`
   )
@@ -86,13 +131,17 @@ export async function getUserAttributeValues(userId: number): Promise<UserAttrib
  * Update user's attribute values (batch)
  */
 export async function updateUserAttributeValues(
-  userId: number,
-  values: UserAttributeValuesMap
+  userId: UserAttributeUserId,
+  values: UserAttributeValuesMap,
+  controlVersion?: number,
 ): Promise<{ message: string }> {
-  const { data } = await apiClient.put<{ message: string }>(
-    `/admin/users/${userId}/attributes`,
-    { values }
-  )
+  const worker = isCloudflareWorkerContractActive()
+  const expected = worker ? requireWorkerControlVersion(controlVersion) : undefined
+  const { data } = worker
+    ? await apiClient.put<{ message: string }>(`/admin/users/${userId}/attributes`, {
+      values, expected_control_version: expected
+    }, { headers: workerMutationHeaders(`admin-user-attribute-values-${userId}`, expected) })
+    : await apiClient.put<{ message: string }>(`/admin/users/${userId}/attributes`, { values })
   return data
 }
 
@@ -100,14 +149,14 @@ export async function updateUserAttributeValues(
  * Batch response type
  */
 export interface BatchUserAttributesResponse {
-  attributes: Record<number, Record<number, string>>
+  attributes: Record<string, Record<string, string>>
 }
 
 /**
  * Get attribute values for multiple users
  */
 export async function getBatchUserAttributes(
-  userIds: number[]
+  userIds: UserAttributeUserId[]
 ): Promise<BatchUserAttributesResponse> {
   const { data } = await apiClient.post<BatchUserAttributesResponse>(
     '/admin/user-attributes/batch',

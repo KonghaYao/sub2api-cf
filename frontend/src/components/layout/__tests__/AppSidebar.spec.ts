@@ -61,6 +61,16 @@ describe('AppSidebar Worker capabilities', () => {
     expect(componentSource).toContain('adminSettingsStore.cloudflareWorkerContract')
   })
 
+  it('hides the removed dynamic-plugin entry in Worker mode', () => {
+    expect(componentSource).toContain("path: '/admin/plugins'")
+    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagPluginManagement')
+  })
+
+  it('hides the removed outbound-proxy inventory entry in Worker mode', () => {
+    expect(componentSource).toContain("path: '/admin/proxies'")
+    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : undefined')
+  })
+
   it('exposes the dedicated invitation-code administration entry', () => {
     expect(componentSource).toContain("path: '/admin/invitation-codes'")
     expect(componentSource).toContain("t('nav.invitationCodes')")
@@ -71,6 +81,19 @@ describe('AppSidebar Worker capabilities', () => {
       'featureFlag: adminSettingsStore.cloudflareWorkerContract ? undefined : flagOpsMonitoring'
     )
   })
+
+  it('hides the legacy channel-monitor entry while retaining Worker account operations', () => {
+    expect(componentSource).toContain("path: '/admin/channels/monitor'")
+    expect(componentSource).toContain("path: '/admin/accounts'")
+    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagChannelMonitor')
+  })
+
+  it.each(['/admin/dashboard', '/admin/risk-control', '/admin/prompt-audit'])(
+    'keeps the still-to-migrate %s declaration instead of deleting its implementation',
+    (path) => {
+      expect(componentSource).toContain(`path: '${path}'`)
+    }
+  )
 
   it('hides the legacy channel-monitor user entry in Worker mode', () => {
     expect(componentSource).toContain(

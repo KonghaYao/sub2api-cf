@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from "../client";
+import { isCloudflareWorkerContractActive } from "@/utils/adminCapabilities";
 import type {
   CustomEndpoint,
   CustomMenuItem,
@@ -1799,6 +1800,9 @@ export interface WebSearchTestResult {
 }
 
 export async function getWebSearchEmulationConfig(): Promise<WebSearchEmulationConfig> {
+  if (isCloudflareWorkerContractActive()) {
+    return { enabled: false, providers: [] };
+  }
   const { data } = await apiClient.get<WebSearchEmulationConfig>(
     "/admin/settings/web-search-emulation",
   );
@@ -1808,6 +1812,12 @@ export async function getWebSearchEmulationConfig(): Promise<WebSearchEmulationC
 export async function updateWebSearchEmulationConfig(
   config: WebSearchEmulationConfig,
 ): Promise<WebSearchEmulationConfig> {
+  if (isCloudflareWorkerContractActive()) {
+    throw settingsContractError(
+      "worker_feature_not_supported",
+      "Web search emulation is not available in the Cloudflare Worker product",
+    );
+  }
   const { data } = await apiClient.put<WebSearchEmulationConfig>(
     "/admin/settings/web-search-emulation",
     config,
@@ -1818,6 +1828,12 @@ export async function updateWebSearchEmulationConfig(
 export async function testWebSearchEmulation(
   query: string,
 ): Promise<WebSearchTestResult> {
+  if (isCloudflareWorkerContractActive()) {
+    throw settingsContractError(
+      "worker_feature_not_supported",
+      "Web search emulation is not available in the Cloudflare Worker product",
+    );
+  }
   const { data } = await apiClient.post<WebSearchTestResult>(
     "/admin/settings/web-search-emulation/test",
     { query },
@@ -1828,6 +1844,12 @@ export async function testWebSearchEmulation(
 export async function resetWebSearchUsage(payload: {
   provider_type: string;
 }): Promise<void> {
+  if (isCloudflareWorkerContractActive()) {
+    throw settingsContractError(
+      "worker_feature_not_supported",
+      "Web search emulation is not available in the Cloudflare Worker product",
+    );
+  }
   await apiClient.post(
     "/admin/settings/web-search-emulation/reset-usage",
     payload,

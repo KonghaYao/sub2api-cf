@@ -528,8 +528,8 @@ watch(
 onMounted(async () => {
   document.addEventListener('click', onDocumentClick)
   try {
-    const gs = await adminAPI.groups.list(1, 1000)
-    groupOptions.value.push(...gs.items.map((g: any) => ({ value: g.id, label: g.name })))
+    const groups = await adminAPI.groups.getAllIncludingInactive()
+    groupOptions.value.push(...groups.map((group: any) => ({ value: group.id, label: group.name })))
   } catch {
     // Ignore filter option loading errors (page still usable)
   }

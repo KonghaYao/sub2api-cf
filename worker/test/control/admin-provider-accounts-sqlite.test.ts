@@ -310,6 +310,48 @@ describe('admin provider account control plane on D1', () => {
     })
   })
 
+  it('filters account lists by group binding and applies stable allowlisted sorting', async () => {
+    const test = fixture()
+    const ungrouped = await createProvider(test, 'openai')
+    const linkedResponse = await test.app.request('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'linked-openai-create' },
+      body: JSON.stringify({
+        name: 'Zulu linked account',
+        base_url: 'https://api.openai.test/v1',
+        api_key: 'linked-openai-secret',
+      }),
+    }, test.env)
+    expect(linkedResponse.status).toBe(201)
+    const linked = (await linkedResponse.json() as any).data
+    test.raw.exec(`
+      INSERT INTO "groups" (id, name, platform, enabled, created_at_ms, updated_at_ms)
+      VALUES ('group-plan', 'Subscription Plan', 'openai', 1, 1, 1);
+      INSERT INTO account_groups (account_id, group_id, priority, weight, created_at_ms, updated_at_ms)
+      VALUES ('${linked.id}', 'group-plan', 0, 1, 1, 1);
+    `)
+
+    const bound = await test.app.request(
+      '/accounts?group=group-plan&sort_by=name&sort_order=asc', {}, test.env,
+    )
+    expect(bound.status, await bound.clone().text()).toBe(200)
+    await expect(bound.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: linked.id, name: 'Zulu linked account' }] },
+    })
+
+    const withoutGroup = await test.app.request(
+      '/accounts?group=ungrouped&sort_by=name&sort_order=asc', {}, test.env,
+    )
+    expect(withoutGroup.status, await withoutGroup.clone().text()).toBe(200)
+    await expect(withoutGroup.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: ungrouped.id }] },
+    })
+
+    const invalidSort = await test.app.request('/accounts?sort_by=sql_expression', {}, test.env)
+    expect(invalidSort.status).toBe(400)
+    await expect(invalidSort.json()).resolves.toMatchObject({ code: 'invalid_sort_by' })
+  })
+
   it('keeps legacy OpenAI defaults and rotates provider credentials with versioned AAD', async () => {
     const test = fixture()
     const legacyResponse = await test.app.request('/accounts', {

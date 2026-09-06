@@ -781,6 +781,9 @@ const CLOUDFLARE_REMOVED_ROUTE_REDIRECTS: Readonly<Record<string, string>> = {
   '/auth/wechat/payment/callback': '/payment/result',
   '/payment/qrcode': '/purchase',
   '/monitor': '/dashboard',
+  '/admin/channels/monitor': CLOUDFLARE_ADMIN_HOME,
+  '/admin/plugins': CLOUDFLARE_ADMIN_HOME,
+  '/admin/proxies': CLOUDFLARE_ADMIN_HOME,
 }
 
 function isBackendModePublicRouteAllowed(path: string, hasPendingAuthSession: boolean): boolean {

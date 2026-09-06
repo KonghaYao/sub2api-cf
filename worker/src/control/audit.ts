@@ -57,9 +57,7 @@ export async function listAdminAuditEvents(
   try {
     const limit = queryInteger(context.req.query('limit'), 'limit', 50, 1, 100)
     const filters = parseFilters(context)
-    const { sql, values } = buildListQuery(filters, limit + 1)
-    const result = await context.env.DB.prepare(sql).bind(...values).all<AuditRow>()
-    const rows = result.results.map(requireAuditRow)
+    const rows = await listAuditRows(context.env.DB, filters, limit + 1)
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
     const last = page.at(-1)
@@ -71,6 +69,24 @@ export async function listAdminAuditEvents(
   } catch (error) {
     return controlError(asGatewayError(error))
   }
+}
+
+async function listAuditRows(
+  database: D1Database,
+  filters: AuditFilters,
+  limit: number,
+): Promise<AuditRow[]> {
+  // D1 can reject the cross-source UNION once an audit source grows large.
+  // Keep the read count fixed by source, and let one batch provide a consistent snapshot.
+  const queries = auditSelects(filters.category).map((select) => {
+    const { sql, values } = buildListQuery(filters, limit, select)
+    return database.prepare(sql).bind(...values)
+  })
+  const results = await database.batch<AuditRow>(queries)
+  return mergeAuditRows(
+    results.map((result) => result.results.map(requireAuditRow)),
+    limit,
+  )
 }
 
 /** Return a single event with source-specific, allowlisted metadata. */
@@ -197,7 +213,11 @@ function parseTime(raw: string | undefined, name: string): number | undefined {
   return timestamp
 }
 
-function buildListQuery(filters: AuditFilters, limit: number): { sql: string; values: unknown[] } {
+function buildListQuery(
+  filters: AuditFilters,
+  limit: number,
+  select: string,
+): { sql: string; values: unknown[] } {
   const conditions: string[] = []
   const values: unknown[] = []
   const condition = (sql: string, ...bound: unknown[]): void => {
@@ -229,7 +249,7 @@ function buildListQuery(filters: AuditFilters, limit: number): { sql: string; va
     sql: `SELECT category, event_id, action, outcome, actor_user_id,
                  actor_session_id, origin, resource_type, resource_id,
                  resource_version, metadata_json, occurred_at_ms
-            FROM (${auditSelect(filters.category)}) AS audit_event
+            FROM (${select}) AS audit_event
             ${conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`}
            ORDER BY occurred_at_ms DESC, category DESC, event_id DESC
            LIMIT ?`,
@@ -237,42 +257,42 @@ function buildListQuery(filters: AuditFilters, limit: number): { sql: string; va
   }
 }
 
-function auditSelect(category?: AuditCategory): string {
-  const selects: Record<AuditCategory, string> = {
-    settings: `
+function auditSelects(category?: AuditCategory): string[] {
+  const selects: Record<AuditCategory, string[]> = {
+    settings: [`
       SELECT 'settings' AS category, id AS event_id, action,
              'succeeded' AS outcome, actor_user_id, actor_session_id,
              'admin' AS origin, 'system_settings' AS resource_type,
              resource_id, resource_version, changed_fields_json AS metadata_json,
              occurred_at_ms
-        FROM admin_settings_audit_events`,
-    rbac: `
+        FROM admin_settings_audit_events`],
+    rbac: [`
       SELECT 'rbac' AS category, id AS event_id, action,
              'succeeded' AS outcome, actor_user_id, actor_session_id,
              'admin' AS origin, resource_type, resource_id, resource_version,
              details_json AS metadata_json, occurred_at_ms
-        FROM admin_rbac_audit_events`,
-    channel: `
+        FROM admin_rbac_audit_events`],
+    channel: [`
       SELECT 'channel' AS category, id AS event_id, action,
              'succeeded' AS outcome, actor_user_id, actor_session_id,
              'admin' AS origin, 'channel' AS resource_type,
              resource_id, resource_version, changed_fields_json AS metadata_json,
              occurred_at_ms
-        FROM admin_channel_audit_events`,
-    account: `
+        FROM admin_channel_audit_events`],
+    account: [`
       SELECT 'account' AS category, id AS event_id, action,
              'succeeded' AS outcome, actor_user_id, actor_session_id,
              'admin' AS origin, 'account' AS resource_type,
              resource_id, resource_version, metadata_json, occurred_at_ms
-        FROM admin_account_audit_events`,
-    auth: `
+        FROM admin_account_audit_events`],
+    auth: [`
       SELECT 'auth' AS category, id AS event_id, event_type AS action,
              outcome, user_id AS actor_user_id, session_id AS actor_session_id,
              'auth' AS origin, 'user' AS resource_type,
              COALESCE(user_id, '') AS resource_id, NULL AS resource_version,
              metadata_json, occurred_at_ms
-        FROM auth_audit_events`,
-    payment: `
+        FROM auth_audit_events`],
+    payment: [`
       SELECT 'payment' AS category, id AS event_id, event_type AS action,
              CASE
                WHEN lower(event_type) LIKE '%failed%' THEN 'failed'
@@ -285,8 +305,8 @@ function auditSelect(category?: AuditCategory): string {
              'payment_order' AS resource_type, order_id AS resource_id,
              NULL AS resource_version, payload_json AS metadata_json,
              occurred_at_ms
-        FROM payment_events`,
-    financial_history: `
+        FROM payment_events`],
+    financial_history: [`
       SELECT 'financial_history' AS category, id AS event_id, action, outcome,
              actor_user_id, actor_session_id, 'admin' AS origin,
              'user_financial_history' AS resource_type, target_user_id AS resource_id,
@@ -300,8 +320,7 @@ function auditSelect(category?: AuditCategory): string {
                'pages_scanned', pages_scanned
              ) AS metadata_json,
              occurred_at_ms
-        FROM admin_financial_history_backfill_audit_events
-      UNION ALL
+        FROM admin_financial_history_backfill_audit_events`, `
       SELECT 'financial_history' AS category, 'batch:' || id AS event_id, action,
              CASE
                WHEN to_status = 'completed' THEN 'succeeded'
@@ -314,11 +333,52 @@ function auditSelect(category?: AuditCategory): string {
              batch_id AS resource_id, batch_control_version AS resource_version,
              json_object('from_status', from_status, 'to_status', to_status) AS metadata_json,
              occurred_at_ms
-        FROM admin_financial_history_backfill_batch_audit_events`,
+        FROM admin_financial_history_backfill_batch_audit_events`],
   }
   return category === undefined
-    ? AUDIT_CATEGORIES.map((value) => selects[value]).join('\nUNION ALL\n')
+    ? AUDIT_CATEGORIES.flatMap((value) => selects[value])
     : selects[category]
+}
+
+function auditSelect(category: AuditCategory): string {
+  return auditSelects(category).join('\nUNION ALL\n')
+}
+
+function mergeAuditRows(sources: AuditRow[][], limit: number): AuditRow[] {
+  const positions = sources.map(() => 0)
+  const merged: AuditRow[] = []
+  while (merged.length < limit) {
+    let bestSource = -1
+    for (let source = 0; source < sources.length; source += 1) {
+      const candidate = sources[source][positions[source]]
+      if (candidate === undefined) continue
+      const best = bestSource < 0 ? undefined : sources[bestSource][positions[bestSource]]
+      if (best === undefined || compareAuditRows(candidate, best) < 0) bestSource = source
+    }
+    if (bestSource < 0) break
+    merged.push(sources[bestSource][positions[bestSource]])
+    positions[bestSource] += 1
+  }
+  return merged
+}
+
+function compareAuditRows(left: AuditRow, right: AuditRow): number {
+  if (left.occurred_at_ms !== right.occurred_at_ms) {
+    return left.occurred_at_ms > right.occurred_at_ms ? -1 : 1
+  }
+  const category = compareSqliteBinary(left.category, right.category)
+  if (category !== 0) return -category
+  return -compareSqliteBinary(left.event_id, right.event_id)
+}
+
+function compareSqliteBinary(left: string, right: string): number {
+  const leftBytes = new TextEncoder().encode(left)
+  const rightBytes = new TextEncoder().encode(right)
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length)
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index]
+  }
+  return leftBytes.length - rightBytes.length
 }
 
 function requireAuditRow(value: AuditRow): AuditRow {

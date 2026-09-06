@@ -115,6 +115,7 @@ const DataTableStub = {
         <span data-test="account-health">{{ row.health_status }}|{{ row.last_latency_ms }}|{{ row.control_version }}|{{ row.updated_at }}</span>
         <div data-test="select-row"><slot name="cell-select" :row="row" /></div>
         <div data-test="schedulable-row"><slot name="cell-schedulable" :row="row" /></div>
+        <div data-test="account-groups"><slot name="cell-groups" :row="row" /></div>
         <slot name="cell-created_at" :value="row.created_at" :row="row" />
         <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
         <div data-test="account-actions"><slot name="cell-actions" :row="row" /></div>
@@ -165,7 +166,10 @@ const mountWorkerView = () => mount(AccountsView, {
       },
       DataTable: DataTableStub,
       AccountTableActions: { template: '<div><slot name="after" /></div>' },
-      AccountTableFilters: { template: '<div data-test="account-filters"></div>' },
+      AccountTableFilters: {
+        props: ['cloudflareWorker'],
+        template: '<div data-test="account-filters" :data-worker="String(cloudflareWorker)"></div>'
+      },
       AccountBulkActionsBar: AccountBulkActionsBarStub,
       Pagination: true,
       ConfirmDialog: true,
@@ -186,7 +190,10 @@ const mountWorkerView = () => mount(AccountsView, {
       AccountCapacityCell: true,
       AccountStatusIndicator: true,
       AccountTodayStatsCell: true,
-      AccountGroupsCell: true,
+      AccountGroupsCell: {
+        props: { groups: { type: Array, default: () => [] } },
+        template: '<span>{{ groups.map((group) => group.name).join(",") }}</span>'
+      },
       AccountUsageCell: true,
       Icon: true
     }
@@ -250,13 +257,16 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(getBatchTodayStats).not.toHaveBeenCalled()
     expect(getUpstreamBillingProbeSettings).not.toHaveBeenCalled()
     expect(wrapper.find('[data-test="edit-filtered"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="account-filters"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="account-filters"]').attributes('data-worker')).toBe('true')
     expect(wrapper.findAll('[data-test="column-key"]').map((node) => node.text())).toEqual([
+      'select',
       'name',
       'id',
       'platform_type',
       'capacity',
       'status',
+      'groups',
+      'rate_multiplier',
       'created_at',
       'actions',
     ])
@@ -279,6 +289,21 @@ describe('admin AccountsView bulk edit scope', () => {
 
     expect(wrapper.find('[title="admin.accounts.schedulableEnabled"]').exists()).toBe(false)
     expect(setSchedulable).not.toHaveBeenCalled()
+  })
+
+  it('hydrates Worker group links into the restored groups column', async () => {
+    workerSettings.cloudflareWorkerContract = true
+    getAllGroups.mockResolvedValueOnce([{ id: 'worker-group', name: 'Worker group' }])
+    listAccounts.mockResolvedValueOnce({
+      items: [{
+        id: 'account-uuid', name: 'Worker account', platform: 'openai', protocol: 'openai',
+        type: 'apikey', status: 'active', enabled: true, group_ids: ['worker-group'],
+        created_at: '2026-09-05T00:00:00.000Z', updated_at: '2026-09-05T00:00:00.000Z',
+      }], total: 1, page: 1, page_size: 20, pages: 1,
+    })
+    const wrapper = mountWorkerView()
+    await flushPromises()
+    expect(wrapper.get('[data-test="account-groups"]').text()).toBe('Worker group')
   })
 
   it('runs a Worker account health check from the row action', async () => {

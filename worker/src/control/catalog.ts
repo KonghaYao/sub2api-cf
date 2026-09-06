@@ -142,6 +142,14 @@ export async function listAdminGroups(context: Context<ControlBindings>): Promis
       conditions.push('enabled = ?')
       values.push(status === 'active' ? 1 : 0)
     }
+    const exclusive = context.req.query('is_exclusive')
+    if (exclusive !== undefined) {
+      if (exclusive !== 'true' && exclusive !== 'false') {
+        throw new GatewayError(400, 'invalid_is_exclusive', 'is_exclusive must be true or false')
+      }
+      conditions.push('is_exclusive = ?')
+      values.push(exclusive === 'true' ? 1 : 0)
+    }
     const search = context.req.query('search')?.trim()
     if (search) {
       if (search.length > 100) throw new GatewayError(400, 'invalid_search', 'search must not exceed 100 characters')
@@ -149,12 +157,40 @@ export async function listAdminGroups(context: Context<ControlBindings>): Promis
       const pattern = `%${escapeLike(search)}%`
       values.push(pattern, pattern)
     }
+    const sortBy = context.req.query('sort_by') ?? 'sort_order'
+    const sortColumns: Record<string, string> = {
+      id: 'id',
+      name: 'name',
+      platform: 'platform',
+      billing_type: 'group_type',
+      subscription_type: 'group_type',
+      rate_multiplier: 'rate_multiplier_ppm',
+      rate_multiplier_ppm: 'rate_multiplier_ppm',
+      is_exclusive: 'is_exclusive',
+      account_count: '(SELECT COUNT(*) FROM account_groups ag WHERE ag.group_id = "groups".id)',
+      status: 'enabled',
+      sort_order: 'sort_order',
+      created_at: 'created_at_ms',
+      updated_at: 'updated_at_ms',
+    }
+    const sortColumn = sortColumns[sortBy]
+    if (sortColumn === undefined) {
+      throw new GatewayError(400, 'invalid_sort_by', 'sort_by is invalid')
+    }
+    const sortOrder = context.req.query('sort_order') ?? 'asc'
+    if (sortOrder !== 'asc' && sortOrder !== 'desc') {
+      throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+    }
+    const direction = sortOrder.toUpperCase()
+    const orderBy = sortBy === 'id'
+      ? `${sortColumn} ${direction}`
+      : `${sortColumn} ${direction}, id ${direction}`
     const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
     const [count, rows] = await context.env.DB.batch([
       context.env.DB.prepare(`SELECT COUNT(*) AS total FROM "groups" ${where}`).bind(...values),
       context.env.DB.prepare(
         `SELECT ${GROUP_COLUMNS} FROM "groups" ${where}
-         ORDER BY sort_order ASC, id ASC LIMIT ? OFFSET ?`,
+         ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
       ).bind(...values, pageSize, (page - 1) * pageSize),
     ])
     const total = validCount(count.results[0], 'group')

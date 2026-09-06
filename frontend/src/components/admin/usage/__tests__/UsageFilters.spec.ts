@@ -57,7 +57,7 @@ vi.mock('vue-i18n', async () => {
 // Mock the admin API module — we control searchUsers return value per test
 const mockSearchUsers = vi.fn()
 const mockSearchApiKeys = vi.fn().mockResolvedValue([])
-const mockGroupsList = vi.fn().mockResolvedValue({ items: [] })
+const mockGetAllGroupsIncludingInactive = vi.fn().mockResolvedValue([])
 const mockGetModelStats = vi.fn().mockResolvedValue({ models: [] })
 const mockAccountsList = vi.fn().mockResolvedValue({ items: [] })
 
@@ -67,7 +67,9 @@ vi.mock('@/api/admin', () => ({
       searchUsers: (...args: any[]) => mockSearchUsers(...args),
       searchApiKeys: (...args: any[]) => mockSearchApiKeys(...args),
     },
-    groups: { list: (...args: any[]) => mockGroupsList(...args) },
+    groups: {
+      getAllIncludingInactive: (...args: any[]) => mockGetAllGroupsIncludingInactive(...args),
+    },
     dashboard: { getModelStats: (...args: any[]) => mockGetModelStats(...args) },
     accounts: { list: (...args: any[]) => mockAccountsList(...args) },
   },
@@ -239,7 +241,7 @@ describe('UsageFilters — model options come from prop (no dup request)', () =>
   beforeEach(() => {
     vi.useFakeTimers()
     mockGetModelStats.mockClear()
-    mockGroupsList.mockClear()
+    mockGetAllGroupsIncludingInactive.mockClear()
   })
   afterEach(() => { vi.useRealTimers() })
 
@@ -258,6 +260,7 @@ describe('UsageFilters — model options come from prop (no dup request)', () =>
     await flushPromises()
 
     expect(mockGetModelStats).not.toHaveBeenCalled()
+    expect(mockGetAllGroupsIncludingInactive).toHaveBeenCalledOnce()
 
     const opts = (wrapper.vm as any).modelOptions as Array<{ value: string | null; label: string }>
     expect(opts.map((o) => o.value)).toEqual([null, 'claude-3', 'gpt-4o'])

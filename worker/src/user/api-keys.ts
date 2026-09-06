@@ -86,20 +86,46 @@ interface UpdateApiKeyPatch {
   ip_blacklist?: string[]
 }
 
+type ApiKeyListStatus = 'active' | 'inactive'
+type ApiKeyListSort = keyof typeof API_KEY_LIST_SORT_COLUMNS
+type ApiKeyListSortOrder = 'asc' | 'desc'
+
+interface ApiKeyListQuery {
+  search?: string
+  status?: ApiKeyListStatus
+  groupId?: string | null
+  sortBy: ApiKeyListSort
+  sortOrder: ApiKeyListSortOrder
+}
+
 const API_KEY_BODY_LIMIT_BYTES = 16 * 1024
+const API_KEY_LIST_SEARCH_MAXIMUM = 100
+const API_KEY_LIST_SORT_COLUMNS = {
+  id: 'id',
+  name: 'name COLLATE NOCASE',
+  status: 'enabled',
+  expires_at: 'expires_at_ms',
+  last_used_at: 'last_used_at_ms',
+  created_at: 'created_at_ms',
+} as const
 
 export async function listUserApiKeys(context: Context<UserBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 10, 1, 100)
+    const query = parseApiKeyListQuery(context)
+    const { where, values } = apiKeyListWhere(user.id, query)
+    const direction = query.sortOrder.toUpperCase()
+    const sortColumn = API_KEY_LIST_SORT_COLUMNS[query.sortBy]
+    const stableOrder = query.sortBy === 'id' ? '' : `, id ${direction}`
     const [countResult, rowsResult] = await context.env.DB.batch([
-      context.env.DB.prepare('SELECT COUNT(*) AS total FROM api_keys WHERE user_id = ?').bind(user.id),
+      context.env.DB.prepare(`SELECT COUNT(*) AS total FROM api_keys ${where}`).bind(...values),
       context.env.DB.prepare(
-        `${apiKeySelect()} WHERE user_id = ?
-         ORDER BY created_at_ms DESC, id DESC
+        `${apiKeySelect()} ${where}
+         ORDER BY ${sortColumn} ${direction}${stableOrder}
          LIMIT ? OFFSET ?`,
-      ).bind(user.id, pageSize, (page - 1) * pageSize),
+      ).bind(...values, pageSize, (page - 1) * pageSize),
     ])
     const totalValue = (countResult.results[0] as { total?: unknown } | undefined)?.total
     if (!Number.isSafeInteger(totalValue) || (totalValue as number) < 0) {
@@ -116,6 +142,87 @@ export async function listUserApiKeys(context: Context<UserBindings>): Promise<R
   } catch (error) {
     return controlError(asGatewayError(error))
   }
+}
+
+function parseApiKeyListQuery(context: Context<UserBindings>): ApiKeyListQuery {
+  const search = optionalApiKeyListValue(
+    context.req.query('search'),
+    'search',
+    API_KEY_LIST_SEARCH_MAXIMUM,
+  )
+  const statusRaw = optionalApiKeyListValue(context.req.query('status'), 'status', 16)
+  if (statusRaw !== undefined && statusRaw !== 'active' && statusRaw !== 'inactive') {
+    throw new GatewayError(400, 'invalid_status', 'status must be active or inactive')
+  }
+  const groupRaw = optionalApiKeyListValue(context.req.query('group_id'), 'group_id', 128)
+  const sortByRaw = optionalApiKeyListValue(context.req.query('sort_by'), 'sort_by', 32)
+  if (
+    sortByRaw !== undefined &&
+    !Object.hasOwn(API_KEY_LIST_SORT_COLUMNS, sortByRaw)
+  ) {
+    throw new GatewayError(
+      400,
+      'invalid_sort_by',
+      `sort_by must be one of: ${Object.keys(API_KEY_LIST_SORT_COLUMNS).join(', ')}`,
+    )
+  }
+  const sortOrderRaw = optionalApiKeyListValue(context.req.query('sort_order'), 'sort_order', 4)
+  if (sortOrderRaw !== undefined && sortOrderRaw !== 'asc' && sortOrderRaw !== 'desc') {
+    throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+  }
+  return {
+    ...(search === undefined ? {} : { search }),
+    ...(statusRaw === undefined ? {} : { status: statusRaw }),
+    ...(groupRaw === undefined
+      ? {}
+      : { groupId: groupRaw === '0' ? null : requireResourceId(groupRaw, 'group') }),
+    sortBy: (sortByRaw ?? 'created_at') as ApiKeyListSort,
+    sortOrder: (sortOrderRaw ?? 'desc') as ApiKeyListSortOrder,
+  }
+}
+
+function optionalApiKeyListValue(
+  raw: string | undefined,
+  name: string,
+  maximum: number,
+): string | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const value = raw.trim()
+  if (value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+  }
+  return value
+}
+
+function apiKeyListWhere(
+  userId: string,
+  query: ApiKeyListQuery,
+): { where: string; values: unknown[] } {
+  const conditions = ['user_id = ?', 'revoked_at_ms IS NULL']
+  const values: unknown[] = [userId]
+  if (query.search !== undefined) {
+    const literal = `%${escapeLikePattern(query.search)}%`
+    conditions.push(
+      `(name LIKE ? ESCAPE '\\' COLLATE NOCASE
+        OR key_prefix LIKE ? ESCAPE '\\' COLLATE NOCASE)`,
+    )
+    values.push(literal, literal)
+  }
+  if (query.status !== undefined) {
+    conditions.push('enabled = ?')
+    values.push(query.status === 'active' ? 1 : 0)
+  }
+  if (query.groupId === null) {
+    conditions.push('group_id IS NULL')
+  } else if (query.groupId !== undefined) {
+    conditions.push('group_id = ?')
+    values.push(query.groupId)
+  }
+  return { where: `WHERE ${conditions.join(' AND ')}`, values }
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&')
 }
 
 export async function getUserApiKey(context: Context<UserBindings>): Promise<Response> {

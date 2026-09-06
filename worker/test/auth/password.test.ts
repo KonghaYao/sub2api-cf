@@ -15,6 +15,7 @@ describe('password credential codec', () => {
     const second = await hashPassword(password)
 
     expect(first).toMatch(/^pbkdf2-sha256\$v=1\$i=\d+\$l=32\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/)
+    expect(first).toContain('$i=100000$')
     expect(first).not.toContain(password)
     expect(second).not.toBe(first)
     await expect(verifyPassword(password, first)).resolves.toBe(true)

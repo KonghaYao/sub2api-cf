@@ -129,12 +129,20 @@ const GroupSelectorStub = defineComponent({
   emits: ['update:modelValue'],
   template: `
     <div data-testid="group-selector">
+      <span data-testid="group-selector-value">{{ modelValue.join(',') }}</span>
       <button
         type="button"
         data-testid="set-shadow-group"
         @click="$emit('update:modelValue', [7])"
       >
         group
+      </button>
+      <button
+        type="button"
+        data-testid="set-worker-group"
+        @click="$emit('update:modelValue', ['group-2'])"
+      >
+        worker group
       </button>
     </div>
   `
@@ -328,7 +336,7 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
-  it('uses the Worker update contract and preserves links by omission', async () => {
+  it('keeps the original group binding control in Worker mode and persists edited links', async () => {
     const account = {
       ...buildAccount(),
       id: 'account-uuid',
@@ -349,17 +357,23 @@ describe('EditAccountModal', () => {
         show: true,
         account,
         proxies: [],
-        groups: [],
+        groups: [
+          { id: 'group-1', name: 'Current Plan', platform: 'openai' },
+          { id: 'group-2', name: 'Replacement Plan', platform: 'openai' },
+        ],
         cloudflareWorker: true,
       },
       global: {
         stubs: {
           BaseDialog: BaseDialogStub,
           Icon: true,
+          GroupSelector: GroupSelectorStub,
         },
       },
     })
 
+    expect(wrapper.get('[data-testid="group-selector-value"]').text()).toBe('group-1')
+    await wrapper.get('[data-testid="set-worker-group"]').trigger('click')
     await wrapper.get('[data-testid="worker-account-edit-name"]').setValue('Updated worker')
     await wrapper.get('[data-testid="worker-account-edit-api-key"]').setValue('replacement-key')
     expect((wrapper.get('[data-testid="worker-account-edit-rate-multiplier"]').element as HTMLInputElement).value)
@@ -374,6 +388,7 @@ describe('EditAccountModal', () => {
       enabled: true,
       max_concurrency: 4,
       rate_multiplier: 1.5,
+      group_links: [{ group_id: 'group-2', priority: 0, weight: 1 }],
       expected_control_version: 6,
     })
     expect(wrapper.get('[data-testid="worker-account-edit-platform"]').text()).toBe('openai')
@@ -427,6 +442,7 @@ describe('EditAccountModal', () => {
       enabled: true,
       max_concurrency: 2,
       rate_multiplier: 1,
+      group_links: [],
       provider_config: { account_id: 'acct_new' },
       expected_control_version: 8,
     })
