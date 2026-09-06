@@ -1,5 +1,7 @@
 export interface Env {
   APP_VERSION: string
+  /** Server calendar timezone for group usage statistics; defaults to Asia/Shanghai. */
+  GROUP_USAGE_TIMEZONE?: string
   ENVIRONMENT: string
   /** Enables the bounded Gemini Batch bridge for eligible image batches. */
   BATCH_PROVIDER_JOBS_ENABLED?: string

@@ -340,6 +340,16 @@ function calendarDayNumber(date: string): number {
   return Math.floor(Date.UTC(year, month - 1, day) / DAY_MS)
 }
 
+/** Calendar boundaries shared by server-timezone administration summaries. */
+export function calendarDayBoundaries(now: number, timezone: string) {
+  const validatedTimezone = parseTimezone(timezone)
+  const date = localDate(now, validatedTimezone)
+  return {
+    today: zonedDayStart(date, validatedTimezone),
+    yesterday: zonedDayStart(addCalendarDays(date, -1), validatedTimezone),
+  }
+}
+
 function addCalendarDays(date: string, days: number): string {
   return new Date((calendarDayNumber(date) + days) * DAY_MS).toISOString().slice(0, 10)
 }

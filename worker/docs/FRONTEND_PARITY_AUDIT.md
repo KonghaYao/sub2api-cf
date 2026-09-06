@@ -146,3 +146,26 @@ explicit typed error. It must never silently discard a submitted field or return
   existing group, and advanced stored configuration execution.
 - v0.42.1 deployed as `3f5bf6b0-e098-4ec4-b3ab-bda7e29520e6`; production HTTP
   health has not been established from this machine.
+
+## v0.42.3 Groups actual usage summary — 2026-09-06
+
+- Restored the original usage-summary request. It returns every group's opaque ID
+  and today/yesterday/cumulative actual customer cost in USD, including inactive
+  groups and genuine zero-usage groups. Browser timezone parameters do not affect it.
+- Server `GROUP_USAGE_TIMEZONE` defaults to Asia/Shanghai, matching the original
+  backend deployment default. Calendar boundaries reuse the existing DST-aware
+  utility; yesterday is a calendar day rather than a fixed 24-hour subtraction.
+- Aggregates exact `usage_projection.amount_micros`, which maps to legacy actual_cost.
+  Provider cost and standard pricing are not substituted. Ungrouped usage is excluded.
+  D1 0066 adds a covering group/time/cost index. Cumulative queries still scan retained
+  projected group usage; durable rollups can replace that scan in a later performance slice.
+- Summary reflects asynchronously projected settlements; pending Queue events are
+  not included. Imported history must exist in the projection to contribute to totals.
+- Validation: 3 SQLite/HTTP tests and 21 original frontend/adapter/parity tests passed,
+  covering Shanghai boundaries, New York DST, empty groups, index use and unauthenticated access.
+- Remaining: real capacity/concurrency/session/RPM stats, detailed group stats and
+  API-key listing, live discovery, composite routes, user multipliers and advanced
+  configuration execution. Capacity values are not inferred from usage.
+- v0.42.2 deployed as `56c263de-2f99-43ed-a3ff-9a624d943322`.
+- Worker typecheck and SPA build passed. D1 pre-migration bookmark:
+  `00000029-00000455-000050de-7c491dd9b00f31460d05931aec5ebfe6`.

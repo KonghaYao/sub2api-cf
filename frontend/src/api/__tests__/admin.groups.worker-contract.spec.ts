@@ -308,7 +308,6 @@ describe('admin groups Cloudflare Worker contract', () => {
     await expect(groups.getGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.clearGroupRateMultipliers(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.batchSetGroupRateMultipliers(1, [])).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.getUsageSummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getCapacitySummary()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
 
     expect(get).not.toHaveBeenCalled()
