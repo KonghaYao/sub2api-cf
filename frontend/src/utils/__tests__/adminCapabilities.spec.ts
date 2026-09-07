@@ -1,65 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  filterCloudflareAdminNavigation,
-  isCloudflareAdminPathSupported,
   sanitizeCloudflareAccountPayload,
   setCloudflareWorkerContractActive,
 } from '@/utils/adminCapabilities'
 
 describe('Cloudflare admin capabilities', () => {
-  it.each([
-    '/admin/settings',
-    '/admin/ops',
-    '/admin/announcements',
-    '/admin/usage',
-    '/admin/users/42',
-    '/admin/groups',
-    '/admin/channels/pricing',
-    '/admin/accounts',
-    '/admin/subscriptions',
-    '/admin/redeem',
-    '/admin/promo-codes',
-    '/admin/invitation-codes',
-    '/admin/affiliates/rebates',
-    '/admin/orders/plans',
-    '/admin/audit-logs/control/event-1',
-  ])('allows migrated route %s', (path) => {
-    expect(isCloudflareAdminPathSupported(path)).toBe(true)
-  })
-
-  it.each([
-    '/admin/dashboard',
-    '/admin/channels/monitor',
-    '/admin/proxies',
-    '/admin/plugins',
-    '/admin/risk-control',
-    '/admin/prompt-audit',
-    '/admin/new-host-feature',
-  ])('denies unsupported or unknown route %s', (path) => {
-    expect(isCloudflareAdminPathSupported(path)).toBe(false)
-  })
-
-  it('removes unsupported leaves while retaining a supported child group', () => {
-    const items = [
-      { path: '/admin/dashboard' },
-      {
-        path: '/admin/orders-menu',
-        children: [
-          { path: '/admin/orders' },
-          { path: '/admin/proxies' },
-        ],
-      },
-    ]
-
-    expect(filterCloudflareAdminNavigation(items)).toEqual([
-      {
-        path: '/admin/orders-menu',
-        children: [{ path: '/admin/orders' }],
-      },
-    ])
-  })
-
   it('recursively strips proxy and TLS fingerprint fields from Worker payloads', () => {
     setCloudflareWorkerContractActive(true)
 

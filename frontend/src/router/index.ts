@@ -10,11 +10,9 @@ import { useAdminSettingsStore } from '@/stores/adminSettings'
 import { useAdminComplianceStore } from '@/stores/adminCompliance'
 import { useNavigationLoadingState } from '@/composables/useNavigationLoading'
 import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
+import { getSetupStatus } from '@/api/setup'
+import { resolveCompletedSetupRedirectPath } from './setupRedirect'
 import { resolveRouteDocumentTitle } from './title'
-import {
-  CLOUDFLARE_ADMIN_HOME,
-  isCloudflareAdminPathSupported
-} from '@/utils/adminCapabilities'
 
 /**
  * Route definitions with lazy loading
@@ -24,7 +22,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/setup',
     name: 'Setup',
-    redirect: '/login',
+    component: () => import('@/views/setup/SetupWizardView.vue'),
     meta: {
       requiresAuth: false,
       title: 'Setup'
@@ -402,7 +400,7 @@ const routes: RouteRecordRaw[] = [
   // ==================== Admin Routes ====================
   {
     path: '/admin',
-    redirect: CLOUDFLARE_ADMIN_HOME
+    redirect: '/admin/dashboard'
   },
   {
     path: '/admin/dashboard',
@@ -765,7 +763,7 @@ let authInitialized = false
 const navigationLoading = useNavigationLoadingState()
 // 延迟初始化预加载，传入 router 实例
 let routePrefetch: ReturnType<typeof useRoutePrefetch> | null = null
-const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/payment/result', '/payment/airwallex', '/legal']
+const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal']
 const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/callback',
   '/auth/linuxdo/callback',
@@ -776,15 +774,6 @@ const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/wechat/payment/callback',
 ]
 const BACKEND_MODE_PENDING_AUTH_PATHS = ['/register', '/email-verify']
-const CLOUDFLARE_REMOVED_ROUTE_REDIRECTS: Readonly<Record<string, string>> = {
-  '/payment/airwallex': '/payment/result',
-  '/auth/wechat/payment/callback': '/payment/result',
-  '/payment/qrcode': '/purchase',
-  '/monitor': '/dashboard',
-  '/admin/channels/monitor': CLOUDFLARE_ADMIN_HOME,
-  '/admin/plugins': CLOUDFLARE_ADMIN_HOME,
-  '/admin/proxies': CLOUDFLARE_ADMIN_HOME,
-}
 
 function isBackendModePublicRouteAllowed(path: string, hasPendingAuthSession: boolean): boolean {
   if (BACKEND_MODE_ALLOWED_PATHS.some((allowedPath) => path === allowedPath || path.startsWith(allowedPath))) {
@@ -827,12 +816,16 @@ router.beforeEach(async (to, _from, next) => {
   const requiresAuth = to.meta.requiresAuth !== false // Default to true
   const requiresAdmin = to.meta.requiresAdmin === true
 
-  const removedWorkerRouteRedirect = adminSettingsStore.cloudflareWorkerContract
-    ? CLOUDFLARE_REMOVED_ROUTE_REDIRECTS[to.path]
-    : undefined
-  if (removedWorkerRouteRedirect) {
-    next(removedWorkerRouteRedirect)
-    return
+  if (to.path === '/setup') {
+    try {
+      const status = await getSetupStatus()
+      if (!status.needs_setup) {
+        next(resolveCompletedSetupRedirectPath(authStore.isAuthenticated, authStore.isAdmin))
+        return
+      }
+    } catch {
+      // If setup status cannot be determined, keep the setup page reachable.
+    }
   }
 
   // If route doesn't require auth, allow access
@@ -911,14 +904,6 @@ router.beforeEach(async (to, _from, next) => {
 
   if (requiresAdmin && authStore.isAdmin) {
     await adminSettingsStore.fetch()
-    if (
-      adminSettingsStore.cloudflareWorkerContract &&
-      !isCloudflareAdminPathSupported(to.path)
-    ) {
-      next(CLOUDFLARE_ADMIN_HOME)
-      return
-    }
-
     if (!adminSettingsStore.cloudflareWorkerContract) {
       const adminComplianceStore = useAdminComplianceStore()
       if (!adminComplianceStore.initialized) {

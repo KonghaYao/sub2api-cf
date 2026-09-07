@@ -87,6 +87,10 @@ interface UserFinancialEventRow {
   occurred_at_ms: number
 }
 
+interface DeletableUserRow extends UserRow {
+  auth_version: number
+}
+
 interface BalanceHistoryCursor {
   v: 1
   occurred_at_ms: number
@@ -94,6 +98,10 @@ interface BalanceHistoryCursor {
 }
 
 const MAX_BALANCE_HISTORY_CURSOR_BYTES = 1_024
+const LIVE_USER_SQL = `NOT (
+  status = 'disabled' AND display_name = '[deleted]'
+  AND email = 'deleted+' || id || '@users.invalid'
+)`
 
 export async function createAdminUser(context: Context<ControlBindings>): Promise<Response> {
   try {
@@ -206,7 +214,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
     const orderBy = parseUserListOrder(context.req.query('sort_by'), context.req.query('sort_order'))
-    const conditions: string[] = []
+    const conditions: string[] = [LIVE_USER_SQL]
     const values: unknown[] = []
     const status = context.req.query('status')
     if (status !== undefined) {
@@ -313,6 +321,133 @@ export async function getAdminUser(context: Context<ControlBindings>): Promise<R
       settled_micros: state.settled_micros,
       available_micros: state.available_micros,
     })
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+/**
+ * Soft-deletes a non-administrator while retaining its D1 identity as the
+ * foreign-key anchor for immutable financial and audit history.
+ */
+export async function deleteAdminUser(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const actor = await authenticateAdminSession(context.req.raw, context.env)
+    const userId = requireResourceId(context.req.param('id'), 'user')
+    const user = await findUserByIdIncludingDeleted(context.env, userId)
+    if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
+    if (isDeletedUser(user)) return controlSuccess(userDeletedResponse())
+    if (user.role === 'admin') {
+      throw new GatewayError(
+        409,
+        actor.user_id === user.id ? 'cannot_delete_self' : 'cannot_delete_admin_user',
+        actor.user_id === user.id
+          ? 'Administrators cannot delete their own account'
+          : 'Administrator accounts cannot be deleted',
+      )
+    }
+
+    const configured = await postUserState(context.env, user.id, '/configure', {
+      schema_version: 1,
+      mutation_id: `d1-user:${user.state_version}`,
+      user_id: user.id,
+      balance_micros: user.balance_micros,
+      enabled: user.status === 'active',
+      initial_state_version: user.state_version,
+    })
+    if (!configured.ok && (await responseErrorCode(configured)) !== 'user_already_configured') {
+      throw await stateError(configured)
+    }
+    const mutationDigest = await sha256Hex(
+      `admin.users.delete.v1\u0000${user.id}\u0000${user.control_version}`,
+    )
+    const disabled = await postUserState(context.env, user.id, '/enabled', {
+      schema_version: 1,
+      mutation_id: `admin-delete:${mutationDigest}`,
+      enabled: false,
+    })
+    if (!disabled.ok) throw await stateError(disabled)
+    const state = await parseUserState(disabled, user.id)
+    const statusMutationApplied = state.idempotent === false && state.applied !== false
+    const now = Date.now()
+    const tombstoneEmail = deletedUserEmail(user.id)
+    const userTombstone = context.env.DB.prepare(
+      `UPDATE users
+          SET email = ?, display_name = '[deleted]', status = 'disabled',
+              password_credential = NULL, email_verified_at_ms = NULL,
+              password_changed_at_ms = NULL, last_login_at_ms = NULL,
+              auth_version = auth_version + 1,
+              state_version = CASE WHEN state_version < ? THEN ? ELSE state_version END,
+              balance_micros = ?,
+              control_version = CASE
+                WHEN control_version = ? AND role = 'user' AND email <> ?
+                  THEN control_version + 1
+                ELSE -1
+              END,
+              updated_at_ms = ?
+        WHERE id = ?`,
+    ).bind(
+      tombstoneEmail,
+      state.state_version,
+      state.state_version,
+      state.balance_micros,
+      user.control_version,
+      tombstoneEmail,
+      now,
+      user.id,
+    )
+    try {
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          `UPDATE api_keys
+              SET key_hash = lower(hex(randomblob(32))), key_prefix = '[deleted]',
+                  enabled = 0, revoked_at_ms = COALESCE(revoked_at_ms, ?),
+                  auth_version = auth_version + 1,
+                  control_version = control_version + 1,
+                  updated_at_ms = ?
+            WHERE user_id = ?`,
+        ).bind(now, now, user.id),
+        ...deleteUserAuthenticatorStatements(context.env, user.id),
+        userTombstone,
+        context.env.DB.prepare(
+          `INSERT INTO auth_audit_events (
+             id, user_id, event_type, outcome, email_hash, ip_hash,
+             session_id, metadata_json, occurred_at_ms
+           ) VALUES (?, ?, 'admin.users.delete', 'succeeded', NULL, NULL, ?, ?, ?)`,
+        ).bind(
+          crypto.randomUUID(),
+          actor.user_id,
+          actor.session_id,
+          JSON.stringify({
+            target_user_id: user.id,
+            target_control_version: user.control_version,
+          }),
+          now,
+        ),
+      ])
+    } catch (error) {
+      const current = await findUserByIdIncludingDeleted(context.env, user.id)
+      if (current !== null && isDeletedUser(current)) {
+        return controlSuccess(userDeletedResponse())
+      }
+      if (statusMutationApplied) {
+        await compensateDeletedUserStatus(
+          context.env,
+          user,
+          mutationDigest,
+          state.state_version,
+        )
+      }
+      if (isControlVersionError(error) || isUniqueEmailError(error)) {
+        throw new GatewayError(
+          409,
+          'user_delete_conflict',
+          'User changed concurrently; retry the deletion',
+        )
+      }
+      throw error
+    }
+    return controlSuccess(userDeletedResponse())
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -1153,10 +1288,61 @@ async function findUserById(env: Env, id: string): Promise<UserRow | null> {
     `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
             state_version, control_version, restrict_public_groups, created_at_ms, updated_at_ms
        FROM users
-      WHERE id = ?`,
+      WHERE id = ? AND ${LIVE_USER_SQL}`,
   )
     .bind(id)
     .first<UserRow>()
+}
+
+async function findUserByIdIncludingDeleted(
+  env: Env,
+  id: string,
+): Promise<DeletableUserRow | null> {
+  return env.DB.prepare(
+    `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
+            state_version, control_version, restrict_public_groups, auth_version,
+            created_at_ms, updated_at_ms
+       FROM users
+      WHERE id = ?`,
+  )
+    .bind(id)
+    .first<DeletableUserRow>()
+}
+
+function deletedUserEmail(id: string): string {
+  return `deleted+${id}@users.invalid`
+}
+
+function isDeletedUser(user: Pick<UserRow, 'id' | 'email' | 'display_name' | 'status'>): boolean {
+  return user.status === 'disabled' &&
+    user.display_name === '[deleted]' &&
+    user.email === deletedUserEmail(user.id)
+}
+
+function userDeletedResponse(): { message: string } {
+  return { message: 'User deleted successfully' }
+}
+
+function deleteUserAuthenticatorStatements(env: Env, userId: string): D1PreparedStatement[] {
+  return [
+    env.DB.prepare('DELETE FROM email_binding_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM oauth_bind_tickets WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM oauth_flows WHERE target_user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM admin_sessions WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM auth_identities WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_totp_credentials WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_totp_setup_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_totp_login_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_totp_verification_budgets WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM passkey_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM passkey_credentials WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM passkey_user_handles WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM email_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM registration_email_challenge_claims WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_notification_email_challenges WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_totp_email_challenges WHERE user_id = ?').bind(userId),
+  ]
 }
 
 async function findUserByEmail(env: Env, email: string): Promise<UserRow | null> {
@@ -1200,6 +1386,29 @@ async function compensateUserStatus(
       503,
       'admin_status_compensation_failed',
       'The rejected admin status change could not be compensated',
+      'server_error',
+    )
+  }
+}
+
+async function compensateDeletedUserStatus(
+  env: Env,
+  user: UserRow,
+  failedMutationDigest: string,
+  expectedStateVersion: number,
+): Promise<void> {
+  const response = await postUserState(env, user.id, '/enabled', {
+    schema_version: 1,
+    mutation_id: `admin-delete-compensate:${failedMutationDigest}:${expectedStateVersion}`,
+    enabled: user.status === 'active',
+    expected_state_version: expectedStateVersion,
+    rollback_mutation_id: `admin-delete:${failedMutationDigest}`,
+  })
+  if (!response.ok) {
+    throw new GatewayError(
+      503,
+      'admin_user_delete_compensation_failed',
+      'The rejected user deletion could not be compensated',
       'server_error',
     )
   }

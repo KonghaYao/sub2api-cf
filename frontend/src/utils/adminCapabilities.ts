@@ -1,5 +1,3 @@
-export const CLOUDFLARE_ADMIN_HOME = '/admin/accounts'
-
 let cloudflareWorkerContractActive = true
 
 const WORKER_UNSUPPORTED_ACCOUNT_FIELDS = new Set([
@@ -10,48 +8,6 @@ const WORKER_UNSUPPORTED_ACCOUNT_FIELDS = new Set([
   'utls',
   'ja3',
 ])
-
-const CLOUDFLARE_ADMIN_PATHS = [
-  '/admin/settings',
-  '/admin/ops',
-  '/admin/announcements',
-  '/admin/usage',
-  '/admin/users',
-  '/admin/groups',
-  '/admin/channels/pricing',
-  '/admin/accounts',
-  '/admin/subscriptions',
-  '/admin/redeem',
-  '/admin/promo-codes',
-  '/admin/invitation-codes',
-  '/admin/affiliates',
-  '/admin/audit-logs',
-  '/admin/orders'
-] as const
-
-export function isCloudflareAdminPathSupported(path: string): boolean {
-  return CLOUDFLARE_ADMIN_PATHS.some(
-    (allowedPath) => path === allowedPath || path.startsWith(`${allowedPath}/`)
-  )
-}
-
-export function filterCloudflareAdminNavigation<T extends { path: string; children?: T[] }>(
-  items: T[]
-): T[] {
-  const visible: T[] = []
-
-  for (const item of items) {
-    const children = item.children
-      ? filterCloudflareAdminNavigation(item.children)
-      : undefined
-    const supported = isCloudflareAdminPathSupported(item.path)
-
-    if (!supported && (!children || children.length === 0)) continue
-    visible.push(children ? { ...item, children } : item)
-  }
-
-  return visible
-}
 
 export function setCloudflareWorkerContractActive(active: boolean): void {
   cloudflareWorkerContractActive = active

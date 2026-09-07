@@ -196,6 +196,17 @@ describe('worker app', () => {
     },
   )
 
+  it('routes the admin user delete contract instead of falling through to the SPA', async () => {
+    const response = await createApp().request('/api/v1/admin/users/user-1', {
+      method: 'DELETE',
+    }, testEnv())
+
+    expect(response.status).toBe(401)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'admin_session_required' },
+    })
+  })
+
   it.each([
     ['/v1/images/batches', 'GET'],
     ['/api/v1/user/image-batches', 'GET'],

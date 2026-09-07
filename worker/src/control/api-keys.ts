@@ -261,10 +261,12 @@ export async function listAdminApiKeys(context: Context<ControlBindings>): Promi
     if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
 
     const [countResult, rowsResult] = await context.env.DB.batch([
-      context.env.DB.prepare('SELECT COUNT(*) AS total FROM api_keys WHERE user_id = ?').bind(userId),
+      context.env.DB.prepare(
+        'SELECT COUNT(*) AS total FROM api_keys WHERE user_id = ? AND revoked_at_ms IS NULL',
+      ).bind(userId),
       context.env.DB.prepare(
         `${apiKeySelect()}
-          WHERE k.user_id = ?
+          WHERE k.user_id = ? AND k.revoked_at_ms IS NULL
           ORDER BY k.created_at_ms DESC, k.id DESC
           LIMIT ? OFFSET ?`,
       ).bind(userId, pageSize, (page - 1) * pageSize),
@@ -297,6 +299,10 @@ export async function revokeAdminApiKey(context: Context<ControlBindings>): Prom
     let row = await findApiKey(context.env, keyId)
     if (row === null) throw new GatewayError(404, 'api_key_not_found', 'API key was not found')
     if (row.revoked_at_ms === null) {
+      const tombstoneHash = await apiKeyDigest(
+        `revoked-api-key:v1\u0000${row.id}\u0000${row.key_hash}`,
+        requireApiKeyPepper(context.env),
+      )
       const now = Date.now()
       const response = publicApiKey({ ...row, enabled: 0, revoked_at_ms: now, updated_at_ms: now,
         auth_version: row.auth_version + 1, control_version: row.control_version + 1 })
@@ -304,11 +310,13 @@ export async function revokeAdminApiKey(context: Context<ControlBindings>): Prom
         await context.env.DB.batch([
           context.env.DB.prepare(
             `UPDATE api_keys
-              SET enabled = 0, revoked_at_ms = ?, updated_at_ms = ?,
+              SET key_hash = ?, enabled = 0,
+                  revoked_at_ms = CASE WHEN revoked_at_ms IS NULL THEN ? ELSE -1 END,
+                  updated_at_ms = ?,
                   auth_version = auth_version + 1,
                   control_version = control_version + 1
-             WHERE id = ? AND revoked_at_ms IS NULL`,
-          ).bind(now, now, row.id),
+             WHERE id = ?`,
+          ).bind(tombstoneHash, now, now, row.id),
           context.env.DB.prepare(
             `INSERT INTO auth_audit_events (id, user_id, event_type, outcome, email_hash, ip_hash, session_id, metadata_json, occurred_at_ms)
              VALUES (?, ?, 'admin.api_keys.revoke', 'succeeded', NULL, NULL, ?, ?, ?)`,
@@ -323,6 +331,12 @@ export async function revokeAdminApiKey(context: Context<ControlBindings>): Prom
         // committed winner instead of surfacing a spurious 500.
         const recovered = await recoverApiKeyRevoke(context.env, idempotency, keyId)
         if (recovered !== null) return controlSuccess(recovered)
+        if (/CHECK constraint failed:.*revoked_at_ms/i.test(errorMessage(error))) {
+          const concurrent = await findApiKey(context.env, keyId)
+          if (concurrent !== null && concurrent.revoked_at_ms !== null) {
+            return controlSuccess(publicApiKey(concurrent))
+          }
+        }
         throw error
       }
       return controlSuccess(response)

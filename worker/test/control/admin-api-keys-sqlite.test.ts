@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { createApp } from '../../src/app'
+import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import type { Env } from '../../src/env'
 import { apiKeyDigest } from '../../src/gateway/crypto'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
@@ -523,6 +524,128 @@ describe('admin API key D1 authorization', () => {
       .toEqual({ name: 'automation', control_version: 0 })
   })
 
+  it('removes a revoked key from the default admin list and rejects its credential', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-list-revoke-create-0001')
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as { data: { id: string; api_key: string } }
+
+    const revoke = () => createApp().request(`/api/v1/admin/api-keys/${createdBody.data.id}`, {
+      method: 'DELETE',
+      headers: {
+        ...test.headers,
+        'idempotency-key': 'admin-list-revoke-0001',
+      },
+    }, test.env)
+    const first = await revoke()
+    const replay = await revoke()
+    expect(first.status).toBe(200)
+    expect(replay.status).toBe(200)
+    await expect(replay.json()).resolves.toMatchObject({
+      code: 0,
+      data: { id: createdBody.data.id, enabled: 0, auth_version: 2, control_version: 1 },
+    })
+
+    const listed = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      headers: { authorization: test.headers.authorization },
+    }, test.env)
+    expect(listed.status).toBe(200)
+    await expect(listed.json()).resolves.toMatchObject({
+      code: 0,
+      data: { items: [], total: 0, page: 1, pages: 0 },
+    })
+
+    const gateway = await createApp().request('/v1/models', {
+      headers: { authorization: `Bearer ${createdBody.data.api_key}` },
+    }, test.env)
+    expect(gateway.status).toBe(401)
+    await expect(gateway.json()).resolves.toMatchObject({
+      error: { code: 'invalid_api_key' },
+    })
+  })
+
+  it('tombstones a credential revoked by an admin so the owner can reuse its custom token', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    const accessToken = createOpaqueToken('access')
+    const refreshToken = createOpaqueToken('refresh')
+    test.raw.prepare(
+      `INSERT INTO user_sessions (
+         id, family_id, user_id, auth_version,
+         access_token_hash, refresh_token_hash,
+         created_at_ms, access_expires_at_ms, refresh_expires_at_ms
+       ) VALUES ('user-session-1', 'user-family-1', ?, 1, ?, ?, ?, ?, ?)`,
+    ).run(
+      USER_ID,
+      await tokenDigest(accessToken, PEPPER, 'access'),
+      await tokenDigest(refreshToken, PEPPER, 'refresh'),
+      now,
+      now + 60_000,
+      now + 600_000,
+    )
+    test.raw.prepare(
+      `INSERT INTO user_group_permissions (user_id, group_id, granted_by_user_id, created_at_ms)
+       VALUES (?, ?, ?, ?)`,
+    ).run(USER_ID, EXCLUSIVE_GROUP_ID, ADMIN_ID, now)
+    const userHeaders = {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+    }
+    const customKey = 'Admin_Revoked_Custom-2026_abcdef'
+    const create = (idempotencyKey: string, name: string) => createApp().request('/api/v1/keys', {
+      method: 'POST',
+      headers: { ...userHeaders, 'idempotency-key': idempotencyKey },
+      body: JSON.stringify({ name, group_id: EXCLUSIVE_GROUP_ID, custom_key: customKey }),
+    }, test.env)
+
+    const first = await create('admin-revoked-custom-create-0001', 'Before admin revoke')
+    expect(first.status).toBe(201)
+    const firstBody = await first.json() as { data: { id: string } }
+    const revoked = await createApp().request(`/api/v1/admin/api-keys/${firstBody.data.id}`, {
+      method: 'DELETE',
+      headers: { ...test.headers, 'idempotency-key': 'admin-revoked-custom-delete-0001' },
+    }, test.env)
+    expect(revoked.status).toBe(200)
+
+    const rejected = await createApp().request('/v1/models', {
+      headers: { authorization: `Bearer ${customKey}` },
+    }, test.env)
+    expect(rejected.status).toBe(401)
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: 'invalid_api_key' },
+    })
+    const originalDigest = await apiKeyDigest(customKey, PEPPER)
+    const tombstone = test.raw.prepare(
+      'SELECT key_hash, auth_version, control_version FROM api_keys WHERE id = ?',
+    ).get(firstBody.data.id) as {
+      key_hash: string
+      auth_version: number
+      control_version: number
+    }
+    expect(tombstone).toMatchObject({ auth_version: 2, control_version: 1 })
+    expect(tombstone.key_hash).toMatch(/^[a-f0-9]{64}$/)
+    expect(tombstone.key_hash).not.toBe(originalDigest)
+
+    const replacement = await create('admin-revoked-custom-create-0002', 'After admin revoke')
+    expect(replacement.status).toBe(201)
+    const replacementBody = await replacement.json() as { data: { id: string } }
+    expect(replacementBody.data.id).not.toBe(firstBody.data.id)
+
+    const listed = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {
+      headers: { authorization: test.headers.authorization },
+    }, test.env)
+    await expect(listed.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        items: [expect.objectContaining({ id: replacementBody.data.id, name: 'After admin revoke' })],
+        total: 1,
+      },
+    })
+    expect(test.raw.prepare(
+      'SELECT key_hash FROM api_keys WHERE id = ?',
+    ).get(replacementBody.data.id)).toEqual({ key_hash: originalDigest })
+  })
+
   it('recovers concurrent revocations with the same idempotency key without double incrementing auth', async () => {
     const test = await fixture()
     const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-revoke-create-0001')
@@ -546,6 +669,43 @@ describe('admin API key D1 authorization', () => {
     await expect(second.json()).resolves.toMatchObject({
       code: 0,
       data: { id: keyId, enabled: 0, auth_version: 2, control_version: 1 },
+    })
+    expect(test.raw.prepare(
+      'SELECT enabled, auth_version, control_version FROM api_keys WHERE id = ?',
+    ).get(keyId)).toEqual({ enabled: 0, auth_version: 2, control_version: 1 })
+    expect(test.raw.prepare(
+      "SELECT COUNT(*) AS total FROM auth_audit_events WHERE event_type = 'admin.api_keys.revoke'",
+    ).get()).toEqual({ total: 1 })
+  })
+
+  it('serializes concurrent revocations with different idempotency keys', async () => {
+    const test = await fixture()
+    const created = await createKey(test, EXCLUSIVE_GROUP_ID, 'admin-revoke-create-0002')
+    const keyId = ((await created.json()) as { data: { id: string } }).data.id
+    const racingEnv = env(synchronizeFirstBatches(test.d1, 2))
+    const revoke = (idempotencyKey: string) => createApp().request(
+      `/api/v1/admin/api-keys/${keyId}`,
+      {
+        method: 'DELETE',
+        headers: { ...test.headers, 'idempotency-key': idempotencyKey },
+      },
+      racingEnv,
+    )
+
+    const [first, second] = await Promise.all([
+      revoke('admin-revoke-concurrent-a-0001'),
+      revoke('admin-revoke-concurrent-b-0001'),
+    ])
+
+    expect([first.status, second.status]).toEqual([200, 200])
+    const firstBody = await first.json() as { data: Record<string, unknown> }
+    const secondBody = await second.json() as { data: Record<string, unknown> }
+    expect(firstBody.data).toEqual(secondBody.data)
+    expect(firstBody.data).toMatchObject({
+      id: keyId,
+      enabled: 0,
+      auth_version: 2,
+      control_version: 1,
     })
     expect(test.raw.prepare(
       'SELECT enabled, auth_version, control_version FROM api_keys WHERE id = ?',

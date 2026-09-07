@@ -5,6 +5,7 @@ import {
   batchDeleteAdminAccounts,
   batchRefreshAdminAccountCredentials,
   createAdminAccount,
+  deleteAdminAccount,
   duplicateAdminAccount,
   getAdminAccount,
   listAdminAccounts,
@@ -39,6 +40,7 @@ function fixture(): Fixture {
   app.post('/accounts/:id/refresh', refreshAdminAccountCredentials)
   app.get('/accounts/:id', getAdminAccount)
   app.put('/accounts/:id', updateAdminAccount)
+  app.delete('/accounts/:id', deleteAdminAccount)
   app.put('/accounts/:id/models/:model_id', putAdminAccountModelCapability)
   app.post('/accounts/:id/test', testAdminAccount)
   return {
@@ -718,6 +720,34 @@ describe('admin provider account control plane on D1', () => {
     await expect(replay.json()).resolves.toMatchObject({
       data: { success_ids: expect.arrayContaining([first.id, second.id]) },
     })
+  })
+
+  it('deletes one account instead of leaving an inactive row behind', async () => {
+    const test = fixture()
+    const account = await createProvider(test, 'openai')
+
+    const deleted = await test.app.request(`/accounts/${account.id}`, {
+      method: 'DELETE',
+      headers: { 'if-match': '"0"' },
+    }, test.env)
+
+    expect(deleted.status, await deleted.clone().text()).toBe(200)
+    await expect(deleted.json()).resolves.toEqual({
+      code: 0,
+      data: { message: 'Account deleted successfully' },
+    })
+    expect((await test.app.request(`/accounts/${account.id}`, {}, test.env)).status).toBe(404)
+    await expect((await test.app.request('/accounts', {}, test.env)).json()).resolves.toMatchObject({
+      data: { total: 0, items: [] },
+    })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM accounts').get()).toEqual({ total: 0 })
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM account_secrets').get()).toEqual({ total: 0 })
+
+    const replay = await test.app.request(`/accounts/${account.id}`, {
+      method: 'DELETE',
+      headers: { 'if-match': '"0"' },
+    }, test.env)
+    expect(replay.status).toBe(404)
   })
 
   it('leaves every account intact when a batch target is missing, stale, or a delete aborts', async () => {

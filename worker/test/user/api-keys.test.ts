@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import type { Env } from '../../src/env'
 import { apiKeyDigest } from '../../src/gateway/crypto'
+import { handleModels } from '../../src/gateway/handler'
 import {
   createUserApiKey,
   getUserApiKey,
@@ -85,6 +86,7 @@ function app(): Hono<{ Bindings: Env }> {
   app.post('/keys', createUserApiKey)
   app.put('/keys/:id', updateUserApiKey)
   app.delete('/keys/:id', revokeUserApiKey)
+  app.get('/v1/models', handleModels)
   return app
 }
 
@@ -282,6 +284,71 @@ describe('user API keys', () => {
         WHERE event_type = 'user.api_keys.create' AND user_id = 'alice'`,
     ).get() as Record<string, unknown>
     expect(JSON.stringify({ persistedMetadata, audit })).not.toContain(customKey)
+  })
+
+  it('tombstones a revoked credential so its custom token can be created again', async () => {
+    const test = await fixture()
+    const customKey = 'Reusable_Custom_Key-2026_abcdef'
+    const create = (idempotencyKey: string, name: string) => app().request('/keys', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify({ name, group_id: 'group-a', custom_key: customKey }),
+    }, test.env)
+
+    const first = await create('alice-reusable-custom-create-0001', 'First key')
+    expect(first.status).toBe(201)
+    const firstBody = await first.json() as { data: { id: string } }
+    const usable = await app().request('/v1/models', {
+      headers: { authorization: `Bearer ${customKey}` },
+    }, test.env)
+    expect(usable.status).toBe(200)
+
+    const revoked = await app().request(`/keys/${firstBody.data.id}`, {
+      method: 'DELETE',
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    expect(revoked.status).toBe(200)
+    const rejected = await app().request('/v1/models', {
+      headers: { authorization: `Bearer ${customKey}` },
+    }, test.env)
+    expect(rejected.status).toBe(401)
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: 'invalid_api_key' },
+    })
+    const originalDigest = await apiKeyDigest(customKey, PEPPER)
+    const tombstone = test.raw.prepare(
+      'SELECT key_hash, auth_version, control_version FROM api_keys WHERE id = ?',
+    ).get(firstBody.data.id) as {
+      key_hash: string
+      auth_version: number
+      control_version: number
+    }
+    expect(tombstone).toMatchObject({ auth_version: 2, control_version: 1 })
+    expect(tombstone.key_hash).toMatch(/^[a-f0-9]{64}$/)
+    expect(tombstone.key_hash).not.toBe(originalDigest)
+
+    const replacement = await create('alice-reusable-custom-create-0002', 'Replacement key')
+    expect(replacement.status).toBe(201)
+    const replacementBody = await replacement.json() as { data: { id: string } }
+    expect(replacementBody.data.id).not.toBe(firstBody.data.id)
+
+    const listed = await app().request('/keys', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    await expect(listed.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        items: [expect.objectContaining({ id: replacementBody.data.id, name: 'Replacement key' })],
+        total: 1,
+      },
+    })
+    expect(test.raw.prepare(
+      'SELECT key_hash FROM api_keys WHERE id = ?',
+    ).get(replacementBody.data.id)).toEqual({ key_hash: originalDigest })
   })
 
   it('validates custom-token boundaries, rejects update-time replacement, and reports digest conflicts safely', async () => {

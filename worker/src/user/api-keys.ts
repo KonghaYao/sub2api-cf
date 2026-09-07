@@ -539,17 +539,21 @@ export async function revokeUserApiKey(context: Context<UserBindings>): Promise<
       throw new GatewayError(409, 'control_version_exhausted', 'API key control version is exhausted')
     }
 
+    const tombstoneHash = await apiKeyDigest(
+      `revoked-api-key:v1\u0000${row.id}\u0000${row.key_hash}`,
+      requireApiKeyPepper(context.env),
+    )
     const now = Date.now()
     try {
       await context.env.DB.batch([
         context.env.DB.prepare(
           `UPDATE api_keys
-              SET enabled = 0,
+              SET key_hash = ?, enabled = 0,
                   revoked_at_ms = CASE WHEN revoked_at_ms IS NULL THEN ? ELSE -1 END,
                   updated_at_ms = ?, auth_version = auth_version + 1,
                   control_version = control_version + 1
             WHERE id = ? AND user_id = ?`,
-        ).bind(now, now, row.id, user.id),
+        ).bind(tombstoneHash, now, now, row.id, user.id),
         apiKeyAuditInsert(
           context.env,
           user.id,
