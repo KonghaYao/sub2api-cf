@@ -15,7 +15,7 @@
 
 ## 验证
 
-前端完整回归 331 个文件 / 2244 项测试通过，Vue 类型检查通过；浏览器管理页面巡检通过，覆盖调度持久化、原管理操作审计及风控入口。真实 workerd 全量集成回归 27 个文件 / 73 项通过。Worker 全量单元回归 228 个文件 / 2067 项及 TypeScript 类型检查通过。部署及线上验证结果待补入。专项结果见 `settings-users.md`、`scheduling-lifecycle-settings.md` 和 `lifecycle-audit-settings-notifications.md`。
+前端完整回归 331 个文件 / 2244 项测试通过，Vue 类型检查通过；浏览器管理页面巡检通过，覆盖调度持久化、原管理操作审计及风控入口。真实 workerd 全量集成回归 27 个文件 / 73 项通过。Worker 全量单元回归 228 个文件 / 2067 项及 TypeScript 类型检查通过。生产部署成功：源代码提交 `8edbd61e8`，Worker version `2d368b2e-ef30-4a75-a510-d58074495a73`，D1 0095–0097 已应用。线上 43 项检查通过、零未解决失败：覆盖设置、风险、仪表盘、审计等接口，并验证隔离禁用账号创建、调度双向切换、项目配置回读、密钥字段脱敏和审计详情。临时账号已删除。管理会话过期后正常刷新成功。专项结果见 `settings-users.md`、`scheduling-lifecycle-settings.md` 和 `lifecycle-audit-settings-notifications.md`。
 
 ## 明确的能力边界
 
