@@ -363,6 +363,31 @@ describe('admin accounts Worker transport capabilities', () => {
     })
   })
 
+  it('moves an explicit Worker update version to If-Match without adding it to the payload', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { update } = await import('@/api/admin/accounts')
+
+    await update('account-opaque-id', { name: 'updated' }, 8)
+
+    expect(put).toHaveBeenCalledWith(
+      '/admin/accounts/account-opaque-id',
+      { name: 'updated' },
+      { headers: { 'If-Match': '"8"' } },
+    )
+  })
+
+  it('does not change the legacy update request when a loaded version is available', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(false)
+    const { update } = await import('@/api/admin/accounts')
+    const request = { name: 'legacy updated', notes: 'preserved' }
+
+    await update(7, request, 8)
+
+    expect(put).toHaveBeenCalledWith('/admin/accounts/7', request, undefined)
+  })
+
   it('forwards complete account DTOs through Worker batch create and redacts returned secrets', async () => {
     const request = [{
       name: 'batch account',

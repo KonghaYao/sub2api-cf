@@ -4609,7 +4609,11 @@ const handleClose = () => {
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
-    const updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
+    const updatedAccount = await adminAPI.accounts.update(
+      accountID,
+      withAntigravityConfirmFlag(updatePayload),
+      props.account?.control_version
+    )
     appStore.showSuccess(t('admin.accounts.accountUpdated'))
     emit('updated', updatedAccount)
     handleClose()

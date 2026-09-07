@@ -380,6 +380,48 @@ describe('EditAccountModal', () => {
     expect(wrapper.findComponent({ name: 'GroupSelector' }).exists()).toBe(true)
   })
 
+  it('submits the loaded Worker control version and emits the authoritative update', async () => {
+    const account = {
+      ...buildAccount(),
+      id: 'account-uuid',
+      control_version: 6,
+    }
+    const updated = { ...account, name: 'Updated by Worker', control_version: 7 }
+    updateAccountMock.mockReset().mockResolvedValue(updated)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock).toHaveBeenCalledWith(
+      'account-uuid',
+      expect.any(Object),
+      6,
+    )
+    expect(wrapper.emitted('updated')?.[0]).toEqual([updated])
+  })
+
+  it('replaces a redacted account key using control version zero', async () => {
+    const account = {
+      ...buildAccount(), id: 'cursor-account', control_version: 0,
+      credentials: { base_url: 'https://upstream.example/v1' },
+      credentials_status: { has_api_key: true },
+    }
+    const updated = { ...account, control_version: 1 }
+    updateAccountMock.mockReset().mockResolvedValue(updated)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('input[type="password"]').setValue('crsr_replacement-test-key')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock).toHaveBeenCalledWith(
+      'cursor-account',
+      expect.objectContaining({ credentials: expect.objectContaining({ api_key: 'crsr_replacement-test-key' }) }),
+      0,
+    )
+    expect(wrapper.emitted('updated')?.[0]).toEqual([updated])
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()
