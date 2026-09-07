@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import type { Env } from '../env'
 import { buildProviderRequest, type ProviderAccount, type ProviderCredential, type ProviderOperation } from '../gateway/providers'
 import { requireString } from './http'
+import { redactDiagnosticText } from '../observability/redaction'
 import { GatewayError } from '../gateway/errors'
 
 type TestEvent = { type: string; text?: string; image_url?: string; mime_type?: string }
@@ -47,10 +48,6 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
           method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body),
           redirect: 'manual', cache: 'no-store', signal: controller.signal,
         })
-        if (!response.ok) {
-          void response.body?.cancel().catch(() => {})
-          throw new Error(`Upstream model test returned HTTP ${response.status}`)
-        }
         reader = response.body?.getReader()
         const decoder = new TextDecoder()
         let text = '', size = 0
@@ -61,6 +58,17 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
           text += decoder.decode(next.value, { stream: true })
         }
         text += decoder.decode()
+        if (!response.ok) {
+          let detail = ''
+          try {
+            const failure = JSON.parse(text)
+            const message = failure?.error?.message ?? failure?.message
+            if (typeof message === 'string') {
+              detail = redactDiagnosticText(message.split(credential.api_key).join('[REDACTED]')).slice(0, 500)
+            }
+          } catch { /* Do not echo non-JSON error pages. */ }
+          throw new Error(`Upstream model test returned HTTP ${response.status}${detail ? ': ' + detail : ''}`)
+        }
         if (response.headers.get('content-type')?.includes('text/event-stream')) {
           const events: TestEvent[] = []
           let completed = false

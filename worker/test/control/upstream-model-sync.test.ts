@@ -47,7 +47,7 @@ describe('upstream model sync through the Worker HTTP routes',()=>{
     const t=await fixture()
     const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'failed-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
     const id=(await created.json() as any).data.id
-    for(const response of [new Response('secret',{status:401}),new Response('<html>error</html>'),Response.json({choices:[]}),Response.json({error:{message:'test-upstream-secret'}})]){
+    for(const response of [Response.json({error:{message:'Invalid key test-upstream-secret'}},{status:401}),new Response('<html>error</html>'),Response.json({choices:[]}),Response.json({error:{message:'test-upstream-secret'}})]){
       vi.stubGlobal('fetch',vi.fn().mockResolvedValue(response))
       const r=await t.app.request(`/api/v1/admin/accounts/${id}/test`,{method:'POST',headers:t.headers,body:JSON.stringify({model_id:'gpt-test'})},t.env)
       const output=await r.text();expect(output).toContain('"success":false');expect(output).not.toContain('"success":true');expect(output).not.toContain('test-upstream-secret')
