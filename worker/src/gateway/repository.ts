@@ -1440,6 +1440,8 @@ function channelModelPolicyStatement(
   const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, requestedModel]
     : [groupId, requestedModel, endpoint]
+  // Keep pricing_policy materialized: inlining its computed billing model into
+  // repeated pricing normalization expressions exceeds D1 statement memory.
   return env.DB.prepare(
     `WITH active_channel AS (
        SELECT c.id, c.control_version, c.billing_model_source, c.restrict_models,
@@ -1486,7 +1488,7 @@ function channelModelPolicyStatement(
               END AS expanded_target
          FROM active_channel channel
          LEFT JOIN matched_mapping mapping ON mapping.channel_id = channel.id
-     ), pricing_policy AS (
+     ), pricing_policy AS MATERIALIZED (
        SELECT target.*,
               CASE channel.billing_model_source
                 WHEN 'requested' THEN ?
