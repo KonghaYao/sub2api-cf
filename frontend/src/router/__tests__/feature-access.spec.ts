@@ -133,12 +133,14 @@ describe('feature route guard', () => {
     adminSettingsStore.fetch.mockResolvedValue(undefined)
   })
 
-  it('statically redirects the host setup wizard and admin root', () => {
+  it('keeps the setup wizard route and points the admin root to the original dashboard', () => {
     expect(routerHarness.routes.find((route) => route.path === '/setup')).toMatchObject({
-      redirect: '/login',
+      name: 'Setup',
+      meta: { requiresAuth: false },
     })
+    expect(routerHarness.routes.find((route) => route.path === '/setup')).not.toHaveProperty('redirect')
     expect(routerHarness.routes.find((route) => route.path === '/admin')).toMatchObject({
-      redirect: '/admin/accounts',
+      redirect: '/admin/dashboard',
     })
   })
 
@@ -223,38 +225,7 @@ describe('feature route guard', () => {
   })
 
   it.each([
-    '/admin/channels/monitor',
-    '/admin/plugins',
-    '/admin/proxies',
-  ])('redirects removed or replaced legacy Worker admin route %s to the account operations page', async (path) => {
-    authStore.isAdmin = true
-    adminSettingsStore.cloudflareWorkerContract = true
-
-    const { navigation, next } = runGuard({ requiresAdmin: true }, path)
-    await navigation
-
-    expect(adminSettingsStore.fetch).not.toHaveBeenCalled()
-    expect(next).toHaveBeenCalledOnce()
-    expect(next).toHaveBeenCalledWith('/admin/accounts')
-  })
-
-  it.each([
     '/admin/dashboard',
-    '/admin/risk-control',
-    '/admin/prompt-audit',
-  ])('keeps the unmigrated host-only admin route %s fail-closed', async (path) => {
-    authStore.isAdmin = true
-    adminSettingsStore.cloudflareWorkerContract = true
-
-    const { navigation, next } = runGuard({ requiresAdmin: true }, path)
-    await navigation
-
-    expect(adminSettingsStore.fetch).toHaveBeenCalledOnce()
-    expect(next).toHaveBeenCalledOnce()
-    expect(next).toHaveBeenCalledWith('/admin/accounts')
-  })
-
-  it.each([
     '/admin/settings',
     '/admin/ops',
     '/admin/announcements',
@@ -269,7 +240,12 @@ describe('feature route guard', () => {
     '/admin/affiliates/rebates',
     '/admin/orders/plans',
     '/admin/audit-logs',
-  ])('keeps migrated Worker admin route %s reachable', async (path) => {
+    '/admin/channels/monitor',
+    '/admin/plugins',
+    '/admin/proxies',
+    '/admin/risk-control',
+    '/admin/prompt-audit',
+  ])('keeps every declared admin route %s reachable in Worker mode', async (path) => {
     authStore.isAdmin = true
     adminSettingsStore.cloudflareWorkerContract = true
 
@@ -281,21 +257,18 @@ describe('feature route guard', () => {
   })
 
   it.each([
-    ['/payment/airwallex', '/payment/result'],
-    ['/auth/wechat/payment/callback', '/payment/result'],
-    ['/payment/qrcode', '/purchase'],
-    ['/monitor', '/dashboard'],
-  ])('redirects unsupported Worker-only route %s to %s', async (path, target) => {
+    ['/payment/airwallex', false],
+    ['/auth/wechat/payment/callback', false],
+    ['/payment/qrcode', true],
+    ['/monitor', true],
+  ])('keeps original route %s reachable in Worker mode', async (path, requiresAuth) => {
     adminSettingsStore.cloudflareWorkerContract = true
 
-    const { navigation, next } = runGuard(
-      { requiresAuth: path === '/payment/qrcode' },
-      path
-    )
+    const { navigation, next } = runGuard({ requiresAuth }, path)
     await navigation
 
     expect(next).toHaveBeenCalledOnce()
-    expect(next).toHaveBeenCalledWith(target)
+    expect(next).toHaveBeenCalledWith()
   })
 
   it.each([

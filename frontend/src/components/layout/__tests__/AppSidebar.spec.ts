@@ -55,20 +55,19 @@ describe('AppSidebar header styles', () => {
 })
 
 describe('AppSidebar Worker capabilities', () => {
-  it('filters admin navigation through the centralized Worker allowlist', () => {
-    expect(componentSource).toContain("from '@/utils/adminCapabilities'")
-    expect(componentSource).toContain('filterCloudflareAdminNavigation(baseItems)')
-    expect(componentSource).toContain('adminSettingsStore.cloudflareWorkerContract')
+  it('keeps the original admin dashboard as the home page in Worker mode', () => {
+    expect(componentSource).toContain("const homePath = computed(() => (isAdmin.value ? '/admin/dashboard' : '/dashboard'))")
+    expect(componentSource).not.toContain('CLOUDFLARE_ADMIN_HOME')
   })
 
-  it('hides the removed dynamic-plugin entry in Worker mode', () => {
+  it('keeps the original dynamic-plugin entry governed only by its business feature flag', () => {
     expect(componentSource).toContain("path: '/admin/plugins'")
-    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagPluginManagement')
+    expect(componentSource).toContain('featureFlag: flagPluginManagement')
   })
 
-  it('hides the removed outbound-proxy inventory entry in Worker mode', () => {
+  it('keeps the original outbound-proxy inventory entry', () => {
     expect(componentSource).toContain("path: '/admin/proxies'")
-    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : undefined')
+    expect(componentSource).toContain("{ path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon }")
   })
 
   it('exposes the dedicated invitation-code administration entry', () => {
@@ -76,16 +75,14 @@ describe('AppSidebar Worker capabilities', () => {
     expect(componentSource).toContain("t('nav.invitationCodes')")
   })
 
-  it('keeps the Worker request/error explorer visible independently of legacy ops monitoring', () => {
-    expect(componentSource).toContain(
-      'featureFlag: adminSettingsStore.cloudflareWorkerContract ? undefined : flagOpsMonitoring'
-    )
+  it('keeps ops governed by its original business feature flag', () => {
+    expect(componentSource).toContain('featureFlag: flagOpsMonitoring')
   })
 
-  it('hides the legacy channel-monitor entry while retaining Worker account operations', () => {
+  it('keeps the original admin channel-monitor entry', () => {
     expect(componentSource).toContain("path: '/admin/channels/monitor'")
     expect(componentSource).toContain("path: '/admin/accounts'")
-    expect(componentSource).toContain('featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagChannelMonitor')
+    expect(componentSource).toContain('featureFlag: flagChannelMonitor')
   })
 
   it.each(['/admin/dashboard', '/admin/risk-control', '/admin/prompt-audit'])(
@@ -95,9 +92,12 @@ describe('AppSidebar Worker capabilities', () => {
     }
   )
 
-  it('hides the legacy channel-monitor user entry in Worker mode', () => {
-    expect(componentSource).toContain(
-      'featureFlag: adminSettingsStore.cloudflareWorkerContract ? () => false : flagChannelMonitor'
-    )
+  it('keeps the legacy channel-monitor user entry in Worker mode', () => {
+    expect(componentSource).toContain("{ path: '/monitor', label: t('nav.channelStatus'), icon: SignalIcon, featureFlag: flagChannelMonitor }")
+  })
+
+  it('does not filter original or custom admin menu entries by deployment platform', () => {
+    expect(componentSource).not.toContain('filterCloudflareAdminNavigation(baseItems)')
+    expect(componentSource).not.toContain('if (!adminSettingsStore.cloudflareWorkerContract)')
   })
 })
