@@ -11,6 +11,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 const WORKER_USER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const WORKER_SUBSCRIPTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const WORKER_USER = {
   id: WORKER_USER_ID,
   email: 'alice@example.com',
@@ -22,8 +23,30 @@ const WORKER_USER = {
   rpm_limit: 120,
   state_version: 2,
   control_version: 3,
+  current_concurrency: 2,
+  last_active_at_ms: 1_788_566_400_000,
+  last_used_at_ms: 1_788_652_800_000,
   created_at_ms: 1_788_393_600_000,
   updated_at_ms: 1_788_480_000_000,
+  subscriptions: [{
+    id: WORKER_SUBSCRIPTION_ID,
+    user_id: WORKER_USER_ID,
+    group_id: 'group-pro',
+    status: 'active',
+    starts_at_ms: 1_788_393_600_000,
+    expires_at_ms: 1_791_072_000_000,
+    daily_used_micros: 1_250_000,
+    weekly_used_micros: 2_500_000,
+    monthly_used_micros: 3_750_000,
+    daily_window_start_ms: 1_788_566_400_000,
+    weekly_window_start_ms: 1_788_307_200_000,
+    monthly_window_start_ms: null,
+    revoked_at_ms: null,
+    control_version: 4,
+    created_at_ms: 1_788_393_600_000,
+    updated_at_ms: 1_788_480_000_000,
+    group: { id: 'group-pro', name: 'Pro' },
+  }],
 }
 
 describe('admin users Cloudflare Worker contract', () => {
@@ -43,7 +66,7 @@ describe('admin users Cloudflare Worker contract', () => {
     vi.restoreAllMocks()
   })
 
-  it('maps Worker list fields and UUIDs while sending only supported filters', async () => {
+  it('preserves every original list filter and maps Worker users to the original list shape', async () => {
     get.mockResolvedValueOnce({
       data: { items: [WORKER_USER], total: 1, page: 2, page_size: 25, pages: 1 },
     })
@@ -54,7 +77,7 @@ describe('admin users Cloudflare Worker contract', () => {
       role: 'user',
       search: ' alice ',
       group_name: 'legacy-group',
-      api_key_group_id: 9,
+      api_key_group_id: 'group-worker-uuid',
       attributes: { 4: 'legacy-attribute' },
       include_subscriptions: true,
       sort_by: 'balance',
@@ -68,6 +91,10 @@ describe('admin users Cloudflare Worker contract', () => {
         status: 'active',
         role: 'user',
         search: 'alice',
+        group_name: 'legacy-group',
+        api_key_group_id: 'group-worker-uuid',
+        'attr[4]': 'legacy-attribute',
+        include_subscriptions: true,
         sort_by: 'balance',
         sort_order: 'desc',
       },
@@ -82,10 +109,32 @@ describe('admin users Cloudflare Worker contract', () => {
       balance: 12.5,
       concurrency: 7,
       rpm_limit: 120,
+      current_concurrency: 2,
+      last_active_at: '2026-09-05T00:00:00.000Z',
+      last_used_at: '2026-09-06T00:00:00.000Z',
       created_at: '2026-09-03T00:00:00.000Z',
       updated_at: '2026-09-04T00:00:00.000Z',
       notes: '',
       allowed_groups: [],
+      subscriptions: [{
+        id: WORKER_SUBSCRIPTION_ID,
+        user_id: WORKER_USER_ID,
+        group_id: 'group-pro',
+        status: 'active',
+        starts_at: '2026-09-03T00:00:00.000Z',
+        expires_at: '2026-10-04T00:00:00.000Z',
+        daily_usage_usd: 1.25,
+        weekly_usage_usd: 2.5,
+        monthly_usage_usd: 3.75,
+        daily_window_start: '2026-09-05T00:00:00.000Z',
+        weekly_window_start: '2026-09-02T00:00:00.000Z',
+        monthly_window_start: null,
+        revoked_at: null,
+        control_version: 4,
+        created_at: '2026-09-03T00:00:00.000Z',
+        updated_at: '2026-09-04T00:00:00.000Z',
+        group: { id: 'group-pro', name: 'Pro' },
+      }],
     })
   })
 

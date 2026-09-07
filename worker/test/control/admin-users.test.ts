@@ -190,7 +190,8 @@ class UserStatement {
   async all<T>(): Promise<D1Result<T>> {
     if (
       this.query.includes('FROM user_group_permissions') ||
-      this.query.includes('FROM user_group_rate_overrides')
+      this.query.includes('FROM user_group_rate_overrides') ||
+      this.query.includes('FROM user_subscriptions')
     ) {
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
@@ -361,7 +362,7 @@ const adminHeaders = {
 describe('admin users', () => {
   it('rejects a list sort that has no Worker projection', async () => {
     const { env } = harness()
-    const response = await createApp().request('/api/v1/admin/users?sort_by=last_active_at', {
+    const response = await createApp().request('/api/v1/admin/users?sort_by=definitely_unknown', {
       headers: adminHeaders,
     }, env)
 
@@ -445,10 +446,18 @@ describe('admin users', () => {
     )
 
     expect(response.status).toBe(200)
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       code: 0,
       data: {
-        items: [database.users.get('user-1')],
+        items: [{
+          ...database.users.get('user-1'),
+          allowed_groups: [],
+          group_rates: {},
+          current_concurrency: 0,
+          last_active_at: null,
+          last_used_at: null,
+          subscriptions: [],
+        }],
         total: 1,
         page: 1,
         page_size: 20,

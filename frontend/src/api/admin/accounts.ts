@@ -368,10 +368,14 @@ export async function duplicate(id: number): Promise<Account> {
  * @param updates - Fields to update
  * @returns Updated account
  */
-export async function update(id: number | string, updates: UpdateAccountRequest): Promise<Account> {
+export async function update(
+  id: number | string,
+  updates: UpdateAccountRequest,
+  expectedControlVersion?: number,
+): Promise<Account> {
   const workerContract = isCloudflareWorkerContractActive()
   const updateRecord = updates as unknown as Record<string, unknown>
-  const expectedVersion = updateRecord.expected_control_version
+  const expectedVersion = expectedControlVersion ?? updateRecord.expected_control_version
   const payload = workerContract
     ? Object.fromEntries(Object.entries(updateRecord).filter(([key]) => key !== 'expected_control_version'))
     : updates

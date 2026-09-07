@@ -1,7 +1,7 @@
 import type { AdminGroup } from '@/types'
 
 export interface ApiKeyGroupFilterOption {
-  value: number | null
+  value: string | number | null
   label: string
   kind?: 'group'
   disabled?: boolean

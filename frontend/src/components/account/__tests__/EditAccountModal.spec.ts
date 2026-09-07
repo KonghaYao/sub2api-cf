@@ -380,6 +380,28 @@ describe('EditAccountModal', () => {
     expect(wrapper.findComponent({ name: 'GroupSelector' }).exists()).toBe(true)
   })
 
+  it('submits the loaded Worker control version and emits the authoritative update', async () => {
+    const account = {
+      ...buildAccount(),
+      id: 'account-uuid',
+      control_version: 6,
+    }
+    const updated = { ...account, name: 'Updated by Worker', control_version: 7 }
+    updateAccountMock.mockReset().mockResolvedValue(updated)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock).toHaveBeenCalledWith(
+      'account-uuid',
+      expect.any(Object),
+      6,
+    )
+    expect(wrapper.emitted('updated')?.[0]).toEqual([updated])
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()
