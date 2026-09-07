@@ -292,7 +292,7 @@
             </div>
           </template>
           <template #cell-schedulable="{ row }">
-            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button role="switch" :aria-checked="row.schedulable" :aria-label="t('admin.accounts.columns.schedulable')" @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -2105,7 +2105,7 @@ const handleBulkToggleSchedulable = async (schedulable: boolean) => {
   const accountIds = [...selIds.value]
   try {
     if (cloudflareWorkerContract.value) {
-      const result = await adminAPI.accounts.bulkSetEnabled(
+      const result = await adminAPI.accounts.bulkSetSchedulable(
         selectedWorkerOperationAccounts(), schedulable
       )
       const successful = new Map(result.results
@@ -2115,9 +2115,7 @@ const handleBulkToggleSchedulable = async (schedulable: boolean) => {
         const updated = successful.get(String(account.id))
         return updated === undefined ? account : {
           ...account,
-          enabled: schedulable,
           schedulable,
-          status: schedulable ? 'active' : 'inactive',
           control_version: updated.control_version
         } as Account
       })
@@ -2583,7 +2581,8 @@ const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
   togglingSchedulable.value = a.id
   try {
-    const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable)
+    const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable, a.control_version)
+    Object.assign(a, updated)
     updateSchedulableInList([a.id], updated?.schedulable ?? nextSchedulable)
     enterAutoRefreshSilentWindow()
   } catch (error) {

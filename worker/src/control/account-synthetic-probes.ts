@@ -1,3 +1,4 @@
+import { accountFetcher } from '../proxy/account-fetch'
 import type { Context } from 'hono'
 
 import type { Env, PlatformEvent } from '../env'
@@ -101,6 +102,8 @@ interface DispatchJobRow extends AccountSyntheticProbePayload {
 }
 
 interface ProbeAccountRow extends JobRow {
+  proxy_id?: number | null
+  credential_kind?: string
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
@@ -612,7 +615,7 @@ function createEvent(
 async function loadProbeAccount(env: Env, id: string, token: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT job.*, account.platform, account.protocol, account.auth_scheme,
-            account.base_url, account.provider_config_json,
+            account.base_url, account.provider_config_json, account.credential_kind, json_extract(account.ui_config_json, '$.proxy_id') AS proxy_id,
             secret.id AS secret_id, secret.key_version, secret.nonce_b64, secret.ciphertext_b64,
             monitor.consecutive_failures, monitor.alert_state
        FROM account_synthetic_probe_jobs job
@@ -652,7 +655,7 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.min(plan.timeout_ms, 8_000))
   try {
-    const response = await fetch(plan.url, {
+    const response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
       method: plan.method, headers: plan.headers,
       body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual', cache: 'no-store', signal: controller.signal,
@@ -690,7 +693,7 @@ function providerOperation(platform: ProviderPlatform, capability: SyntheticProb
   return capability
 }
 
-function minimalProbeBody(
+export function minimalProbeBody(
   platform: ProviderPlatform,
   capability: SyntheticProbeCapability,
   model: string,
@@ -710,7 +713,7 @@ function minimalProbeBody(
   return { model, messages: [{ role: 'user', content: prompt }], max_tokens: 1, stream: false }
 }
 
-async function readBoundedProviderJson(response: Response): Promise<unknown> {
+export async function readBoundedProviderJson(response: Response): Promise<unknown> {
   if (response.body === null) return null
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -737,7 +740,7 @@ async function readBoundedProviderJson(response: Response): Promise<unknown> {
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown } catch { return null }
 }
 
-function validProviderResponse(
+export function validProviderResponse(
   platform: ProviderPlatform,
   capability: SyntheticProbeCapability,
   value: unknown,

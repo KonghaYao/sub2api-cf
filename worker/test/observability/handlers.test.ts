@@ -30,6 +30,7 @@ const PEPPER = 'observability-handler-pepper-32-bytes'
 async function fixture() {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
+  raw.exec(`UPDATE system_settings SET public_json=json_set(public_json,'$.allow_user_view_error_requests',json('true')) WHERE id='global'`)
   const now = Date.now()
   raw.prepare(
     `INSERT INTO users (id, email, display_name, role, created_at_ms, updated_at_ms)
@@ -448,8 +449,8 @@ describe('request explorer HTTP contracts', () => {
     const dashboardContract = await createApp().request('/api/v1/admin/ops/dashboard/overview', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
-    expect(dashboardContract.status).toBe(501)
-    await expect(dashboardContract.json()).resolves.toMatchObject({ code: 'admin_ops_contract_not_migrated' })
+    expect(dashboardContract.status).toBe(200)
+    await expect(dashboardContract.json()).resolves.toMatchObject({ code: 0 })
     test.raw.close()
   })
 
@@ -913,4 +914,16 @@ describe('request explorer HTTP contracts', () => {
     expect(((await productionAdmin.json()) as any).data.items).toHaveLength(2)
     test.raw.close()
   })
+  it('enforces the user error visibility switch for lists and details without disabling administrator access',async()=>{
+    const test=await fixture()
+    test.raw.exec("UPDATE system_settings SET public_json=json_set(public_json,'$.allow_user_view_error_requests',json('false')) WHERE id='global'")
+    for(const path of ['/usage/errors','/usage/errors/missing']){
+      const response=await app().request(path,{headers:{authorization:test.auth.alice!}},test.env)
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({code:'user_error_requests_disabled'})
+    }
+    expect((await app().request('/admin/ops/request-errors',{headers:{authorization:test.auth.admin!}},test.env)).status).toBe(200)
+    test.raw.close()
+  })
+
 })

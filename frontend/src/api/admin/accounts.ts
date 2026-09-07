@@ -906,6 +906,14 @@ function workerOperationAccounts(accounts: WorkerAccountOperationTarget[], maxAc
   })
 }
 
+export async function bulkSetSchedulable(accounts: WorkerAccountOperationTarget[], schedulable: boolean): Promise<WorkerAccountBulkStatusResult> {
+  const payload = { accounts: workerOperationAccounts(accounts), schedulable }
+  const operation = await workerOperationKey('admin-account-bulk-schedulable', payload)
+  const { data } = await apiClient.post<WorkerAccountBulkStatusResult>('/admin/accounts/bulk-update', payload, { headers: { 'Idempotency-Key': operation.key } })
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
 export async function bulkSetEnabled(
   accounts: WorkerAccountOperationTarget[],
   enabled: boolean
@@ -1022,9 +1030,10 @@ export async function getBatchTodayStats(accountIds: number[]): Promise<BatchTod
  * @param schedulable - Whether the account should participate in scheduling
  * @returns Updated account
  */
-export async function setSchedulable(id: number, schedulable: boolean): Promise<Account> {
+export async function setSchedulable(id: number | string, schedulable: boolean, expectedControlVersion?: number): Promise<Account> {
   if (isCloudflareWorkerContractActive()) {
-    throw new Error('Per-account schedulable changes are not supported by the Worker contract')
+    const current = expectedControlVersion === undefined ? await getById(id) : null
+    return update(id, { schedulable }, expectedControlVersion ?? current?.control_version)
   }
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/schedulable`, {
     schedulable
@@ -1525,31 +1534,31 @@ export async function updateOllamaCloudUsageSettings(
   return data
 }
 
-export async function getOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+export async function getOllamaCloudUsage(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.get<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage`)
   return data
 }
 
-export async function saveOllamaCloudUsageSession(id: number, session: string): Promise<OllamaCloudUsageState> {
+export async function saveOllamaCloudUsageSession(id: number | string, session: string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`, {
     session
   })
   return data
 }
 
-export async function deleteOllamaCloudUsageSession(id: number): Promise<OllamaCloudUsageState> {
+export async function deleteOllamaCloudUsageSession(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.delete<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`)
   return data
 }
 
-export async function setOllamaCloudUsageAutoRefresh(id: number, enabled: boolean): Promise<OllamaCloudUsageState> {
+export async function setOllamaCloudUsageAutoRefresh(id: number | string, enabled: boolean): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/auto-refresh`, {
     enabled
   })
   return data
 }
 
-export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+export async function refreshOllamaCloudUsage(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.post<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/refresh`)
   return data
 }
@@ -1590,6 +1599,7 @@ export const accountsAPI = {
   batchUpdateCredentials,
   bulkUpdate,
   bulkSetEnabled,
+  bulkSetSchedulable,
   queueHealthProbes,
   queueSyntheticProbes,
   listSyntheticProbeHistory,

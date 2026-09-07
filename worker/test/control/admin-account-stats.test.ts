@@ -1,3 +1,4 @@
+import { accountTodayStats } from '../../src/control/account-today-stats'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAdminAccountStats } from '../../src/control/accounts'
@@ -47,6 +48,8 @@ function fixture() {
   } as Env
   const app = new Hono<{ Bindings: Env }>()
   app.get('/accounts/:id/stats', getAdminAccountStats)
+  app.get('/accounts/:id/today-stats', accountTodayStats)
+  app.post('/accounts/today-stats/batch', accountTodayStats)
   return { app, env, raw }
 }
 
@@ -57,6 +60,16 @@ afterEach(() => {
 })
 
 describe('admin account statistics projection', () => {
+  it('returns actual current-day account, standard and user costs through the batch route', async () => {
+    const test=fixture()
+    try {
+      const response=await test.app.request('/accounts/today-stats/batch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({account_ids:['account-a']})},test.env)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({data:{stats:{'account-a':{requests:1,tokens:150,cost:0.8,standard_cost:1,user_cost:0.9}}}})
+      expect(await (await test.app.request('/accounts/account-a/today-stats',{},test.env)).json()).toMatchObject({data:{requests:1,cost:0.8}})
+    }finally{test.raw.close()}
+  })
+
   it('returns the legacy-shaped daily and model account-cost view in USD', async () => {
     const test = fixture()
     const response = await test.app.request('/accounts/account-a/stats?days=2', {}, test.env)

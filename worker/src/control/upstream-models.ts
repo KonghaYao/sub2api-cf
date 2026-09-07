@@ -1,10 +1,11 @@
+import type { AccountFetcher } from '../proxy/account-fetch'
 import { GatewayError } from '../gateway/errors'
 import { buildProviderHealthRequest, type ProviderAccount, type ProviderCredential } from '../gateway/providers'
 
 const MAX_CATALOG_BYTES = 2 * 1024 * 1024
 
 /** Fetch a catalog only; callers decide whether to save the returned selection. */
-export async function fetchUpstreamModels(account: ProviderAccount, credential: ProviderCredential) {
+export async function fetchUpstreamModels(account: ProviderAccount, credential: ProviderCredential, upstreamFetch: AccountFetcher = fetch) {
   const plan = buildProviderHealthRequest({ account, credential })
   const controller = new AbortController()
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
@@ -17,7 +18,7 @@ export async function fetchUpstreamModels(account: ProviderAccount, credential: 
     }, plan.timeout_ms)
   })
   const fetchCatalog = async () => {
-    const response = await fetch(plan.url, {
+    const response = await upstreamFetch(plan.url, {
       method: plan.method, headers: plan.headers, redirect: 'manual',
       cache: 'no-store', signal: controller.signal,
     })

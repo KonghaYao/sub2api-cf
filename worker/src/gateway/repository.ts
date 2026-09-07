@@ -1,3 +1,4 @@
+import { normalizeSecuritySettings, securityDefaults } from '../control/gateway-security-settings'
 import type { Env } from '../env'
 import { resolveCompositeRoute } from '../control/composite-routes'
 import { groupAccessPredicate } from '../user/group-access'
@@ -8,7 +9,7 @@ import type {
   FrozenTimePricing,
 } from './customer-pricing'
 import { GatewayError } from './errors'
-import { isSourceIpAllowed, parseStoredIpPolicy, trustedSourceIp } from './ip-policy'
+import { isSourceIpAllowed, parseStoredIpPolicy, configuredSourceIp } from './ip-policy'
 import { isProviderPlatform } from './platform'
 import type {
   AccountCandidate,
@@ -190,7 +191,7 @@ export async function authenticateGatewayRequest(
   ) {
     throw new GatewayError(401, 'invalid_api_key', 'Invalid or expired API key', 'authentication_error')
   }
-  enforceApiKeyIpPolicy(request, env, row)
+  await enforceApiKeyIpPolicy(request, env, row)
   if (row.user_status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
@@ -245,7 +246,7 @@ export async function authenticateGatewayRequest(
   }
 }
 
-function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): void {
+async function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): Promise<void> {
   // Compatibility for hand-written pre-0059 unit fixtures only. A partial
   // projection is never accepted; deployed D1 always returns both columns.
   if (row.ip_allowlist_json === undefined && row.ip_denylist_json === undefined) return
@@ -255,7 +256,10 @@ function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): v
   const allowlist = parseStoredIpPolicy(row.ip_allowlist_json, 'ip_allowlist_json')
   const denylist = parseStoredIpPolicy(row.ip_denylist_json, 'ip_denylist_json')
   if (allowlist.length === 0 && denylist.length === 0) return
-  if (!isSourceIpAllowed(trustedSourceIp(request, env.ENVIRONMENT), allowlist, denylist)) {
+  const stored=await env.DB.prepare("SELECT gateway_json FROM system_settings WHERE id='global'").first<{gateway_json:string}>()
+  const raw=stored?JSON.parse(stored.gateway_json):{}
+  const config=normalizeSecuritySettings(Object.fromEntries(Object.entries(raw).filter(([key])=>Object.hasOwn(securityDefaults,key))))
+  if (!isSourceIpAllowed(configuredSourceIp(request, env.ENVIRONMENT,config.api_key_acl_trust_forwarded_ip,config.forwarded_client_ip_headers), allowlist, denylist)) {
     throw new GatewayError(
       403,
       'api_key_ip_restricted',
@@ -428,7 +432,7 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
             FROM account_groups ag
             JOIN accounts a ON a.id = ag.account_id
             JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
-           WHERE ag.group_id = gm.group_id AND a.enabled = 1
+           WHERE ag.group_id = gm.group_id AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
              AND a.health_status <> 'unhealthy'
              AND a.platform = m.platform
              AND (m.platform = g.platform OR g.platform = 'composite')
@@ -1278,7 +1282,7 @@ function externalAliasCandidatesStatement(
     `${cte.sql}
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1292,7 +1296,7 @@ function externalAliasCandidatesStatement(
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
        CROSS JOIN system_settings settings
-      WHERE resolved.match_count = 1 AND a.enabled = 1 AND a.base_url IS NOT NULL
+      WHERE resolved.match_count = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1
@@ -1720,7 +1724,7 @@ function accountCandidatesStatement(
      )
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1735,7 +1739,7 @@ function accountCandidatesStatement(
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
        CROSS JOIN system_settings settings
-      WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
+      WHERE ag.group_id = ? AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND ${capabilityColumn} = 1
@@ -1755,6 +1759,7 @@ export async function getAccountCredential(
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
+            json_extract(a.ui_config_json, '$.proxy_id') AS proxy_id,
             a.image_adapter, a.credential_kind,
             a.provider_config_json,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
@@ -1766,7 +1771,7 @@ export async function getAccountCredential(
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND ${capabilityColumn} = 1 AND a.enabled = 1
+        AND ${capabilityColumn} = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
         AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL
       LIMIT 1`,

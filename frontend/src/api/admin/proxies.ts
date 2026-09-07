@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import type {
   Proxy,
   ProxyAccountSummary,
@@ -14,6 +15,20 @@ import type {
   AdminDataPayload,
   AdminDataImportResult
 } from '@/types'
+
+const batchKeys = new Map<string,string>()
+function batchOperationKey(prefix:string,body:unknown): string { const fingerprint=prefix+JSON.stringify(body); let key=batchKeys.get(fingerprint); if(!key){key=`${prefix}-${crypto.randomUUID()}`;if(batchKeys.size>=4)batchKeys.delete(batchKeys.keys().next().value!);batchKeys.set(fingerprint,key)} return key }
+
+const versions = new Map<number, number>()
+let pendingCreate: {fingerprint:string;key:string}|null = null
+function remember(proxy: Proxy): Proxy { if (Number.isSafeInteger(proxy.control_version)) versions.set(proxy.id, proxy.control_version!); return proxy }
+async function versionHeaders(id: number, expectedVersion?: number) {
+  if (!isCloudflareWorkerContractActive()) return undefined
+  if (expectedVersion === undefined && !versions.has(id)) remember(await getById(id))
+  const version = expectedVersion ?? versions.get(id)
+  if (!Number.isSafeInteger(version)) throw new Error('Proxy version is missing; reload before saving')
+  return { 'If-Match': `"${version}"` }
+}
 
 /**
  * List all proxies with pagination
@@ -44,6 +59,7 @@ export async function list(
     },
     signal: options?.signal
   })
+  data.items.forEach(remember)
   return data
 }
 
@@ -53,7 +69,7 @@ export async function list(
  */
 export async function getAll(): Promise<Proxy[]> {
   const { data } = await apiClient.get<Proxy[]>('/admin/proxies/all')
-  return data
+  return data.map(remember)
 }
 
 /**
@@ -64,7 +80,7 @@ export async function getAllWithCount(): Promise<Proxy[]> {
   const { data } = await apiClient.get<Proxy[]>('/admin/proxies/all', {
     params: { with_count: 'true' }
   })
-  return data
+  return data.map(remember)
 }
 
 /**
@@ -74,7 +90,7 @@ export async function getAllWithCount(): Promise<Proxy[]> {
  */
 export async function getById(id: number): Promise<Proxy> {
   const { data } = await apiClient.get<Proxy>(`/admin/proxies/${id}`)
-  return data
+  return remember(data)
 }
 
 /**
@@ -83,8 +99,11 @@ export async function getById(id: number): Promise<Proxy> {
  * @returns Created proxy
  */
 export async function create(proxyData: CreateProxyRequest): Promise<Proxy> {
-  const { data } = await apiClient.post<Proxy>('/admin/proxies', proxyData)
-  return data
+  const worker=isCloudflareWorkerContractActive(),fingerprint=JSON.stringify(proxyData)
+  if(worker&&pendingCreate?.fingerprint!==fingerprint)pendingCreate={fingerprint,key:`proxy-create-${crypto.randomUUID()}`}
+  const { data } = await apiClient.post<Proxy>('/admin/proxies', proxyData, worker ? { headers: { 'Idempotency-Key': pendingCreate!.key } } : undefined)
+  pendingCreate=null
+  return remember(data)
 }
 
 /**
@@ -93,9 +112,9 @@ export async function create(proxyData: CreateProxyRequest): Promise<Proxy> {
  * @param updates - Fields to update
  * @returns Updated proxy
  */
-export async function update(id: number, updates: UpdateProxyRequest): Promise<Proxy> {
-  const { data } = await apiClient.put<Proxy>(`/admin/proxies/${id}`, updates)
-  return data
+export async function update(id: number, updates: UpdateProxyRequest, expectedVersion?: number): Promise<Proxy> {
+  const { data } = await apiClient.put<Proxy>(`/admin/proxies/${id}`, updates, { headers: await versionHeaders(id, expectedVersion) })
+  return remember(data)
 }
 
 /**
@@ -103,8 +122,8 @@ export async function update(id: number, updates: UpdateProxyRequest): Promise<P
  * @param id - Proxy ID
  * @returns Success confirmation
  */
-export async function deleteProxy(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/proxies/${id}`)
+export async function deleteProxy(id: number, expectedVersion?: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/proxies/${id}`, { headers: await versionHeaders(id, expectedVersion) })
   return data
 }
 
@@ -205,6 +224,14 @@ export async function batchCreate(
   created: number
   skipped: number
 }> {
+  if (isCloudflareWorkerContractActive()) {
+    const key=batchOperationKey('proxy-batch',proxies),result={created:0,skipped:0}
+    for(let offset=0;offset<proxies.length;offset+=5){
+      const {data}=await apiClient.post<{created:number;skipped:number}>('/admin/proxies/batch',{proxies:proxies.slice(offset,offset+5)},{headers:{'Idempotency-Key':`${key}:${offset}`}})
+      result.created+=data.created;result.skipped+=data.skipped
+    }
+    return result
+  }
   const { data } = await apiClient.post<{
     created: number
     skipped: number
@@ -216,6 +243,16 @@ export async function batchDelete(ids: number[]): Promise<{
   deleted_ids: number[]
   skipped: Array<{ id: number; reason: string }>
 }> {
+  if (isCloudflareWorkerContractActive()) {
+    const result={deleted_ids:[] as number[],skipped:[] as Array<{id:number;reason:string}>}
+    for(let offset=0;offset<ids.length;offset+=10){
+      const batch=ids.slice(offset,offset+10)
+      for(const id of batch)await versionHeaders(id)
+      const {data}=await apiClient.post<typeof result>('/admin/proxies/batch-delete',{ids:batch,expected_control_versions:Object.fromEntries(batch.map(id=>[id,versions.get(id)]))})
+      result.deleted_ids.push(...data.deleted_ids);result.skipped.push(...data.skipped)
+    }
+    return result
+  }
   const { data } = await apiClient.post<{
     deleted_ids: number[]
     skipped: Array<{ id: number; reason: string }>
@@ -251,6 +288,15 @@ export async function exportData(options?: {
 export async function importData(payload: {
   data: AdminDataPayload
 }): Promise<AdminDataImportResult> {
+  if (isCloudflareWorkerContractActive()) {
+    if(payload.data.accounts?.length)throw new Error('Use the account importer for account data')
+    const key=batchOperationKey('proxy-import',payload),result:AdminDataImportResult={proxy_created:0,proxy_reused:0,proxy_failed:0,account_created:0,account_failed:0,errors:[]}
+    for(let offset=0;offset<payload.data.proxies.length;offset+=5){
+      const {data}=await apiClient.post<AdminDataImportResult>('/admin/proxies/data',{data:{...payload.data,proxies:payload.data.proxies.slice(offset,offset+5)}},{headers:{'Idempotency-Key':`${key}:${offset}`}})
+      result.proxy_created+=data.proxy_created;result.proxy_reused+=data.proxy_reused;result.proxy_failed+=data.proxy_failed;result.errors!.push(...data.errors??[])
+    }
+    return result
+  }
   const { data } = await apiClient.post<AdminDataImportResult>('/admin/proxies/data', payload)
   return data
 }

@@ -1,3 +1,5 @@
+import { parseWechatVariants, prepareWechatVariants, readWechatVariants, type WechatVariants } from '../auth/wechat-variants'
+import { normalizeOAuthAdvanced } from '../auth/oauth-advanced'
 import type { Context } from 'hono'
 
 import { authenticateAdminSession } from './admin-auth'
@@ -40,6 +42,7 @@ export type AdminOAuthProvider = typeof providers[number]
 type OAuthAdapter = typeof expectedAdapters[AdminOAuthProvider]
 
 interface OAuthProviderRow {
+  advanced_json?: string
   provider: AdminOAuthProvider
   schema_version: number
   adapter: OAuthAdapter
@@ -63,6 +66,9 @@ interface OAuthProviderRow {
 }
 
 export interface AdminOAuthProviderResponse {
+  redirect_uri?: string
+  wechat_variants?: WechatVariants
+  advanced?: Record<string, unknown>
   schema_version: 1
   control_version: number
   provider: AdminOAuthProvider
@@ -85,6 +91,8 @@ export interface AdminOAuthProviderResponse {
 }
 
 interface ParsedProviderInput {
+  wechat_variants?: WechatVariants
+  advanced?: Record<string, unknown>
   adapter: OAuthAdapter
   enabled: boolean
   issuer: string
@@ -106,7 +114,8 @@ export async function listAdminOAuthProviders(context: OAuthProviderContext): Pr
     const result = await context.env.DB.prepare(
       `${providerSelect()} ORDER BY provider`,
     ).all<OAuthProviderRow>()
-    const items = result.results.map(publicProvider)
+    const variants = await readWechatVariants(context.env)
+    const items = result.results.map(row => ({ ...publicProvider(row), redirect_uri: configuredCallback(context.env, row.provider), ...(row.provider === 'wechat' ? { wechat_variants: variants } : {}) }))
     return controlSuccess({ items, total: items.length })
   } catch (error) {
     return controlError(asGatewayError(error))
@@ -117,7 +126,7 @@ export async function getAdminOAuthProvider(context: OAuthProviderContext): Prom
   try {
     const provider = parseProvider(context.req.param('provider'))
     const row = await requireProvider(context.env, provider)
-    return providerResponse(publicProvider(row))
+    return providerResponse({ ...publicProvider(row), redirect_uri: configuredCallback(context.env, row.provider), ...(provider === 'wechat' ? { wechat_variants: await readWechatVariants(context.env) } : {}) })
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -127,6 +136,7 @@ export async function upsertAdminOAuthProvider(context: OAuthProviderContext): P
   try {
     const provider = parseProvider(context.req.param('provider'))
     const body = await readJsonObject(context.req.raw)
+    if (provider === 'oidc') await resolveOidcDiscovery(body, context.env)
     const expectedVersion = requireExpectedControlVersion(context.req.raw, body)
     const input = parseProviderInput(provider, body, context.env)
     const idempotency = await controlIdempotency(
@@ -143,7 +153,7 @@ export async function upsertAdminOAuthProvider(context: OAuthProviderContext): P
       return await updateProvider(context, provider, current, input, idempotency)
     }
     if (expectedVersion !== 0) throw providerVersionConflict()
-    if (input.enabled && (input.clientSecret === undefined || input.clientSecret === null)) {
+    if (input.enabled && !oidcPublicClient(provider, input.advanced) && (input.clientSecret === undefined || input.clientSecret === null)) {
       throw clientSecretRequired()
     }
     const actor = await authenticateAdminSession(context.req.raw, context.env)
@@ -158,7 +168,11 @@ export async function upsertAdminOAuthProvider(context: OAuthProviderContext): P
         providerSecretAad(context.env.ENVIRONMENT, provider, 1),
       )
     const now = Date.now()
+    const variants = provider === 'wechat' ? await prepareWechatVariants(context.env,input.wechat_variants) : null
     const created: AdminOAuthProviderResponse = {
+      redirect_uri: configuredCallback(context.env, provider),
+      ...(variants ? { wechat_variants: variants.public } : {}),
+      advanced: input.advanced ?? normalizeOAuthAdvanced(provider, {}),
       schema_version: 1,
       control_version: now,
       provider,
@@ -210,6 +224,8 @@ export async function upsertAdminOAuthProvider(context: OAuthProviderContext): P
         now,
         now,
       ),
+      context.env.DB.prepare('UPDATE oauth_providers SET advanced_json = ? WHERE provider = ?').bind(JSON.stringify(created.advanced), provider),
+      ...(variants?.statements ?? []),
       providerAuditInsert(
         context.env,
         actor.user_id,
@@ -311,13 +327,17 @@ async function updateProvider(
     ciphertext = encrypted.ciphertext_b64
   }
   if (
-    input.enabled &&
+    input.enabled && !oidcPublicClient(provider, input.advanced ?? JSON.parse(current.advanced_json ?? '{}')) &&
     (keyVersion === null || nonce === null || nonce === '' || ciphertext === null || ciphertext === '')
   ) {
     throw clientSecretRequired()
   }
   const now = nextControlVersion(current.updated_at_ms)
+  const variants = provider === 'wechat' ? await prepareWechatVariants(context.env,input.wechat_variants) : null
   const updated: AdminOAuthProviderResponse = {
+    redirect_uri: configuredCallback(context.env, provider),
+    ...(variants ? { wechat_variants: variants.public } : {}),
+    advanced: input.advanced ?? normalizeOAuthAdvanced(provider, JSON.parse(current.advanced_json ?? '{}')),
     schema_version: 1,
     control_version: now,
     provider,
@@ -370,6 +390,8 @@ async function updateProvider(
       now,
       provider,
     ),
+    context.env.DB.prepare('UPDATE oauth_providers SET advanced_json = ? WHERE provider = ?').bind(JSON.stringify(updated.advanced), provider),
+    ...(variants?.statements ?? []),
     providerAuditInsert(
       context.env,
       actor.user_id,
@@ -392,7 +414,7 @@ async function updateProvider(
 }
 
 function providerSelect(): string {
-  return `SELECT provider, schema_version, adapter, enabled, issuer,
+  return `SELECT provider, advanced_json, schema_version, adapter, enabled, issuer,
                  authorization_endpoint, token_endpoint, userinfo_endpoint,
                  emails_endpoint, jwks_endpoint, client_id,
                  secret_key_version, secret_nonce_b64, secret_ciphertext_b64,
@@ -429,6 +451,7 @@ function publicProvider(row: OAuthProviderRow): AdminOAuthProviderResponse {
   return {
     schema_version: 1,
     control_version: row.updated_at_ms,
+    advanced: normalizeOAuthAdvanced(row.provider, JSON.parse(row.advanced_json ?? '{}')),
     provider: row.provider,
     adapter: row.adapter,
     enabled: row.enabled === 1,
@@ -449,6 +472,41 @@ function publicProvider(row: OAuthProviderRow): AdminOAuthProviderResponse {
   }
 }
 
+function configuredCallback(env: Env, provider: string): string { return typeof env.PUBLIC_ORIGIN === 'string' && env.PUBLIC_ORIGIN ? `${env.PUBLIC_ORIGIN.replace(/\/$/, '')}/api/v1/auth/oauth/${provider}/callback` : '' }
+
+function oidcPublicClient(provider: string, advanced: unknown): boolean { return provider === 'oidc' && normalizeOAuthAdvanced(provider, advanced).oidc_connect_token_auth_method === 'none' }
+
+async function resolveOidcDiscovery(body: Record<string, unknown>, env: Env): Promise<void> {
+  const advanced = normalizeOAuthAdvanced('oidc', body.advanced)
+  const discovery = String(advanced.oidc_connect_discovery_url || '')
+  if (!discovery) return
+  const allowedHosts = new Set(parseAllowedHosts(body.allowed_hosts, env))
+  const endpoint = externalEndpoint(discovery, 'discovery_url', allowedHosts, env)
+  let metadata: Record<string, unknown>
+  try {
+    const response = await fetch(endpoint, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(10_000) })
+    if (!response.ok) throw new Error('discovery failed')
+    const content = await response.text()
+    if (content.length > 128_000) throw new Error('discovery too large')
+    const decoded: unknown = JSON.parse(content)
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw new Error('invalid discovery')
+    metadata = decoded as Record<string, unknown>
+  } catch { throw new GatewayError(502, 'oidc_discovery_failed', 'OIDC discovery metadata is unavailable') }
+  if (typeof metadata.issuer !== 'string' || (body.issuer && metadata.issuer !== body.issuer)) throw new GatewayError(400, 'oidc_discovery_issuer_mismatch', 'OIDC discovery issuer does not match the configured issuer')
+  const mapping: Record<string, string> = { issuer: 'issuer', authorization_endpoint: 'authorization_endpoint', token_endpoint: 'token_endpoint', userinfo_endpoint: 'userinfo_endpoint', jwks_endpoint: 'jwks_uri' }
+  for (const [field, source] of Object.entries(mapping)) {
+    if (body[field]) continue
+    const value = metadata[source]
+    if (typeof value !== 'string' || !value) continue
+    let host: string
+    try { host = new URL(value).hostname } catch { throw new GatewayError(400, 'invalid_discovery_endpoint', 'OIDC discovery returned an invalid endpoint') }
+    const hosts = new Set([...allowedHosts, host])
+    body[field] = externalEndpoint(value, field, hosts, env)
+    allowedHosts.add(host)
+  }
+  body.allowed_hosts = [...allowedHosts]
+}
+
 function parseProviderInput(
   provider: AdminOAuthProvider,
   body: Record<string, unknown>,
@@ -458,12 +516,14 @@ function parseProviderInput(
     'expected_control_version', 'adapter', 'enabled', 'issuer',
     'authorization_endpoint', 'token_endpoint', 'userinfo_endpoint',
     'emails_endpoint', 'jwks_endpoint', 'client_id', 'client_secret',
-    'scopes', 'allowed_hosts', 'frontend_callback_path', 'pkce_enabled',
+    'scopes', 'allowed_hosts', 'frontend_callback_path', 'pkce_enabled', 'advanced', 'wechat_variants',
   ])
+  if (provider !== 'wechat' && body.wechat_variants !== undefined) throw new GatewayError(400, 'invalid_wechat_variants', 'WeChat variants require the WeChat provider')
   const adapter = requiredString(body.adapter, 'adapter', 32)
   if (adapter !== expectedAdapters[provider]) {
     throw new GatewayError(400, 'invalid_adapter', `adapter must be ${expectedAdapters[provider]} for ${provider}`)
   }
+  if (oidcPublicClient(provider, body.advanced) && body.pkce_enabled === false) throw new GatewayError(400, 'oidc_public_client_requires_pkce', 'OIDC public clients require PKCE')
   const allowedHosts = parseAllowedHosts(body.allowed_hosts, env)
   const allowedHostSet = new Set(allowedHosts)
   const authorizationEndpoint = externalEndpoint(body.authorization_endpoint, 'authorization_endpoint', allowedHostSet, env)
@@ -471,12 +531,14 @@ function parseProviderInput(
   const userinfoEndpoint = externalEndpoint(body.userinfo_endpoint, 'userinfo_endpoint', allowedHostSet, env)
   const emailsEndpoint = nullableEndpoint(body.emails_endpoint, 'emails_endpoint', allowedHostSet, env)
   const jwksEndpoint = nullableEndpoint(body.jwks_endpoint, 'jwks_endpoint', allowedHostSet, env)
-  if (provider === 'oidc' && jwksEndpoint === null) {
+  if (provider === 'oidc' && jwksEndpoint === null && normalizeOAuthAdvanced(provider, body.advanced).oidc_connect_validate_id_token !== false) {
     throw new GatewayError(400, 'invalid_jwks_endpoint', 'OIDC providers require jwks_endpoint')
   }
   const issuer = requiredString(body.issuer, 'issuer', MAX_ENDPOINT_LENGTH)
   if (provider === 'oidc') externalUrl(issuer, 'issuer', allowedHostSet, env)
   return {
+    wechat_variants: provider === 'wechat' ? parseWechatVariants(body.wechat_variants) : undefined,
+    advanced: body.advanced === undefined ? undefined : normalizeOAuthAdvanced(provider, body.advanced),
     adapter: adapter as OAuthAdapter,
     enabled: optionalBoolean(body.enabled, true),
     issuer,

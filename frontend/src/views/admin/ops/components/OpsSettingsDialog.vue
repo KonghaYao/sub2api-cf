@@ -57,6 +57,7 @@ async function loadAllSettings() {
     // 如果后端返回了阈值，使用后端的值；否则保持默认值
     if (thresholds && Object.keys(thresholds).length > 0) {
         metricThresholds.value = {
+          control_version: thresholds.control_version,
           sla_percent_min: thresholds.sla_percent_min ?? 99.5,
           ttft_p99_ms_max: thresholds.ttft_p99_ms_max ?? 500,
           request_error_rate_percent_max: thresholds.request_error_rate_percent_max ?? 5,
@@ -152,7 +153,7 @@ const validation = computed(() => {
   // 验证运行时设置
   if (runtimeSettings.value) {
     const evalSeconds = runtimeSettings.value.evaluation_interval_seconds
-    if (!Number.isFinite(evalSeconds) || evalSeconds < 1 || evalSeconds > 86400) {
+    if (!Number.isFinite(evalSeconds) || evalSeconds < (runtimeSettings.value.evaluation_min_interval_seconds ?? 1) || evalSeconds > (runtimeSettings.value.evaluation_max_interval_seconds ?? 86400)) {
       errors.push(t('admin.ops.runtime.validation.evalIntervalRange'))
     }
   }
@@ -214,10 +215,10 @@ async function saveAllSettings() {
       }
     }
     await Promise.all([
-      runtimeSettings.value ? opsAPI.updateAlertRuntimeSettings(runtimeSettings.value) : Promise.resolve(),
-      emailConfig.value ? opsAPI.updateEmailNotificationConfig(emailConfig.value) : Promise.resolve(),
-      advancedSettings.value ? opsAPI.updateAdvancedSettings(advancedSettings.value) : Promise.resolve(),
-      opsAPI.updateMetricThresholds(metricThresholds.value)
+      runtimeSettings.value ? opsAPI.updateAlertRuntimeSettings(runtimeSettings.value).then(saved => { runtimeSettings.value = saved }) : Promise.resolve(),
+      emailConfig.value ? opsAPI.updateEmailNotificationConfig(emailConfig.value).then(saved => { emailConfig.value = saved }) : Promise.resolve(),
+      advancedSettings.value ? opsAPI.updateAdvancedSettings(advancedSettings.value).then(saved => { advancedSettings.value = saved }) : Promise.resolve(),
+      opsAPI.updateMetricThresholds(metricThresholds.value).then(saved => { metricThresholds.value = saved })
     ])
     appStore.showSuccess(t('admin.ops.settings.saveSuccess'))
     emit('saved')
@@ -254,8 +255,8 @@ async function saveAllSettings() {
           <input
             v-model.number="runtimeSettings.evaluation_interval_seconds"
             type="number"
-            min="1"
-            max="86400"
+            :min="runtimeSettings.evaluation_min_interval_seconds ?? 1"
+            :max="runtimeSettings.evaluation_max_interval_seconds ?? 86400"
             class="input"
           />
           <p class="mt-1 text-xs text-gray-500">{{ t('admin.ops.settings.evaluationIntervalHint') }}</p>

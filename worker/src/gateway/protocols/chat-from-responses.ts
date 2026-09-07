@@ -396,6 +396,15 @@ export class BufferedResponsesToChatCompletions {
   }
 
   response(): ChatCompletionResponse {
+    return responsesToChatCompletionsResponse(this.nativeResponse(), this.publicModel, this.nowSeconds)
+  }
+
+  hasOutput(): boolean {
+    return this.text.length > 0 || this.reasoning.length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
+  }
+
+  /** Return the authoritative Responses document, filling omitted output from streamed deltas. */
+  nativeResponse(): JsonObject {
     if (this.terminalResponse === null || this.terminalValue === null) {
       throw new ResponsesToChatError('Upstream stream ended before a terminal response event')
     }
@@ -410,7 +419,9 @@ export class BufferedResponsesToChatCompletions {
     if (response.service_tier === undefined && this.serviceTier !== undefined) {
       response.service_tier = this.serviceTier
     }
-    return responsesToChatCompletionsResponse(response, this.publicModel, this.nowSeconds)
+    response.object ??= 'response'
+    response.model = this.publicModel
+    return response
   }
 
   private drain(flush: boolean): void {

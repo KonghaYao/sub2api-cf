@@ -240,13 +240,14 @@ export function commercialRegistrationInsertSql(active: boolean): string {
   const columns = `(id, email, display_name, role, status, balance_micros,
     state_version, created_at_ms, updated_at_ms, password_credential,
     auth_version, password_changed_at_ms, last_login_at_ms, email_verified_at_ms,
-    financial_history_complete)`
+    financial_history_complete, rpm_limit)`
+  const defaultRpm = `(SELECT COALESCE(json_extract(public_json, '$.default_user_rpm_limit'), 0) FROM system_settings WHERE id = 'global')`
   if (!active) {
     return `INSERT INTO users ${columns}
-      VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?, 1)`
+      VALUES (?, ?, ?, 'user', 'active', 0, 0, ?, ?, ?, 1, ?, ?, ?, 1, ${defaultRpm})`
   }
   return `INSERT INTO users ${columns}
-    SELECT ?, ?, ?, 'user', 'active', ?, 0, ?, ?, ?, 1, ?, ?, ?, 1
+    SELECT ?, ?, ?, 'user', 'active', ?, 0, ?, ?, ?, 1, ?, ?, ?, 1, ${defaultRpm}
       FROM commercial_registration_claims WHERE user_id = ?`
 }
 

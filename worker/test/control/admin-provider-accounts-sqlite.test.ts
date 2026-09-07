@@ -16,7 +16,7 @@ import {
 } from '../../src/control/accounts'
 import type { Env } from '../../src/env'
 import { decryptCredential } from '../../src/gateway/crypto'
-import { credentialAad } from '../../src/gateway/repository'
+import { credentialAad, getAccountCredential } from '../../src/gateway/repository'
 import type { ProviderPlatform } from '../../src/gateway/providers'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
@@ -114,6 +114,31 @@ afterEach(() => {
 })
 
 describe('admin provider account control plane on D1', () => {
+  it('pauses scheduling independently of enabled and preserves the control version', async () => {
+    const test = fixture(); const created = await createProvider(test, 'openai')
+    test.raw.exec(`INSERT INTO "groups"(id,name,platform,created_at_ms,updated_at_ms) VALUES('schedule-group','Scheduling','openai',1,1);
+      INSERT INTO models(id,platform,public_name,upstream_name,endpoint,created_at_ms,updated_at_ms) VALUES('schedule-model','openai','gpt-test','gpt-test','both',1,1);`)
+    test.raw.prepare('INSERT INTO account_groups(account_id,group_id,created_at_ms,updated_at_ms) VALUES(?,?,1,1)').run(created.id,'schedule-group')
+    test.raw.prepare('INSERT INTO account_models(account_id,model_id,created_at_ms,updated_at_ms) VALUES(?,?,1,1)').run(created.id,'schedule-model')
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).resolves.toMatchObject({account_id:created.id})
+    const paused = await test.app.request(`/accounts/${created.id}`, {
+      method:'PUT', headers:{'content-type':'application/json','idempotency-key':'schedule-off','if-match':`"${created.control_version}"`},
+      body:JSON.stringify({schedulable:false}),
+    },test.env)
+    expect(paused.status).toBe(200)
+    expect(await paused.json()).toMatchObject({data:{enabled:true,schedulable:false,control_version:created.control_version+1}})
+    expect(test.raw.prepare('SELECT enabled FROM accounts WHERE id=?').get(created.id)).toEqual({enabled:1})
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).rejects.toMatchObject({code:'credential_unavailable'})
+    const resumed = await test.app.request(`/accounts/${created.id}`, {
+      method:'PUT', headers:{'content-type':'application/json','idempotency-key':'schedule-on','if-match':`"${created.control_version+1}"`},
+      body:JSON.stringify({schedulable:true}),
+    },test.env)
+    expect(resumed.status).toBe(200)
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).resolves.toMatchObject({account_id:created.id})
+    test.raw.close()
+
+  })
+
   it('creates, reads and updates the persisted image adapter and credential kind', async () => {
     const test = fixture()
     const createResponse = await test.app.request('/accounts', {

@@ -56,6 +56,7 @@ interface StatusResult {
   success: boolean
   control_version?: number
   enabled?: boolean
+  schedulable?: boolean
   error?: OperationError
 }
 
@@ -73,12 +74,14 @@ export async function bulkUpdateAdminAccounts(context: Context<Bindings>): Promi
     const actor = await authenticateAdminSession(context.req.raw, context.env)
     const key = requireIdempotencyKey(context.req.raw)
     const body = await readJsonObject(context.req.raw, MAX_BODY_BYTES)
-    rejectUnknownKeys(body, ['accounts', 'enabled'])
-    if (typeof body.enabled !== 'boolean') {
-      throw new GatewayError(400, 'invalid_enabled', 'enabled must be a boolean')
+    rejectUnknownKeys(body, ['accounts', 'enabled', 'schedulable'])
+    const scheduling = body.schedulable !== undefined
+    const enabled = scheduling ? body.schedulable : body.enabled
+    if (typeof enabled !== 'boolean' || (scheduling && body.enabled !== undefined)) {
+      throw new GatewayError(400, 'invalid_enabled', 'Provide exactly one boolean: enabled or schedulable')
     }
     const accounts = parseAccounts(body.accounts)
-    const requestValue = { accounts, enabled: body.enabled }
+    const requestValue = { accounts, ...(scheduling ? { schedulable: enabled } : { enabled }) }
     const idempotency = await controlIdempotency('admin.accounts.bulk-status.v1', key, requestValue)
     const replay = await findControlIdempotency(context.env, idempotency)
     if (replay !== null) {
@@ -88,10 +91,10 @@ export async function bulkUpdateAdminAccounts(context: Context<Bindings>): Promi
     const results: StatusResult[] = []
     for (const [index, shard] of shards(accounts).entries()) {
       const shardIdempotency = await childIdempotency(idempotency, index, {
-        operation: 'bulk-status', accounts: shard, enabled: body.enabled,
+        operation: 'bulk-status', accounts: shard, enabled, scheduling,
       })
       results.push(...await applyStatusShard(
-        context.env, actor, shardIdempotency, shard, body.enabled, Date.now(),
+        context.env, actor, shardIdempotency, shard, enabled, Date.now(), scheduling,
       ))
     }
     const response = statusResponse(results)
@@ -285,6 +288,7 @@ async function applyStatusShard(
   accounts: AccountOperationInput[],
   enabled: boolean,
   now: number,
+  scheduling = false,
 ): Promise<StatusResult[]> {
   const replay = await findControlIdempotency(env, idempotency)
   if (replay !== null) return parseIdempotentResponse(replay, 'account_bulk_status_shard')
@@ -304,7 +308,7 @@ async function applyStatusShard(
         account_id: row.id,
         success: true,
         control_version: row.control_version + 1,
-        enabled,
+        ...(scheduling ? { schedulable: enabled } : { enabled }),
       }
     })
     const successful = results.filter((result): result is StatusResult & { control_version: number } =>
@@ -315,13 +319,13 @@ async function applyStatusShard(
     ]
     if (successful.length > 0) {
       statements.push(
-        statusShardUpdate(env, idempotency, successful, enabled, now),
+        statusShardUpdate(env, idempotency, successful, enabled, now, scheduling),
         accountAuditBatchInsert(
           env, actor, idempotency, action,
           successful.map((result) => ({
             accountId: result.account_id,
             version: result.control_version,
-            metadata: { enabled },
+            metadata: scheduling ? { schedulable: enabled } : { enabled },
           })),
           now,
         ),
@@ -448,8 +452,16 @@ function statusShardUpdate(
   results: Array<StatusResult & { control_version: number }>,
   enabled: boolean,
   now: number,
+  scheduling = false,
 ): D1PreparedStatement {
   const ids = results.map(() => '?').join(', ')
+  if (scheduling) {
+    return env.DB.prepare(`UPDATE accounts
+      SET ui_config_json = json_set(ui_config_json, '$.schedulable', json(?)),
+          config_version = config_version + 1, control_version = control_version + 1, updated_at_ms = ?
+      WHERE id IN (${ids}) AND EXISTS (SELECT 1 FROM admin_account_operation_guards WHERE scope = ? AND idempotency_key_hash = ?)`
+    ).bind(enabled ? 'true' : 'false', now, ...results.map(result => result.account_id), idempotency.scope, idempotency.key_hash)
+  }
   return env.DB.prepare(
     `UPDATE accounts
         SET enabled = ?, config_version = config_version + 1,

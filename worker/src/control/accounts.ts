@@ -1,3 +1,6 @@
+import { enrichAccountOllamaUsage } from './ollama-cloud-usage'
+import { accountFetcher, accountProxyId, type AccountFetcher } from '../proxy/account-fetch'
+import { validateAccountProxy } from './proxies'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { decryptCredential, encryptCredential } from '../gateway/crypto'
@@ -258,7 +261,7 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       status: 'a.enabled',
       rate_multiplier: 'a.billing_rate_multiplier_ppm',
       max_concurrency: 'a.max_concurrency',
-      schedulable: 'a.enabled',
+      schedulable: "COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1)",
       priority: "COALESCE(json_extract(a.ui_config_json, '$.priority'), 0)",
       expires_at: "json_extract(a.ui_config_json, '$.expires_at')",
       created_at: 'a.created_at_ms',
@@ -297,8 +300,10 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       throw new GatewayError(500, 'invalid_account_count', 'Account count projection is invalid', 'server_error')
     }
     const total = totalValue as number
+    const rows = rowsResult.results as unknown as AccountRow[]
+    const ollama = await enrichAccountOllamaUsage(context.env, rows)
     return controlSuccess({
-      items: (rowsResult.results as unknown as AccountRow[]).map(publicAccount),
+      items: rows.map(row => ({ ...publicAccount(row), ...(ollama.has(row.id) ? { ollama_cloud_usage: ollama.get(row.id) } : {}) })),
       total,
       page,
       page_size: pageSize,
@@ -312,7 +317,8 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
 export async function getAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
-    return controlSuccess(publicAccount(account))
+    const ollama = await enrichAccountOllamaUsage(context.env, [account])
+    return controlSuccess({ ...publicAccount(account), ...(ollama.has(account.id) ? { ollama_cloud_usage: ollama.get(account.id) } : {}) })
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -725,6 +731,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
     if ((await findAccount(context.env, accountId)) !== null) {
       throw new GatewayError(409, 'idempotency_record_missing', 'Account exists without its idempotency record')
     }
+    await validateAccountProxy(context.env, input.ui_config.proxy_id)
     await validateLinks(context.env, input.platform, input.group_links, input.model_capabilities)
     const masterKey = requireCredentialsMasterKey(context.env)
     const encrypted = await encryptCredential(
@@ -842,8 +849,14 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
       patch.credential_patch !== undefined ||
       patch.provider_config !== undefined ||
       patch.image_adapter !== undefined ||
-      patch.credential_kind !== undefined
+      patch.credential_kind !== undefined ||
+      (patch.ui_config !== undefined && patch.ui_config.proxy_id !== accountProxyId(account.ui_config_json))
     let nextUiConfig = patch.ui_config ?? parseUiConfig(account.ui_config_json)
+    if (patch.ui_config !== undefined) await validateAccountProxy(context.env, nextUiConfig.proxy_id)
+    const billingProbeExtra = nextUiConfig.extra as Record<string,unknown> | undefined
+    if (patch.billing_rate_multiplier_ppm !== undefined && patch.billing_rate_multiplier_ppm !== account.billing_rate_multiplier_ppm && billingProbeExtra?.upstream_billing_probe_enabled === true && billingProbeExtra?.upstream_billing_rate_sync_enabled === true) {
+      throw new GatewayError(409,'upstream_billing_rate_sync_conflict','Disable upstream billing rate sync before manually changing the account rate')
+    }
     let nextCredential: StoredAccountCredential | undefined
     if (patch.credential_patch !== undefined) {
       const currentCredential = await decryptCredential(
@@ -1041,7 +1054,7 @@ async function refreshOpenAIOAuthAccount(
     if (!refreshToken) {
       throw new GatewayError(409, 'oauth_refresh_token_missing', 'OpenAI OAuth account has no refresh token; re-authorize the account')
     }
-    const refreshed = await refreshOpenAIOAuthToken(refreshToken, currentCredential.client_id)
+    const refreshed = await refreshOpenAIOAuthToken(refreshToken, currentCredential.client_id, accountFetcher(env, accountProxyId(account.ui_config_json), account))
     const nextCredential = mergeOpenAIRefreshCredential(currentCredential, refreshed)
     const nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
     const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
@@ -1135,6 +1148,7 @@ export async function duplicateAdminAccount(context: Context<ControlBindings>): 
     const idempotency = await controlIdempotency('admin.accounts.duplicate.v1', idempotencyKey, { source_id: source.id })
     const previous = await findControlIdempotency(context.env, idempotency)
     if (previous !== null) return controlSuccess(safeIdempotentAccount(previous))
+    await validateAccountProxy(context.env, accountProxyId(source.ui_config_json))
 
     const accountId = await deterministicUuid('admin.accounts.duplicate.v1', idempotencyKey)
     const secretId = await deterministicUuid('admin.account-secrets.duplicate.v1', idempotencyKey)
@@ -1354,7 +1368,7 @@ export async function previewAdminUpstreamModels(context: Context<ControlBinding
     const baseUrl = body.base_url === undefined ? defaults[platform] : requireString(body, 'base_url', 2048)
     const account: ProviderAccount = { platform, ...providerContract(platform), base_url: baseUrl, provider_config: {} }
     const credential = { api_key: requireProviderCredential(body, 'api_key') }
-    return controlSuccess(await fetchUpstreamModels(account, credential))
+    return controlSuccess(await fetchUpstreamModels(account, credential, accountFetcher(context.env, body.proxy_id)))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -1368,7 +1382,7 @@ export async function syncAdminUpstreamModels(context: Context<ControlBindings>)
       account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
       credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
-    return controlSuccess(await fetchUpstreamModels(providerAccount(account), credential))
+    return controlSuccess(await fetchUpstreamModels(providerAccount(account), credential, accountFetcher(context.env, accountProxyId(account.ui_config_json), account)))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -1396,7 +1410,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       if (Object.hasOwn(input, 'model_id')) {
         const extra = parseUiConfig(account.ui_config_json).extra
         return testAccountModel(context, providerAccount(account), credential, input,
-          extra && typeof extra === 'object' && !Array.isArray(extra) ? extra as Record<string, unknown> : {})
+          extra && typeof extra === 'object' && !Array.isArray(extra) ? extra as Record<string, unknown> : {}, accountFetcher(context.env, accountProxyId(account.ui_config_json), account))
       }
     }
     const plan = buildProviderHealthRequest({
@@ -1409,7 +1423,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
     let status: 'healthy' | 'unhealthy' = 'unhealthy'
     let healthError: string | null = null
     try {
-      const response = await fetch(plan.url, {
+      const response = await accountFetcher(context.env, accountProxyId(account.ui_config_json), account)(plan.url, {
         method: plan.method,
         headers: plan.headers,
         redirect: 'manual',
@@ -1589,6 +1603,9 @@ async function runAccountBatch(
 
 function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   rejectUnknownFields(body, CREATE_ACCOUNT_FIELDS)
+  if (body.schedulable !== undefined && typeof body.schedulable !== 'boolean') {
+    throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+  }
   const platform = body.platform === undefined ? 'openai' : requireProviderPlatform(body.platform)
   const contract = providerContract(platform)
   const protocol = body.protocol === undefined
@@ -1710,14 +1727,14 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (patch.provider_config?.subscription_plan !== undefined) {
     assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
   }
-  if (body.enabled !== undefined || body.status !== undefined || body.schedulable !== undefined) {
+  if (body.schedulable !== undefined && typeof body.schedulable !== 'boolean') {
+    throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+  }
+  if (body.enabled !== undefined || body.status !== undefined) {
     if (body.status === 'error') {
       throw new GatewayError(409, 'status_not_supported', 'Worker accounts cannot be placed in error status manually')
     }
-    const enabledBody = body.enabled === undefined && body.schedulable !== undefined
-      ? { ...body, enabled: body.schedulable }
-      : body
-    patch.enabled = parseEnabledBody(enabledBody, true)
+    patch.enabled = parseEnabledBody(body, true)
   }
   if (body.max_concurrency !== undefined || body.concurrency !== undefined) {
     const field = body.max_concurrency === undefined ? 'concurrency' : 'max_concurrency'
@@ -1869,6 +1886,7 @@ function credentialKindForType(value: unknown, platform: ProviderPlatform): Acco
 
 const UI_CONFIG_VERSION = 1
 const UI_COMPAT_FIELDS = [
+  'schedulable',
   'notes', 'extra', 'proxy_id', 'load_factor', 'priority', 'expires_at',
   'auto_pause_on_expired', 'upstream_billing_probe_enabled',
   'upstream_billing_rate_sync_enabled',
@@ -2091,7 +2109,9 @@ function validateAccountExecution(
       (credentialKind === 'oauth' || credentialKind === 'setup_token')
     : platform === 'openai'
       ? imageAdapter === 'direct_images' && (credentialKind === 'api_key' || credentialKind === 'oauth')
-      : imageAdapter === 'direct_images' && credentialKind === 'api_key'
+      : platform === 'anthropic'
+        ? imageAdapter === 'direct_images' && ['api_key','oauth','setup_token'].includes(credentialKind)
+        : imageAdapter === 'direct_images' && credentialKind === 'api_key'
   if (!supported) {
     throw new GatewayError(
       409,
@@ -2198,7 +2218,7 @@ interface OpenAIRefreshResponse {
   token_type?: string
 }
 
-async function refreshOpenAIOAuthToken(refreshToken: string, clientId: unknown): Promise<OpenAIRefreshResponse> {
+async function refreshOpenAIOAuthToken(refreshToken: string, clientId: unknown, upstreamFetch: AccountFetcher): Promise<OpenAIRefreshResponse> {
   const form = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
@@ -2207,7 +2227,7 @@ async function refreshOpenAIOAuthToken(refreshToken: string, clientId: unknown):
   })
   let response: Response
   try {
-    response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
+    response = await upstreamFetch(OPENAI_OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
@@ -2630,6 +2650,7 @@ function accountResponse(value: {
     ...compatibility,
     rate_multiplier: multiplierPpm / 1_000_000,
     enabled: value.enabled,
+    schedulable: compatibility.schedulable !== false,
     status: !value.enabled
       ? 'inactive' as const
       : value.health_status === 'unhealthy'
@@ -2784,6 +2805,7 @@ function normalizeBaseUrl(value: string): string {
 function mapAccountWriteError(error: unknown): GatewayError {
   if (error instanceof GatewayError) return error
   const message = error instanceof Error ? error.message : String(error)
+  if (message.includes('upstream_billing_rate_sync_conflict')) return new GatewayError(409,'upstream_billing_rate_sync_conflict','Disable upstream billing rate sync before manually changing the account rate')
   if (/UNIQUE constraint failed: accounts\.platform, accounts\.name/i.test(message)) {
     return new GatewayError(409, 'account_name_exists', 'An account with this name already exists')
   }

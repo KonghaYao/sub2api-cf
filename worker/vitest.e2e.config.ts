@@ -20,8 +20,41 @@ export default defineConfig(async () => {
             ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
             }
+            if (url.pathname === '/v1/sub2api/billing') return Response.json({object:'sub2api.key_billing',schema_version:1,billing_scope:'token',group_rate_multiplier:0.25,resolved_rate_multiplier:0.25,effective_rate_multiplier:0.25,peak_rate_enabled:false,observed_at:new Date().toISOString()})
+            if (url.pathname === '/v1/messages' || url.pathname === '/v1/responses' || url.pathname === '/backend-api/codex/responses') {
+              const body = await request.clone().json() as any
+              if (body.model === 'cyber-policy-test') {
+                const error={code:'cyber_policy',message:'Fixture cyber refusal'}
+                return body.stream?new Response('data: '+JSON.stringify({type:'response.failed',response:{id:'cyber-fixture',status:'failed',error}})+'\n\n',{headers:{'content-type':'text/event-stream'}}):Response.json({error},{status:400})
+              }
+              if (typeof body.model === 'string' && body.model.startsWith('native-buffer-')) {
+                const data=body.model === 'native-buffer-failed'
+                  ? {type:'response.failed',response:{id:'native-error',status:'failed',error:{code:'invalid_request',message:'fixture failure'},usage:{input_tokens:6,output_tokens:2}}}
+                  : {type:'response.created',response:{id:'native-incomplete'}}
+                const bytes=new TextEncoder().encode('data: '+JSON.stringify(data)+'\n\n')
+                if(body.model === 'native-buffer-cancel')return new Response(new ReadableStream({start(controller){controller.enqueue(bytes)}}),{headers:{'content-type':'text/event-stream'}})
+                return new Response(bytes,{headers:{'content-type':'text/event-stream'}})
+              }
+              if (body.model === 'provider-forwarding-anthropic') {
+                const valid=request.headers.get('authorization')==='Bearer local-fixture-key' && !request.headers.has('x-api-key') && request.headers.get('user-agent')?.startsWith('claude-cli/') && request.headers.get('x-stainless-runtime')==='node' && body.system.some((b:any)=>b.text==='Custom fixture expansion') && body.messages[0].content[0].text.includes('Original client instructions')
+                if (!valid) return Response.json({error:'anthropic provider settings mismatch'},{status:422})
+                return Response.json({id:'provider',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'provider-settings-verified'}],stop_reason:'end_turn',usage:{input_tokens:10,output_tokens:5}})
+              }
+              if (body.model === 'provider-forwarding-codex') {
+                if(request.headers.get('user-agent')!=='codex-tui/0.200.0 (Linux)' || request.headers.get('version')!=='0.200.0' || request.headers.get('originator')!=='codex-tui')return Response.json({error:'codex provider settings mismatch'},{status:422})
+                return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'provider',object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'provider-settings-verified'}]}],usage:{input_tokens:10,output_tokens:5}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+              }
+            }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
+              if (typeof body.model === 'string' && body.model.startsWith('fast-policy-')) {
+                const expectedTier = body.model === 'fast-policy-filter-upstream' ? undefined : 'priority'
+                if (body.model === 'fast-policy-block-upstream' || body.service_tier !== expectedTier) return Response.json({error:'policy body mismatch'}, {status:422})
+                const result = {id:'fast-policy',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:'policy-body-verified'},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}}
+                if (body.stream) return new Response('data: '+JSON.stringify({choices:[{delta:{content:'policy-body-verified'}}]})+'\n\ndata: '+JSON.stringify({choices:[],usage:result.usage})+'\n\ndata: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}})
+                return Response.json(result)
+              }
+              if (body.model === 'runtime-overload-upstream') return new Response('fixture overload', { status: 529 })
               if (body.model === 'lifecycle-invalid-json-upstream') {
                 return new Response('<html>upstream maintenance</html>', { headers: { 'content-type': 'text/html' } })
               }
@@ -84,6 +117,12 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/responses') {
               const body = await request.json() as Record<string, unknown>
+              if (body.model === 'scheduler-response-upstream') {
+                const value={id:body.previous_response_id ? 'resp-scheduler-next':'resp-scheduler-first',object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:body.previous_response_id ? 'continued':'first'}]}],usage:{input_tokens:2,output_tokens:1}}
+                const headers={'x-ratelimit-limit-tokens':'1000','x-ratelimit-remaining-tokens':'900','x-ratelimit-reset-tokens':'1m'}
+                if(body.stream) return new Response('data: '+JSON.stringify({type:'response.output_text.delta',delta:'first'})+'\n\ndata: '+JSON.stringify({type:'response.completed',response:value})+'\n\n',{headers:{...headers,'content-type':'text/event-stream'}})
+                return Response.json(value,{headers})
+              }
               if (body.model === 'gpt-bridge-failover-upstream') {
                 if (url.origin === 'https://upstream.e2e.invalid') {
                   return new Response([

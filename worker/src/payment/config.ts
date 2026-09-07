@@ -22,6 +22,13 @@ import {
 type PaymentBindings = { Bindings: Env }
 
 interface PaymentConfigRow {
+  load_balance_strategy: 'round_robin' | 'least_amount'
+  cancel_rate_limit_enabled: number
+  cancel_rate_limit_max: number
+  cancel_rate_limit_window: number
+  cancel_rate_limit_unit: 'minute' | 'hour' | 'day'
+  cancel_rate_limit_window_mode: 'rolling' | 'fixed'
+
   schema_version: number
   enabled: number
   enabled_payment_types_json: string
@@ -251,6 +258,7 @@ export async function updatePaymentConfig(context: Context<PaymentBindings>): Pr
              balance_disabled = ?, balance_recharge_multiplier_ppm = ?,
              subscription_usd_to_cny_rate_ppm = ?, recharge_fee_ppm = ?,
              product_name_prefix = ?, product_name_suffix = ?, help_url = ?, help_text = ?,
+             load_balance_strategy = ?, cancel_rate_limit_enabled = ?, cancel_rate_limit_max = ?, cancel_rate_limit_window = ?, cancel_rate_limit_unit = ?, cancel_rate_limit_window_mode = ?,
              version = CASE WHEN version = ? THEN ? ELSE -1 END, updated_at_ms = ?
            WHERE id = 'global'`,
         ).bind(
@@ -269,6 +277,12 @@ export async function updatePaymentConfig(context: Context<PaymentBindings>): Pr
           next.product_name_suffix,
           next.help_url,
           next.help_text,
+          next.load_balance_strategy,
+          next.cancel_rate_limit_enabled,
+          next.cancel_rate_limit_max,
+          next.cancel_rate_limit_window,
+          next.cancel_rate_limit_unit,
+          next.cancel_rate_limit_window_mode,
           expected,
           expected + 1,
           next.updated_at_ms,
@@ -591,7 +605,21 @@ export async function decryptPaymentProviderConfig(
 export async function requireActiveStripeProvider(
   env: Env,
   providerId?: string,
+  selectForOrder = false,
 ): Promise<ActiveStripeProvider> {
+  if (providerId === undefined && selectForOrder) {
+    const strategy = await env.DB.prepare("SELECT load_balance_strategy FROM payment_config WHERE id='global'").first<{ load_balance_strategy: string }>()
+    if (strategy?.load_balance_strategy === 'least_amount') {
+      const selected = await env.DB.prepare(`SELECT p.id FROM payment_provider_instances p WHERE p.enabled=1 AND p.provider_type='stripe' ORDER BY (SELECT COALESCE(SUM(o.pay_amount_micros),0) FROM payment_orders o WHERE o.provider_instance_id=p.id AND o.created_at_ms>=? AND o.status NOT IN ('CANCELLED','EXPIRED','FAILED')) ASC,p.created_at_ms,p.id LIMIT 1`).bind(Math.floor(Date.now()/86400000)*86400000).first<{ id: string }>()
+      providerId = selected?.id
+    } else {
+      const providers = (await env.DB.prepare("SELECT id FROM payment_provider_instances WHERE enabled=1 AND provider_type='stripe' ORDER BY created_at_ms,id").all<{ id: string }>()).results
+      if (providers.length) {
+        const selected = await env.DB.prepare("UPDATE payment_config SET selection_cursor=(selection_cursor+1)%2147483647 WHERE id='global' RETURNING selection_cursor").first<{ selection_cursor: number }>()
+        providerId = providers[Math.max(0,(selected?.selection_cursor ?? 1)-1)%providers.length].id
+      }
+    }
+  }
   const row = providerId === undefined
     ? await env.DB.prepare(
         `SELECT ${PROVIDER_COLUMNS} FROM payment_provider_instances
@@ -665,6 +693,7 @@ async function requirePaymentConfigRow(env: Env): Promise<PaymentConfigRow> {
             balance_disabled, balance_recharge_multiplier_ppm,
             subscription_usd_to_cny_rate_ppm, recharge_fee_ppm,
             product_name_prefix, product_name_suffix, help_url, help_text,
+            load_balance_strategy, cancel_rate_limit_enabled, cancel_rate_limit_max, cancel_rate_limit_window, cancel_rate_limit_unit, cancel_rate_limit_window_mode,
             version, created_at_ms, updated_at_ms
        FROM payment_config WHERE id = 'global'`,
   ).first<PaymentConfigRow>()
@@ -795,7 +824,12 @@ function publicPaymentConfig(
     balance_recharge_multiplier: row.balance_recharge_multiplier_ppm / 1_000_000,
     subscription_usd_to_cny_rate: row.subscription_usd_to_cny_rate_ppm / 1_000_000,
     recharge_fee_rate: row.recharge_fee_ppm / 10_000,
-    load_balance_strategy: 'round_robin',
+    load_balance_strategy: row.load_balance_strategy,
+    cancel_rate_limit_enabled: row.cancel_rate_limit_enabled === 1,
+    cancel_rate_limit_max: row.cancel_rate_limit_max,
+    cancel_rate_limit_window: row.cancel_rate_limit_window,
+    cancel_rate_limit_unit: row.cancel_rate_limit_unit,
+    cancel_rate_limit_window_mode: row.cancel_rate_limit_window_mode,
     product_name_prefix: row.product_name_prefix,
     product_name_suffix: row.product_name_suffix,
     help_image_url: row.help_url,
@@ -876,11 +910,14 @@ function parsePaymentConfigPatch(body: Record<string, unknown>): Partial<Payment
     }
     patch.enabled_payment_types_json = JSON.stringify(types)
   }
-  if (body.load_balance_strategy !== undefined) {
-    const strategy = optionalTrimmedString(body.load_balance_strategy, 'load_balance_strategy', 32)
-    if (strategy !== '' && strategy !== 'round_robin') {
-      throw new GatewayError(400, 'unsupported_load_balance_strategy', 'Only round_robin is supported')
-    }
+  assignBooleanInteger(body, 'cancel_rate_limit_enabled', patch, 'cancel_rate_limit_enabled')
+  assignInteger(body, 'cancel_rate_limit_max', patch, 'cancel_rate_limit_max', 1, 10000)
+  assignInteger(body, 'cancel_rate_limit_window', patch, 'cancel_rate_limit_window', 1, 10000)
+  for (const [field, allowed] of [['load_balance_strategy', ['round_robin', 'least_amount']], ['cancel_rate_limit_unit', ['minute', 'hour', 'day']], ['cancel_rate_limit_window_mode', ['rolling', 'fixed']]] as const) {
+    if (body[field] === undefined) continue
+    const value = typeof body[field] === 'string' ? body[field].replace(/-/g, '_') : ''
+    if (!(allowed as readonly string[]).includes(value)) throw new GatewayError(400, `invalid_${field}`, `Invalid ${field}`)
+    Object.assign(patch, { [field]: value })
   }
   if (Object.keys(patch).length === 0) {
     throw new GatewayError(400, 'payment_config_patch_required', 'At least one payment setting is required')

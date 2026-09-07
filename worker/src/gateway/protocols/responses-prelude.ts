@@ -1,3 +1,4 @@
+import { GatewayError } from '../errors'
 import {
   isResponsesFailedTerminal,
   responsesFailureDetails,
@@ -42,7 +43,7 @@ const deterministicFailureCodes = new Set([
  */
 export async function inspectResponsesSsePrelude(
   response: Response,
-  options: { stopAtVisible?: boolean; maxWaitMs?: number } = {},
+  options: { stopAtVisible?: boolean; maxWaitMs?: number; signal?: AbortSignal } = {},
 ): Promise<ResponsesPreludeInspection> {
   if (response.body === null) {
     return { decision: { kind: 'unresolved' }, response }
@@ -59,7 +60,7 @@ export async function inspectResponsesSsePrelude(
     if (remaining <= 0) {
       return inspectedResponse(response, reader, prefix, preludeTimeoutFailure())
     }
-    const timedRead = await readBefore(reader, remaining)
+    const timedRead = await readBefore(reader, remaining, options.signal)
     if (timedRead.kind === 'timeout') {
       return inspectedResponse(response, reader, prefix, preludeTimeoutFailure(), timedRead.pending)
     }
@@ -231,14 +232,25 @@ function objectValue(value: unknown): JsonObject | null {
 async function readBefore(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<
   | { kind: 'read'; result: ReadableStreamReadResult<Uint8Array> }
   | { kind: 'timeout'; pending: Promise<ReadableStreamReadResult<Uint8Array>> }
 > {
   let timer: ReturnType<typeof setTimeout> | undefined
   const pending = reader.read()
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<never>((_,reject) => {
+    onAbort = () => {
+      reject(new GatewayError(499,'client_cancelled','Client cancelled the request','invalid_request_error'))
+      void reader.cancel('client cancelled prelude').catch(() => undefined)
+    }
+    signal?.addEventListener('abort',onAbort,{once:true})
+    if(signal?.aborted)onAbort()
+  })
   try {
     return await Promise.race([
+      aborted,
       pending.then((result) => ({ kind: 'read' as const, result })),
       new Promise<{ kind: 'timeout'; pending: typeof pending }>((resolve) => {
         timer = setTimeout(() => resolve({ kind: 'timeout', pending }), timeoutMs)
@@ -246,5 +258,6 @@ async function readBefore(
     ])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+    if(onAbort)signal?.removeEventListener('abort',onAbort)
   }
 }

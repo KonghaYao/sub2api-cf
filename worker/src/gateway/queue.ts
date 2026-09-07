@@ -1,3 +1,5 @@
+import { consumeOpsSystemLog } from '../control/ops-system-logs'
+import { consumeSettingsMaintenance } from '../maintenance/queue'
 import type {
   Env,
   PlatformEvent,
@@ -85,6 +87,7 @@ export async function consumeEvents(
 ): Promise<void> {
   for (const message of batch.messages) {
     try {
+      if (await consumeOpsSystemLog(message.body, env) || await consumeSettingsMaintenance(message.body, env)) { message.ack(); continue }
       if (isMediaProviderJobAdvanceEvent(message.body)) {
         await consumeMediaProviderJobAdvance(message.body, env)
         message.ack()

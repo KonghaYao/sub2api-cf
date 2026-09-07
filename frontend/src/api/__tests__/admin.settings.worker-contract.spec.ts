@@ -21,28 +21,18 @@ describe('admin settings Cloudflare Worker contract', () => {
     )
   })
 
-  it('keeps removed host web-search emulation calls off the Worker API', async () => {
-    const {
-      getWebSearchEmulationConfig,
-      resetWebSearchUsage,
-      testWebSearchEmulation,
-      updateWebSearchEmulationConfig,
-    } = await import('@/api/admin/settings')
-
-    await expect(getWebSearchEmulationConfig()).resolves.toEqual({
-      enabled: false,
-      providers: [],
-    })
-    await expect(updateWebSearchEmulationConfig({ enabled: true, providers: [] }))
-      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(testWebSearchEmulation('query'))
-      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(resetWebSearchUsage({ provider_type: 'tavily' }))
-      .rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-
-    expect(get).not.toHaveBeenCalled()
-    expect(post).not.toHaveBeenCalled()
-    expect(put).not.toHaveBeenCalled()
+  it('reads, updates, tests and resets real Worker search configuration with its own version', async () => {
+    const { getWebSearchEmulationConfig, resetWebSearchUsage, testWebSearchEmulation, updateWebSearchEmulationConfig } = await import('@/api/admin/settings')
+    get.mockResolvedValue({ data: { enabled: false, providers: [], control_version: 3 } })
+    put.mockResolvedValue({ data: { enabled: true, providers: [], control_version: 4 } })
+    post.mockResolvedValue({ data: { results: [] } })
+    await expect(getWebSearchEmulationConfig()).resolves.toMatchObject({ control_version: 3 })
+    await updateWebSearchEmulationConfig({ enabled: true, providers: [] })
+    expect(put).toHaveBeenCalledWith('/admin/settings/web-search-emulation', { enabled: true, providers: [] }, { headers: { 'If-Match': '"3"' } })
+    await testWebSearchEmulation('query')
+    expect(post).toHaveBeenCalledWith('/admin/settings/web-search-emulation/test', { query: 'query' })
+    await resetWebSearchUsage({ provider_type: 'tavily' })
+    expect(post).toHaveBeenCalledWith('/admin/settings/web-search-emulation/reset-usage', { provider_type: 'tavily' })
   })
 
   it('adapts the versioned Worker response to the existing settings form', async () => {

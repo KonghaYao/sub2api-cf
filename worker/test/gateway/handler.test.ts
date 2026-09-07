@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 import { encryptCredential } from '../../src/gateway/crypto'
 import type { Env } from '../../src/env'
 import type { ModelRoute } from '../../src/gateway/types'
@@ -46,6 +47,8 @@ class FakeStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('SELECT gateway_json FROM system_settings')) return { gateway_json: JSON.stringify(this.database.gatewaySettings) } as T
+    if (this.query.includes('FROM runtime_settings')) return (this.database.runtimeSettings.has(String(this.values[0])) ? { value_json: JSON.stringify(this.database.runtimeSettings.get(String(this.values[0]))), control_version: 1 } : null) as T | null
     if (this.query.includes('FROM api_keys k')) return this.database.principal as T
     if (this.query.includes('WITH response_input AS')) return this.database.responseModelPricing as T | null
     if (this.query.includes('FROM resolved_alias alias')) return this.database.externalAliasModel as T | null
@@ -227,6 +230,8 @@ function withAccountExecutionDefaults(credential: Record<string, unknown>): Reco
 }
 
 class FakeDatabase {
+  gatewaySettings: Record<string, unknown> = {}
+  runtimeSettings = new Map<string, unknown>()
   readonly bindings: Array<{ query: string; values: unknown[] }> = []
   readonly batchQueries: string[][] = []
   credential: Record<string, unknown> = {}
@@ -522,6 +527,33 @@ function expectZeroCostBillingLifecycle(user: FakeStateStub): void {
 }
 
 describe('OpenAI-compatible gateway', () => {
+  it('applies persisted client policy before reserving credit or contacting an upstream', async () => {
+    const { env, database, user } = await harness()
+    database.gatewaySettings = { min_codex_version:'0.100.0' }
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+    const response = await createApp().request('/v1/chat/completions', {
+      method:'POST', headers:{authorization:'Bearer sk-customer','content-type':'application/json','user-agent':'codex_cli_rs/0.99.0'},
+      body:JSON.stringify({model:'gpt-public',messages:[{role:'user',content:'hello'}]}),
+    },env)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({error:{code:'unsupported_client_version'}})
+    expect(upstream).not.toHaveBeenCalled()
+    expect(user.calls.some(call=>call.path==='/reserve')).toBe(false)
+  })
+  it('applies the configured metadata policy to the actual provider body', async () => {
+    const {env,database}=await harness()
+    database.gatewaySettings={enable_metadata_passthrough:false}
+    const upstream=vi.fn(async(_url:unknown,_init?:RequestInit)=>Response.json({model:'gpt-upstream',choices:[],usage:{prompt_tokens:1,completion_tokens:1}}))
+    vi.stubGlobal('fetch',upstream)
+    const response=await createApp().request('/v1/chat/completions',{
+      method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},
+      body:JSON.stringify({model:'gpt-public',messages:[{role:'user',content:'hello'}],metadata:{user_id:'private'}}),
+    },env)
+    expect(response.status).toBe(200)
+    expect(JSON.parse(String(upstream.mock.calls[0][1]?.body)).metadata).toBeUndefined()
+  })
+
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
@@ -1922,6 +1954,30 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('enforces saved stream-timeout threshold through the real handler and SQLite event counter', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-04T00:00:00Z') })
+    const sqlite = createSqliteD1()
+    try {
+      applyMigrations(sqlite.raw)
+      sqlite.raw.prepare('INSERT INTO accounts(id,name,platform,credential_ref,created_at_ms,updated_at_ms)VALUES(?,?,?,?,?,?)').run(accountId,'Timeout test','openai','fixture',Date.now(),Date.now())
+      sqlite.raw.prepare('INSERT INTO runtime_settings(name,value_json,updated_at_ms)VALUES(?,?,?)').run('stream-timeout',JSON.stringify({enabled:true,action:'temp_unsched',temp_unsched_minutes:7,threshold_count:1,threshold_window_minutes:1}),Date.now())
+      const { env, pool, user } = await harness()
+      const original = env.DB, statements = new WeakSet<object>()
+      env.DB = {
+        prepare(query: string) { const statement = /runtime_settings|stream_timeout_events/.test(query) ? sqlite.d1.prepare(query) : original.prepare(query); if (/runtime_settings|stream_timeout_events/.test(query)) statements.add(statement); return statement },
+        batch(input: D1PreparedStatement[]) { return input.every(statement => statements.has(statement)) ? sqlite.d1.batch(input) : original.batch(input) },
+      } as D1Database
+      vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))}}),{headers:{'content-type':'text/event-stream'}})))
+      const response = await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages:[{role:'user',content:'hello'}]})},env)
+      const text = response.text()
+      await vi.advanceTimersByTimeAsync(120_001)
+      expect(await text).toContain('Upstream stream terminated unexpectedly')
+      expect(sqlite.raw.prepare('SELECT COUNT(*) AS count FROM stream_timeout_events').get()).toEqual({count:1})
+      expect(pool.calls.find(call=>call.path==='/failure')?.body).toMatchObject({cooldown_ms:420000})
+      expect(user.calls.filter(call=>call.path==='/settle')).toHaveLength(1)
+    } finally { sqlite.raw.close();vi.useRealTimers() }
+  })
+
   it('bounds a cancelled-stream drain and falls back to estimated usage', async () => {
     vi.useFakeTimers({ now: new Date('2026-09-04T00:00:00.000Z') })
     try {
@@ -2624,8 +2680,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(response.status).toBe(200)
     expect(user.calls.filter((call) => call.path === '/settle')).toHaveLength(3)
     expect(database.recovery).not.toBeNull()
-    expect(queued).toHaveLength(1)
-    expect(queued[0]).toMatchObject({ event_type: 'settlement.retry.v1' })
+    expect(queued.filter((event: any) => event.event_type === 'settlement.retry.v1')).toHaveLength(1)
   })
 
   it('atomically replaces Pool members with a versioned account snapshot', async () => {
@@ -2759,6 +2814,39 @@ describe('OpenAI-compatible gateway', () => {
       },
     })
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('applies configured beta policy and retries a signature rejection once without extra billing', async () => {
+    const { env, database, user, pool } = await harness()
+    Object.assign(database.principal, { platform: 'anthropic' })
+    Object.assign(database.credential, { platform: 'anthropic', protocol: 'anthropic', auth_scheme: 'x-api-key', provider_config_json: '{}', base_url: 'https://api.anthropic.example' })
+    database.runtimeSettings.set('beta-policy', { rules: [{ beta_token: 'remove-v1', action: 'filter', scope: 'all' }] })
+    database.runtimeSettings.set('rectifier', { enabled: true, thinking_signature_enabled: true, thinking_budget_enabled: true, apikey_signature_enabled: true, apikey_signature_patterns: [] })
+    const upstream = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => upstream.mock.calls.length === 1
+      ? Response.json({ error: { message: 'invalid thinking signature' } }, { status: 400 })
+      : Response.json({ id: 'msg_rectified', type: 'message', role: 'assistant', model: 'gpt-upstream', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } }))
+    vi.stubGlobal('fetch', upstream)
+    const response = await createApp().request('/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': 'sk-customer', 'content-type': 'application/json', 'anthropic-beta': 'remove-v1,keep-v1' },
+      body: JSON.stringify({ model: 'gpt-public', max_tokens: 64, messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'old', signature: 'bad' }, { type: 'text', text: 'continue' }] }] }),
+    }, env)
+    expect(response.status).toBe(200)
+    expect(upstream).toHaveBeenCalledTimes(2)
+    expect(new Headers(upstream.mock.calls[0][1]?.headers).get('anthropic-beta')).toBe('keep-v1')
+    expect(JSON.parse(String(upstream.mock.calls[1][1]?.body))).toMatchObject({ max_tokens: 64, messages: [{ content: [{ type: 'text', text: 'continue' }] }] })
+    expect(user.calls.filter(call => call.path === '/settle')).toHaveLength(1)
+    expect(pool.calls.filter(call => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('uses configured 529 cooldown on the last failed upstream without changing customer charges', async () => {
+    const { env, database, user, pool } = await harness()
+    database.runtimeSettings.set('overload-cooldown', { enabled: true, cooldown_minutes: 2 })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('overloaded', { status: 529 })))
+    const response = await createApp().request('/v1/responses', { method: 'POST', headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-public', input: 'hello' }) }, env)
+    expect(response.status).toBe(503)
+    expect(pool.calls.filter(call => call.path === '/failure').every(call => call.body.cooldown_ms === 120000)).toBe(true)
+    expect(pool.calls.filter(call => call.path === '/failure').length).toBeGreaterThan(0)
+    expect(user.calls.filter(call => call.path === '/settle')).toHaveLength(0)
   })
 
   it('routes Anthropic Messages natively with x-api-key authentication and native usage', async () => {

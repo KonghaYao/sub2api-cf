@@ -69,6 +69,12 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/auth/oauth/complete',
+    name: 'WorkerOAuthComplete',
+    component: () => import('@/views/auth/WorkerOAuthCompleteView.vue'),
+    meta: { requiresAuth: false, title: 'Complete registration' },
+  },
+  {
     path: '/auth/callback',
     name: 'OAuthCallback',
     alias: '/auth/oauth/callback',

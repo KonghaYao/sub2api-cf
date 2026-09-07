@@ -108,11 +108,12 @@ class MissingUserDatabase {
 
   constructor(private readonly events?: string[]) {}
 
-  prepare(): D1PreparedStatement {
+  prepare(query: string): D1PreparedStatement {
     const database = this
     const statement = {
       bind: () => statement,
       first: async () => {
+        if(query.includes('FROM runtime_settings')) return { value_json: JSON.stringify({enabled:false,user_rpm:240,heavy_rpm:60,exempt_admin:true,public_ip_rpm:300}) }
         database.events?.push('db:read')
         database.reads += 1
         return null

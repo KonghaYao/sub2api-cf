@@ -35,6 +35,7 @@ class UserStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return null
     if (this.query.includes('SELECT 1 AS allowed') && this.query.includes('FROM admin_user_roles')) {
       return { allowed: 1 } as T
     }

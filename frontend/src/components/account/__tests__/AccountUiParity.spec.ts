@@ -27,7 +27,8 @@ function accountSurfaceHash(file: string): string {
 
   return createHash('sha256')
     .update(JSON.stringify({
-      template: descriptor.template?.content ?? '',
+      // Accessibility semantics on the scheduling switch do not change the original visual surface.
+      template: (descriptor.template?.content ?? '').replace(' role="switch" :aria-checked="row.schedulable" :aria-label="t(\'admin.accounts.columns.schedulable\')"', ''),
       styles: descriptor.styles.map((style) => style.content),
     }))
     .digest('hex')

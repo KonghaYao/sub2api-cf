@@ -1,52 +1,52 @@
 export default {
   audit: {
-    title: '审计事件',
-    description: '只读展示管理、认证与支付事件；敏感标识已掩码，详情仅返回白名单字段。',
-    empty: '暂无审计事件',
-    loadFailed: '加载审计事件失败',
+    title: '操作日志',
+    description: '记录管理员与用户的管理面操作，请求头凭证仅保留首尾、请求体已脱敏。日志无法单条删除，全量清理需二次验证。',
+    clearAll: '全部清理',
+    empty: '暂无操作日志',
+    loadFailed: '加载操作日志失败',
     filters: {
       all: '全部',
-      category: '分类',
+      q: '关键字',
+      qPlaceholder: '路径 / 动作 / 操作者邮箱',
+      actorEmail: '操作者邮箱',
       action: '动作',
-      outcome: '结果',
-      actorUserId: '操作者用户 ID',
-      resourceType: '资源类型',
-      resourceId: '资源 ID'
-    },
-    categories: {
-      settings: '系统设置',
-      rbac: '权限管理',
-      account: '账号',
-      auth: '认证安全',
-      payment: '支付'
-    },
-    outcomes: {
-      succeeded: '成功',
-      failed: '失败',
-      blocked: '已阻止',
-      recorded: '已记录'
+      clientIp: '客户端 IP',
+      method: '请求方法',
+      authMethod: '认证方式',
+      result: '结果',
+      resultSuccess: '成功',
+      resultFailure: '失败',
+      startTime: '开始时间',
+      endTime: '结束时间'
     },
     columns: {
       time: '时间',
-      category: '分类',
       actor: '操作者',
       action: '动作',
-      outcome: '结果',
-      resource: '资源',
+      method: '方法',
+      result: '结果',
+      clientIp: '客户端 IP',
       detail: '详情'
     },
-    pagination: {
-      page: '第 {page} 页',
-      previous: '上一页审计事件',
-      next: '下一页审计事件'
-    },
     detail: {
-      title: '审计事件详情',
-      actor: '操作者',
-      origin: '来源',
-      resource: '资源',
-      version: '版本 {version}',
-      metadata: '白名单元数据'
+      title: '操作日志详情',
+      actorRole: '角色',
+      methodPath: '方法 / 路径',
+      latency: '耗时',
+      requestId: '请求 ID',
+      credential: '凭证（掩码）',
+      userAgent: 'User-Agent',
+      requestBody: '请求体（已脱敏）',
+      extra: '附加信息'
+    },
+    clearConfirm: {
+      title: '清理全部操作日志',
+      message: '此操作将永久删除所有操作日志，且不可恢复。清理动作本身会被留痕记录。确定继续吗？',
+      totpTitle: '输入二次验证码',
+      totpHint: '清理操作日志需要现场验证 TOTP 验证码。',
+      success: '已清理 {count} 条操作日志',
+      failed: '清理操作日志失败'
     }
   }
 }

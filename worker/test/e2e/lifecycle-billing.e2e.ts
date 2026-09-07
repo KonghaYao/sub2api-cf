@@ -1,3 +1,4 @@
+import { poolStateName } from '../../src/gateway/state-client'
 import { env, exports } from 'cloudflare:workers'
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { createApp } from '../../src/app'
@@ -116,6 +117,16 @@ describe('billing lifecycle over real Worker/D1/DO/Queue', () => {
       expect(await env.DB.prepare('SELECT amount_micros,outcome FROM usage_projection WHERE api_key_id=?').bind(fixture.api_key_id).first()).toEqual({ amount_micros: 27, outcome: mode === 'success' ? 'completed' : mode === 'cancel' ? 'cancelled' : 'failed' })
     }, { timeout: 5000 })
     expect(await env.DB.prepare('SELECT quota_used_micros FROM api_keys WHERE id=?').bind(fixture.api_key_id).first()).toEqual({ quota_used_micros: 27 })
+    const route=await env.DB.prepare('SELECT model_id FROM group_models WHERE group_id=?').bind(fixture.group_id).first<{model_id:string}>()
+    const pool=env.POOL_STATE.get(env.POOL_STATE.idFromName(poolStateName(fixture.group_id,route!.model_id,'chat_completions')))
+    const telemetry=await (await pool.fetch('https://pool.test/snapshot')).json() as {scheduler_metrics:Array<{samples:number;error_rate:number;ttft_ms:number|null}>}
+    if(mode==='cancel') expect(telemetry.scheduler_metrics).toEqual([])
+    else {
+      expect(telemetry.scheduler_metrics).toHaveLength(1)
+      expect(telemetry.scheduler_metrics[0]).toMatchObject({samples:1,error_rate:mode==='success'?0:1})
+      expect(telemetry.scheduler_metrics[0]!.ttft_ms).toBeGreaterThanOrEqual(0)
+    }
+
   })
 
   it('rejects exhausted Key quota and releases the user reservation', async () => {

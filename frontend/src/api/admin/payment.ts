@@ -28,6 +28,11 @@ export interface AdminPaymentConfig {
   balance_recharge_multiplier: number
   subscription_usd_to_cny_rate: number
   recharge_fee_rate: number
+  cancel_rate_limit_enabled?: boolean
+  cancel_rate_limit_max?: number
+  cancel_rate_limit_window?: number
+  cancel_rate_limit_unit?: string
+  cancel_rate_limit_window_mode?: string
   load_balance_strategy: string
   product_name_prefix: string
   product_name_suffix: string
@@ -50,6 +55,11 @@ export interface UpdatePaymentConfigRequest {
   balance_recharge_multiplier?: number
   subscription_usd_to_cny_rate?: number
   recharge_fee_rate?: number
+  cancel_rate_limit_enabled?: boolean
+  cancel_rate_limit_max?: number
+  cancel_rate_limit_window?: number
+  cancel_rate_limit_unit?: string
+  cancel_rate_limit_window_mode?: string
   load_balance_strategy?: string
   product_name_prefix?: string
   product_name_suffix?: string

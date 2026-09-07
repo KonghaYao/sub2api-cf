@@ -61,7 +61,7 @@ export async function prepareAuthSourceGrant(
   guard: AuthSourceGrantGuard,
   now: number,
 ): Promise<PreparedAuthSourceGrant> {
-  const defaults = await env.DB.prepare(
+  let defaults = await env.DB.prepare(
     `SELECT balance_micros, concurrency, grant_on_signup, grant_on_first_bind
        FROM auth_source_defaults WHERE source = ? LIMIT 1`,
   ).bind(source).first<DefaultRow>()
@@ -70,13 +70,22 @@ export async function prepareAuthSourceGrant(
   const enabled = reason === 'signup'
     ? defaults.grant_on_signup === 1
     : defaults.grant_on_first_bind === 1
-  if (!enabled) return emptyGrant()
+  let globalFallback = false
+  if (!enabled) {
+    if (reason !== 'signup') return emptyGrant()
+    const global = await env.DB.prepare("SELECT public_json FROM system_settings WHERE id='global'").first<{ public_json: string }>()
+    const settings = global ? JSON.parse(global.public_json) as Record<string, unknown> : {}
+    if (settings.default_balance === undefined && settings.default_concurrency === undefined) return emptyGrant()
+    defaults = { ...defaults, balance_micros: Math.round(Number(settings.default_balance ?? 0) * 1e6), concurrency: Number(settings.default_concurrency ?? 5) }
+    validateDefault(defaults)
+    globalFallback = true
+  }
 
-  const subscriptions = (await env.DB.prepare(
+  const subscriptions = globalFallback ? [] : (await env.DB.prepare(
     `SELECT group_id, validity_days FROM auth_source_default_subscriptions
       WHERE source = ? ORDER BY group_id`,
   ).bind(source).all<SubscriptionRow>()).results
-  const quotas = (await env.DB.prepare(
+  const quotas = globalFallback ? [] : (await env.DB.prepare(
     `SELECT platform, daily_limit_micros, weekly_limit_micros, monthly_limit_micros
        FROM auth_source_default_platform_quotas WHERE source = ? ORDER BY platform`,
   ).bind(source).all<QuotaRow>()).results

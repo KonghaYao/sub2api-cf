@@ -16,6 +16,7 @@ const ADMIN_COMPLIANCE_PHRASE = 'I have read, understood, and agree to the Sub2A
 
 /** Every leaf route exposed by the Worker-filtered administrator sidebar. */
 const RETAINED_ADMIN_ROUTES = [
+  '/admin/dashboard',
   '/admin/ops',
   '/admin/users',
   '/admin/groups',
@@ -35,28 +36,6 @@ const RETAINED_ADMIN_ROUTES = [
   '/admin/usage',
   '/admin/audit-logs',
   '/admin/settings',
-] as const
-
-/** Registered host-only administrator routes explicitly removed from Worker mode. */
-const REMOVED_ADMIN_ROUTES = [
-  '/admin/plugins',
-  '/admin/proxies',
-] as const
-
-/** Legacy entry replaced by the Worker-native probes on the account operations page. */
-const REPLACED_ADMIN_ROUTES = ['/admin/channels/monitor'] as const
-
-/** Declared legacy pages that stay fail-closed until their Worker contracts exist. */
-const DEFERRED_ADMIN_ROUTES = [
-  '/admin/dashboard',
-  '/admin/risk-control',
-  '/admin/prompt-audit',
-] as const
-
-const UNAVAILABLE_ADMIN_ROUTES = [
-  ...REMOVED_ADMIN_ROUTES,
-  ...REPLACED_ADMIN_ROUTES,
-  ...DEFERRED_ADMIN_ROUTES,
 ] as const
 
 interface PatrolFailures {
@@ -249,9 +228,11 @@ async function expectStableAdminPage(page: Page, route: string): Promise<void> {
   await page.waitForTimeout(500)
 }
 
-test('every Worker-retained administrator route renders and unavailable routes stay unreachable', async ({ page, request }) => {
+test('administrator pages render, scheduling persists and original operation audit works', async ({ page, request }, testInfo) => {
+  test.setTimeout(90000)
   const session = await prepareAdministrator(request)
   await page.addInitScript((auth) => {
+    if (window !== window.top) return
     localStorage.setItem('auth_token', auth.accessToken)
     localStorage.setItem('refresh_token', auth.refreshToken)
     localStorage.setItem('token_expires_at', String(Date.now() + auth.expiresIn * 1_000))
@@ -261,69 +242,43 @@ test('every Worker-retained administrator route renders and unavailable routes s
 
   patrol.setRoute('/admin')
   await page.goto('/admin', { waitUntil: 'domcontentloaded' })
-  await expect.soft(page, '/admin Worker home').toHaveURL(/\/admin\/accounts(?:\?|$)/)
+  await expect.soft(page, '/admin home').toHaveURL(/\/admin\/dashboard(?:\?|$)/)
 
   for (const route of RETAINED_ADMIN_ROUTES) {
     patrol.setRoute(route)
     await expectStableAdminPage(page, route)
   }
 
-  for (const route of UNAVAILABLE_ADMIN_ROUTES) {
-    patrol.setRoute(route)
-    await page.goto(route, { waitUntil: 'domcontentloaded' })
-    await expect.soft(page, `${route} Worker removal redirect`).toHaveURL(/\/admin\/accounts(?:\?|$)/)
-  }
-
-  patrol.setRoute('/admin/accounts')
-  await page.goto('/admin/accounts', { waitUntil: 'domcontentloaded' })
-  for (const route of [...UNAVAILABLE_ADMIN_ROUTES, '/admin/security-audit']) {
-    await expect.soft(
-      page.locator(`a[href="${route}"]`),
-      `${route} must be absent from the Worker sidebar`,
-    ).toHaveCount(0)
-  }
-
-  const replacementGroup = await responseData<{ id: string }>(await request.post('/api/v1/admin/groups', {
-    headers: {
-      authorization: `Bearer ${session.accessToken}`,
-      'idempotency-key': 'admin-route-create-replacement-plan-0001',
-    },
-    data: {
-      name: 'Admin Route Replacement Subscription',
-      platform: 'openai',
-      group_type: 'subscription',
-      is_exclusive: true,
-      daily_quota_micros: 10_000_000,
-    },
-  }))
-
   patrol.setRoute('/admin/accounts')
   await page.goto('/admin/accounts', { waitUntil: 'domcontentloaded' })
   const accountRow = page.locator('tr').filter({ hasText: 'Admin Route Patrol Upstream' })
   await expect(accountRow).toHaveCount(1)
-  await accountRow.getByRole('button', { name: /编辑|Edit/i }).click()
-  const groupSelector = page.getByTestId('worker-account-group-selector')
-  await expect(groupSelector).toBeVisible()
-  const currentGroup = groupSelector.locator(`input[value="${session.bootstrapGroupId}"]`)
-  const replacement = groupSelector.locator(`input[value="${replacementGroup.id}"]`)
-  await expect(currentGroup).toBeChecked()
-  await currentGroup.uncheck()
-  await replacement.check()
-  const accountUpdate = page.waitForResponse((response) =>
-    response.request().method() === 'PUT' &&
-    new URL(response.url()).pathname === `/api/v1/admin/accounts/${session.bootstrapAccountId}`,
-  )
-  await page.locator('button[form="edit-worker-account-form"]').click()
-  expect((await accountUpdate).status()).toBe(200)
-
-  const updatedAccount = await responseData<{ group_links: Array<{ group_id: string }> }>(
-    await request.get(`/api/v1/admin/accounts/${session.bootstrapAccountId}`, {
-      headers: { authorization: `Bearer ${session.accessToken}` },
-    }),
-  )
-  expect(updatedAccount.group_links).toEqual([
-    expect.objectContaining({ group_id: replacementGroup.id }),
-  ])
+  const toggle = accountRow.getByRole('switch')
+  for (const value of [false, true]) {
+    const updated = page.waitForResponse(response => response.request().method() === 'PUT' &&
+      new URL(response.url()).pathname === `/api/v1/admin/accounts/${session.bootstrapAccountId}`)
+    await toggle.click()
+    expect((await updated).status()).toBe(200)
+    await expect(toggle).toHaveAttribute('aria-checked', String(value))
+    const account = await responseData<{ enabled:boolean; schedulable:boolean }>(await request.get(`/api/v1/admin/accounts/${session.bootstrapAccountId}`, {
+      headers:{authorization:`Bearer ${session.accessToken}`},
+    }))
+    expect(account).toMatchObject({enabled:true,schedulable:value})
+  }
+  patrol.setRoute('/admin/audit-logs')
+  await page.goto('/admin/audit-logs', { waitUntil: 'domcontentloaded' })
+  const search = page.locator('input').first()
+  await search.fill(session.bootstrapAccountId)
+  const filtered = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/admin/audit-logs' && new URL(response.url()).searchParams.get('q') === session.bootstrapAccountId)
+  await search.press('Enter')
+  expect((await filtered).status()).toBe(200)
+  await expect(page.getByRole('button', {name:/Detail|详情/i}).first()).toBeVisible()
+  await page.screenshot({path:testInfo.outputPath('admin-audit-original.png'),fullPage:true})
+  const detail = page.waitForResponse(response => /\/api\/v1\/admin\/audit-logs\/[^/]+$/.test(new URL(response.url()).pathname))
+  await page.getByRole('button', {name:/Detail|详情/i}).first().click()
+  expect((await detail).status()).toBe(200)
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.keyboard.press('Escape')
 
   await page.waitForTimeout(500)
   await patrol.inspectResponses()

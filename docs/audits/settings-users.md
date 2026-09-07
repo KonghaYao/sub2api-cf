@@ -1,0 +1,47 @@
+# Main settings and user entry consumers
+
+Local isolated worktree audit, not a production verification. Root agent owns deployment.
+
+Implemented main GET/PUT settings projection and consumers:
+
+- Page size/options are persisted and returned to shared frontend pagination settings.
+- Password reset is independent of verification; reset URLs honor configured frontend URL.
+- TOTP toggle blocks new enrollment and reports actual encryption readiness; existing enrollment remains enforced for login.
+- Session binding checks IP/UA for access and refresh, with authoritative D1 fallback on KV outage.
+- Login agreement documents/mode are validated and returned to existing login agreement UI.
+- Default RPM is inserted atomically for password/OAuth registration and returned in user profile.
+- Domain quota follows Go policy: allowed domains unlimited, other domains one account when enabled. SQLite trigger in the same creation batch closes concurrent insert races. OAuth signup now applies the same email policy.
+- SMTP/OAuth main form is bridged to real provider/email settings endpoints with independent versions and unchanged-secret preservation.
+- Default platform quotas bridge USD fields to the existing defaults endpoint and registration consumer.
+- Gateway settings are versioned with main settings; effective scheduler values are response-only and excluded from writes. Consumers are owned by root/billing.
+- Notifications and monitor configuration bridge to independent endpoints, owned by the audit agent.
+- Web search fake responses were removed, real config/test/reset APIs and independent If-Match are used, including the Worker save path.
+- Tencent and Aliyun CAPTCHA use signed real provider requests (TC3 and ACS3 respectively); credentials remain encrypted, only one provider can be enabled. Actual registration tests save settings, reject missing/rejected proofs, and accept provider success. No live provider credentials were used.
+- Forced third-party email creates a browser-bound, expiring pending registration. Email challenge/pending claim/user/identity/password/session are consumed/created in one D1 batch. Replay fails. A shared native completion view uses the existing CAPTCHA/email form. When disabled, unverified provider email is not trusted: an identity-derived placeholder email is used and remains unverified.
+- DingTalk corporate restriction uses application credentials to resolve union ID to employee ID and fetch staff; only verified staff may bypass closed registration. Optional corporate name/email/department attributes have real writes. Original Go intentionally does not enforce the legacy internal_corp_id informational field.
+
+- WeChat Open/MP/Mobile variants now save encrypted independent credentials and route authorization/token requests by a mode bound into the OAuth flow. Callback query parameters cannot switch mode; multi-mode identities require UnionID. Existing blank secrets are retained and unchanged form saves do not rotate configuration.
+- OIDC discovery resolves real provider metadata, validates issuer and HTTPS endpoints, then saves the exact runtime endpoints. Token authentication supports client_secret_post/basic/none, with PKCE required for public clients. ID-token verification supports RSA, RSA-PSS and ECDSA allowlists, configurable clock skew, issuer/audience/nonce and UserInfo subject checks. The explicit no-ID-token mode trusts authenticated UserInfo only; claim paths and verified-email requirements are enforced.
+- OAuth public provider name reflects configured OIDC name. Worker backend callback fields display the actual deployment callback as read-only, because routes and browser cookies are deployment-owned. Frontend completion URLs are validated same-site /auth paths; external URLs are rejected instead of silently stripped.
+- Migration 0082 preserves existing encrypted OAuth credentials and in-flight flow foreign keys while removing the unconditional OIDC JWKS requirement. A transaction/FK-enabled SQLite migration test verifies row preservation and a clean foreign_key_check.
+
+Validation to date: 175 focused Worker tests and 67 focused frontend tests passed after pending email implementation; subsequent DingTalk SQLite scenario passed, with final suite integration still ongoing. Earlier 205 auth/settings tests passed before pending changes. Browser root-route discrepancy was traced to the baseline's explicit original-navigation restoration, not settings detection.
+
+Provider protocols checked against the original Go implementation and official Tencent SDK TC3 signing and Alibaba Cloud ACS3 documentation. Local provider fetch mocks verify actual request paths, payloads and accept/reject behavior; production protocol credentials remain a deployment smoke-test item.
+
+Final focused verification: 186 Worker tests passed across auth, settings, provider control and TOTP (15 files); 68 existing affected frontend tests passed, plus 2 new pending-completion view tests passed. Worker and frontend typechecks passed before the final small readonly-copy/test additions; final root integration run owns full-suite/deployment validation. OIDC RS256/PS256/ES256 each has a genuine cryptographic signature + wrong nonce test. New Basic/none/UserInfo tests cover rejection before verified email and success after it. No production requests, credentials or live email were used by this agent.
+
+Validation limits: external OAuth/CAPTCHA/SMTP provider responses are intercepted in local integration tests. Root browser coverage checks the admin settings paths; a live third-party-provider browser callback requires actual configured provider authorization and has not been claimed as tested. DingTalk internal_corp_id remains informational as in the original Go service; actual corporate membership is proven with the application's staff API.
+
+Additional closure after independent visible-field audit: global default balance/concurrency now save and grant on signup when the source-specific override is disabled (enabled source grants still override them); real API-to-registration tests cover both cases. Plugin visibility and user-error visibility now publish real booleans (root owns user-error endpoint gates). Payment cancellation controls now gate new order creation after too many cancellations, matching original Go semantics, using an atomic admission predicate; rolling/fixed windows and both balancing choices have real config-save-to-order tests. Round-robin uses an atomic selection cursor; least-amount chooses the provider with the smallest daily effective order total. Main form now submits fast/flex objects and UUID user targets, uses final Claude prompt block editor JSON, and excludes read-only synced versions. CCH's original Go deprecation is explicitly shown with a disabled Worker control; no other missing feature was hidden.
+
+
+## Final Ollama provider-usage closure (local validation)
+
+Added migration 0093 and seven account/settings handlers: encrypted web-session save/delete, shared API-key identity, opt-in automatic refresh, explicit refresh, safe status reads, and editable global interval/debounce settings. Official `https://ollama.com/settings` HTML supplies the quota windows, reset times, plan/balance and per-model request counts; gateway usage timestamps only trigger refresh scheduling. Assigned proxy failures never silently fall back to direct traffic. Session changes during a fetch discard the stale result. Provider Retry-After can extend beyond the normal one-day exponential backoff ceiling.
+
+Account list/detail now bulk-project these safe snapshots and link same-key accounts, so the existing account page retains configuration and usage after reloading. Responses never expose web cookies or provider API keys. Cookies are encrypted with environment- and identity-bound authenticated data. A scheduler cycle attempts at most four groups to bound Worker subrequests; large active populations may therefore need multiple maintenance cycles. Provider HTML remains an external contract: canonical sanitized Go fixtures and its CSS-width, reset-element, plan and balance fallback cases are covered, but arbitrary future website redesigns require parser maintenance.
+
+Final focused checks: 16 Worker files / 186 tests passed (main settings, all payment tests, proxies, OAuth migration constraints, Ollama and account regression); 5 frontend files / 57 tests passed (main SettingsView, exact template parity, fast-policy UUID selector, provider bridge, Ollama API contracts). Worker and frontend typechecks passed; diff whitespace check passed. These are local SQLite/API and intercepted provider tests; no production credentials were changed or live Ollama requests made by this agent. Root owns final full-suite integration and deployment.
+
+Still absent from current Worker consumers at freeze: Grok text-model/cross-client/base-URL settings; Antigravity fallback/identity patch/UA settings; account_scheduling_thresholds, allow_ungrouped_key_scheduling, openai_low_upstream_rate_priority_enabled and openai_oauth_scheduling_rate_multiplier. These are explicitly not claimed complete. CCH is separately disabled because the original Go implementation declares it deprecated. Payment least-amount scheduling uses current pending/effective order sums; simultaneous admissions can choose the same provider before either insert becomes visible, so it is a balancing heuristic rather than an exact serialized fair-allocation guarantee.

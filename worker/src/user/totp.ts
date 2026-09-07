@@ -12,7 +12,7 @@ import {
 } from '../auth/rate-limit'
 import {
   deliverPlatformEmail,
-  hasEmailDeliveryBinding,
+  hasEmailDeliveryConfigured,
 } from '../email/delivery'
 import {
   executeLeasedEmailDelivery,
@@ -50,6 +50,7 @@ const EMAIL_LEASE_MS = 60 * 1_000
 const EMAIL_RATE_WINDOW_MS = 60 * 60 * 1_000
 
 interface TotpSettings {
+  totp_enabled?: boolean
   email_verification_enabled?: boolean
   email_verify_enabled?: boolean
   site_name?: string
@@ -112,7 +113,7 @@ export async function getTotpStatus(context: Context<UserBindings>): Promise<Res
     return controlSuccess({
       enabled: credential !== null,
       enabled_at: credential === null ? null : Math.floor(credential.enabled_at_ms / 1_000),
-      feature_enabled: totpFeatureAvailable(context.env),
+      feature_enabled: totpFeatureAvailable(context.env) && (await readTotpSettings(context.env)).totp_enabled !== false,
       recovery_codes_remaining: recoveryCount?.count ?? 0,
     })
   } catch (error) {
@@ -133,11 +134,12 @@ export async function sendTotpVerificationCode(context: Context<UserBindings>): 
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const settings = await readTotpSettings(context.env)
+    if (settings.totp_enabled === false) throw new GatewayError(403, 'TOTP_DISABLED', 'New TOTP enrollment is disabled')
     if (user.role === 'admin' || !emailVerificationEnabled(settings)) {
       throw new GatewayError(400, 'EMAIL_VERIFY_NOT_ENABLED', 'Email verification is not enabled')
     }
     if (!totpFeatureAvailable(context.env)) throw totpNotConfigured()
-    if (!hasEmailDeliveryBinding(context.env)) {
+    if (!(await hasEmailDeliveryConfigured(context.env))) {
       throw new GatewayError(
         503,
         'TOTP_EMAIL_DELIVERY_UNAVAILABLE',
@@ -245,6 +247,9 @@ export async function sendTotpVerificationCode(context: Context<UserBindings>): 
 export async function initiateTotpSetup(context: Context<UserBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
+    if ((await readTotpSettings(context.env)).totp_enabled === false) {
+      throw new GatewayError(403, 'TOTP_DISABLED', 'New TOTP enrollment is disabled')
+    }
     if (!totpFeatureAvailable(context.env)) throw totpNotConfigured()
     if (await findTotpCredential(context.env, user.id) !== null) {
       throw new GatewayError(400, 'TOTP_ALREADY_ENABLED', 'TOTP is already enabled for this account')
@@ -302,6 +307,9 @@ export async function initiateTotpSetup(context: Context<UserBindings>): Promise
 export async function enableTotp(context: Context<UserBindings>): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
+    if ((await readTotpSettings(context.env)).totp_enabled === false) {
+      throw new GatewayError(403, 'TOTP_DISABLED', 'New TOTP enrollment is disabled')
+    }
     if (!totpFeatureAvailable(context.env)) throw totpNotConfigured()
     const body = await readJsonObject(context.req.raw)
     const setupToken = body.setup_token

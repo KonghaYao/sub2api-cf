@@ -1,3 +1,4 @@
+import { enqueueSettingsMaintenance } from './maintenance/queue'
 import { app } from './app'
 import { recoverPendingSubscriptionState } from './control/subscriptions'
 import { scheduleAccountHealthLifecycle } from './control/account-lifecycle'
@@ -15,7 +16,6 @@ import { recoverPendingAffiliateRebates } from './commercial/affiliate'
 import {
   cleanupObservabilityR2Orphans,
   repairObservabilityPayloadMetadata,
-  runObservabilityRetention,
 } from './observability/retention'
 import { recoverPendingMediaTasks } from './media/queue'
 import { recoverPendingProviderMediaJobs } from './media/provider-job'
@@ -39,7 +39,6 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     cleanupExpiredOAuthState(env),
     scanPaymentReconciliationIssues(env),
     recoverPendingAffiliateRebates(env),
-    runObservabilityRetention(env, { beforeMs: now - 30 * 86_400_000, limit: 100 }),
     repairObservabilityPayloadMetadata(env, { nowMs: now, limit: 50 }),
     cleanupObservabilityR2Orphans(env, { beforeMs: now - 31 * 86_400_000, limit: 50 }),
     recoverPendingMediaTasks(env),
@@ -47,6 +46,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverImageTasks(env),
     recoverAccountStatsRollups(env),
     runAdminRequestAuditRetention(env, now),
+    enqueueSettingsMaintenance(env, now),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -63,7 +63,6 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'oauth_state_cleanup',
           'payment_reconciliation',
           'affiliate_rebates',
-          'observability_retention',
           'observability_payload_repair',
           'observability_r2_orphans',
           'media_tasks',
@@ -71,6 +70,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'image_tasks',
           'account_stats_rollups',
           'admin_request_audit_retention',
+          'settings_maintenance_dispatch',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

@@ -1,7 +1,9 @@
+import { verifyCaptcha } from './captcha'
+import type { CaptchaPublicSettings } from '../control/captcha-settings'
+import { enforceSessionBinding } from './session-binding'
 import type { Context, Next } from 'hono'
 import type { Env } from '../env'
 import { controlError, controlSuccess, readJsonObject } from '../control/http'
-import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
@@ -45,7 +47,7 @@ import {
   prepareCommercialRegistration,
 } from '../commercial/registration'
 import { initialPlatformQuotaStatements } from '../user/platform-quotas'
-import { requireRegistrationEmailSuffixAllowed } from './email-policy'
+import { checkRegistrationEmailPolicy, registrationDomainGuard, registrationDomainQuotaError } from './email-policy'
 import {
   prepareAuthSourceGrant,
   recoverPendingAuthSourceGrants,
@@ -58,9 +60,10 @@ const ACCESS_TTL_MS = 15 * 60 * 1_000
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1_000
 const MAX_USER_AGENT_LENGTH = 512
 
-interface PublicAuthSettings {
+interface PublicAuthSettings extends Partial<CaptchaPublicSettings> {
   registration_enabled?: boolean
   registration_email_suffix_whitelist?: string[]
+  registration_email_domain_quota_enabled?: boolean
   email_verification_enabled?: boolean
   turnstile_enabled?: boolean
 }
@@ -119,7 +122,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     }
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
-    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
+    const registrationDomain = await checkRegistrationEmailPolicy(context.env, email, settings)
     const password = requirePassword(body.password)
     validateNewPassword(password)
     const rateLimitSubject = await checkAuthRateLimit(
@@ -128,7 +131,8 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       email,
       'register',
     )
-    await verifyTurnstile(context, settings, body.turnstile_token)
+    // Email verification already consumed the one-use CAPTCHA proof at code issuance.
+    if (settings.email_verification_enabled !== true) await verifyCaptcha(context.req.raw, context.env, settings, body)
     await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
     const existing = await findUserByEmail(context.env, email)
     if (existing !== null) {
@@ -185,7 +189,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
     )
     const emailHash = await sha256Hex(email)
     try {
-      const statements: D1PreparedStatement[] = []
+      const statements: D1PreparedStatement[] = registrationDomainGuard(context.env, registrationDomain)
       if (commercial.claimStatement !== undefined) statements.push(commercial.claimStatement)
       if (registrationChallenge !== null) statements.push(registrationChallenge.consumeStatement)
       statements.push(
@@ -223,6 +227,7 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       )
       await context.env.DB.batch(statements)
     } catch (error) {
+      if (errorMessage(error).includes('EMAIL_DOMAIN_QUOTA_EXCEEDED')) throw registrationDomainQuotaError()
       if (/UNIQUE constraint failed: (?:users\.(?:email|canonical_email_inbox)|index 'uq_users_canonical_email_inbox')/i.test(errorMessage(error))) {
         await recordAuthRateLimitFailure(context.env, rateLimitSubject)
         throw new GatewayError(409, 'email_already_registered', 'Email is already registered')
@@ -235,6 +240,8 @@ export async function registerWithPassword(context: Context<AuthBindings>): Prom
       throw error
     }
     await settleAuthSourceGrant(context.env, sourceGrant.grantId)
+    const createdUser = await findUserByEmail(context.env, email)
+    user.rpm_limit = createdUser?.rpm_limit ?? user.rpm_limit
     const grantedUser = sourceGrant.enabled ? {
       ...user,
       balance_micros: user.balance_micros + sourceGrant.balanceMicros,
@@ -260,7 +267,7 @@ export async function loginWithPassword(context: Context<AuthBindings>): Promise
       'login',
     )
     const settings = await publicAuthSettings(context.env)
-    await verifyTurnstile(context, settings, body.turnstile_token)
+    await verifyCaptcha(context.req.raw, context.env, settings, body)
     await commitAuthRateLimitAttempt(context.env, rateLimitSubject)
     let user = await findUserByEmail(context.env, email)
     if (user === null || user.password_credential === null) {
@@ -343,7 +350,7 @@ export async function requirePublicAuthStartCaptcha(
       ? {}
       : await readJsonObject(request.clone() as unknown as Request)
     const settings = await publicAuthSettings(context.env)
-    await verifyTurnstile(context, settings, body.turnstile_token)
+    await verifyCaptcha(context.req.raw, context.env, settings, body)
     await next()
   } catch (error) {
     return authControlError(normalizeAuthError(error))
@@ -539,6 +546,7 @@ export async function refreshUserSession(context: Context<AuthBindings>): Promis
       throw invalidRefreshToken()
     }
 
+    await enforceSessionBinding(context.req.raw, context.env, session.session_id)
     const accessToken = createOpaqueToken('access')
     const nextRefreshToken = createOpaqueToken('refresh')
     const [accessHash, refreshHash] = await Promise.all([
@@ -629,6 +637,7 @@ export async function authenticateUserRequest(request: Request, env: Env): Promi
   if (session === null) {
     throw new GatewayError(401, 'invalid_access_token', 'Invalid or expired access token', 'authentication_error')
   }
+  await enforceSessionBinding(request, env, session.session_id)
   return session
 }
 
@@ -969,38 +978,6 @@ async function publicAuthSettings(env: Env): Promise<PublicAuthSettings> {
   }
 }
 
-async function verifyTurnstile(
-  context: Context<AuthBindings>,
-  settings: PublicAuthSettings,
-  token: unknown,
-): Promise<void> {
-  if (settings.turnstile_enabled !== true) return
-  if (typeof token !== 'string' || token.trim() === '' || token.length > 2_048) {
-    throw new GatewayError(400, 'captcha_required', 'Turnstile verification is required')
-  }
-  const secret = context.env.TURNSTILE_SECRET_KEY ??
-    await readSystemSettingSecret(context.env, 'turnstile_secret_key')
-  if (!secret) {
-    throw new GatewayError(503, 'turnstile_not_configured', 'Turnstile is not configured', 'server_error')
-  }
-  const form = new URLSearchParams({ secret, response: token })
-  const ip = context.req.header('cf-connecting-ip')
-  if (ip) form.set('remoteip', ip)
-  let response: Response
-  try {
-    response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-    })
-  } catch {
-    throw new GatewayError(503, 'turnstile_unavailable', 'Turnstile verification is unavailable', 'server_error')
-  }
-  const result = await response.json().catch(() => null) as { success?: unknown } | null
-  if (!response.ok || result?.success !== true) {
-    throw new GatewayError(400, 'captcha_invalid', 'Turnstile verification failed')
-  }
-}
 
 function authPayload(user: UserRow, issued: IssuedSession): Record<string, unknown> {
   return {

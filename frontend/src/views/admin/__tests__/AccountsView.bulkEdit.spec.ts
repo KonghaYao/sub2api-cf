@@ -298,7 +298,7 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(wrapper.get('[data-test="account-actions"]').text()).toContain('common.more')
     await toggle.trigger('click')
     await flushPromises()
-    expect(setSchedulable).toHaveBeenCalledWith('account-uuid', false)
+    expect(setSchedulable).toHaveBeenCalledWith('account-uuid', false, 1)
   })
 
   it('keeps the original groups column in Worker mode', async () => {

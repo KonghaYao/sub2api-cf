@@ -966,6 +966,8 @@ export interface ClaudeModel {
 }
 
 export interface Proxy {
+  control_version?: number
+  password_configured?: boolean
   id: number
   name: string
   protocol: ProxyProtocol
@@ -1173,7 +1175,7 @@ export interface OllamaCloudUsageSnapshot {
 }
 
 export interface OllamaCloudUsageState {
-  account_id: number
+  account_id: number | string
   eligible: boolean
   configured: boolean
   auto_refresh_enabled: boolean

@@ -50,6 +50,22 @@ describe('Worker-native email challenges', () => {
     },
   })
 
+  it('honors the independent password reset toggle before queueing email', async () => {
+    const test = await fixture()
+    test.env.CONFIG_KV.get = (async () => ({ email_verification_enabled: true, password_reset_enabled: false })) as unknown as KVNamespace['get']
+    const response = await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+    expect(response.status).toBe(403)
+    expect(test.events).toHaveLength(0)
+  })
+
+  it('allows password reset independently and builds links from the configured frontend URL', async () => {
+    const test = await fixture()
+    test.env.CONFIG_KV.get = (async () => ({ email_verification_enabled: false, password_reset_enabled: true, frontend_url: 'https://portal.example.test' })) as unknown as KVNamespace['get']
+    const response = await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+    expect(response.status).toBe(200)
+    expect(test.events[0].payload.action_url).toMatch(/^https:\/\/portal\.example\.test\/reset-password\?/)
+  })
+
   it('preserves the six-digit pre-registration contract with cooldown and an enumeration-safe response', async () => {
     const available = await fixture()
     const existing = await fixture()

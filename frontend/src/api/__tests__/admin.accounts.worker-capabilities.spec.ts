@@ -476,13 +476,13 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(post).toHaveBeenCalledWith('/admin/accounts/batch-update-credentials', request)
   })
 
-  it('does not expose the absent per-account schedulable route in Worker mode', async () => {
+  it('updates Worker scheduling with the row control version', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
     const { setSchedulable } = await import('@/api/admin/accounts')
 
-    await expect(setSchedulable(7, false)).rejects.toThrow('not supported by the Worker contract')
-    expect(post).not.toHaveBeenCalled()
+    await setSchedulable(7, false, 3)
+    expect(put).toHaveBeenCalledWith('/admin/accounts/7', { schedulable: false }, { headers: { 'If-Match': '"3"' } })
   })
 
   it('sends versioned Worker bulk status and health probe operations with idempotency keys', async () => {

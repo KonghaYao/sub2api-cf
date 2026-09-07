@@ -80,7 +80,7 @@
       :data-testid="`${testIdPrefix}-create-account-submit`"
       type="button"
       class="btn btn-primary w-full"
-      :disabled="isSubmitting || !email.trim() || password.length < 6 || (invitationCodeEnabled && !invitationCode.trim()) || (turnstileEnabled && !turnstileToken)"
+      :disabled="isSubmitting || !email.trim() || password.length < 6 || (invitationCodeEnabled && !invitationCode.trim()) || (turnstileEnabled && !turnstileToken && !proofAlreadyVerified)"
       @click="handleSubmit"
     >
       {{ isSubmitting ? t('common.processing') : t('auth.createAccount') }}
@@ -117,6 +117,8 @@ const props = defineProps<{
   initialEmail: string
   testIdPrefix: string
   isSubmitting: boolean
+  forceEmailVerification?: boolean
+  proofAlreadyVerified?: boolean
   errorMessage?: string
 }>()
 
@@ -309,12 +311,12 @@ async function handleSubmit() {
   // Turnstile 票据一次性：发送验证码已消耗上一枚，reset 后要等新票据回调。
   // 缺票时不能提交——create-account 端点会校验验证码，空 token 直接被判失败。
   // 表单的隐式提交（输入框回车）绕得过按钮的 disabled，所以这里必须再挡一次。
-  if (turnstileEnabled.value && !turnstileToken.value) {
+  if (!props.proofAlreadyVerified && turnstileEnabled.value && !turnstileToken.value) {
     sendCodeError.value = t('auth.completeVerification')
     return
   }
 
-  if (!(await acquireActionProof())) {
+  if (!props.proofAlreadyVerified && !(await acquireActionProof())) {
     return
   }
 
@@ -347,7 +349,7 @@ onMounted(async () => {
   try {
     const settings = await getPublicSettings()
     invitationCodeEnabled.value = settings.invitation_code_enabled === true
-    emailVerifyEnabled.value = settings.email_verify_enabled !== false
+    emailVerifyEnabled.value = props.forceEmailVerification === true || settings.email_verify_enabled !== false
     turnstileEnabled.value = settings.turnstile_enabled === true
     turnstileSiteKey.value = settings.turnstile_site_key || ''
     tencentCaptchaEnabled.value = settings.tencent_captcha_enabled === true

@@ -1,3 +1,4 @@
+import type { Env } from '../env'
 import { GatewayError } from '../gateway/errors'
 
 const DOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/
@@ -57,4 +58,32 @@ function invalidWhitelist(): GatewayError {
     'invalid_registration_email_suffix_whitelist',
     'registration_email_suffix_whitelist is invalid',
   )
+}
+
+export interface RegistrationEmailPolicy {
+  registration_email_suffix_whitelist?: string[]
+  registration_email_domain_quota_enabled?: boolean
+}
+
+/** Returns an exact domain only when the one-account exception applies. */
+export async function checkRegistrationEmailPolicy(env: Env, email: string, settings: RegistrationEmailPolicy): Promise<string | null> {
+  try {
+    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
+    return null
+  } catch (error) {
+    if (!(error instanceof GatewayError) || error.code !== 'EMAIL_SUFFIX_NOT_ALLOWED' || settings.registration_email_domain_quota_enabled !== true) throw error
+  }
+  const domain = email.slice(email.lastIndexOf('@') + 1).toLowerCase()
+  const existing = await env.DB.prepare(`SELECT id FROM users WHERE lower(substr(email, instr(email, '@') + 1)) = ? LIMIT 1`).bind(domain).first()
+  if (existing !== null) throw registrationDomainQuotaError()
+  return domain
+}
+
+/** Must be in the same D1 batch as the user INSERT: the trigger closes the read/write race. */
+export function registrationDomainGuard(env: Env, domain: string | null): D1PreparedStatement[] {
+  return domain === null ? [] : [env.DB.prepare('INSERT OR REPLACE INTO registration_domain_checks (domain) VALUES (?)').bind(domain)]
+}
+
+export function registrationDomainQuotaError(): GatewayError {
+  return new GatewayError(400, 'EMAIL_DOMAIN_QUOTA_EXCEEDED', 'This email domain has reached its registration quota')
 }

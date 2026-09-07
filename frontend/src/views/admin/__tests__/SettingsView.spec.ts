@@ -92,6 +92,9 @@ const localeRef = vi.hoisted(() => ({ value: "zh-CN" }));
 vi.mock("@/api", () => ({
   adminAPI: {
     settings: {
+      buildWorkerGatewaySettings: vi.fn().mockReturnValue({}),
+      getWorkerProviderSettings: vi.fn().mockResolvedValue({}),
+      saveWorkerProviderSettings: vi.fn().mockResolvedValue(undefined),
       getSettings,
       updateSettings,
       getCommercialConfig,
@@ -824,6 +827,17 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({ compact_home_enabled: true }),
     );
+  });
+
+  it("saves global user defaults, visibility flags, fast rules and payment admission settings on Worker", async () => {
+    getSettings.mockResolvedValue({ ...baseSettingsResponse, cloudflare_worker_contract: true, default_balance: 2.5, default_concurrency: 7, plugin_management_enabled: true, allow_user_view_error_requests: true, openai_fast_policy_settings: { rules: [{ service_tier: 'priority', action: 'block', scope: 'all', user_ids: ['worker-user-id'] }] } });
+    getPaymentConfig.mockResolvedValue({ data: { enabled: false, enabled_payment_types: [], min_amount: 0, max_amount: 0, daily_limit: 0, order_timeout_minutes: 30, max_pending_orders: 3, balance_disabled: true, balance_recharge_multiplier: 1, subscription_usd_to_cny_rate: 0, recharge_fee_rate: 0, product_name_prefix: '', product_name_suffix: '', help_image_url: '', help_text: '', load_balance_strategy: 'least_amount', cancel_rate_limit_enabled: true, cancel_rate_limit_max: 3, cancel_rate_limit_window: 2, cancel_rate_limit_unit: 'hour', cancel_rate_limit_window_mode: 'fixed' } });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ default_balance: 2.5, default_concurrency: 7, plugin_management_enabled: true, allow_user_view_error_requests: true, gateway: { openai_fast_policy_settings: { rules: [expect.objectContaining({ user_ids: ['worker-user-id'] })] } } }));
+    expect(updatePaymentConfig).toHaveBeenCalledWith(expect.objectContaining({ load_balance_strategy: 'least-amount', cancel_rate_limit_enabled: true, cancel_rate_limit_max: 3, cancel_rate_limit_window: 2, cancel_rate_limit_unit: 'hour', cancel_rate_limit_window_mode: 'fixed' }));
   });
 
   it("keeps the original payment form visible and saves its Worker-backed values", async () => {

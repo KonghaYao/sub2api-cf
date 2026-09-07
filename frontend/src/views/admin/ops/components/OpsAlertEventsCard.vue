@@ -229,7 +229,7 @@ async function loadHistory() {
   try {
     const platform = getDimensionString(ev, 'platform')
     const groupIdRaw = ev.dimensions?.group_id
-    const groupId = typeof groupIdRaw === 'number' ? groupIdRaw : undefined
+    const groupId = (typeof groupIdRaw === 'number' || typeof groupIdRaw === 'string') ? groupIdRaw : undefined
 
     const items = await opsAPI.listAlertEvents({
       limit: 20,
@@ -273,7 +273,7 @@ async function silenceAlert() {
   try {
     const platform = getDimensionString(ev, 'platform')
     const groupIdRaw = ev.dimensions?.group_id
-    const groupId = typeof groupIdRaw === 'number' ? groupIdRaw : null
+    const groupId = (typeof groupIdRaw === 'number' || typeof groupIdRaw === 'string') ? groupIdRaw : null
     const region = getDimensionString(ev, 'region') || null
 
     await opsAPI.createAlertSilence({

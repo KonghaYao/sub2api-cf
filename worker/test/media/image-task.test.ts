@@ -293,6 +293,27 @@ describe('ordinary asynchronous Images contract', () => {
     await expect(response.json()).resolves.toMatchObject({ task_id: taskId, status: 'processing' })
   })
 
+  it.each([false, true])('uploads actual image bytes and cleans external storage when result commit fails (%s)', async (failCommit) => {
+    const test = await fixture()
+    const secret = await encryptCredential({ api_key: 'storage-secret' }, MASTER_KEY, 'object-storage:images:v1')
+    test.raw.prepare(`INSERT INTO object_storage_settings(id,config_json,nonce_b64,ciphertext_b64,control_version,updated_at_ms) VALUES('images',?,?,?,1,?)`).run(JSON.stringify({ enabled: true, reuse_backup_s3: false, endpoint: 'https://storage.example.test', region: 'auto', bucket: 'images-bucket', access_key_id: 'IMAGEACCESS', prefix: 'images/', force_path_style: true, public_base_url: '', presign_expiry_hours: 1, max_download_bytes: 1048576 }), secret.nonce_b64, secret.ciphertext_b64, Date.now())
+    const stored: Uint8Array[] = []
+    const methods: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => { methods.push(request.method); expect(request.headers.get('authorization')).toContain('Credential=IMAGEACCESS/'); if(request.method==='PUT')stored.push(new Uint8Array(await request.arrayBuffer())); return new Response(null) }))
+    if(failCommit)test.failResultPut()
+    try {
+      const submitted = await submit(test)
+      await consumeImageTaskExecute(test.queued[0], test.env)
+      const response = await app().request(`/v1/images/tasks/${String(submitted.body.task_id)}`, { headers: { authorization: `Bearer ${RAW_KEY}` } }, test.env)
+      const body = await response.json() as any
+      if(failCommit){expect(body.status).toBe('failed');expect(methods).toEqual(['PUT','DELETE'])}
+      else{expect(JSON.stringify(body)).toContain('storage.example.test');expect(JSON.stringify(body)).toContain('X-Amz-Signature=');expect(methods).toEqual(['PUT'])}
+      expect(JSON.stringify(test.raw.prepare('SELECT * FROM image_task_outputs').all())).not.toContain('storage-secret')
+      expect(stored[0]).toEqual(test.imageBytes)
+      expect(test.settle).toHaveBeenCalledTimes(1)
+    } finally { vi.unstubAllGlobals(); test.raw.close() }
+  })
+
   it('executes a duplicate Queue delivery at most once', async () => {
     const test = await fixture()
     await submit(test)

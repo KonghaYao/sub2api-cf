@@ -6,7 +6,7 @@ import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   deliverPlatformEmail,
-  hasEmailDeliveryBinding,
+  hasEmailDeliveryConfigured,
 } from '../email/delivery'
 import {
   executeLeasedEmailDelivery,
@@ -165,7 +165,7 @@ export async function sendNotificationEmailVerificationCode(
 ): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
-    if (!hasEmailDeliveryBinding(context.env)) {
+    if (!(await hasEmailDeliveryConfigured(context.env))) {
       throw new GatewayError(
         503,
         'notification_email_delivery_unavailable',

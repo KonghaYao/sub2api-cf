@@ -1,3 +1,4 @@
+import { accountFetcher } from '../proxy/account-fetch'
 import type { Env, PlatformEvent } from '../env'
 import { decryptCredential, sha256Hex } from '../gateway/crypto'
 import {
@@ -81,6 +82,8 @@ interface ProbeJobRow {
 }
 
 interface ProbeAccountRow {
+  proxy_id?: number | null
+  credential_kind?: string
   id: string
   platform: ProviderPlatform
   protocol: ProviderProtocol
@@ -508,7 +511,7 @@ async function dispatchJob(env: Env, job: DispatchJobRow | ProbeJobRow, nowMs: n
 async function loadProbeAccount(env: Env, jobId: string, runToken: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT a.id, a.platform, a.protocol, a.auth_scheme, a.base_url,
-            a.provider_config_json, a.config_version, a.credential_ref,
+            a.provider_config_json, a.credential_kind, a.config_version, a.credential_ref, json_extract(a.ui_config_json, '$.proxy_id') AS proxy_id,
             a.health_probe_generation, a.consecutive_health_failures,
             secret.id AS secret_id, secret.key_version,
             secret.nonce_b64, secret.ciphertext_b64
@@ -558,7 +561,7 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
   let healthStatus: ProbeResult['healthStatus'] = 'unhealthy'
   let healthError: string | null = null
   try {
-    const response = await fetch(plan.url, {
+    const response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
       method: plan.method,
       headers: plan.headers,
       redirect: 'manual',

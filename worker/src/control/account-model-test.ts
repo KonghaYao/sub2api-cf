@@ -1,3 +1,4 @@
+import type { AccountFetcher } from '../proxy/account-fetch'
 import type { Context } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Env } from '../env'
@@ -9,7 +10,7 @@ import { GatewayError } from '../gateway/errors'
 type TestEvent = { type: string; text?: string; image_url?: string; mime_type?: string }
 
 /** An explicit administrator test uses this account directly, outside user billing. */
-export function testAccountModel(context: Context<{ Bindings: Env }>, account: ProviderAccount, credential: ProviderCredential, input: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+export function testAccountModel(context: Context<{ Bindings: Env }>, account: ProviderAccount, credential: ProviderCredential, input: Record<string, unknown>, extra: Record<string, unknown> = {}, upstreamFetch: AccountFetcher = fetch) {
   const model = requireString(input, 'model_id', 256)
   const prompt = typeof input.prompt === 'string' && input.prompt.trim()
     ? requireString(input, 'prompt', 4000) : 'Reply with OK.'
@@ -46,7 +47,7 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
         timer = setTimeout(() => { stop(); reject(new Error('Upstream model test timed out')) }, 60_000)
       })
       const run = async () => {
-        const response = await fetch(plan.url, {
+        const response = await upstreamFetch(plan.url, {
           method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body),
           redirect: 'manual', cache: 'no-store', signal: controller.signal,
         })

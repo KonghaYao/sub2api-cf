@@ -118,6 +118,22 @@ beforeEach(() => {
 })
 
 describe('admin account operations', () => {
+  it('pauses and resumes batch scheduling without changing enabled or health', async () => {
+    const test = await fixture()
+    try {
+      seedAccount(test,'schedule-only',2)
+      for (const [schedulable,version] of [[false,2],[true,3]] as const) {
+        const body = { accounts:[{id:'schedule-only',expected_control_version:version}],schedulable }
+        const response = await request(test,'/accounts/bulk-update',body,`schedule-${version}`)
+        expect(response.status).toBe(200)
+        const payload = await response.json()
+        expect(payload).toMatchObject({data:{success:1,failed:0,results:[{account_id:'schedule-only',success:true,schedulable,control_version:version+1}]}})
+        expect(test.raw.prepare("SELECT enabled,control_version,json_extract(ui_config_json,'$.schedulable') AS schedulable FROM accounts WHERE id='schedule-only'").get()).toEqual({enabled:1,control_version:version+1,schedulable:schedulable?1:0})
+        expect(await (await request(test,'/accounts/bulk-update',body,`schedule-${version}`)).json()).toEqual(payload)
+      }
+    } finally {test.raw.close();vi.useRealTimers()}
+  })
+
   it('keeps the real max-25 health route within budget through user auth, RBAC, and step-up', async () => {
     const test = await fixture()
     try {
@@ -170,7 +186,7 @@ describe('admin account operations', () => {
       expect(queries.count).toBeLessThanOrEqual(50)
       // Exact count includes the one-statement request-audit snapshot and keeps
       // this boundary sensitive while the platform ceiling remains 50.
-      expect(queries.count).toBe(23)
+      expect(queries.count).toBe(24)
     } finally {
       vi.useRealTimers()
       test.raw.close()

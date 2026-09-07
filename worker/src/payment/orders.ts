@@ -551,7 +551,7 @@ async function persistNewOrder(
     )
   }
   const plan = await requirePurchasablePlan(env, input.plan_id)
-  const provider = await requireActiveStripeProvider(env)
+  const provider = await requireActiveStripeProvider(env, undefined, true)
   const priced = paymentAmountWithFee(plan.price_micros, policy.recharge_fee_ppm, plan.currency)
   validatePaymentLimits(policy, plan.price_micros, priced.pay_amount_micros)
   const now = Date.now()
@@ -589,6 +589,7 @@ async function persistNewOrder(
            FROM payment_config admission
           WHERE admission.id = 'global' AND admission.enabled = 1
             AND admission.enabled_payment_types_json = '["stripe"]'
+            AND (admission.cancel_rate_limit_enabled=0 OR (SELECT COUNT(*) FROM payment_orders cancelled WHERE cancelled.user_id=? AND cancelled.status='CANCELLED' AND cancelled.updated_at_ms >= (CASE WHEN admission.cancel_rate_limit_window_mode='fixed' THEN (? / (CASE admission.cancel_rate_limit_unit WHEN 'minute' THEN 60000 WHEN 'hour' THEN 3600000 ELSE 86400000 END)) * (CASE admission.cancel_rate_limit_unit WHEN 'minute' THEN 60000 WHEN 'hour' THEN 3600000 ELSE 86400000 END) - (admission.cancel_rate_limit_window-1)*(CASE admission.cancel_rate_limit_unit WHEN 'minute' THEN 60000 WHEN 'hour' THEN 3600000 ELSE 86400000 END) ELSE ? - admission.cancel_rate_limit_window*(CASE admission.cancel_rate_limit_unit WHEN 'minute' THEN 60000 WHEN 'hour' THEN 3600000 ELSE 86400000 END) END)) < admission.cancel_rate_limit_max)
             AND (
               SELECT COUNT(*) FROM payment_orders pending
                WHERE pending.user_id = ? AND pending.status = 'PENDING'
@@ -630,6 +631,7 @@ async function persistNewOrder(
         expiresAt,
         now,
         now,
+        userId, now, now,
         userId,
         now,
         userId,
@@ -1200,6 +1202,13 @@ async function throwPaymentAdmissionError(
       'Stripe payment is not enabled',
       'permission_error',
     )
+  }
+  const cancellation = await env.DB.prepare(`SELECT cancel_rate_limit_enabled AS enabled,cancel_rate_limit_max AS maximum,cancel_rate_limit_window AS window,cancel_rate_limit_unit AS unit,cancel_rate_limit_window_mode AS mode FROM payment_config WHERE id='global'`).first<{enabled:number;maximum:number;window:number;unit:string;mode:string}>()
+  if (cancellation?.enabled === 1) {
+    const unit = cancellation.unit === 'minute' ? 60000 : cancellation.unit === 'hour' ? 3600000 : 86400000
+    const start = cancellation.mode === 'fixed' ? Math.floor(now/unit)*unit-(cancellation.window-1)*unit : now-cancellation.window*unit
+    const count = await env.DB.prepare("SELECT COUNT(*) AS total FROM payment_orders WHERE user_id=? AND status='CANCELLED' AND updated_at_ms>=?").bind(userId,start).first<{ total:number }>()
+    if ((count?.total ?? 0)>=cancellation.maximum) throw new GatewayError(429, 'CANCEL_RATE_LIMITED', 'Too many cancelled orders in this payment window')
   }
   const pending = await env.DB.prepare(
     `SELECT COUNT(*) AS total FROM payment_orders

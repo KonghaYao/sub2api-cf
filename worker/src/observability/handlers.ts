@@ -266,9 +266,15 @@ export const getAdminRequestDetail = (context: Context<Bindings>) => adminDetail
 export const getAdminRequestErrorDetail = (context: Context<Bindings>) => adminDetail(context, 'errors')
 export const getAdminUpstreamErrorDetail = (context: Context<Bindings>) => adminDetail(context, 'upstream')
 
+async function requireOwnerErrorVisibility(env:ObservabilityEnv):Promise<void>{
+ const row=await env.DB.prepare("SELECT public_json FROM system_settings WHERE id='global'").first<{public_json:string}>()
+ if(!row||JSON.parse(row.public_json).allow_user_view_error_requests!==true)throw new GatewayError(403,'user_error_requests_disabled','User error request visibility is disabled','permission_error')
+}
+
 async function ownerDetail(context: Context<Bindings>, family: Family): Promise<Response> {
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
+    if(family==='errors')await requireOwnerErrorVisibility(context.env)
     const row = await findObservation(context.env, requireResourceId(context.req.param('id'), 'observation'), user.id)
     if (row === null || !rowMatchesFamily(row, family)) throw notFound()
     const payload = await projectPayload(context.env, row)
@@ -383,6 +389,7 @@ async function listFor(
     let owner: string | undefined
     if (view === 'owner') owner = (await authenticateUserRequest(context.req.raw, context.env)).id
     else await authenticateAdminSession(context.req.raw, context.env)
+    if(view==='owner'&&family==='errors')await requireOwnerErrorVisibility(context.env)
     const filters = await parseFilters(
       context, family, timeContract, owner, true, legacyOffset, ownerErrorContract,
     )

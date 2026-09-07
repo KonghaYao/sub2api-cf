@@ -1,3 +1,19 @@
+import * as ollamaUsage from './control/ollama-cloud-usage'
+import * as opsSystemLogs from './control/ops-system-logs'
+import * as opsAlerts from './control/ops-alerts'
+import * as proxyCatalog from './control/proxies'
+import * as opsDashboard from './control/ops-dashboard'
+import * as backupStorage from './control/backup-storage'
+import { getUpstreamBillingProbeSettings, putUpstreamBillingProbeSettings, setUpstreamBillingProbeEnabled, probeUpstreamBilling, probeUpstreamBillingBatch, getUpstreamBillingRates } from './control/upstream-billing-probe'
+import * as channelMonitorV2 from './control/channel-monitor-v2'
+import * as channelMonitors from './control/channel-monitors'
+import { accountTodayStats } from './control/account-today-stats'
+import { getNotificationSettings, updateNotificationSettings, readNotificationSettings } from './control/notification-settings'
+import { getWebSearchConfig, updateWebSearchConfig, resetWebSearchUsage, testWebSearch } from './control/web-search'
+import { runtimeSettingNames, runtimeSettingHandlers } from './control/runtime-settings'
+import { enforcePanelRateLimit } from './control/panel-rate-limit'
+import { getAdminAutomationKey, regenerateAdminAutomationKey, deleteAdminAutomationKey } from './control/admin-automation-key'
+import { getEmailDeliverySettings, updateEmailDeliverySettings, testSmtpConnection, sendSmtpTestEmail, listEmailTemplates, getEmailTemplate, updateEmailTemplate, restoreOfficialEmailTemplate, previewEmailTemplate } from './control/email-settings'
 import { adminDashboard, adminDashboardBatch } from './control/dashboard'
 import { getAdminGroupUsageSummary } from './control/group-usage'
 import { getAdminGroupCapacitySummary } from './control/group-capacity'
@@ -505,6 +521,8 @@ export function createApp() {
     handleDurableObjectBackup,
   )
 
+  app.use('/api/v1/*', enforcePanelRateLimit)
+
   app.get('/api/v1/settings/public', async (context) => {
     const key = `${context.env.ENVIRONMENT}:public-settings:v1`
     const settings = await context.env.CONFIG_KV.get<Record<string, unknown>>(key, 'json')
@@ -513,6 +531,10 @@ export function createApp() {
       ? await isPaymentEnabled(context.env)
       : Boolean(resolved.payment_enabled)
     const oauth = await oauthPublicSettings(context.env)
+    const [monitor, notifications] = typeof context.env.DB.prepare === 'function'
+      ? await Promise.all([channelMonitors.readChannelMonitorSettings(context.env), readNotificationSettings(context.env)])
+      : [null, null]
+
     return context.json({
       code: 0,
       data: {
@@ -524,6 +546,19 @@ export function createApp() {
         available_channels_enabled: resolved.available_channels_enabled === true,
         ...oauth,
         payment_enabled: paymentEnabled,
+        ...(monitor ? {
+          channel_monitor_enabled: monitor.channel_monitor_enabled,
+          channel_monitor_mode: monitor.channel_monitor_mode,
+          channel_monitor_hide_throughput: monitor.channel_monitor_hide_throughput,
+          channel_monitor_show_quota: monitor.channel_monitor_show_quota,
+        } : {}),
+        ...(notifications ? {
+          balance_low_notify_enabled: notifications.balance_low_notify_enabled,
+          balance_low_notify_threshold: notifications.balance_low_notify_threshold,
+          balance_low_notify_recharge_url: notifications.balance_low_notify_recharge_url,
+          subscription_expiry_notify_enabled: notifications.subscription_expiry_notify_enabled,
+        } : {}),
+
       },
     })
   })
@@ -610,8 +645,85 @@ export function createApp() {
   app.delete('/api/v1/admin/user-attributes/:id', deleteUserAttributeDefinition)
   app.get('/api/v1/admin/users/:id/attributes', getAdminUserAttributes)
   app.put('/api/v1/admin/users/:id/attributes', updateAdminUserAttributes)
+  app.get('/api/v1/admin/settings/notifications', getNotificationSettings)
+  app.put('/api/v1/admin/settings/notifications', updateNotificationSettings)
+  app.get('/api/v1/admin/settings/web-search-emulation', getWebSearchConfig)
+  app.put('/api/v1/admin/settings/web-search-emulation', updateWebSearchConfig)
+  app.post('/api/v1/admin/settings/web-search-emulation/test', testWebSearch)
+  app.post('/api/v1/admin/settings/web-search-emulation/reset-usage', resetWebSearchUsage)
+  app.get('/api/v1/admin/settings/channel-monitor', channelMonitors.getChannelMonitorSettings)
+  app.put('/api/v1/admin/settings/channel-monitor', channelMonitors.updateChannelMonitorSettings)
+  app.get('/api/v1/admin/channel-monitors', channelMonitors.listChannelMonitors)
+  app.post('/api/v1/admin/channel-monitors', channelMonitors.createChannelMonitor)
+  app.get('/api/v1/admin/channel-monitors/:id', channelMonitors.getChannelMonitor)
+  app.put('/api/v1/admin/channel-monitors/:id', channelMonitors.updateChannelMonitor)
+  app.delete('/api/v1/admin/channel-monitors/:id', channelMonitors.deleteChannelMonitor)
+  app.post('/api/v1/admin/channel-monitors/:id/duplicate', channelMonitors.duplicateChannelMonitor)
+  app.post('/api/v1/admin/channel-monitors/:id/run', channelMonitors.runChannelMonitor)
+  app.get('/api/v1/admin/channel-monitors/:id/history', channelMonitors.channelMonitorHistory)
+  app.get('/api/v1/admin/channel-monitor-templates', channelMonitors.listChannelMonitorTemplates)
+  app.post('/api/v1/admin/channel-monitor-templates', channelMonitors.createChannelMonitorTemplate)
+  app.get('/api/v1/admin/channel-monitor-templates/:id', channelMonitors.getChannelMonitorTemplate)
+  app.put('/api/v1/admin/channel-monitor-templates/:id', channelMonitors.updateChannelMonitorTemplate)
+  app.delete('/api/v1/admin/channel-monitor-templates/:id', channelMonitors.deleteChannelMonitorTemplate)
+  app.get('/api/v1/admin/channel-monitor-templates/:id/monitors', channelMonitors.associatedChannelMonitors)
+  app.post('/api/v1/admin/channel-monitor-templates/:id/apply', channelMonitors.applyChannelMonitorTemplate)
+  app.get('/api/v1/channel-monitors', channelMonitors.userChannelMonitors)
+  app.get('/api/v1/channel-monitors/:id/status', channelMonitors.userChannelMonitorStatus)
+  app.get('/api/v1/admin/channel-monitor-v2/config', channelMonitorV2.getChannelMonitorV2Config)
+  app.put('/api/v1/admin/channel-monitor-v2/config', channelMonitorV2.updateChannelMonitorV2Config)
+  app.get('/api/v1/admin/channel-monitor-v2/dimensions', channelMonitorV2.channelMonitorV2Dimensions)
+  app.get('/api/v1/admin/channel-monitor-v2/snapshot', channelMonitorV2.channelMonitorV2Snapshot)
+  app.get('/api/v1/admin/channel-monitor-v2/models', channelMonitorV2.channelMonitorV2Models)
+  app.get('/api/v1/admin/channel-monitor-v2/matrix', channelMonitorV2.channelMonitorV2Matrix)
+  app.get('/api/v1/admin/channel-monitor-v2/errors', channelMonitorV2.channelMonitorV2Errors)
+  app.get('/api/v1/admin/channel-monitor-v2/users', channelMonitorV2.channelMonitorV2Users)
+  app.get('/api/v1/channel-monitor-v2/dimensions', channelMonitorV2.channelMonitorV2Dimensions)
+  app.get('/api/v1/channel-monitor-v2/snapshot', channelMonitorV2.channelMonitorV2Snapshot)
+  app.get('/api/v1/channel-monitor-v2/models', channelMonitorV2.channelMonitorV2Models)
+  app.get('/api/v1/channel-monitor-v2/matrix', channelMonitorV2.channelMonitorV2Matrix)
+  app.get('/api/v1/channel-monitor-v2/errors', channelMonitorV2.channelMonitorV2Errors)
+  app.get('/api/v1/channel-monitor-v2/users', channelMonitorV2.channelMonitorV2Users)
+  app.get('/api/v1/admin/accounts/upstream-billing-probe/settings', getUpstreamBillingProbeSettings)
+  app.put('/api/v1/admin/accounts/upstream-billing-probe/settings', putUpstreamBillingProbeSettings)
+  app.post('/api/v1/admin/accounts/upstream-billing-probe/batch', probeUpstreamBillingBatch)
+  app.get('/api/v1/admin/accounts/upstream-billing-rates', getUpstreamBillingRates)
+  app.put('/api/v1/admin/accounts/:id/upstream-billing-probe', setUpstreamBillingProbeEnabled)
+  app.post('/api/v1/admin/accounts/:id/upstream-billing-probe', probeUpstreamBilling)
+  app.get('/api/v1/admin/backups/s3-config', backupStorage.getBackupS3Config)
+  app.put('/api/v1/admin/backups/s3-config', backupStorage.updateBackupS3Config)
+  app.post('/api/v1/admin/backups/s3-config/test', backupStorage.testBackupS3Config)
+  app.get('/api/v1/admin/backups/image-storage', backupStorage.getImageStorageConfig)
+  app.put('/api/v1/admin/backups/image-storage', backupStorage.updateImageStorageConfig)
+  app.post('/api/v1/admin/backups/image-storage/test', backupStorage.testImageStorageConfig)
+  app.get('/api/v1/admin/backups/schedule', backupStorage.getBackupSchedule)
+  app.put('/api/v1/admin/backups/schedule', backupStorage.updateBackupSchedule)
+  app.get('/api/v1/admin/backups', backupStorage.listManagedBackups)
+  app.post('/api/v1/admin/backups', backupStorage.requireBackupExecutor)
+  app.get('/api/v1/admin/backups/:id', backupStorage.getManagedBackup)
+  app.get('/api/v1/admin/backups/:id/download', backupStorage.requireBackupExecutor)
+  app.post('/api/v1/admin/backups/:id/restore', backupStorage.requireBackupExecutor)
+  app.delete('/api/v1/admin/backups/:id', backupStorage.requireBackupExecutor)
   app.get('/api/v1/admin/settings', getAdminSettings)
   app.put('/api/v1/admin/settings', updateAdminSettings)
+  for (const name of runtimeSettingNames) {
+    const handlers = runtimeSettingHandlers(name)
+    app.get(`/api/v1/admin/settings/${name}`, handlers.get)
+    app.put(`/api/v1/admin/settings/${name}`, handlers.put)
+  }
+  app.get('/api/v1/admin/settings/admin-api-key', getAdminAutomationKey)
+  app.post('/api/v1/admin/settings/admin-api-key/regenerate', regenerateAdminAutomationKey)
+  app.delete('/api/v1/admin/settings/admin-api-key', deleteAdminAutomationKey)
+  app.get('/api/v1/admin/settings/email-delivery', getEmailDeliverySettings)
+  app.put('/api/v1/admin/settings/email-delivery', updateEmailDeliverySettings)
+  app.post('/api/v1/admin/settings/test-smtp', testSmtpConnection)
+  app.post('/api/v1/admin/settings/send-test-email', sendSmtpTestEmail)
+  app.get('/api/v1/admin/settings/email-templates', listEmailTemplates)
+  app.get('/api/v1/admin/settings/email-templates/:event/:locale', getEmailTemplate)
+  app.put('/api/v1/admin/settings/email-templates/:event/:locale', updateEmailTemplate)
+  app.post('/api/v1/admin/settings/email-templates/:event/:locale/restore-official', restoreOfficialEmailTemplate)
+  app.post('/api/v1/admin/settings/email-template-preview', previewEmailTemplate)
+
   app.get('/api/v1/admin/compliance', getAdminComplianceStatus)
   app.post('/api/v1/admin/compliance/accept', acceptAdminCompliance)
   app.get('/api/v1/admin/usage', listAdminUsage)
@@ -639,6 +751,53 @@ export function createApp() {
   app.post('/api/v1/admin/ops/upstream-errors/:id/:action', actOnAdminUpstreamError)
   app.get('/api/v1/admin/ops/request-errors/:id', getAdminRequestErrorDetail)
   app.get('/api/v1/admin/ops/upstream-errors/:id', getAdminUpstreamErrorDetail)
+  app.get('/api/v1/admin/ops/advanced-settings', opsDashboard.getOpsAdvancedSettings)
+  app.put('/api/v1/admin/ops/advanced-settings', opsDashboard.updateOpsAdvancedSettings)
+  app.get('/api/v1/admin/ops/settings/metric-thresholds', opsDashboard.getOpsMetricThresholds)
+  app.put('/api/v1/admin/ops/settings/metric-thresholds', opsDashboard.updateOpsMetricThresholds)
+  app.get('/api/v1/admin/ops/dashboard/snapshot-v2', opsDashboard.getOpsDashboardSnapshot)
+  app.get('/api/v1/admin/ops/dashboard/overview', opsDashboard.getOpsDashboardOverview)
+  app.get('/api/v1/admin/ops/dashboard/throughput-trend', opsDashboard.getOpsThroughputTrend)
+  app.get('/api/v1/admin/ops/dashboard/latency-histogram', opsDashboard.getOpsLatencyHistogram)
+  app.get('/api/v1/admin/ops/dashboard/error-trend', opsDashboard.getOpsErrorTrend)
+  app.get('/api/v1/admin/ops/dashboard/error-distribution', opsDashboard.getOpsErrorDistribution)
+  app.get('/api/v1/admin/ops/dashboard/openai-token-stats', opsDashboard.getOpsOpenAITokenStats)
+  app.get('/api/v1/admin/ops/concurrency', opsDashboard.getOpsConcurrency)
+  app.get('/api/v1/admin/ops/user-concurrency', opsDashboard.getOpsUserConcurrency)
+  app.get('/api/v1/admin/ops/account-availability', opsDashboard.getOpsAccountAvailability)
+  app.get('/api/v1/admin/ops/realtime-traffic', opsDashboard.getOpsRealtimeTraffic)
+  app.get('/api/v1/admin/proxies', proxyCatalog.listProxies)
+  app.get('/api/v1/admin/proxies/all', proxyCatalog.listProxies)
+  app.post('/api/v1/admin/proxies', proxyCatalog.createProxy)
+  app.post('/api/v1/admin/proxies/batch', proxyCatalog.batchCreateProxies)
+  app.post('/api/v1/admin/proxies/batch-delete', proxyCatalog.batchDeleteProxies)
+  app.get('/api/v1/admin/proxies/data', proxyCatalog.exportProxyData)
+  app.post('/api/v1/admin/proxies/data', proxyCatalog.importProxyData)
+  app.get('/api/v1/admin/proxies/:id', proxyCatalog.getProxy)
+  app.put('/api/v1/admin/proxies/:id', proxyCatalog.updateProxy)
+  app.delete('/api/v1/admin/proxies/:id', proxyCatalog.deleteProxy)
+  app.post('/api/v1/admin/proxies/:id/test', proxyCatalog.testProxy)
+  app.post('/api/v1/admin/proxies/:id/quality-check', proxyCatalog.checkProxyQuality)
+  app.get('/api/v1/admin/proxies/:id/stats', proxyCatalog.proxyStats)
+  app.get('/api/v1/admin/proxies/:id/accounts', proxyCatalog.proxyAccounts)
+  app.get('/api/v1/admin/ops/runtime/alert', opsAlerts.getOpsAlertRuntime)
+  app.put('/api/v1/admin/ops/runtime/alert', opsAlerts.updateOpsAlertRuntime)
+  app.get('/api/v1/admin/ops/email-notification/config', opsAlerts.getOpsEmailConfig)
+  app.put('/api/v1/admin/ops/email-notification/config', opsAlerts.updateOpsEmailConfig)
+  app.get('/api/v1/admin/ops/alert-rules', opsAlerts.listOpsAlertRules)
+  app.post('/api/v1/admin/ops/alert-rules', opsAlerts.createOpsAlertRule)
+  app.put('/api/v1/admin/ops/alert-rules/:id', opsAlerts.updateOpsAlertRule)
+  app.delete('/api/v1/admin/ops/alert-rules/:id', opsAlerts.deleteOpsAlertRule)
+  app.get('/api/v1/admin/ops/alert-events', opsAlerts.listOpsAlertEvents)
+  app.get('/api/v1/admin/ops/alert-events/:id', opsAlerts.getOpsAlertEvent)
+  app.put('/api/v1/admin/ops/alert-events/:id/status', opsAlerts.updateOpsAlertEventStatus)
+  app.post('/api/v1/admin/ops/alert-silences', opsAlerts.createOpsAlertSilence)
+  app.get('/api/v1/admin/ops/runtime/logging', opsSystemLogs.getOpsRuntimeLogging)
+  app.put('/api/v1/admin/ops/runtime/logging', opsSystemLogs.updateOpsRuntimeLogging)
+  app.post('/api/v1/admin/ops/runtime/logging/reset', opsSystemLogs.resetOpsRuntimeLogging)
+  app.get('/api/v1/admin/ops/system-logs', opsSystemLogs.listOpsSystemLogs)
+  app.post('/api/v1/admin/ops/system-logs/cleanup', opsSystemLogs.cleanupOpsSystemLogs)
+  app.get('/api/v1/admin/ops/system-logs/health', opsSystemLogs.getOpsSystemLogHealth)
   app.all('/api/v1/admin/ops/*', unsupportedAdminOps)
   app.get('/api/v1/admin/announcements', listAdminAnnouncements)
   app.post('/api/v1/admin/announcements', createAdminAnnouncement)
@@ -734,10 +893,20 @@ export function createApp() {
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
   app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)
   app.get('/api/v1/admin/accounts/synthetic-probes/history', listAdminAccountSyntheticProbeHistory)
+  app.post('/api/v1/admin/accounts/today-stats/batch', accountTodayStats)
+  app.get('/api/v1/admin/accounts/:id/today-stats', accountTodayStats)
   app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
   app.get('/api/v1/admin/accounts/:id/models', listAdminAccountTestModels)
+  app.get('/api/v1/admin/accounts/ollama-cloud-usage/settings', ollamaUsage.getOllamaCloudUsageSettings)
+  app.put('/api/v1/admin/accounts/ollama-cloud-usage/settings', ollamaUsage.putOllamaCloudUsageSettings)
+  app.get('/api/v1/admin/accounts/:id/ollama-cloud-usage', ollamaUsage.getOllamaCloudUsage)
+  app.put('/api/v1/admin/accounts/:id/ollama-cloud-usage/session', ollamaUsage.saveOllamaCloudUsageSession)
+  app.delete('/api/v1/admin/accounts/:id/ollama-cloud-usage/session', ollamaUsage.deleteOllamaCloudUsageSession)
+  app.put('/api/v1/admin/accounts/:id/ollama-cloud-usage/auto-refresh', ollamaUsage.setOllamaCloudUsageAutoRefresh)
+  app.post('/api/v1/admin/accounts/:id/ollama-cloud-usage/refresh', ollamaUsage.refreshOllamaCloudUsage)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)
+  app.post('/api/v1/admin/accounts/:id/schedulable', updateAdminAccount)
   app.delete('/api/v1/admin/accounts/:id', deleteAdminAccount)
   app.put('/api/v1/admin/accounts/:id/groups/:group_id', putAdminAccountGroupLink)
   app.delete('/api/v1/admin/accounts/:id/groups/:group_id', deleteAdminAccountGroupLink)

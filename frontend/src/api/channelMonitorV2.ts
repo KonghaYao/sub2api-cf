@@ -21,7 +21,7 @@ export type MonitorMatrixGroupBy = 'platform' | 'platform_group' | 'platform_mod
 export interface MonitorFilter {
   range: MonitorRange
   platforms: string[]
-  groupIds: number[]
+  groupIds: Array<number | string>
   models: string[]
 }
 
@@ -103,7 +103,7 @@ export interface MonitorConfig {
   enabled: boolean
   refresh_interval_seconds: 60 | 300
   platforms: Array<{ platform: string; enabled: boolean; models: string[] }>
-  group_ids: number[]
+  group_ids: Array<number | string>
   health_thresholds: {
     minimum_sample: number
     warning_error_rate: number
@@ -160,7 +160,7 @@ export interface MonitorMatrixBucket {
 
 export interface MonitorMatrixRow {
   platform: string
-  group_id?: number
+  group_id?: number | string
   group_name?: string
   model?: string
   metrics: MonitorMetric
@@ -176,7 +176,7 @@ export interface MonitorMatrixResponse {
 
 export interface MonitorDimensions {
   platforms: Array<{ value: string; label: string; request_count: number }>
-  groups: Array<{ id: number; name: string; platform?: string; request_count: number }>
+  groups: Array<{ id: number | string; name: string; platform?: string; request_count: number }>
   models: Array<{ value: string; label: string; platform?: string; request_count: number }>
 }
 
