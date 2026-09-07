@@ -32,6 +32,8 @@ import {
   requireString,
 } from './http'
 
+import { fetchUpstreamModels } from './upstream-models'
+
 type ControlBindings = { Bindings: Env }
 
 interface AccountRow {
@@ -1341,6 +1343,34 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
 
 export async function deleteAdminAccountModelCapability(context: Context<ControlBindings>): Promise<Response> {
   return deleteRelation(context, 'model')
+}
+
+export async function previewAdminUpstreamModels(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const platform = requireProviderPlatform(body.platform)
+    const defaults = { openai: 'https://api.openai.com', anthropic: 'https://api.anthropic.com', gemini: 'https://generativelanguage.googleapis.com', codex: 'https://chatgpt.com/backend-api/codex' }
+    const baseUrl = body.base_url === undefined ? defaults[platform] : requireString(body, 'base_url', 2048)
+    const account: ProviderAccount = { platform, ...providerContract(platform), base_url: baseUrl, provider_config: {} }
+    const credential = { api_key: requireProviderCredential(body, 'api_key') }
+    return controlSuccess(await fetchUpstreamModels(account, credential))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+export async function syncAdminUpstreamModels(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    requireSupportedAccount(account)
+    const credential = await decryptCredential(
+      account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
+      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+    )
+    return controlSuccess(await fetchUpstreamModels(providerAccount(account), credential))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
 }
 
 export async function testAdminAccount(context: Context<ControlBindings>): Promise<Response> {

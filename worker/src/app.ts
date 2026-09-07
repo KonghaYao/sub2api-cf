@@ -51,6 +51,8 @@ import {
   putAdminAccountGroupLink,
   putAdminAccountModelCapability,
   testAdminAccount,
+  previewAdminUpstreamModels,
+  syncAdminUpstreamModels,
   updateAdminAccount,
 } from './control/accounts'
 import {
@@ -720,6 +722,8 @@ export function createApp() {
   app.delete('/api/v1/admin/channels/:id', deleteAdminChannel)
   app.get('/api/v1/admin/accounts', listAdminAccounts)
   app.post('/api/v1/admin/accounts', createAdminAccount)
+  app.post('/api/v1/admin/accounts/models/sync-upstream-preview', previewAdminUpstreamModels)
+  app.post('/api/v1/admin/accounts/:id/models/sync-upstream', syncAdminUpstreamModels)
   app.post('/api/v1/admin/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/api/v1/admin/accounts/:id/refresh', refreshAdminAccountCredentials)
   app.post('/api/v1/admin/accounts/batch-refresh', batchRefreshAdminAccountCredentials)
