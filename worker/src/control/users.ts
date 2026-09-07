@@ -1107,6 +1107,11 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
               SET revoked_at_ms = ?, revoke_reason = 'admin_password_reset'
             WHERE user_id = ? AND revoked_at_ms IS NULL`,
         ).bind(updatedAtMs, user.id))
+        statements.push(context.env.DB.prepare(
+          `UPDATE admin_sessions
+              SET revoked_at_ms = ?
+            WHERE user_id = ? AND revoked_at_ms IS NULL`,
+        ).bind(updatedAtMs, user.id))
       }
       controlVersion += 1
     }
@@ -1153,9 +1158,30 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       updatedAtMs = Date.now()
       statements.push(context.env.DB.prepare(
         `UPDATE users
-            SET status = ?, balance_micros = ?, state_version = ?, updated_at_ms = ?
+            SET auth_version = CASE
+                  WHEN status <> ? AND ? = 'disabled' THEN auth_version + 1
+                  ELSE auth_version
+                END,
+                status = ?, balance_micros = ?, state_version = ?, updated_at_ms = ?
           WHERE id = ? AND state_version < ?`,
-      ).bind(projectedStatus, balanceMicros, stateVersion, updatedAtMs, user.id, stateVersion))
+      ).bind(projectedStatus, projectedStatus, projectedStatus, balanceMicros, stateVersion, updatedAtMs, user.id, stateVersion))
+      if (projectedStatus === 'disabled') {
+        // Revocation is permanent: re-enabling an account must require a fresh
+        // login instead of reviving sessions that existed before its suspension.
+        // Gate on the projection so a stale DO result cannot revoke newer state.
+        statements.push(context.env.DB.prepare(
+          `UPDATE user_sessions
+              SET revoked_at_ms = ?, revoke_reason = 'admin_user_disabled'
+            WHERE user_id = ? AND revoked_at_ms IS NULL
+              AND EXISTS (SELECT 1 FROM users WHERE id = ? AND status = 'disabled' AND state_version = ?)`,
+        ).bind(updatedAtMs, user.id, user.id, stateVersion))
+        statements.push(context.env.DB.prepare(
+          `UPDATE admin_sessions
+              SET revoked_at_ms = ?
+            WHERE user_id = ? AND revoked_at_ms IS NULL
+              AND EXISTS (SELECT 1 FROM users WHERE id = ? AND status = 'disabled' AND state_version = ?)`,
+        ).bind(updatedAtMs, user.id, user.id, stateVersion))
+      }
     }
     const response = {
       ...user,

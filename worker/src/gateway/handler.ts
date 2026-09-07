@@ -1,3 +1,4 @@
+import { requestIdFor } from '../request-id'
 import type { Context } from 'hono'
 import { captureUpstreamDiagnostic } from './upstream-diagnostics'
 import type { Env, UsageSettledPayload } from '../env'
@@ -344,7 +345,7 @@ async function handleGeminiCountTokens(
   context: Context<GatewayBindings>,
   publicModel: string,
 ): Promise<Response> {
-  const requestId = crypto.randomUUID()
+  const requestId = requestIdFor(context.req.raw)
   const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
@@ -517,7 +518,7 @@ export async function handleResponsesCompact(
 export async function handleAnthropicCountTokens(
   context: Context<GatewayBindings>,
 ): Promise<Response> {
-  const requestId = crypto.randomUUID()
+  const requestId = requestIdFor(context.req.raw)
   const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
@@ -630,7 +631,7 @@ export async function handleAnthropicCountTokens(
 export async function handleResponsesInputTokens(
   context: Context<GatewayBindings>,
 ): Promise<Response> {
-  const requestId = crypto.randomUUID()
+  const requestId = requestIdFor(context.req.raw)
   const startedAt = Date.now()
   let acquired: AcquiredUpstream | null = null
   let pool: DurableObjectStub | null = null
@@ -1075,7 +1076,7 @@ async function dispatchGateway(
   errorResponse: GatewayErrorResponder,
   preserveUnsafeIntegers = false,
 ): Promise<Response> {
-  const requestId = crypto.randomUUID()
+  const requestId = requestIdFor(context.req.raw)
   const startedAt = Date.now()
   let admission: ApiKeyAdmissionLease | null = null
   let admissionHandedOff = false
@@ -1841,7 +1842,8 @@ async function createSynchronousResponse(
     try {
       parsed = JSON.parse(new TextDecoder().decode(bytes))
     } catch {
-      // Compatible upstreams occasionally return non-JSON bodies; charge by bounded byte estimate.
+      await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
+      throw new GatewayError(502, 'invalid_upstream_response', 'Upstream returned invalid JSON', 'server_error')
     }
     const embeddedError = objectValue(objectValue(parsed)?.error)
     if (input.upstreamEndpoint === 'chat_completions' && embeddedError !== null) {
@@ -1949,6 +1951,7 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
   }
 
   usage(): TokenUsage | null {
+    if (this.zeroCost()) return { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false }
     return this.delegate.usage()
   }
 
@@ -1965,7 +1968,11 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
   }
 
   failure(): ReturnType<typeof responsesFailureDetails> | null {
-    return this.endpoint === 'responses' ? this.delegate.failure() : null
+    return this.delegate.failure()
+  }
+
+  zeroCost(): boolean {
+    return this.endpoint === 'chat_completions' && this.delegate.chatFailureHasNoOutput()
   }
 
   errorFrame(message: string): Uint8Array {

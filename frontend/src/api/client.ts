@@ -13,7 +13,7 @@ import {
   shouldMarkUserUIRequest,
 } from './adminUIRequest'
 import { requestAdminStepUp } from './adminStepUpRecovery'
-import { refreshAuthTokens } from './tokenRefresh'
+import { getStoredAuthUserID, refreshAuthTokens } from './tokenRefresh'
 import { getAPIBaseURL } from './url'
 export { buildApiUrl, buildGatewayUrl } from './url'
 
@@ -28,6 +28,16 @@ export const apiClient: AxiosInstance = axios.create({
   }
 })
 
+interface SessionBoundRequestConfig extends InternalAxiosRequestConfig {
+  _authUserID?: string | null
+  _retry?: boolean
+  _stepUpRetry?: boolean
+}
+
+function sessionChangedError() {
+  return { status: 401, code: 'AUTH_SESSION_CHANGED', message: 'Authentication session changed while the request was in flight.' }
+}
+
 // ==================== Request Interceptor ====================
 
 // Get user's timezone
@@ -40,7 +50,14 @@ const getUserTimezone = (): string => {
 }
 
 apiClient.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
+  (config: SessionBoundRequestConfig) => {
+    const userID = getStoredAuthUserID()
+    if (config._authUserID !== undefined && config._authUserID !== userID) {
+      return Promise.reject(sessionChangedError())
+    }
+    // Preserve the original identity across retries, including state-changing
+    // requests. A later 401 must not replay this operation for a new login.
+    config._authUserID = userID
     // Attach token from localStorage
     const token = localStorage.getItem('auth_token')
     if (token && config.headers) {
@@ -108,10 +125,11 @@ apiClient.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    const originalRequest = error.config as InternalAxiosRequestConfig & {
-      _retry?: boolean
-      _stepUpRetry?: boolean
+    if ((error as unknown as { code?: string }).code === 'AUTH_SESSION_CHANGED') {
+      return Promise.reject(error)
     }
+
+    const originalRequest = error.config as SessionBoundRequestConfig
 
     // Handle common errors
     if (error.response) {
@@ -196,6 +214,9 @@ apiClient.interceptors.response.use(
       // 401: Try to refresh the token if we have a refresh token
       // This handles TOKEN_EXPIRED, INVALID_TOKEN, TOKEN_REVOKED, etc.
       if (status === 401 && !originalRequest._retry) {
+        if (originalRequest._authUserID !== undefined && originalRequest._authUserID !== getStoredAuthUserID()) {
+          return Promise.reject(sessionChangedError())
+        }
         const refreshToken = localStorage.getItem('refresh_token')
         const isAuthEndpoint =
           url.includes('/auth/login') || url.includes('/auth/register') || url.includes('/auth/refresh')

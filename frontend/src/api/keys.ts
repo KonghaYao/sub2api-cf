@@ -242,7 +242,8 @@ export async function create(
   ipBlacklist?: string[],
   quota?: number,
   expiresInDays?: number,
-  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number }
+  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number },
+  options?: { expiresAt?: string }
 ): Promise<ApiKey> {
   if (!isCloudflareWorkerContractActive()) {
     const payload = { name } as CreateApiKeyRequest
@@ -277,7 +278,13 @@ export async function create(
   workerAmountPayload(payload, 'rate_limit_5h', rateLimitData?.rate_limit_5h)
   workerAmountPayload(payload, 'rate_limit_1d', rateLimitData?.rate_limit_1d)
   workerAmountPayload(payload, 'rate_limit_7d', rateLimitData?.rate_limit_7d)
-  if (expiresInDays !== undefined && expiresInDays > 0) {
+  if (options?.expiresAt !== undefined) {
+    const expiresAtMs = Date.parse(options.expiresAt)
+    if (!Number.isSafeInteger(expiresAtMs)) {
+      throw Object.assign(new Error('expires_at must be a valid timestamp'), { code: 'invalid_expires_at' })
+    }
+    payload.expires_at_ms = expiresAtMs
+  } else if (expiresInDays !== undefined && expiresInDays > 0) {
     payload.expires_at_ms = Date.now() + Math.ceil(expiresInDays * 24 * 60 * 60 * 1000)
   }
 

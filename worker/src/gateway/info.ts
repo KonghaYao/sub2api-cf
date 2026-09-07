@@ -362,7 +362,7 @@ function dayBucket(date: string, timezone: string): DayBucket {
   }
 }
 
-function localDate(timestamp: number, timezone: string): string {
+export function localDate(timestamp: number, timezone: string): string {
   const parts = dateTimeParts(timestamp, timezone)
   return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
 }

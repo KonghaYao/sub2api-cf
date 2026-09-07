@@ -94,6 +94,7 @@ async function prepareFreshWorker(request: APIRequestContext): Promise<Bootstrap
 
 test('user registers, logs in, completes the API-key lifecycle and gateway billing, and persists an R2 avatar', async ({ page, request }) => {
   const setup = await prepareFreshWorker(request)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
   await page.goto('/register')
   await page.locator('#email').fill(EMAIL)
@@ -144,12 +145,17 @@ test('user registers, logs in, completes the API-key lifecycle and gateway billi
   await page.locator('[data-tour="key-form-name"]').fill('Browser-created key')
   await page.locator('[data-tour="key-form-group"] button[aria-haspopup="true"]').click()
   await page.getByRole('option', { name: /Browser E2E Group/ }).click()
+  const createResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/v1/keys' && response.request().method() === 'POST'
+  )
   await page.locator('[data-tour="key-form-submit"]').click()
-
-  const secretDialog = page.getByRole('dialog').filter({ hasText: /API key created successfully/i })
-  await expect(secretDialog).toBeVisible()
-  await expect(secretDialog.locator('code')).toHaveText(/^sk-sub2api-[A-Za-z0-9_-]{48}$/)
-  const apiKey = (await secretDialog.locator('code').textContent())!
+  const created = await expectData<{ id: string; key: string }>(await createResponse)
+  const createdKeyRow = page.locator('tr').filter({ hasText: 'Browser-created key' })
+  await expect(createdKeyRow).toHaveCount(1)
+  await createdKeyRow.getByTitle(/copy to clipboard/i).click()
+  const apiKey = await page.evaluate(() => navigator.clipboard.readText())
+  expect(apiKey).toMatch(/^sk-sub2api-[A-Za-z0-9_-]{48}$/)
+  expect(apiKey).toBe(created.key)
 
   const completion = await page.evaluate(async ({ key }) => {
     const response = await fetch('/v1/chat/completions', {
@@ -176,7 +182,6 @@ test('user registers, logs in, completes the API-key lifecycle and gateway billi
     },
   })
 
-  await secretDialog.getByRole('button', { name: /close modal/i }).click()
   await expect(page.getByText('Browser-created key', { exact: true })).toBeVisible()
 
   await expect.poll(async () => page.evaluate(async ({ token }) => {
@@ -217,7 +222,6 @@ test('user registers, logs in, completes the API-key lifecycle and gateway billi
   await expect(page.getByTestId('profile-avatar-preview')).toHaveAttribute('src', avatarUrl!)
 
   await page.goto('/keys')
-  const createdKeyRow = page.locator('tr').filter({ hasText: 'Browser-created key' })
   await expect(createdKeyRow).toHaveCount(1)
   await createdKeyRow.getByRole('button', { name: /^delete$/i }).click()
   const deleteDialog = page.getByRole('dialog').filter({ hasText: /Browser-created key/ })
@@ -233,4 +237,9 @@ test('user registers, logs in, completes the API-key lifecycle and gateway billi
   expect(revoked.status).toBe('inactive')
   await expectData(await refreshedList)
   await expect(createdKeyRow).toHaveCount(0)
+  const rejected = await request.post('/v1/chat/completions', {
+    headers: { authorization: `Bearer ${apiKey}` },
+    data: { model: 'gpt-browser-e2e', messages: [{ role: 'user', content: 'This key was deleted.' }], max_tokens: 16 },
+  })
+  expect(rejected.status()).toBe(401)
 })

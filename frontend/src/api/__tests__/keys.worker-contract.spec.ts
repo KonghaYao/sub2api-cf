@@ -58,6 +58,16 @@ describe('user API keys Cloudflare Worker contract', () => {
     )
   })
 
+  it('preserves an exact selected expiry instead of rounding it up to a whole day', async () => {
+    post.mockResolvedValueOnce({ data: workerKey() })
+    const expiry = '2030-01-01T10:15:00.000Z'
+    await create('short-lived', GROUP_ID, undefined, undefined, undefined, 0, undefined, undefined,
+      { expiresAt: expiry })
+    expect(post).toHaveBeenCalledWith('/keys', expect.objectContaining({
+      expires_at_ms: Date.parse(expiry)
+    }), expect.anything())
+  })
+
   it('keeps UUID identifiers and projects every monetary/window field to the legacy USD UI model', async () => {
     get.mockResolvedValueOnce({
       data: { items: [workerKey()], total: 1, page: 1, page_size: 10, pages: 1 }

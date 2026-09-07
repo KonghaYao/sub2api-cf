@@ -20,6 +20,38 @@ export default defineConfig(async () => {
             ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
             }
+            if (url.pathname === '/v1/chat/completions') {
+              const body = await request.clone().json() as Record<string, unknown>
+              if (body.model === 'lifecycle-invalid-json-upstream') {
+                return new Response('<html>upstream maintenance</html>', { headers: { 'content-type': 'text/html' } })
+              }
+              if (typeof body.model === 'string' && ['lifecycle-stream-success-upstream', 'lifecycle-stream-partial-error-upstream', 'lifecycle-stream-cancel-upstream', 'lifecycle-stream-late-usage-upstream'].includes(body.model)) {
+                const frames = [
+                  'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+                  'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n\n',
+                  body.model === 'lifecycle-stream-partial-error-upstream'
+                    ? 'data: {"error":{"code":"upstream_error","message":"generation interrupted"}}\n\ndata: [DONE]\n\n'
+                    : 'data: [DONE]\n\n',
+                ]
+                if (body.model === 'lifecycle-stream-late-usage-upstream') {
+                  frames.splice(1, 0, 'data: {"error":{"code":"upstream_error","message":"generation interrupted"}}\n\n')
+                }
+                return new Response(new ReadableStream({
+                  async pull(controller) {
+                    await new Promise(resolve => setTimeout(resolve, 20))
+                    const frame = frames.shift()
+                    if (frame === undefined) controller.close()
+                    else controller.enqueue(new TextEncoder().encode(frame))
+                  },
+                }), { headers: { 'content-type': 'text/event-stream' } })
+              }
+              if (body.model === 'lifecycle-stream-error-upstream') {
+                return new Response('data: {"error":{"code":"resource_exhausted","message":"Monthly usage limit"}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+              }
+              if (body.model === 'lifecycle-quota-upstream') {
+                return Response.json({ error: { code: 'resource_exhausted', message: 'Monthly usage limit' } })
+              }
+            }
             if (url.pathname === '/v1/images/generations') {
               const body = await request.json() as Record<string, unknown>
               if (

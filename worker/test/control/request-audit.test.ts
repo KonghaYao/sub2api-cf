@@ -134,13 +134,15 @@ describe('admin request audit middleware', () => {
     }, JSON.stringify({ outcome: expectedStatus })), undefined, subject.env)
 
     expect(response.status).toBe(expectedStatus)
-    expect(response.headers.get('x-request-id')).toBe('request-ray-123')
+    const requestId = response.headers.get('x-request-id')
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(requestId).not.toBe('request-ray-123')
     const row = subject.raw.prepare('SELECT * FROM admin_request_audit_logs').get()
     expect(row).toMatchObject({
       actor_user_id: 'admin-one', actor_email: 'snapshot@example.com', actor_role: 'admin',
       auth_method: 'admin_api_key', method: 'POST', path,
       route_template: path,
-      request_id: 'request-ray-123', client_ip: '198.51.100.7',
+      request_id: requestId, client_ip: '198.51.100.7',
       user_agent: 'audit-test-agent', status_code: expectedStatus,
       request_body: `{"outcome":${expectedStatus}}`,
     })
@@ -457,7 +459,9 @@ describe('admin request audit clear', () => {
 
     expect(response.status).toBe(200)
     await expect(data(response)).resolves.toEqual({ deleted: 2 })
-    expect(response.headers.get('x-request-id')).toBe('clear-request-ray')
+    const requestId = response.headers.get('x-request-id')
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(requestId).not.toBe('clear-request-ray')
     const rows = subject.raw.prepare('SELECT * FROM admin_request_audit_logs').all()
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
@@ -469,7 +473,7 @@ describe('admin request audit clear', () => {
       method: 'POST',
       path: '/api/v1/admin/audit-logs/clear',
       route_template: '/api/v1/admin/audit-logs/clear',
-      request_id: 'clear-request-ray',
+      request_id: requestId,
       client_ip: '198.51.100.88',
       user_agent: 'clear-test-agent',
       status_code: 200,

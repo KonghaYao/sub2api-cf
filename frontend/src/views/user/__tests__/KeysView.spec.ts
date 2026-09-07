@@ -586,6 +586,26 @@ describe('user KeysView column settings', () => {
     wrapper.unmount()
   })
 
+  it('sends the exact custom expiry selected in the create form', async () => {
+    getAvailableGroups.mockResolvedValueOnce([{ id: 'group-a', name: 'OpenAI' }])
+    const wrapper = await mountView()
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('expires-exactly')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')!
+    groupSelect.vm.$emit('update:modelValue', 'group-a')
+    await nextTick()
+    const expirationLabel = wrapper.findAll('label').find((label) => label.text() === 'keys.expiration')!
+    await expirationLabel.element.parentElement!.querySelector('button')!.click()
+    await nextTick()
+    const selectedDate = '2030-01-01T10:15'
+    await wrapper.get('input[type="datetime-local"]').setValue(selectedDate)
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+    expect(createKey.mock.calls[0][8]).toEqual({ expiresAt: new Date(selectedDate).toISOString() })
+    wrapper.unmount()
+  })
+
   it('submits an enabled quota from the existing create form', async () => {
     const groupID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
     getAvailableGroups.mockResolvedValueOnce([{
@@ -766,6 +786,21 @@ describe('user KeysView column settings', () => {
         monetaryBaseline: key
       }
     )
+  })
+
+  it('can edit an expired key name without resubmitting its unchanged past expiry', async () => {
+    const key = createApiKey({ group_id: 'group-a', status: 'expired', expires_at: '2020-01-01T00:00:42.123Z', control_version: 3 })
+    listKeys.mockResolvedValueOnce({ items: [key], total: 1, page: 1, page_size: 20, pages: 1 })
+    updateKey.mockResolvedValueOnce(key)
+    const wrapper = await mountView()
+    await getButtonByText(wrapper, 'Edit').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('renamed expired key')
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+    expect(updateKey).toHaveBeenCalledOnce()
+    expect(updateKey.mock.calls[0][1].expires_at).toBeUndefined()
+    expect(updateKey.mock.calls[0][1].status).toBeUndefined()
+    wrapper.unmount()
   })
 
   it('passes the loaded raw micros as the unchanged edit baseline for lossless saving', async () => {
