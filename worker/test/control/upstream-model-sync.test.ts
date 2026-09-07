@@ -27,6 +27,32 @@ describe('upstream model sync through the Worker HTTP routes',()=>{
     expect(fetcher.mock.calls[0][1].redirect).toBe('manual')
     expect(t.raw.prepare('SELECT COUNT(*) AS n FROM accounts').get()).toEqual({n:0})
   })
+  it('loads test-modal models and executes the selected model as SSE instead of a health probe',async()=>{
+    const t=await fixture()
+    const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'model-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
+    expect(created.status).toBe(201);const id=(await created.json() as any).data.id
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json({data:[{id:'gpt-test'}]})).mockResolvedValueOnce(Response.json({choices:[{message:{content:'OK'}}]}))
+    vi.stubGlobal('fetch',fetcher)
+    const models=await t.app.request(`/api/v1/admin/accounts/${id}/models`,{headers:t.headers},t.env)
+    expect(models.status).toBe(200)
+    expect(await models.json()).toMatchObject({data:[{id:'gpt-test',display_name:'gpt-test'}]})
+    const tested=await t.app.request(`/api/v1/admin/accounts/${id}/test`,{method:'POST',headers:t.headers,body:JSON.stringify({model_id:'gpt-test',mode:'default'})},t.env)
+    expect(tested.headers.get('content-type')).toContain('text/event-stream')
+    const output=await tested.text();expect(output).toContain('"type":"content","text":"OK"');expect(output).toContain('"success":true')
+    expect(fetcher.mock.calls[1][0]).toBe('https://pucoding.com/v1/chat/completions')
+    expect(JSON.parse(fetcher.mock.calls[1][1].body).model).toBe('gpt-test')
+  })
+
+  it('finishes model tests with an explicit failure for HTTP, malformed and empty upstream responses',async()=>{
+    const t=await fixture()
+    const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'failed-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
+    const id=(await created.json() as any).data.id
+    for(const response of [new Response('secret',{status:401}),new Response('<html>error</html>'),Response.json({choices:[]}),Response.json({error:{message:'test-upstream-secret'}})]){
+      vi.stubGlobal('fetch',vi.fn().mockResolvedValue(response))
+      const r=await t.app.request(`/api/v1/admin/accounts/${id}/test`,{method:'POST',headers:t.headers,body:JSON.stringify({model_id:'gpt-test'})},t.env)
+      const output=await r.text();expect(output).toContain('"success":false');expect(output).not.toContain('"success":true');expect(output).not.toContain('test-upstream-secret')
+    }
+  })
   it('uses the saved encrypted credential through the saved account route',async()=>{
     const t=await fixture(); const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'sync-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
     expect(created.status,await created.clone().text()).toBe(201)

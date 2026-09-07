@@ -53,6 +53,7 @@ import {
   testAdminAccount,
   previewAdminUpstreamModels,
   syncAdminUpstreamModels,
+  listAdminAccountTestModels,
   updateAdminAccount,
 } from './control/accounts'
 import {
@@ -734,6 +735,7 @@ export function createApp() {
   app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)
   app.get('/api/v1/admin/accounts/synthetic-probes/history', listAdminAccountSyntheticProbeHistory)
   app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
+  app.get('/api/v1/admin/accounts/:id/models', listAdminAccountTestModels)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)
   app.delete('/api/v1/admin/accounts/:id', deleteAdminAccount)

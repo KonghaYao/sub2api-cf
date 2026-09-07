@@ -32,6 +32,7 @@ import {
   requireString,
 } from './http'
 
+import { testAccountModel } from './account-model-test'
 import { fetchUpstreamModels } from './upstream-models'
 
 type ControlBindings = { Bindings: Env }
@@ -1373,6 +1374,13 @@ export async function syncAdminUpstreamModels(context: Context<ControlBindings>)
   }
 }
 
+export async function listAdminAccountTestModels(context: Context<ControlBindings>): Promise<Response> {
+  const response = await syncAdminUpstreamModels(context)
+  if (!response.ok) return response
+  const { data } = await response.json() as { data: { models: string[]; metadata: Record<string, { display_name?: string }> } }
+  return controlSuccess(data.models.map(id => ({ id, display_name: data.metadata[id]?.display_name ?? id })))
+}
+
 export async function testAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
@@ -1383,6 +1391,12 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       requireCredentialsMasterKey(context.env),
       credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
+    if (context.req.raw.body !== null) {
+      const input = await readJsonObject(context.req.raw)
+      if (Object.hasOwn(input, 'model_id')) {
+        return testAccountModel(context, providerAccount(account), credential, input)
+      }
+    }
     const plan = buildProviderHealthRequest({
       account: providerAccount(account),
       credential,

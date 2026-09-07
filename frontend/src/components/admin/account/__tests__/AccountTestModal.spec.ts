@@ -90,6 +90,14 @@ function mountModal(account: Record<string, unknown> = {
 }
 
 describe('AccountTestModal', () => {
+  it('shows model-list failures instead of silently leaving an empty selector', async () => {
+    getAvailableModels.mockRejectedValueOnce({ message: 'Upstream model sync returned HTTP 401' })
+    const wrapper = mountModal()
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Upstream model sync returned HTTP 401')
+  })
+
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
       { id: 'gemini-2.0-flash', display_name: 'Gemini 2.0 Flash' },
@@ -117,6 +125,28 @@ describe('AccountTestModal', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('renders an actual text test result and does not hang on an empty response', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gpt-test', display_name: 'GPT Test' }])
+    const wrapper = mountModal({ id: 'worker-account', name: 'pucoding', platform: 'openai', type: 'apikey', status: 'active' })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect((wrapper.vm as any).selectedModelId).toBe('gpt-test')
+    global.fetch = vi.fn().mockResolvedValue(createStreamResponse([
+      'data: {"type":"content","text":"OK"}\n',
+      'data: {"type":"test_complete","success":true}\n'
+    ])) as any
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect(wrapper.text()).toContain('OK')
+    expect(wrapper.text()).toContain('admin.accounts.testCompleted')
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe('gpt-test')
+    global.fetch = vi.fn().mockResolvedValue(createStreamResponse([])) as any
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.accounts.testFailed')
+    expect((wrapper.vm as any).status).toBe('error')
   })
 
   it('gemini 图片模型测试会携带提示词并渲染图片预览', async () => {
