@@ -5,7 +5,7 @@
  */
 
 import { apiClient, buildGatewayUrl } from '../client'
-import type { CursorPage, ExplorerPayload, PaginatedResponse } from '@/types'
+import type { CursorPage, ExplorerPayload, GroupId, PaginatedResponse } from '@/types'
 
 export type OpsQueryMode = 'auto' | 'raw' | 'preagg'
 
@@ -107,6 +107,7 @@ export interface OpsThroughputTrendResponse {
 
 export type OpsRequestKind = 'success' | 'error'
 export type OpsRequestDetailsKind = OpsRequestKind | 'all'
+export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc'
 export interface OpsRequestDetail {
   kind: OpsRequestKind
   created_at: string
@@ -131,8 +132,11 @@ export interface OpsRequestDetail {
 }
 
 export interface OpsRequestDetailsParams {
+  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
   start_time?: string
   end_time?: string
+
+  kind?: OpsRequestDetailsKind
 
   platform?: string
   group_id?: string | null
@@ -143,13 +147,25 @@ export interface OpsRequestDetailsParams {
 
   model?: string
   request_id?: string
+  q?: string
   status_code?: number
+
+  min_duration_ms?: number
+  max_duration_ms?: number
+  sort?: OpsRequestDetailsSort
 
   limit?: number
   cursor?: string
+  page?: number
+  page_size?: number
 }
 
-export type OpsRequestDetailsResponse = CursorPage<OpsRequestDetail>
+export type OpsRequestDetailsOffsetParams = Omit<OpsRequestDetailsParams, 'limit' | 'cursor' | 'page' | 'page_size'> & {
+  page: number
+  page_size: number
+}
+
+export type OpsRequestDetailsResponse = CursorPage<OpsRequestDetail> | PaginatedResponse<OpsRequestDetail>
 
 export interface OpsLatencyHistogramBucket {
   range: string
@@ -328,12 +344,12 @@ export interface OpsUserConcurrencyStatsResponse {
   timestamp?: string
 }
 
-export async function getConcurrencyStats(platform?: string, groupId?: number | null): Promise<OpsConcurrencyStatsResponse> {
+export async function getConcurrencyStats(platform?: string, groupId?: GroupId | null): Promise<OpsConcurrencyStatsResponse> {
   const params: Record<string, any> = {}
   if (platform) {
     params.platform = platform
   }
-  if (typeof groupId === 'number' && groupId > 0) {
+  if (groupId != null && String(groupId).trim()) {
     params.group_id = groupId
   }
 
@@ -390,12 +406,12 @@ export interface OpsAccountAvailabilityStatsResponse {
   timestamp?: string
 }
 
-export async function getAccountAvailabilityStats(platform?: string, groupId?: number | null): Promise<OpsAccountAvailabilityStatsResponse> {
+export async function getAccountAvailabilityStats(platform?: string, groupId?: GroupId | null): Promise<OpsAccountAvailabilityStatsResponse> {
   const params: Record<string, any> = {}
   if (platform) {
     params.platform = platform
   }
-  if (typeof groupId === 'number' && groupId > 0) {
+  if (groupId != null && String(groupId).trim()) {
     params.group_id = groupId
   }
   const { data } = await apiClient.get<OpsAccountAvailabilityStatsResponse>('/admin/ops/account-availability', { params })
@@ -413,7 +429,7 @@ export interface OpsRealtimeTrafficSummary {
   start_time: string
   end_time: string
   platform: string
-  group_id?: number | null
+  group_id?: GroupId | null
   qps: OpsRateSummary
   tps: OpsRateSummary
 }
@@ -427,13 +443,13 @@ export interface OpsRealtimeTrafficSummaryResponse {
 export async function getRealtimeTrafficSummary(
   window: string,
   platform?: string,
-  groupId?: number | null
+  groupId?: GroupId | null
 ): Promise<OpsRealtimeTrafficSummaryResponse> {
   const params: Record<string, any> = { window }
   if (platform) {
     params.platform = platform
   }
-  if (typeof groupId === 'number' && groupId > 0) {
+  if (groupId != null && String(groupId).trim()) {
     params.group_id = groupId
   }
 
@@ -935,6 +951,11 @@ export interface OpsErrorDetail extends OpsErrorLog {
 
   upstream_status_code?: number | null
   is_business_limited?: boolean
+  api_key_prefix?: string | null
+  error_body?: string
+  upstream_error_message?: string
+  upstream_error_detail?: string
+  upstream_errors?: string
 }
 
 export interface OpsErrorResolutionAuditEvent {
@@ -974,7 +995,7 @@ export async function getDashboardOverview(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -992,7 +1013,7 @@ export async function getDashboardSnapshotV2(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -1010,7 +1031,7 @@ export async function getThroughputTrend(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -1028,7 +1049,7 @@ export async function getLatencyHistogram(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -1046,7 +1067,7 @@ export async function getErrorTrend(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -1064,7 +1085,7 @@ export async function getErrorDistribution(
   start_time?: string
   end_time?: string
   platform?: string
-  group_id?: number | null
+  group_id?: GroupId | null
   mode?: OpsQueryMode
   },
   options: OpsRequestOptions = {}
@@ -1106,13 +1127,29 @@ export type OpsErrorListQueryParams = {
   status_code?: number
   phase?: string
   category?: string
+  error_owner?: string
+  error_source?: string
+  resolved?: string
+  view?: 'errors' | 'excluded' | 'all'
+  q?: string
+  status_codes?: string
+  status_codes_other?: string
   sort_by?: string
   sort_order?: 'asc' | 'desc'
 }
 
-export interface OpsErrorOffsetQueryParams extends OpsErrorListQueryParams {
+export type OpsErrorOffsetQueryParams = Omit<OpsErrorListQueryParams, 'limit' | 'cursor' | 'page' | 'page_size'> & {
   page: number
   page_size: number
+}
+
+export interface OpsRelatedErrorDetail extends OpsErrorLog {
+  payload: ExplorerPayload
+  api_key_prefix?: string | null
+  error_body?: string
+  upstream_error_message?: string
+  upstream_error_detail?: string
+  upstream_errors?: string
 }
 
 export function listRequestErrors(params: OpsErrorOffsetQueryParams): Promise<PaginatedResponse<OpsErrorLog>>
@@ -1124,8 +1161,12 @@ export async function listRequestErrors(
   return data
 }
 
-export async function listUpstreamErrors(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse> {
-  const { data } = await apiClient.get<OpsErrorLogsResponse>('/admin/ops/upstream-errors', { params })
+export function listUpstreamErrors(params: OpsErrorOffsetQueryParams): Promise<PaginatedResponse<OpsErrorLog>>
+export function listUpstreamErrors(params: OpsErrorListQueryParams): Promise<OpsErrorLogsResponse>
+export async function listUpstreamErrors(
+  params: OpsErrorListQueryParams,
+): Promise<OpsErrorLogsResponse | PaginatedResponse<OpsErrorLog>> {
+  const { data } = await apiClient.get<OpsErrorLogsResponse | PaginatedResponse<OpsErrorLog>>('/admin/ops/upstream-errors', { params })
   return data
 }
 
@@ -1147,13 +1188,25 @@ export async function getErrorDetail(
   return data
 }
 
+export function listRequestErrorUpstreamErrors(
+  id: string | number,
+  params: OpsErrorOffsetQueryParams,
+  options: { include_detail: true },
+): Promise<PaginatedResponse<OpsRelatedErrorDetail>>
+export function listRequestErrorUpstreamErrors(
+  id: string | number,
+  params?: OpsErrorListQueryParams,
+  options?: { include_detail?: false },
+): Promise<CursorPage<OpsErrorLog>>
 export async function listRequestErrorUpstreamErrors(
   id: string | number,
-  params: OpsErrorListQueryParams = {}
-): Promise<CursorPage<OpsErrorLog>> {
+  params: OpsErrorListQueryParams = {},
+  options: { include_detail?: boolean } = {},
+): Promise<CursorPage<OpsErrorLog> | PaginatedResponse<OpsRelatedErrorDetail>> {
   const query: Record<string, any> = { ...params }
+  if (options.include_detail) query.include_detail = '1'
   const encodedId = encodeURIComponent(String(id))
-  const { data } = await apiClient.get<CursorPage<OpsErrorLog>>(`/admin/ops/request-errors/${encodedId}/upstream-errors`, { params: query })
+  const { data } = await apiClient.get<CursorPage<OpsErrorLog> | PaginatedResponse<OpsRelatedErrorDetail>>(`/admin/ops/request-errors/${encodedId}/upstream-errors`, { params: query })
   return data
 }
 
@@ -1214,6 +1267,8 @@ function hasDeterministicClientError(error: unknown): boolean {
   return typeof status === 'number' && status >= 400 && status < 500
 }
 
+export function listRequestDetails(params: OpsRequestDetailsOffsetParams): Promise<PaginatedResponse<OpsRequestDetail>>
+export function listRequestDetails(params: OpsRequestDetailsParams): Promise<CursorPage<OpsRequestDetail>>
 export async function listRequestDetails(params: OpsRequestDetailsParams): Promise<OpsRequestDetailsResponse> {
   const { data } = await apiClient.get<OpsRequestDetailsResponse>('/admin/ops/requests', { params })
   return data

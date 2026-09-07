@@ -8,8 +8,11 @@
         :data="rows"
         :loading="loading"
         clickable-rows
-        @rowClick="(row) => emit('openErrorDetail', row.id)"
+        server-side-sort
+        default-sort-key="created_at"
+        default-sort-order="desc"
         @sort="onSort"
+        @rowClick="(row) => emit('openErrorDetail', row.id)"
       >
         <template #cell-created_at="{ row }">
           <span
@@ -164,20 +167,12 @@
 
     <div class="flex-shrink-0">
       <Pagination
-        v-if="total !== undefined && total > 0"
+        v-if="total > 0"
         :total="total"
         :page="page"
-        :page-size="pageSize ?? 20"
+        :page-size="pageSize"
         @update:page="emit('update:page', $event)"
         @update:pageSize="emit('update:pageSize', $event)"
-      />
-      <CursorPagination
-        v-else-if="rows.length > 0 || page > 1"
-        :page="page"
-        :has-more="hasMore ?? false"
-        :loading="loading"
-        @previous="emit('previous')"
-        @next="emit('next')"
       />
     </div>
   </div>
@@ -189,7 +184,6 @@ import { useI18n } from 'vue-i18n'
 import DataTable from '@/components/common/DataTable.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Pagination from '@/components/common/Pagination.vue'
-import CursorPagination from '@/components/user/CursorPagination.vue'
 import IpGeoCell from '@/components/common/IpGeoCell.vue'
 import IpGeoBatchToolbar from '@/components/common/IpGeoBatchToolbar.vue'
 import type { OpsErrorLog } from '@/api/admin/ops'
@@ -286,11 +280,10 @@ function getTypeBadge(log: OpsErrorLog): { label: string; className: string } {
 
 interface Props {
   rows: OpsErrorLog[]
-  hasMore?: boolean
-  total?: number
+  total: number
   loading: boolean
   page: number
-  pageSize?: number
+  pageSize: number
   /** 用户邮箱可点击(emit userClick),仅在有弹窗承接的使用方开启 */
   userClickable?: boolean
   /** 列设置:仅显示这些 key 的列;不传则全量 */
@@ -301,8 +294,6 @@ interface Props {
 
 interface Emits {
   (e: 'openErrorDetail', id: string): void
-  (e: 'previous'): void
-  (e: 'next'): void
   (e: 'update:page', value: number): void
   (e: 'update:pageSize', value: number): void
   (e: 'sort', sortBy: string, sortOrder: 'asc' | 'desc'): void

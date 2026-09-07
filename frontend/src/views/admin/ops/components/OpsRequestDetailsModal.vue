@@ -3,15 +3,21 @@ import { computed, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
-import CursorPagination from '@/components/user/CursorPagination.vue'
+import Pagination from '@/components/common/Pagination.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useAppStore } from '@/stores'
-import { opsAPI, type OpsRequestDetailsParams, type OpsRequestDetail } from '@/api/admin/ops'
+import { opsAPI, type OpsRequestDetailsParams, type OpsRequestDetailsOffsetParams, type OpsRequestDetail } from '@/api/admin/ops'
 import { formatDateTime } from '../utils/opsFormatters'
 import { buildOpsErrorTimeParams } from '../utils/opsErrorParams'
 
 export interface OpsRequestDetailsPreset {
   title: string
+  kind?: OpsRequestDetailsParams['kind']
+  sort?: OpsRequestDetailsParams['sort']
+  min_duration_ms?: number
+  max_duration_ms?: number
+  custom_start_time?: string | null
+  custom_end_time?: string | null
 }
 
 interface Props {
@@ -40,12 +46,9 @@ const isDesktopViewport = useMediaQuery('(min-width: 768px)')
 
 const loading = ref(false)
 const items = ref<OpsRequestDetail[]>([])
+const total = ref(0)
 const page = ref(1)
 const pageSize = ref(10)
-const hasMore = ref(false)
-const nextCursor = ref<string | null>(null)
-const cursors = ref<Array<string | undefined>>([undefined])
-const timeParams = ref(buildOpsErrorTimeParams(props.timeRange, props.customStartTime, props.customEndTime))
 
 const close = () => emit('update:modelValue', false)
 
@@ -59,33 +62,39 @@ const rangeLabel = computed(() => {
 })
 
 function buildTimeParams(): { start_time: string; end_time: string } {
-  return buildOpsErrorTimeParams(props.timeRange, props.customStartTime, props.customEndTime)
+  return buildOpsErrorTimeParams(
+    props.timeRange,
+    props.customStartTime ?? props.preset.custom_start_time,
+    props.customEndTime ?? props.preset.custom_end_time,
+  )
 }
 
 const fetchData = async () => {
   if (!props.modelValue) return
   loading.value = true
   try {
-    const params: OpsRequestDetailsParams = {
-      ...timeParams.value,
-      limit: pageSize.value,
-      cursor: cursors.value[page.value - 1],
+    const params: OpsRequestDetailsOffsetParams = {
+      ...buildTimeParams(),
+      page: page.value,
+      page_size: pageSize.value,
+      kind: props.preset.kind ?? 'all',
+      sort: props.preset.sort ?? 'created_at_desc',
     }
 
     const platform = (props.platform || '').trim()
     if (platform) params.platform = platform
     if (props.groupId != null && String(props.groupId).trim()) params.group_id = String(props.groupId)
+    if (typeof props.preset.min_duration_ms === 'number') params.min_duration_ms = props.preset.min_duration_ms
+    if (typeof props.preset.max_duration_ms === 'number') params.max_duration_ms = props.preset.max_duration_ms
 
     const res = await opsAPI.listRequestDetails(params)
     items.value = res.items || []
-    hasMore.value = res.has_more
-    nextCursor.value = res.next_cursor
+    total.value = res.total || 0
   } catch (e: any) {
     console.error('[OpsRequestDetailsModal] Failed to fetch request details', e)
     appStore.showError(e?.message || t('admin.ops.requestDetails.failedToLoad'))
     items.value = []
-    hasMore.value = false
-    nextCursor.value = null
+    total.value = 0
   } finally {
     loading.value = false
   }
@@ -96,7 +105,8 @@ watch(
   (open) => {
     if (open) {
       if (props.resumeState) return
-      resetCursor()
+      page.value = 1
+      pageSize.value = 10
       fetchData()
     }
   }
@@ -109,34 +119,29 @@ watch(
     props.customEndTime,
     props.platform,
     props.groupId,
-    props.preset.title,
+    props.preset.kind,
+    props.preset.sort,
+    props.preset.min_duration_ms,
+    props.preset.max_duration_ms,
+    props.preset.custom_start_time,
+    props.preset.custom_end_time,
   ],
   () => {
     if (!props.modelValue) return
-    resetCursor()
+    page.value = 1
     fetchData()
   }
 )
 
-function resetCursor() {
+function handlePageChange(next: number) {
+  page.value = next
+  fetchData()
+}
+
+function handlePageSizeChange(next: number) {
+  pageSize.value = next
   page.value = 1
-  cursors.value = [undefined]
-  hasMore.value = false
-  nextCursor.value = null
-  timeParams.value = buildTimeParams()
-}
-
-function goToPreviousPage() {
-  if (page.value <= 1) return
-  page.value -= 1
-  void fetchData()
-}
-
-function goToNextPage() {
-  if (!hasMore.value || !nextCursor.value) return
-  cursors.value[page.value] = nextCursor.value
-  page.value += 1
-  void fetchData()
+  fetchData()
 }
 
 async function handleCopyRequestId(requestId: string) {
@@ -199,7 +204,7 @@ const kindBadgeClass = (kind: string) => {
           <div v-else class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-dark-700">
             <div class="min-h-0 flex-1 overflow-auto">
               <div v-if="!isDesktopViewport" class="divide-y divide-gray-100 dark:divide-dark-800">
-                <div v-for="row in items" :key="`${row.request_id}:${row.created_at}`" class="space-y-2 p-4">
+                <div v-for="(row, idx) in items" :key="idx" class="space-y-2 p-4">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="rounded-full px-2 py-1 text-[10px] font-bold" :class="kindBadgeClass(row.kind)">
                       {{ row.kind === 'error' ? t('admin.ops.requestDetails.kind.error') : t('admin.ops.requestDetails.kind.success') }}
@@ -262,7 +267,7 @@ const kindBadgeClass = (kind: string) => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-800">
-                <tr v-for="row in items" :key="`${row.request_id}:${row.created_at}`" class="hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                <tr v-for="(row, idx) in items" :key="idx" class="hover:bg-gray-50 dark:hover:bg-dark-700/50">
                   <td class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
                     {{ formatDateTime(row.created_at) }}
                   </td>
@@ -312,12 +317,12 @@ const kindBadgeClass = (kind: string) => {
             </table>
             </div>
 
-            <CursorPagination
+            <Pagination
+              :total="total"
               :page="page"
-              :has-more="hasMore"
-              :loading="loading"
-              @previous="goToPreviousPage"
-              @next="goToNextPage"
+              :page-size="pageSize"
+              @update:page="handlePageChange"
+              @update:pageSize="handlePageSizeChange"
             />
           </div>
         </div>

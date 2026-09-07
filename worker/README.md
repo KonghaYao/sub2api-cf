@@ -126,6 +126,10 @@ an absolute UTC duration and deletes at most 500 oldest request-audit rows per
 tick while preserving the newest clear trace; immutable domain audit tables are
 never part of this cleanup.
 
+Migration 0078 extends request observations with the selected upstream endpoint, trusted
+`CF-Connecting-IP`, and bounded User-Agent required by the restored Ops explorer. Existing rows
+remain explicitly unknown for fields that were not historically collected.
+
 ## Checks
 
 Run `pnpm run check` for TypeScript and unit tests. The Worker deliberately

@@ -24,7 +24,7 @@ type Family = 'all' | 'errors' | 'upstream'
 
 const COLUMNS = `id, request_id, client_request_id, bucket_day, occurred_at_ms, completed_at_ms,
   lifecycle, user_id, api_key_id, account_id, group_id, method, request_path,
-  inbound_endpoint, platform, requested_model, upstream_model, request_type, stream,
+  inbound_endpoint, upstream_endpoint, client_ip, user_agent, platform, requested_model, upstream_model, request_type, stream,
   status_code, duration_ms, outcome, input_tokens, output_tokens, cache_read_tokens,
   amount_micros, error_phase, error_type, error_owner, error_source, severity,
   error_message, upstream_status_code, is_business_limited, resolved, resolved_at_ms,
@@ -36,6 +36,10 @@ const COLUMNS = `id, request_id, client_request_id, bucket_day, occurred_at_ms, 
 const ADMIN_COLUMNS = `${COLUMNS},
   (SELECT email FROM users WHERE users.id=request_observations.user_id) AS user_email,
   (SELECT name FROM api_keys WHERE api_keys.id=request_observations.api_key_id) AS api_key_name,
+  (SELECT key_prefix FROM api_keys WHERE api_keys.id=request_observations.api_key_id) AS api_key_prefix,
+  CASE WHEN request_observations.api_key_id IS NOT NULL AND NOT EXISTS
+    (SELECT 1 FROM api_keys WHERE api_keys.id=request_observations.api_key_id AND api_keys.revoked_at_ms IS NULL)
+    THEN 1 ELSE 0 END AS api_key_deleted,
   (SELECT name FROM accounts WHERE accounts.id=request_observations.account_id) AS account_name,
   (SELECT name FROM "groups" WHERE "groups".id=request_observations.group_id) AS group_name`
 
@@ -55,7 +59,17 @@ interface ListFilters {
   requestId?: string
   errorPhase?: string
   errorCategory?: string
-  sortColumn?: 'occurred_at_ms' | 'status_code' | 'requested_model'
+  errorOwner?: string
+  errorSource?: string
+  resolved?: boolean
+  view?: 'errors' | 'excluded' | 'all'
+  query?: string
+  statusCodes?: number[]
+  statusCodesOther?: boolean
+  requestKind?: 'all' | 'success' | 'error'
+  minDurationMs?: number
+  maxDurationMs?: number
+  sortColumn?: 'occurred_at_ms' | 'status_code' | 'COALESCE(upstream_status_code,status_code)' | 'requested_model' | 'duration_ms'
   sortDirection?: 'ASC' | 'DESC'
   family: Family
 }
@@ -83,9 +97,9 @@ export const listAdminUsage = (context: Context<Bindings>) => {
   }
   return listFor(context, 'admin', 'all', 'usage')
 }
-export const listAdminRequests = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'ops')
+export const listAdminRequests = (context: Context<Bindings>) => listFor(context, 'admin', 'all', 'ops', true)
 export const listAdminRequestErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'errors', 'ops', true)
-export const listAdminUpstreamErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'upstream', 'ops')
+export const listAdminUpstreamErrors = (context: Context<Bindings>) => listFor(context, 'admin', 'upstream', 'ops', true)
 
 export async function getAdminUsageStats(context: Context<Bindings>): Promise<Response> {
   try {
@@ -220,6 +234,17 @@ export async function unsupportedAdminUsageAnalytics(context: Context<Bindings>)
   } catch (error) { return controlError(asGatewayError(error)) }
 }
 
+export async function unsupportedAdminOps(context: Context<Bindings>): Promise<Response> {
+  try {
+    await authenticateAdminSession(context.req.raw, context.env)
+    throw new GatewayError(
+      501,
+      'admin_ops_contract_not_migrated',
+      `Ops contract is not available on the Worker yet: ${context.req.method} ${context.req.path}`,
+    )
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
 function searchQuery(value: string | undefined, allowEmpty = false): string {
   const query = value?.trim() ?? ''
   if ((!allowEmpty && query === '') || query.length > 200) throw new GatewayError(400, 'invalid_search_query', 'Search query is invalid')
@@ -246,7 +271,7 @@ async function ownerDetail(context: Context<Bindings>, family: Family): Promise<
 async function adminDetail(context: Context<Bindings>, family: Family): Promise<Response> {
   try {
     await authenticateAdminSession(context.req.raw, context.env)
-    const row = await findObservation(context.env, requireResourceId(context.req.param('id'), 'observation'))
+    const row = await findAdminObservation(context.env, requireResourceId(context.req.param('id'), 'observation'))
     if (row === null || !rowMatchesFamily(row, family)) throw notFound()
     const audit = await context.env.DB.prepare(
       `SELECT id, actor_user_id, resolved, occurred_at_ms
@@ -255,9 +280,11 @@ async function adminDetail(context: Context<Bindings>, family: Family): Promise<
         ORDER BY occurred_at_ms DESC, id DESC
         LIMIT 101`,
     ).bind(row.id).all<ResolutionAuditRow>()
+    const payload = await projectPayload(context.env, row)
     const response = controlSuccess({
       ...projectRow(row, 'admin'),
-      payload: await projectPayload(context.env, row),
+      payload,
+      ...legacyPayloadProjection(payload),
       resolution_audit: audit.results.slice(0, 100).map(projectResolutionAudit),
       resolution_audit_truncated: audit.results.length > 100,
     })
@@ -285,17 +312,18 @@ export async function listRelatedUpstreamErrors(context: Context<Bindings>): Pro
     // The source observation already provides an indexed correlation key. Do
     // not apply the general Explorer's moving one-hour default here: operators
     // must still be able to inspect retries related to an older request.
-    const filters = await parseFilters(context, 'upstream', 'ops', undefined, false)
+    const filters = await parseFilters(context, 'upstream', 'ops', undefined, false, true)
+    const includeDetail = parseOptionalBoolean(context.req.query('include_detail'), 'include_detail') ?? false
     const clauses = [
       `id <> ?`,
       `lifecycle = 'failed'`,
       `error_phase IN ('upstream', 'account_auth', 'network')`,
       `error_owner = 'provider'`,
-      `(request_id = ? OR (? <> '' AND client_request_id = ?))`,
+      `request_id = ?`,
     ]
-    const values: unknown[] = [id, source.request_id, source.client_request_id ?? '', source.client_request_id ?? '']
+    const values: unknown[] = [id, source.request_id]
     addSharedClauses(filters, clauses, values)
-    return await listResponse(context.env, filters, clauses, values, 'admin')
+    return await listResponse(context.env, filters, clauses, values, 'admin', includeDetail)
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -342,6 +370,7 @@ async function listFor(
     const clauses: string[] = []
     const values: unknown[] = []
     addFamilyClause(family, clauses)
+    if (family === 'all' && timeContract === 'ops') clauses.push(`lifecycle IN ('completed','failed')`)
     addSharedClauses(filters, clauses, values)
     return await listResponse(context.env, filters, clauses, values, view)
   } catch (error) {
@@ -583,18 +612,28 @@ async function listResponse(
   clauses: string[],
   values: unknown[],
   view: View,
+  includeDetail = false,
 ): Promise<Response> {
   const columns = view === 'admin' ? ADMIN_COLUMNS : COLUMNS
   const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
   if (filters.page !== undefined) {
     const sortColumn = filters.sortColumn ?? 'occurred_at_ms'
     const sortDirection = filters.sortDirection ?? 'DESC'
+    const orderBy = sortColumn === 'duration_ms'
+      ? 'duration_ms DESC, occurred_at_ms DESC, id DESC'
+      : `${sortColumn} ${sortDirection}, id ${sortDirection}`
     const [count, rows] = await env.DB.batch([
       env.DB.prepare(`SELECT COUNT(*) AS total FROM request_observations ${where}`).bind(...values),
-      env.DB.prepare(`SELECT ${columns} FROM request_observations ${where} ORDER BY ${sortColumn} ${sortDirection}, id ${sortDirection} LIMIT ? OFFSET ?`).bind(...values, filters.limit, (filters.page - 1) * filters.limit),
+      env.DB.prepare(`SELECT ${columns} FROM request_observations ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).bind(...values, filters.limit, (filters.page - 1) * filters.limit),
     ])
     const total = Number((count.results[0] as { total?: unknown } | undefined)?.total ?? 0)
-    return controlSuccess({ items: (rows.results as ObservationRow[]).map((row) => projectRow(row, view)), total, page: filters.page, page_size: filters.limit, pages: total === 0 ? 0 : Math.ceil(total / filters.limit) })
+    return controlSuccess({
+      items: await projectRows(env, rows.results as ObservationRow[], view, includeDetail),
+      total,
+      page: filters.page,
+      page_size: filters.limit,
+      pages: total === 0 ? 0 : Math.ceil(total / filters.limit),
+    })
   }
   const result = await env.DB.prepare(
     `SELECT ${columns} FROM request_observations ${where}
@@ -604,7 +643,7 @@ async function listResponse(
   const page = result.results.slice(0, filters.limit)
   const last = page.at(-1)
   return controlSuccess({
-    items: page.map((row) => projectRow(row, view)),
+    items: await projectRows(env, page, view, includeDetail),
     has_more: hasMore,
     next_cursor: hasMore && last !== undefined
       ? await encodeCursor(
@@ -623,10 +662,14 @@ async function parseFilters(
   defaultOpsRange = true,
   legacyOffset = false,
 ): Promise<ListFilters> {
+  validateOpsQueryParameters(context, family, timeContract)
   const offsetRequested =
     legacyOffset && (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined)
-  for (const legacy of ['page', 'page_size', 'sort_by', 'sort_order', 'q', 'user_query']) {
-    if (offsetRequested && ['page', 'page_size', 'sort_by', 'sort_order'].includes(legacy) && context.req.query(legacy) !== undefined) continue
+  if (offsetRequested && (context.req.query('cursor') !== undefined || context.req.query('limit') !== undefined)) {
+    throw new GatewayError(400, 'pagination_mode_conflict', 'Offset pagination cannot be combined with a cursor')
+  }
+  for (const legacy of ['page', 'page_size', 'sort_by', 'sort_order', 'q', 'user_query', 'kind', 'sort', 'min_duration_ms', 'max_duration_ms']) {
+    if (offsetRequested && context.req.query(legacy) !== undefined) continue
     if (context.req.query(legacy) !== undefined) {
       throw new GatewayError(
         400,
@@ -638,12 +681,16 @@ async function parseFilters(
   const limit = queryInteger(context.req.query('limit'), 'limit', 20, 1, 100)
   const filters: ListFilters = { limit, family }
   if (offsetRequested) {
-    filters.page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
+    const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     filters.limit = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
+    if ((page - 1) * filters.limit > 10_000) {
+      throw new GatewayError(400, 'ops_offset_too_deep', 'Ops offset pagination is limited to 10,000 rows')
+    }
+    filters.page = page
     const sortBy = context.req.query('sort_by') ?? 'created_at'
     const sortOrder = context.req.query('sort_order') ?? 'desc'
     const sortColumns: Record<string, ListFilters['sortColumn']> = {
-      created_at: 'occurred_at_ms', status: 'status_code', status_code: 'status_code', model: 'requested_model',
+      created_at: 'occurred_at_ms', status: 'COALESCE(upstream_status_code,status_code)', status_code: 'COALESCE(upstream_status_code,status_code)', model: 'requested_model',
     }
     if (!Object.hasOwn(sortColumns, sortBy)) throw new GatewayError(400, 'unsupported_error_sort', 'sort_by is not supported')
     if (sortOrder !== 'asc' && sortOrder !== 'desc') throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
@@ -667,6 +714,40 @@ async function parseFilters(
   filters.requestId = exact('request_id', 128)
   filters.errorPhase = exact('phase', 32)
   filters.errorCategory = exact('category', 32)
+  filters.errorOwner = exact('error_owner', 32)?.toLowerCase()
+  filters.errorSource = exact('error_source', 32)?.toLowerCase()
+  filters.query = exact('q', 200)
+  filters.resolved = parseOptionalBoolean(context.req.query('resolved'), 'resolved')
+  const view = exact('view', 16)?.toLowerCase()
+  if (view !== undefined) {
+    if (view !== 'errors' && view !== 'excluded' && view !== 'all') {
+      throw new GatewayError(400, 'invalid_view', 'view must be errors, excluded, or all')
+    }
+    filters.view = view
+  }
+  filters.statusCodes = parseStatusCodes(context.req.query('status_codes'))
+  filters.statusCodesOther = parseOptionalBoolean(context.req.query('status_codes_other'), 'status_codes_other')
+  if (filters.statusCodes !== undefined && filters.statusCodesOther === true) {
+    throw new GatewayError(400, 'invalid_status_filter', 'status_codes and status_codes_other cannot be combined')
+  }
+  if (family === 'all' && timeContract === 'ops') {
+    const kind = exact('kind', 16)?.toLowerCase() ?? 'all'
+    if (kind !== 'all' && kind !== 'success' && kind !== 'error') {
+      throw new GatewayError(400, 'invalid_request_kind', 'kind must be all, success, or error')
+    }
+    filters.requestKind = kind
+    filters.minDurationMs = optionalBoundedInteger(context.req.query('min_duration_ms'), 'min_duration_ms', 0, 86_400_000)
+    filters.maxDurationMs = optionalBoundedInteger(context.req.query('max_duration_ms'), 'max_duration_ms', 0, 86_400_000)
+    if (filters.minDurationMs !== undefined && filters.maxDurationMs !== undefined && filters.minDurationMs > filters.maxDurationMs) {
+      throw new GatewayError(400, 'invalid_duration_range', 'Duration range is invalid')
+    }
+    const requestSort = exact('sort', 32) ?? 'created_at_desc'
+    if (requestSort !== 'created_at_desc' && requestSort !== 'duration_desc') {
+      throw new GatewayError(400, 'invalid_request_sort', 'sort must be created_at_desc or duration_desc')
+    }
+    filters.sortColumn = requestSort === 'duration_desc' ? 'duration_ms' : 'occurred_at_ms'
+    filters.sortDirection = 'DESC'
+  }
   if (forcedUserId !== undefined) filters.userId = forcedUserId
   const status = exact('status_code', 3)
   if (status !== undefined) {
@@ -694,6 +775,12 @@ async function parseFilters(
   if (filters.startMs !== undefined && filters.endMs !== undefined && filters.startMs >= filters.endMs) {
     throw new GatewayError(400, 'invalid_time_range', 'Time range is invalid')
   }
+  if (
+    filters.query !== undefined && filters.startMs !== undefined && filters.endMs !== undefined &&
+    filters.endMs - filters.startMs > 24 * 60 * 60 * 1_000
+  ) {
+    throw new GatewayError(422, 'ops_search_window_too_wide', 'Ops fuzzy search is limited to a 24 hour window')
+  }
   if (cursor !== undefined) {
     const expected = await filterHash(filters)
     if (cursor.filter_hash !== expected) throw invalidCursor()
@@ -716,18 +803,63 @@ function addSharedClauses(filters: ListFilters, clauses: string[], values: unkno
     ['user_id', filters.userId], ['api_key_id', filters.apiKeyId],
     ['account_id', filters.accountId], ['group_id', filters.groupId],
     ['platform', filters.platform], ['requested_model', filters.model],
-    ['status_code', filters.statusCode], ['request_id', filters.requestId],
+    ['request_id', filters.requestId],
   ]
   for (const [column, value] of equality) {
     if (value === undefined) continue
     clauses.push(`${column} = ?`)
     values.push(value)
   }
+  if (filters.statusCode !== undefined) {
+    clauses.push('COALESCE(upstream_status_code,status_code) = ?')
+    values.push(filters.statusCode)
+  }
   if (filters.errorPhase !== undefined) {
     clauses.push('error_phase = ?')
     values.push(filters.errorPhase)
   }
   if (filters.errorCategory !== undefined) addErrorCategoryClause(filters.errorCategory, clauses)
+  if (filters.errorOwner !== undefined) {
+    clauses.push('LOWER(error_owner) = ?')
+    values.push(filters.errorOwner)
+  }
+  if (filters.errorSource !== undefined) {
+    clauses.push('LOWER(error_source) = ?')
+    values.push(filters.errorSource)
+  }
+  if (filters.resolved !== undefined) {
+    clauses.push('resolved = ?')
+    values.push(filters.resolved ? 1 : 0)
+  }
+  if (filters.family !== 'all') {
+    const view = filters.view ?? 'errors'
+    if (view === 'errors') clauses.push('is_business_limited = 0')
+    else if (view === 'excluded') clauses.push('is_business_limited = 1')
+  }
+  if (filters.statusCodes !== undefined) {
+    clauses.push(`COALESCE(upstream_status_code,status_code,0) IN (${filters.statusCodes.map(() => '?').join(',')})`)
+    values.push(...filters.statusCodes)
+  } else if (filters.statusCodesOther === true) {
+    const known = [400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504, 529]
+    clauses.push(`COALESCE(upstream_status_code,status_code,0) NOT IN (${known.map(() => '?').join(',')})`)
+    values.push(...known)
+  }
+  if (filters.query !== undefined) {
+    const like = `%${escapeLike(filters.query)}%`
+    clauses.push(`(
+      request_id LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+      COALESCE(client_request_id,'') LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+      requested_model LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+      error_message LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+      COALESCE(user_id,'') LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+      EXISTS (SELECT 1 FROM users WHERE users.id=request_observations.user_id AND users.email LIKE ? ESCAPE '\\' COLLATE NOCASE)
+    )`)
+    values.push(like, like, like, like, like, like)
+  }
+  if (filters.requestKind === 'error') clauses.push(`lifecycle = 'failed'`)
+  if (filters.requestKind === 'success') clauses.push(`lifecycle <> 'failed'`)
+  if (filters.minDurationMs !== undefined) { clauses.push('duration_ms >= ?'); values.push(filters.minDurationMs) }
+  if (filters.maxDurationMs !== undefined) { clauses.push('duration_ms <= ?'); values.push(filters.maxDurationMs) }
   if (filters.startMs !== undefined) { clauses.push('occurred_at_ms >= ?'); values.push(filters.startMs) }
   if (filters.endMs !== undefined) { clauses.push('occurred_at_ms < ?'); values.push(filters.endMs) }
   if (filters.cursor !== undefined) {
@@ -762,6 +894,15 @@ async function findObservation(
   ).bind(id, ...(userId === undefined ? [] : [userId])).first<ObservationRow>()
 }
 
+async function findAdminObservation(
+  env: ObservabilityEnv,
+  id: string,
+): Promise<ObservationRow | null> {
+  return env.DB.prepare(
+    `SELECT ${ADMIN_COLUMNS} FROM request_observations WHERE id = ?`,
+  ).bind(id).first<ObservationRow>()
+}
+
 async function projectPayload(env: ObservabilityEnv, row: ObservationRow): Promise<PayloadProjection> {
   if (row.payload_state === 'deleted') return payloadProjection('expired')
   if (row.payload_state === 'pending' || row.payload_state === 'retry') return payloadProjection('pending_recovery')
@@ -788,6 +929,7 @@ function payloadProjection(state: PayloadProjection['state']): PayloadProjection
 function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
   const base: Record<string, unknown> = {
     id: row.id,
+    error_id: row.lifecycle === 'failed' ? row.id : undefined,
     kind: row.lifecycle === 'failed' ? 'error' : 'success',
     created_at: new Date(row.occurred_at_ms).toISOString(),
     request_id: row.request_id,
@@ -795,10 +937,13 @@ function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
     method: row.method,
     request_path: row.request_path,
     inbound_endpoint: row.inbound_endpoint,
+    upstream_endpoint: row.upstream_endpoint,
+    client_ip: row.client_ip,
+    user_agent: row.user_agent,
     platform: row.platform,
     model: row.requested_model,
     requested_model: row.requested_model,
-    status_code: row.status_code,
+    status_code: row.upstream_status_code ?? row.status_code,
     duration_ms: row.duration_ms,
     request_type: row.request_type,
     stream: row.stream === 1,
@@ -829,10 +974,78 @@ function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
     control_version: row.resolution_version,
     user_email: (row as any).user_email ?? undefined,
     api_key_name: (row as any).api_key_name ?? undefined,
+    api_key_prefix: (row as any).api_key_prefix ?? undefined,
+    api_key_deleted: (row as any).api_key_deleted === 1,
     account_name: (row as any).account_name ?? undefined,
     group_name: (row as any).group_name ?? undefined,
   })
   return base
+}
+
+async function projectRows(
+  env: ObservabilityEnv,
+  rows: ObservationRow[],
+  view: View,
+  includeDetail: boolean,
+): Promise<Record<string, unknown>[]> {
+  if (!includeDetail) return rows.map((row) => projectRow(row, view))
+  return Promise.all(rows.map(async (row) => {
+    const fullPayload = await projectPayload(env, row)
+    const payload = boundedRelatedPayload(fullPayload)
+    return {
+      ...projectRow(row, view),
+      payload,
+      ...legacyPayloadProjection(fullPayload, 16_384),
+    }
+  }))
+}
+
+function boundedRelatedPayload(payload: PayloadProjection): PayloadProjection {
+  if (payload.state !== 'available' || typeof payload.body !== 'string' || payload.body.length <= 16_384) return payload
+  return {
+    ...payload,
+    body: `${payload.body.slice(0, 16_384)}\n…[truncated]`,
+  }
+}
+
+function legacyPayloadProjection(payload: PayloadProjection, maximum?: number): Record<string, unknown> {
+  if (payload.state !== 'available' || payload.body === null) return {}
+  try {
+    const decoded = JSON.parse(payload.body) as Record<string, unknown>
+    const error = recordValue(decoded.error)
+    const response = recordValue(decoded.response)
+    return compactObject({
+      error_body: boundedDiagnostic(diagnosticJson(error?.body), maximum),
+      upstream_error_message: boundedDiagnostic(
+        typeof error?.message === 'string' ? error.message : undefined,
+        maximum,
+      ),
+      upstream_error_detail: boundedDiagnostic(diagnosticJson(response?.body), maximum),
+      upstream_errors: boundedDiagnostic(diagnosticJson(response?.errors), maximum),
+    })
+  } catch {
+    return {}
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function diagnosticJson(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+function boundedDiagnostic(value: string | undefined, maximum: number | undefined): string | undefined {
+  if (value === undefined || maximum === undefined || value.length <= maximum) return value
+  return `${value.slice(0, maximum)}\n…[truncated]`
+}
+
+function compactObject(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined))
 }
 
 function projectResolutionAudit(row: ResolutionAuditRow): Record<string, unknown> {
@@ -865,6 +1078,12 @@ async function filterHash(filters: ListFilters): Promise<string> {
     platform: filters.platform ?? null, model: filters.model ?? null,
     statusCode: filters.statusCode ?? null, requestId: filters.requestId ?? null,
     errorPhase: filters.errorPhase ?? null, errorCategory: filters.errorCategory ?? null,
+    errorOwner: filters.errorOwner ?? null, errorSource: filters.errorSource ?? null,
+    resolved: filters.resolved ?? null, view: filters.view ?? null,
+    statusCodes: filters.statusCodes ?? null, statusCodesOther: filters.statusCodesOther ?? null,
+    query: filters.query ?? null, requestKind: filters.requestKind ?? null,
+    minDurationMs: filters.minDurationMs ?? null, maxDurationMs: filters.maxDurationMs ?? null,
+    sortColumn: filters.sortColumn ?? null, sortDirection: filters.sortDirection ?? null,
   }))
 }
 
@@ -923,6 +1142,74 @@ function base64UrlDecode(value: string): string {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
   const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4))
   return new TextDecoder().decode(Uint8Array.from(binary, (entry) => entry.charCodeAt(0)))
+}
+
+function validateOpsQueryParameters(
+  context: Context<Bindings>,
+  family: Family,
+  timeContract: 'usage' | 'ops',
+): void {
+  if (timeContract !== 'ops') return
+  const common = new Set([
+    'limit', 'cursor', 'page', 'page_size', 'start_time', 'end_time',
+    'platform', 'group_id', 'account_id', 'user_id', 'api_key_id', 'model',
+    'request_id', 'status_code',
+  ])
+  const allowed = family === 'all'
+    ? new Set([...common, 'kind', 'sort', 'min_duration_ms', 'max_duration_ms', 'q'])
+    : new Set([
+        ...common, 'phase', 'category', 'error_owner', 'error_source', 'resolved',
+        'view', 'q', 'status_codes', 'status_codes_other', 'sort_by', 'sort_order',
+      ])
+  if (/\/request-errors\/[^/]+\/upstream-errors$/.test(context.req.path)) allowed.add('include_detail')
+  for (const name of new URL(context.req.url).searchParams.keys()) {
+    if (name === 'time_range') {
+      throw new GatewayError(501, 'ops_time_range_not_migrated', 'Use explicit start_time and end_time on the Worker')
+    }
+    if (!allowed.has(name)) {
+      throw new GatewayError(400, 'unsupported_ops_parameter', `Ops query parameter is not supported: ${name}`)
+    }
+  }
+}
+
+function optionalBoundedInteger(
+  value: string | undefined,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (value === undefined || value === '') return undefined
+  if (!/^\d+$/.test(value)) throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+  }
+  return parsed
+}
+
+function parseOptionalBoolean(value: string | undefined, name: string): boolean | undefined {
+  if (value === undefined || value === '') return undefined
+  const normalized = value.toLowerCase()
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') return true
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') return false
+  throw new GatewayError(400, `invalid_${name}`, `${name} is invalid`)
+}
+
+function parseStatusCodes(value: string | undefined): number[] | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parts = value.split(',').map((part) => part.trim()).filter(Boolean)
+  if (parts.length === 0 || parts.length > 50) {
+    throw new GatewayError(400, 'invalid_status_codes', 'status_codes is invalid')
+  }
+  const codes = parts.map((part) => optionalBoundedInteger(part, 'status_codes', 100, 599))
+  if (codes.some((code) => code === undefined)) {
+    throw new GatewayError(400, 'invalid_status_codes', 'status_codes is invalid')
+  }
+  return [...new Set(codes as number[])]
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
 
 function parseDate(raw: string | undefined, endExclusive: boolean): number | undefined {

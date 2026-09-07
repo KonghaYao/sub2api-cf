@@ -367,6 +367,7 @@ import {
   searchAdminUsageUsers,
   unsupportedAdminUsageCleanup,
   unsupportedAdminUsageAnalytics,
+  unsupportedAdminOps,
 } from './observability'
 import {
   createPaymentProvider,
@@ -630,6 +631,7 @@ export function createApp() {
   app.post('/api/v1/admin/ops/upstream-errors/:id/:action', actOnAdminUpstreamError)
   app.get('/api/v1/admin/ops/request-errors/:id', getAdminRequestErrorDetail)
   app.get('/api/v1/admin/ops/upstream-errors/:id', getAdminUpstreamErrorDetail)
+  app.all('/api/v1/admin/ops/*', unsupportedAdminOps)
   app.get('/api/v1/admin/announcements', listAdminAnnouncements)
   app.post('/api/v1/admin/announcements', createAdminAnnouncement)
   app.get('/api/v1/admin/announcements/:id', getAdminAnnouncement)

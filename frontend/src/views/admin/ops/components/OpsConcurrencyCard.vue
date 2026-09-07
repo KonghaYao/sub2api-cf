@@ -2,10 +2,11 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { opsAPI, type OpsAccountAvailabilityStatsResponse, type OpsConcurrencyStatsResponse, type OpsUserConcurrencyStatsResponse } from '@/api/admin/ops'
+import type { GroupId } from '@/types'
 
 interface Props {
   platformFilter?: string
-  groupIdFilter?: number | null
+  groupIdFilter?: GroupId | null
   refreshToken: number
 }
 
@@ -38,7 +39,7 @@ const displayDimension = computed<'platform' | 'group' | 'account' | 'user'>(() 
   if (showByUser.value) {
     return 'user'
   }
-  if (typeof props.groupIdFilter === 'number' && props.groupIdFilter > 0) {
+  if (props.groupIdFilter != null && String(props.groupIdFilter).trim()) {
     return 'account'
   }
   if (props.platformFilter) {
@@ -188,8 +189,8 @@ const accountRows = computed((): AccountRow[] => {
       const avail = availStats[aid] || {}
 
       // 只显示匹配的分组
-      if (typeof props.groupIdFilter === 'number' && props.groupIdFilter > 0) {
-        if (conc.group_id !== props.groupIdFilter && avail.group_id !== props.groupIdFilter) {
+      if (props.groupIdFilter != null && String(props.groupIdFilter).trim()) {
+        if (String(conc.group_id) !== String(props.groupIdFilter) && String(avail.group_id) !== String(props.groupIdFilter)) {
           return null
         }
       }

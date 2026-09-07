@@ -30,9 +30,9 @@ export async function recordRequestStart(
       `INSERT INTO request_observations (
          id, request_id, client_request_id, bucket_day, occurred_at_ms,
          lifecycle, user_id, api_key_id, account_id, group_id,
-         method, request_path, inbound_endpoint, platform, requested_model,
+         method, request_path, inbound_endpoint, client_ip, user_agent, platform, requested_model,
          request_type, stream, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, 'started', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, 'started', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       id,
       requestId,
@@ -46,6 +46,8 @@ export async function recordRequestStart(
       normalizeMethod(input.method),
       normalizeRequestPath(input.requestPath),
       boundedText(input.inboundEndpoint, 128),
+      optionalText(input.clientIp, 64),
+      optionalText(input.userAgent, 512),
       boundedText(input.platform, 64),
       boundedText(input.requestedModel, 200),
       optionalInteger(input.requestType, 0, 32_767),
@@ -73,6 +75,7 @@ export async function recordRequestContext(
               group_id = COALESCE(?, group_id), platform = COALESCE(?, platform),
               requested_model = COALESCE(?, requested_model),
               request_type = COALESCE(?, request_type), stream = COALESCE(?, stream),
+              upstream_endpoint = COALESCE(?, upstream_endpoint),
               updated_at_ms = ?
         WHERE id = ? AND request_id = ? AND lifecycle = 'started'`,
     ).bind(
@@ -83,6 +86,7 @@ export async function recordRequestContext(
       input.requestedModel === undefined ? null : boundedText(input.requestedModel, 200),
       input.requestType === undefined ? null : optionalInteger(input.requestType, 0, 32_767),
       input.stream === undefined ? null : input.stream ? 1 : 0,
+      input.upstreamEndpoint === undefined ? null : boundedText(input.upstreamEndpoint, 128),
       updatedAtMs,
       handle.id,
       handle.requestId,

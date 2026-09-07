@@ -55,6 +55,7 @@ describe('OpsErrorDetailModal', () => {
       control_version: 42,
       request_id: 'rid-1',
       message: 'All available accounts exhausted',
+      error_body: '{"error":"same"}',
       payload: {
         state: 'available',
         body: '{"error":"same"}',
@@ -83,7 +84,7 @@ describe('OpsErrorDetailModal', () => {
     expect(wrapper.findAll('pre')).toHaveLength(1)
   })
 
-  it('resolves the error and refreshes the detail before notifying its parent', async () => {
+  it('loads bounded related upstream details and exposes their redacted preview', async () => {
     const open = {
       id: 'err_opaque',
       created_at: '2026-08-19T00:00:00Z',
@@ -105,22 +106,17 @@ describe('OpsErrorDetailModal', () => {
       resolution_audit: [],
       resolution_audit_truncated: false,
     }
-    mocks.getErrorDetail
-      .mockResolvedValueOnce(open)
-      .mockResolvedValueOnce({
+    mocks.getErrorDetail.mockResolvedValue(open)
+    mocks.listRequestErrorUpstreamErrors.mockResolvedValue({
+      total: 1,
+      page: 1,
+      page_size: 100,
+      pages: 1,
+      items: [{
         ...open,
-        resolved: true,
-        resolved_at: '2026-09-05T01:00:00.000Z',
-        resolved_by_user_id: 'admin-1',
-        control_version: 43,
-        resolution_audit: [{
-          id: 'audit-1', resolved: true, actor_user_id: 'admin-1',
-          occurred_at: '2026-09-05T01:00:00.000Z',
-        }],
-      })
-    mocks.updateErrorResolution.mockResolvedValue({
-      id: 'err_opaque', resolved: true, resolved_at: '2026-09-05T01:00:00.000Z',
-      resolved_by_user_id: 'admin-1', control_version: 43,
+        id: 'upstream_opaque',
+        payload: { state: 'available', body: '{"error":"[REDACTED]"}', content_type: 'application/json', redacted: true },
+      }],
     })
 
     const wrapper = shallowMount(OpsErrorDetailModal, {
@@ -134,19 +130,19 @@ describe('OpsErrorDetailModal', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="error-resolution-action"]').trigger('click')
-    await flushPromises()
-
-    expect(mocks.updateErrorResolution).toHaveBeenCalledWith(
-      'request', 'err_opaque', 'resolve', 42,
+    expect(mocks.listRequestErrorUpstreamErrors).toHaveBeenCalledWith(
+      'err_opaque',
+      { page: 1, page_size: 100, view: 'all' },
+      { include_detail: true },
     )
-    expect(mocks.getErrorDetail).toHaveBeenCalledTimes(2)
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-    expect(wrapper.get('[data-testid="error-resolution-action"]').text())
-      .toContain('admin.ops.errorDetail.markUnresolved')
+    const previewButton = wrapper.find('button')
+    expect(previewButton.exists()).toBe(true)
+    await previewButton.trigger('click')
+    expect(wrapper.text()).toContain('[REDACTED]')
+    expect(wrapper.find('[data-testid="error-resolution-action"]').exists()).toBe(false)
   })
 
-  it('reopens a resolved upstream error and refreshes its detail', async () => {
+  it('loads an opaque upstream error id through the upstream detail family', async () => {
     const resolved = {
       id: 'upstream_opaque',
       created_at: '2026-08-19T00:00:00Z',
@@ -168,19 +164,7 @@ describe('OpsErrorDetailModal', () => {
       resolution_audit: [],
       resolution_audit_truncated: false,
     }
-    mocks.getErrorDetail
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce({
-        ...resolved,
-        resolved: false,
-        resolved_at: null,
-        resolved_by_user_id: null,
-        control_version: 8,
-      })
-    mocks.updateErrorResolution.mockResolvedValue({
-      id: 'upstream_opaque', resolved: false, resolved_at: null,
-      resolved_by_user_id: null, control_version: 8,
-    })
+    mocks.getErrorDetail.mockResolvedValue(resolved)
 
     const wrapper = shallowMount(OpsErrorDetailModal, {
       props: { show: true, errorId: 'upstream_opaque', errorType: 'upstream' },
@@ -193,15 +177,7 @@ describe('OpsErrorDetailModal', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="error-resolution-action"]').trigger('click')
-    await flushPromises()
-
-    expect(mocks.updateErrorResolution).toHaveBeenCalledWith(
-      'upstream', 'upstream_opaque', 'reopen', 7,
-    )
-    expect(mocks.getErrorDetail).toHaveBeenCalledTimes(2)
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-    expect(wrapper.get('[data-testid="error-resolution-action"]').text())
-      .toContain('admin.ops.errorDetail.markResolved')
+    expect(mocks.getErrorDetail).toHaveBeenCalledWith('upstream', 'upstream_opaque')
+    expect(mocks.listRequestErrorUpstreamErrors).not.toHaveBeenCalled()
   })
 })

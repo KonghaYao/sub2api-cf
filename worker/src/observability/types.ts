@@ -20,6 +20,8 @@ export interface RequestObservationStart {
   method: string
   requestPath: string
   inboundEndpoint?: string
+  clientIp?: string | null
+  userAgent?: string | null
   platform?: string
   requestedModel?: string
   requestType?: number | null
@@ -41,6 +43,7 @@ export interface RequestObservationContextUpdate {
   requestedModel?: string
   requestType?: number | null
   stream?: boolean
+  upstreamEndpoint?: string
 }
 
 export interface RequestObservationOutcome {
@@ -104,6 +107,9 @@ export interface ObservationRow {
   method: string
   request_path: string
   inbound_endpoint: string
+  upstream_endpoint: string
+  client_ip: string | null
+  user_agent: string | null
   platform: string
   requested_model: string
   upstream_model: string

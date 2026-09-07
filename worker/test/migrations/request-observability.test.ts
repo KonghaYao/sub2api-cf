@@ -23,6 +23,15 @@ describe('request observability migration', () => {
       `SELECT sql FROM sqlite_master
         WHERE type = 'trigger' AND name = 'limit_request_observation_bucket'`,
     ).get()?.sql).toContain('100000')
+    expect(raw.prepare(
+      'SELECT version, name FROM schema_migrations WHERE version = 78',
+    ).get()).toEqual({ version: 78, name: 'ops_request_context' })
+    expect(raw.prepare(
+      `SELECT name FROM pragma_table_info('request_observations')
+        WHERE name IN ('upstream_endpoint','client_ip','user_agent') ORDER BY name`,
+    ).all()).toEqual([
+      { name: 'client_ip' }, { name: 'upstream_endpoint' }, { name: 'user_agent' },
+    ])
     raw.close()
   })
 

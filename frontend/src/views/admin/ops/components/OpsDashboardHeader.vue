@@ -286,7 +286,7 @@ function makeZeroRealtimeTrafficSummary(): OpsRealtimeTrafficSummary {
     start_time: now,
     end_time: now,
     platform: props.platform,
-    group_id: typeof props.groupId === 'number' ? props.groupId : undefined,
+    group_id: props.groupId,
     qps: { current: 0, peak: 0, avg: 0 },
     tps: { current: 0, peak: 0, avg: 0 }
   }
@@ -303,7 +303,7 @@ async function loadRealtimeTrafficSummary() {
     const res = await opsAPI.getRealtimeTrafficSummary(
       realtimeWindow.value,
       props.platform,
-      typeof props.groupId === 'number' ? props.groupId : null,
+      props.groupId,
     )
     if (res && res.enabled === false) {
       adminSettingsStore.setOpsRealtimeMonitoringEnabledLocal(false)
@@ -1260,7 +1260,7 @@ function handleToolbarRefresh() {
               v-if="!props.fullscreen"
               class="text-[10px] font-bold text-blue-500 hover:underline"
               type="button"
-              @click="openErrorDetails('request')"
+              @click="openDetails({ title: t('admin.ops.requestDetails.title'), kind: 'error' })"
             >
               {{ t('admin.ops.requestDetails.details') }}
             </button>
@@ -1286,6 +1286,14 @@ function handleToolbarRefresh() {
               <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.latencyDuration') }}</span>
               <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.latency')" />
             </div>
+            <button
+              v-if="!props.fullscreen"
+              class="text-[10px] font-bold text-blue-500 hover:underline"
+              type="button"
+              @click="openDetails({ title: t('admin.ops.latencyDuration'), sort: 'duration_desc' })"
+            >
+              {{ t('admin.ops.requestDetails.details') }}
+            </button>
           </div>
           <div class="mt-2 flex items-baseline gap-2">
             <div class="text-3xl font-black text-gray-900 dark:text-white">
@@ -1329,6 +1337,14 @@ function handleToolbarRefresh() {
               <span class="text-[10px] font-bold uppercase text-gray-400">TTFT</span>
               <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.ttft')" />
             </div>
+            <button
+              v-if="!props.fullscreen"
+              class="text-[10px] font-bold text-blue-500 hover:underline"
+              type="button"
+              @click="openDetails({ title: t('admin.ops.ttftLabel'), sort: 'duration_desc' })"
+            >
+              {{ t('admin.ops.requestDetails.details') }}
+            </button>
           </div>
           <div class="mt-2 flex items-baseline gap-2">
             <div class="text-3xl font-black" :class="getThresholdColorClass(getTTFTThresholdLevel(ttftP99Ms))">

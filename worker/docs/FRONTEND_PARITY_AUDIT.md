@@ -73,6 +73,22 @@ explicit typed error. It must never silently discard a submitted field or return
   to API-key validation, gateway routing, available groups, group rates, and channels immediately.
 - Users and the group dialog have source-template/style parity guards; no visual or form controls changed.
 
+## v0.42.40 Ops explorer parity — 2026-09-07
+
+- Restores the six original Ops dashboard, header, request/error list, and detail templates/styles
+  exactly to `5097b3145`; a source parity guard prevents another Worker-only substitute UI.
+- Request and error explorers retain their original filters, stable server sorting, page sizes,
+  totals, captured request context, API-key prefix/deletion state, and related-upstream preview while
+  accepting opaque group IDs unchanged. Migration 0078 records the selected upstream endpoint,
+  trusted Cloudflare client IP, and bounded User-Agent for new observations; pre-migration rows keep
+  those historically unavailable values null/empty rather than fabricating them.
+- Worker list routes support both bounded offset pages and the existing cursor contract. Shared
+  predicates drive count and row queries in one D1 batch; unsupported Ops routes and parameters
+  return explicit typed errors instead of hidden controls, ignored filters, or fabricated zeros.
+- Validation: six parity checks, focused frontend/Worker tests, both full unit suites, both
+  typechecks, and the Cloudflare SPA build pass. Binding E2E remains at its known 10/15 Miniflare
+  baseline because five gateway cases fail with `SQLITE_NOMEM`.
+
 ## Account compatibility storage contract
 
 - D1 stores only non-secret UI configuration and normalized searchable/sortable fields.

@@ -116,77 +116,18 @@
           </div>
         </div>
 
+        <div v-if="detail.api_key_prefix" class="rounded-xl bg-gray-50 p-4 dark:bg-dark-900">
+          <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.ops.errorDetail.apiKeyPrefix') }}</div>
+          <div class="mt-1 font-mono text-sm font-medium text-gray-900 dark:text-white">
+            {{ detail.api_key_prefix }}
+          </div>
+        </div>
+
       </div>
 
       <div v-if="rootCauseMessage" class="rounded-xl bg-amber-50 p-6 dark:bg-amber-900/10">
         <h3 class="text-sm font-black uppercase tracking-wider text-amber-900 dark:text-amber-200">{{ t('admin.ops.errorDetail.rootCause') }}</h3>
         <div class="mt-3 break-words text-sm font-medium text-amber-900 dark:text-amber-100">{{ rootCauseMessage }}</div>
-      </div>
-
-      <div
-        data-testid="error-resolution-panel"
-        class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-800"
-      >
-        <div>
-          <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
-            {{ t('admin.ops.errorDetail.resolution') }}
-          </div>
-          <div class="mt-1 text-sm font-semibold text-gray-900 dark:text-white">
-            {{ detail.resolved ? t('admin.ops.errorDetails.resolved') : t('admin.ops.errorDetails.unresolved') }}
-          </div>
-          <div v-if="detail.resolved" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            {{ detail.resolved_by_user_id || '—' }} · {{ detail.resolved_at ? formatDateTime(detail.resolved_at) : '—' }}
-          </div>
-        </div>
-        <button
-          type="button"
-          class="btn"
-          :class="detail.resolved ? 'btn-secondary' : 'btn-primary'"
-          data-testid="error-resolution-action"
-          :disabled="resolutionLoading"
-          @click="performResolutionAction"
-        >
-          {{ detail.resolved ? t('admin.ops.errorDetail.markUnresolved') : t('admin.ops.errorDetail.markResolved') }}
-        </button>
-      </div>
-
-      <div
-        v-if="detail.resolution_audit?.length"
-        data-testid="error-resolution-audit"
-        class="rounded-xl bg-gray-50 p-4 dark:bg-dark-900"
-      >
-        <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
-          {{ t('admin.ops.errorDetail.resolutionAudit') }}
-        </div>
-        <div class="mt-3 space-y-2">
-          <div
-            v-for="event in detail.resolution_audit"
-            :key="event.id"
-            class="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600 dark:text-gray-300"
-          >
-            <span>{{ event.resolved ? t('admin.ops.errorDetails.resolved') : t('admin.ops.errorDetails.unresolved') }}</span>
-            <span>{{ event.actor_user_id }} · {{ formatDateTime(event.occurred_at) }}</span>
-          </div>
-        </div>
-        <div v-if="detail.resolution_audit_truncated" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
-          {{ t('admin.ops.errorDetail.resolutionAuditTruncated') }}
-        </div>
-      </div>
-
-      <div
-        v-if="detail.payload.redacted"
-        class="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200"
-      >
-        {{ t('usage.explorer.payload.redacted') }}
-      </div>
-
-      <div
-        v-if="detail.payload.state !== 'available'"
-        data-testid="admin-payload-state"
-        class="rounded-xl border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400"
-      >
-        <div class="font-medium">{{ t('admin.ops.errorDetail.payloadUnavailable') }}</div>
-        <div class="mt-1 text-xs">{{ t(`usage.explorer.payload.${detail.payload.state}`) }}</div>
       </div>
 
       <div class="rounded-xl bg-gray-50 p-6 dark:bg-dark-900">
@@ -226,6 +167,26 @@
                 <div class="font-mono text-xs text-gray-500 dark:text-gray-400">
                   {{ ev.status_code ?? '—' }}
                 </div>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] font-bold text-primary-700 hover:bg-primary-50 disabled:cursor-not-allowed disabled:opacity-60 dark:text-primary-200 dark:hover:bg-dark-700"
+                  :disabled="!getUpstreamResponsePreview(ev)"
+                  :title="getUpstreamResponsePreview(ev) ? '' : t('common.noData')"
+                  @click="toggleUpstreamDetail(ev.id)"
+                >
+                  <Icon
+                    :name="expandedUpstreamDetailIds.has(ev.id) ? 'chevronDown' : 'chevronRight'"
+                    size="xs"
+                    :stroke-width="2"
+                  />
+                  <span>
+                    {{
+                      expandedUpstreamDetailIds.has(ev.id)
+                        ? t('admin.ops.errorDetail.responsePreview.collapse')
+                        : t('admin.ops.errorDetail.responsePreview.expand')
+                    }}
+                  </span>
+                </button>
               </div>
             </div>
 
@@ -242,6 +203,10 @@
 
             <div v-if="ev.message" class="mt-3 break-words text-sm font-medium text-gray-900 dark:text-white">{{ ev.message }}</div>
 
+            <pre
+              v-if="expandedUpstreamDetailIds.has(ev.id)"
+              class="mt-3 max-h-[240px] overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-800 dark:border-dark-700 dark:bg-dark-900 dark:text-gray-100"
+            ><code>{{ prettyJSON(getUpstreamResponsePreview(ev)) }}</code></pre>
           </div>
         </div>
       </div>
@@ -263,8 +228,9 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores'
-import { opsAPI, type OpsErrorDetail, type OpsErrorLog } from '@/api/admin/ops'
+import { opsAPI, type OpsErrorDetail, type OpsRelatedErrorDetail } from '@/api/admin/ops'
 import { formatDateTime } from '@/utils/format'
 
 interface Props {
@@ -287,7 +253,6 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const loading = ref(false)
-const resolutionLoading = ref(false)
 const detail = ref<OpsErrorDetail | null>(null)
 
 const showUpstreamList = computed(() => props.errorType === 'request')
@@ -298,13 +263,12 @@ const effectiveErrorKind = computed<'request' | 'upstream'>(() => {
 
 const requestId = computed(() => detail.value?.request_id || detail.value?.client_request_id || '')
 
-type DiagnosticPayloadKey = 'client'
+type DiagnosticPayloadKey = 'client' | 'upstream_message' | 'upstream_detail' | 'upstream_events'
 
 const rootCauseMessage = computed(() => {
   const current = detail.value
   if (!current) return ''
-  const payloadBody = current.payload.state === 'available' ? current.payload.body : null
-  for (const candidate of [current.message, payloadBody]) {
+  for (const candidate of [current.upstream_error_message, current.upstream_error_detail, current.message, current.error_body]) {
     const value = meaningfulPayload(candidate)
     if (value) return value
   }
@@ -315,7 +279,10 @@ const diagnosticPayloadSections = computed(() => {
   const current = detail.value
   if (!current) return []
   const candidates: Array<{ key: DiagnosticPayloadKey; value: string }> = [
-    { key: 'client', value: current.payload.state === 'available' ? meaningfulPayload(current.payload.body) : '' },
+    { key: 'client', value: meaningfulPayload(current.error_body) },
+    { key: 'upstream_message', value: meaningfulPayload(current.upstream_error_message) },
+    { key: 'upstream_detail', value: meaningfulPayload(current.upstream_error_detail) },
+    { key: 'upstream_events', value: meaningfulPayload(current.upstream_errors) },
   ]
   return candidates.filter((section, index, all) => {
     return section.value && all.findIndex(candidate => candidate.value === section.value) === index
@@ -343,7 +310,7 @@ function isUpstreamError(d: OpsErrorDetail | null): boolean {
   if (!d) return false
   const phase = String(d.phase || '').toLowerCase()
   const owner = String(d.error_owner || '').toLowerCase()
-  return phase === 'upstream' && owner === 'provider'
+  return ['upstream', 'account_auth', 'network'].includes(phase) && owner === 'provider'
 }
 
 function formatRequestTypeLabel(type: number | null | undefined): string {
@@ -371,17 +338,36 @@ function displayModel(d: OpsErrorDetail | null): string {
   return String(d.model || '').trim()
 }
 
-const correlatedUpstream = ref<OpsErrorLog[]>([])
+const correlatedUpstream = ref<OpsRelatedErrorDetail[]>([])
 const correlatedUpstreamLoading = ref(false)
 
-const correlatedUpstreamErrors = computed<OpsErrorLog[]>(() => correlatedUpstream.value)
+const correlatedUpstreamErrors = computed<OpsRelatedErrorDetail[]>(() => correlatedUpstream.value)
+
+const expandedUpstreamDetailIds = ref(new Set<string>())
+
+function getUpstreamResponsePreview(ev: OpsRelatedErrorDetail): string {
+  if (ev.payload?.state === 'available') return meaningfulPayload(ev.payload.body)
+  for (const candidate of [ev.upstream_error_detail, ev.upstream_errors, ev.upstream_error_message, ev.error_body]) {
+    const value = meaningfulPayload(candidate)
+    if (value) return value
+  }
+  return ''
+}
+
+function toggleUpstreamDetail(id: string) {
+  const next = new Set(expandedUpstreamDetailIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedUpstreamDetailIds.value = next
+}
 
 async function fetchCorrelatedUpstreamErrors(requestErrorId: string) {
   correlatedUpstreamLoading.value = true
   try {
     const res = await opsAPI.listRequestErrorUpstreamErrors(
       requestErrorId,
-      { limit: 100 }
+      { page: 1, page_size: 100, view: 'all' },
+      { include_detail: true },
     )
     correlatedUpstream.value = res.items || []
   } catch (err) {
@@ -425,34 +411,6 @@ async function fetchDetail(id: string): Promise<boolean> {
   }
 }
 
-async function performResolutionAction(): Promise<void> {
-  const current = detail.value
-  if (!current || resolutionLoading.value) return
-  resolutionLoading.value = true
-  const action = current.resolved ? 'reopen' : 'resolve'
-  try {
-    await opsAPI.updateErrorResolution(
-      effectiveErrorKind.value,
-      current.id,
-      action,
-      current.control_version,
-    )
-    if (await fetchDetail(current.id)) {
-      emit('changed')
-      appStore.showSuccess(t(
-        action === 'resolve'
-          ? 'admin.ops.errorDetail.resolvedSuccess'
-          : 'admin.ops.errorDetail.reopenedSuccess',
-      ))
-    }
-  } catch (err: any) {
-    appStore.showError(err?.message || t('admin.ops.errorDetail.failedToUpdateResolvedStatus'))
-    if (err?.status === 409) await fetchDetail(current.id)
-  } finally {
-    resolutionLoading.value = false
-  }
-}
-
 watch(
   () => [props.show, props.errorId] as const,
   ([show, id]) => {
@@ -461,6 +419,7 @@ watch(
       return
     }
     if (typeof id === 'string' && id.length > 0) {
+      expandedUpstreamDetailIds.value = new Set()
       fetchDetail(id)
       if (props.errorType === 'request') {
         fetchCorrelatedUpstreamErrors(id)

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import OpsErrorLogTable from './OpsErrorLogTable.vue'
-import { opsAPI, type OpsErrorListQueryParams, type OpsErrorLog } from '@/api/admin/ops'
+import { opsAPI, type OpsErrorOffsetQueryParams, type OpsErrorLog } from '@/api/admin/ops'
 import { buildOpsErrorTimeParams } from '../utils/opsErrorParams'
 
 interface Props {
@@ -29,15 +29,15 @@ const { t } = useI18n()
 
 const loading = ref(false)
 const rows = ref<OpsErrorLog[]>([])
+const total = ref(0)
 const page = ref(1)
 const pageSize = ref(10)
-const hasMore = ref(false)
-const nextCursor = ref<string | null>(null)
-const cursors = ref<Array<string | undefined>>([undefined])
-const timeParams = ref(buildOpsErrorTimeParams(props.timeRange, props.customStartTime, props.customEndTime))
 
-const requestId = ref('')
-const statusCode = ref<number | null>(null)
+const q = ref('')
+const statusCode = ref<number | 'other' | null>(null)
+const phase = ref<string>('')
+const errorOwner = ref<string>('')
+const viewMode = ref<'errors' | 'excluded' | 'all'>('errors')
 
 
 const modalTitle = computed(() => {
@@ -49,67 +49,118 @@ const statusCodeSelectOptions = computed(() => {
   return [
     { value: null, label: t('common.all') },
     ...codes.map((c) => ({ value: c, label: String(c) })),
+    { value: 'other', label: t('admin.ops.errorDetails.statusCodeOther') || 'Other' }
   ]
 })
+
+const ownerSelectOptions = computed(() => [
+  { value: '', label: t('common.all') },
+  { value: 'provider', label: t('admin.ops.errorDetails.owner.provider') || 'provider' },
+  { value: 'client', label: t('admin.ops.errorDetails.owner.client') || 'client' },
+  { value: 'platform', label: t('admin.ops.errorDetails.owner.platform') || 'platform' }
+])
+
+const viewModeSelectOptions = computed(() => [
+  { value: 'errors', label: t('admin.ops.errorDetails.viewErrors') || 'errors' },
+  { value: 'excluded', label: t('admin.ops.errorDetails.viewExcluded') || 'excluded' },
+  { value: 'all', label: t('common.all') }
+])
+
+const phaseSelectOptions = computed(() => [
+  { value: '', label: t('common.all') },
+  { value: 'request', label: t('admin.ops.errorDetails.phase.request') || 'request' },
+  { value: 'auth', label: t('admin.ops.errorDetails.phase.auth') || 'auth' },
+  { value: 'account_auth', label: t('admin.ops.errorDetails.phase.account_auth') || 'account_auth' },
+  { value: 'routing', label: t('admin.ops.errorDetails.phase.routing') || 'routing' },
+  { value: 'upstream', label: t('admin.ops.errorDetails.phase.upstream') || 'upstream' },
+  { value: 'network', label: t('admin.ops.errorDetails.phase.network') || 'network' },
+  { value: 'internal', label: t('admin.ops.errorDetails.phase.internal') || 'internal' }
+])
 
 function close() {
   emit('update:show', false)
 }
 
-function resetCursor() {
-  page.value = 1
-  cursors.value = [undefined]
-  hasMore.value = false
-  nextCursor.value = null
-  timeParams.value = buildOpsErrorTimeParams(props.timeRange, props.customStartTime, props.customEndTime)
+const sortBy = ref('created_at')
+const sortOrder = ref<'asc' | 'desc'>('desc')
+let requestSequence = 0
+let suppressWatchedFetch = false
+
+function restartAtFirstPage() {
+  if (page.value === 1) void fetchErrorLogs()
+  else page.value = 1
+}
+
+function onSort(nextSortBy: string, nextSortOrder: 'asc' | 'desc') {
+  sortBy.value = nextSortBy
+  sortOrder.value = nextSortOrder
+  restartAtFirstPage()
 }
 
 async function fetchErrorLogs() {
   if (!props.show) return
 
+  const sequence = ++requestSequence
   loading.value = true
   try {
-    const params: OpsErrorListQueryParams = {
-      ...timeParams.value,
-      limit: pageSize.value,
-      cursor: cursors.value[page.value - 1],
+    const params: OpsErrorOffsetQueryParams = {
+      ...buildOpsErrorTimeParams(props.timeRange, props.customStartTime, props.customEndTime),
+      page: page.value,
+      page_size: pageSize.value,
+      view: viewMode.value,
+      sort_by: sortBy.value,
+      sort_order: sortOrder.value,
     }
 
     const platform = String(props.platform || '').trim()
     if (platform) params.platform = platform
     if (props.groupId != null && String(props.groupId).trim()) params.group_id = String(props.groupId)
 
-    if (requestId.value.trim()) params.request_id = requestId.value.trim()
-    if (typeof statusCode.value === 'number') params.status_code = statusCode.value
+    if (q.value.trim()) params.q = q.value.trim()
+    if (statusCode.value === 'other') params.status_codes_other = '1'
+    else if (typeof statusCode.value === 'number') params.status_codes = String(statusCode.value)
+    if (phase.value.trim()) params.phase = phase.value.trim()
+    if (errorOwner.value.trim()) params.error_owner = errorOwner.value.trim()
 
     const res = props.errorType === 'upstream'
       ? await opsAPI.listUpstreamErrors(params)
       : await opsAPI.listRequestErrors(params)
+    if (sequence !== requestSequence) return
     rows.value = res.items || []
-    hasMore.value = res.has_more
-    nextCursor.value = res.next_cursor
+    total.value = res.total || 0
   } catch (err) {
+    if (sequence !== requestSequence) return
     console.error('[OpsErrorDetailsModal] Failed to fetch error logs', err)
     rows.value = []
-    hasMore.value = false
-    nextCursor.value = null
+    total.value = 0
   } finally {
-    loading.value = false
+    if (sequence === requestSequence) loading.value = false
   }
 }
 
-  function resetFilters() {
-    requestId.value = ''
+function resetFilters() {
+    suppressWatchedFetch = true
+    q.value = ''
     statusCode.value = null
-    resetCursor()
-    fetchErrorLogs()
-  }
+    phase.value = props.errorType === 'upstream' ? 'upstream' : ''
+    errorOwner.value = ''
+    viewMode.value = 'errors'
+    page.value = 1
+    void nextTick(() => {
+      suppressWatchedFetch = false
+      void fetchErrorLogs()
+    })
+}
 
 
 watch(
   () => props.show,
   (open) => {
-    if (!open) return
+    if (!open) {
+      requestSequence += 1
+      loading.value = false
+      return
+    }
     if (props.resumeState) return
     page.value = 1
     pageSize.value = 10
@@ -121,45 +172,39 @@ watch(
   () => [props.timeRange, props.customStartTime, props.customEndTime, props.platform, props.groupId] as const,
   () => {
     if (!props.show) return
-    resetCursor()
+    page.value = 1
+    fetchErrorLogs()
+  }
+)
+
+watch(
+  () => [page.value, pageSize.value] as const,
+  () => {
+    if (!props.show || suppressWatchedFetch) return
     fetchErrorLogs()
   }
 )
 
 let searchTimeout: number | null = null
 watch(
-  () => requestId.value,
+  () => q.value,
   () => {
-    if (!props.show) return
+    if (!props.show || suppressWatchedFetch) return
     if (searchTimeout) window.clearTimeout(searchTimeout)
     searchTimeout = window.setTimeout(() => {
-      resetCursor()
-      fetchErrorLogs()
+      restartAtFirstPage()
     }, 350)
   }
 )
 
 watch(
-  () => statusCode.value,
+  () => [statusCode.value, phase.value, errorOwner.value, viewMode.value] as const,
   () => {
-    if (!props.show) return
-    resetCursor()
-    fetchErrorLogs()
+    if (!props.show || suppressWatchedFetch) return
+    restartAtFirstPage()
   }
 )
 
-function goToPreviousPage() {
-  if (page.value <= 1) return
-  page.value -= 1
-  void fetchErrorLogs()
-}
-
-function goToNextPage() {
-  if (!hasMore.value || !nextCursor.value) return
-  cursors.value[page.value] = nextCursor.value
-  page.value += 1
-  void fetchErrorLogs()
-}
 </script>
 
 <template>
@@ -167,7 +212,7 @@ function goToNextPage() {
     <div class="flex h-full min-h-0 flex-col">
       <!-- Filters -->
       <div class="mb-4 flex-shrink-0 border-b border-gray-200 pb-4 dark:border-dark-700">
-        <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <div class="grid grid-cols-2 gap-2 md:grid-cols-8">
           <div class="col-span-2 compact-select">
             <div class="relative group">
               <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
@@ -181,7 +226,7 @@ function goToNextPage() {
                 </svg>
               </div>
               <input
-                v-model="requestId"
+                v-model="q"
                 type="text"
                 class="w-full rounded-lg border-gray-200 bg-gray-50/50 py-1.5 pl-9 pr-3 text-xs font-medium text-gray-700 transition-all focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/10 dark:border-dark-700 dark:bg-dark-900 dark:text-gray-300 dark:focus:bg-dark-800"
                 :placeholder="t('admin.ops.errorDetails.searchPlaceholder')"
@@ -191,6 +236,20 @@ function goToNextPage() {
 
           <div class="compact-select">
             <Select :model-value="statusCode" :options="statusCodeSelectOptions" @update:model-value="statusCode = $event as any" />
+          </div>
+
+          <div class="compact-select">
+            <Select :model-value="phase" :options="phaseSelectOptions" @update:model-value="phase = String($event ?? '')" />
+          </div>
+
+          <div class="compact-select">
+            <Select :model-value="errorOwner" :options="ownerSelectOptions" @update:model-value="errorOwner = String($event ?? '')" />
+          </div>
+
+
+
+          <div class="compact-select">
+            <Select :model-value="viewMode" :options="viewModeSelectOptions" @update:model-value="viewMode = $event as any" />
           </div>
 
           <div class="flex items-center justify-end">
@@ -204,18 +263,21 @@ function goToNextPage() {
       <!-- Body -->
       <div class="flex min-h-0 flex-1 flex-col">
         <div class="mb-2 flex-shrink-0 text-xs text-gray-500 dark:text-gray-400">
-          {{ t('usage.explorer.page', { page }) }}
+          {{ t('admin.ops.errorDetails.total') }} {{ total }}
         </div>
 
           <OpsErrorLogTable
             class="min-h-0 flex-1"
             :rows="rows"
-            :has-more="hasMore"
+            :total="total"
             :loading="loading"
             :page="page"
+            :page-size="pageSize"
             @openErrorDetail="emit('openErrorDetail', $event)"
-            @previous="goToPreviousPage"
-            @next="goToNextPage"
+            @sort="onSort"
+
+            @update:page="page = $event"
+            @update:pageSize="pageSize = $event"
           />
 
       </div>

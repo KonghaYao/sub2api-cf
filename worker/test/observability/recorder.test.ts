@@ -3,6 +3,7 @@ import type { Env } from '../../src/env'
 import { consumeEvents } from '../../src/gateway/queue'
 import {
   consumeObservabilityPayloadRetry,
+  recordRequestContext,
   recordRequestOutcome,
   recordRequestStart,
 } from '../../src/observability/recorder'
@@ -31,9 +32,12 @@ describe('request observation recorder', () => {
     const test = fixture()
     const handle = await recordRequestStart(test.env, {
       requestId: 'req-observe-1', userId: 'alice', method: 'POST', requestPath: '/v1/responses',
-      requestedModel: 'gpt-5.5', stream: true,
+      requestedModel: 'gpt-5.5', stream: true, clientIp: '203.0.113.8', userAgent: 'test-agent/1',
     })
     expect(handle).not.toBeNull()
+    await expect(recordRequestContext(test.env, handle!, {
+      upstreamEndpoint: '/responses',
+    })).resolves.toBe(true)
     await expect(recordRequestOutcome(test.env, handle!, {
       lifecycle: 'completed', statusCode: 200, durationMs: 25, inputTokens: 2,
       outputTokens: 3, amountMicros: 10,
@@ -41,10 +45,14 @@ describe('request observation recorder', () => {
     })).resolves.toBe(true)
 
     const row = test.raw.prepare(
-      `SELECT lifecycle, payload_state, payload_object_key, input_tokens, amount_micros
+      `SELECT lifecycle, payload_state, payload_object_key, input_tokens, amount_micros,
+              upstream_endpoint, client_ip, user_agent
          FROM request_observations WHERE request_id = 'req-observe-1'`,
     ).get() as Record<string, unknown>
-    expect(row).toMatchObject({ lifecycle: 'completed', payload_state: 'stored', input_tokens: 2, amount_micros: 10 })
+    expect(row).toMatchObject({
+      lifecycle: 'completed', payload_state: 'stored', input_tokens: 2, amount_micros: 10,
+      upstream_endpoint: '/responses', client_ip: '203.0.113.8', user_agent: 'test-agent/1',
+    })
     expect(row.payload_object_key).toMatch(/^observability\/v1\/\d{4}\/\d{2}\/\d{2}\/[0-9a-f-]{36}\/[a-f0-9]{16}\.json$/)
     const payload = test.objects.get(String(row.payload_object_key))!
     expect(payload).toContain('[REDACTED]')

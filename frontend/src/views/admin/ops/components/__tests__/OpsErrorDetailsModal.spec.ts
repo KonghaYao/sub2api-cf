@@ -16,19 +16,17 @@ vi.mock('vue-i18n', async (importOriginal) => {
   return { ...actual, useI18n: () => ({ t: (key: string) => key }) }
 })
 
-describe('OpsErrorDetailsModal Worker pagination', () => {
+describe('OpsErrorDetailsModal Worker offset contract', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-05T00:00:00.000Z'))
-    mocks.listRequestErrors.mockReset()
-      .mockResolvedValueOnce({ items: [{}], has_more: true, next_cursor: 'next' })
-      .mockResolvedValueOnce({ items: [], has_more: false, next_cursor: null })
+    mocks.listRequestErrors.mockReset().mockResolvedValue({ items: [{}], total: 1, page: 1, page_size: 10, pages: 1 })
     mocks.listUpstreamErrors.mockReset()
   })
 
   afterEach(() => vi.useRealTimers())
 
-  it('reuses one bounded time window across cursor pages', async () => {
+  it('sends the original offset filters and preserves opaque group ids', async () => {
     const wrapper = mount(OpsErrorDetailsModal, {
       props: { show: false, timeRange: '1h', errorType: 'request', groupId: 'group_opaque' },
       global: {
@@ -42,17 +40,46 @@ describe('OpsErrorDetailsModal Worker pagination', () => {
 
     await wrapper.setProps({ show: true })
     await flushPromises()
-    const first = mocks.listRequestErrors.mock.calls[0][0]
-
-    vi.setSystemTime(new Date('2026-09-05T00:10:00.000Z'))
-    ;(wrapper.vm as any).goToNextPage()
-    await flushPromises()
-
-    expect(mocks.listRequestErrors.mock.calls[1][0]).toEqual(expect.objectContaining({
-      cursor: 'next',
+    expect(mocks.listRequestErrors.mock.calls[0][0]).toEqual(expect.objectContaining({
+      page: 1,
+      page_size: 10,
+      view: 'errors',
+      sort_by: 'created_at',
+      sort_order: 'desc',
       group_id: 'group_opaque',
-      start_time: first.start_time,
-      end_time: first.end_time,
     }))
+    expect(mocks.listRequestErrors).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let an older response overwrite a newer filter result', async () => {
+    let resolveOld!: (value: unknown) => void
+    mocks.listRequestErrors.mockImplementation((params: { group_id?: string }) => {
+      if (params.group_id === 'group-old') {
+        return new Promise(resolve => { resolveOld = resolve })
+      }
+      return Promise.resolve({
+        items: [{ id: params.group_id || 'initial' }], total: 1, page: 1, page_size: 10, pages: 1,
+      })
+    })
+    const wrapper = mount(OpsErrorDetailsModal, {
+      props: { show: true, timeRange: '1h', errorType: 'request' },
+      global: {
+        stubs: {
+          BaseDialog: { template: '<div><slot /></div>' },
+          Select: true,
+          OpsErrorLogTable: { props: ['rows'], template: '<div data-testid="rows">{{ rows?.[0]?.id }}</div>' },
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.setProps({ groupId: 'group-old' })
+    await wrapper.vm.$nextTick()
+    await wrapper.setProps({ groupId: 'group-new' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="rows"]').text()).toBe('group-new')
+
+    resolveOld({ items: [{ id: 'stale' }], total: 1, page: 1, page_size: 10, pages: 1 })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="rows"]').text()).toBe('group-new')
   })
 })

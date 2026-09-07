@@ -8,28 +8,10 @@
         {{ errorMessage }}
       </div>
 
-      <section v-if="cloudflareWorker" class="card space-y-4" data-testid="worker-ops-explorer">
-        <div>
-          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.ops.title') }}</h2>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.ops.description') }}</p>
-        </div>
-        <div class="flex flex-wrap gap-3">
-          <button type="button" class="btn btn-primary" data-testid="worker-ops-requests" @click="handleOpenRequestDetails()">
-            {{ t('admin.ops.requestDetails.title') }}
-          </button>
-          <button type="button" class="btn btn-secondary" data-testid="worker-ops-request-errors" @click="openErrorDetails('request')">
-            {{ t('admin.ops.requestErrors') }}
-          </button>
-          <button type="button" class="btn btn-secondary" data-testid="worker-ops-upstream-errors" @click="openErrorDetails('upstream')">
-            {{ t('admin.ops.upstreamErrors') }}
-          </button>
-        </div>
-      </section>
-
-      <OpsDashboardSkeleton v-if="!cloudflareWorker && loading && !hasLoadedOnce" :fullscreen="isFullscreen" />
+      <OpsDashboardSkeleton v-if="loading && !hasLoadedOnce" :fullscreen="isFullscreen" />
 
       <OpsDashboardHeader
-        v-else-if="!cloudflareWorker && opsEnabled"
+        v-else-if="opsEnabled"
         :overview="overview"
         :platform="platform"
         :group-id="groupId"
@@ -58,9 +40,9 @@
       />
 
       <!-- Row: Concurrency + Throughput -->
-      <div v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
+      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
         <div class="lg:col-span-1 min-h-[360px]">
-          <OpsConcurrencyCard :platform-filter="platform" :group-id-filter="legacyGroupId" :refresh-token="dashboardRefreshToken" />
+          <OpsConcurrencyCard :platform-filter="platform" :group-id-filter="groupId" :refresh-token="dashboardRefreshToken" />
         </div>
         <div class="lg:col-span-1 h-[360px]">
           <OpsSwitchRateTrendChart
@@ -86,7 +68,7 @@
       </div>
 
       <!-- Row: Visual Analysis (baseline 3-up grid) -->
-      <div v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 md:grid-cols-3">
+      <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 md:grid-cols-3">
         <OpsLatencyChart :latency-data="latencyHistogram" :loading="loadingLatency" />
         <OpsErrorDistributionChart
           :data="errorDistribution"
@@ -103,29 +85,29 @@
       </div>
 
       <!-- Row: OpenAI Token Stats -->
-      <div v-if="!cloudflareWorker && opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
+      <div v-if="opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
         <OpsOpenAITokenStatsCard
           :platform-filter="platform"
-          :group-id-filter="legacyGroupId"
+          :group-id-filter="groupId"
           :refresh-token="dashboardRefreshToken"
         />
       </div>
 
       <!-- Alert Events -->
-      <OpsAlertEventsCard v-if="!cloudflareWorker && opsEnabled && showAlertEvents && !(loading && !hasLoadedOnce)" />
+      <OpsAlertEventsCard v-if="opsEnabled && showAlertEvents && !(loading && !hasLoadedOnce)" />
 
       <!-- System Logs -->
       <OpsSystemLogTable
-        v-if="!cloudflareWorker && opsEnabled && !(loading && !hasLoadedOnce)"
+        v-if="opsEnabled && !(loading && !hasLoadedOnce)"
         :platform-filter="platform"
         :refresh-token="dashboardRefreshToken"
       />
 
       <!-- Settings Dialog (hidden in fullscreen mode) -->
       <template v-if="!isFullscreen">
-        <OpsSettingsDialog v-if="!cloudflareWorker" :show="showSettingsDialog" @close="showSettingsDialog = false" @saved="onSettingsSaved" />
+        <OpsSettingsDialog :show="showSettingsDialog" @close="showSettingsDialog = false" @saved="onSettingsSaved" />
 
-        <BaseDialog v-if="!cloudflareWorker" :show="showAlertRulesCard" :title="t('admin.ops.alertRules.title')" width="extra-wide" @close="showAlertRulesCard = false">
+        <BaseDialog :show="showAlertRulesCard" :title="t('admin.ops.alertRules.title')" width="extra-wide" @close="showAlertRulesCard = false">
           <OpsAlertRulesCard />
         </BaseDialog>
 
@@ -142,13 +124,11 @@
           @openErrorDetail="openError"
         />
 
-        <OpsErrorDetailModal v-model:show="showErrorModal" :error-id="selectedErrorId" :error-type="errorDetailsType" :back-to-list="detailReturnTarget !== null" @back="handleBackToList" @changed="handleErrorResolutionChanged" />
+        <OpsErrorDetailModal v-model:show="showErrorModal" :error-id="selectedErrorId" :error-type="errorDetailsType" :back-to-list="detailReturnTarget !== null" @back="handleBackToList" />
 
         <OpsRequestDetailsModal
           v-model="showRequestDetails"
           :time-range="timeRange"
-          :custom-start-time="customStartTime"
-          :custom-end-time="customEndTime"
           :preset="requestDetailsPreset"
           :platform="platform"
           :group-id="groupId"
@@ -178,7 +158,6 @@ import {
 } from '@/api/admin/ops'
 import type { GroupId } from '@/types'
 import { useAdminSettingsStore, useAppStore } from '@/stores'
-import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
 import OpsDashboardSkeleton from './components/OpsDashboardSkeleton.vue'
 import OpsConcurrencyCard from './components/OpsConcurrencyCard.vue'
@@ -200,7 +179,6 @@ const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
 const adminSettingsStore = useAdminSettingsStore()
-const cloudflareWorker = isCloudflareWorkerContractActive()
 const { t } = useI18n()
 
 const opsEnabled = computed(() => adminSettingsStore.opsMonitoringEnabled)
@@ -219,7 +197,6 @@ const lastUpdated = ref<Date | null>(new Date())
 const timeRange = ref<TimeRange>('1h')
 const platform = ref<string>('')
 const groupId = ref<GroupId | null>(null)
-const legacyGroupId = computed(() => typeof groupId.value === 'number' ? groupId.value : null)
 const queryMode = ref<QueryMode>('auto')
 const customStartTime = ref<string | null>(null)
 const customEndTime = ref<string | null>(null)
@@ -403,7 +380,6 @@ const requestDetailsPreset = ref<OpsRequestDetailsPreset>({
 // 记录单条错误详情来自哪个列表，便于"返回列表"时重新打开对应弹窗并保留状态。
 type DetailReturnTarget = 'errorList' | 'requestList' | null
 const detailReturnTarget = ref<DetailReturnTarget>(null)
-const errorDetailChanged = ref(false)
 
 // 从详情返回时，列表弹窗应保留上一次的筛选/分页状态而非重置。
 const resumeListState = ref(false)
@@ -474,6 +450,8 @@ function handleThroughputSelectGroup(nextGroupId: string | number) {
 function handleOpenRequestDetails(preset?: OpsRequestDetailsPreset) {
   const basePreset: OpsRequestDetailsPreset = {
     title: t('admin.ops.requestDetails.title'),
+    custom_start_time: customStartTime.value,
+    custom_end_time: customEndTime.value,
   }
 
   requestDetailsPreset.value = { ...basePreset, ...(preset ?? {}) }
@@ -481,6 +459,7 @@ function handleOpenRequestDetails(preset?: OpsRequestDetailsPreset) {
   // Ensure only one modal visible at a time.
   showErrorDetails.value = false
   showErrorModal.value = false
+  errorDetailsType.value = 'request'
   showRequestDetails.value = true
 }
 
@@ -529,7 +508,6 @@ function onQueryModeChange(v: string | number | boolean | null) {
 
 function openError(id: string) {
   selectedErrorId.value = id
-  errorDetailChanged.value = false
   // 记录来源列表，便于详情页"返回列表"。
   detailReturnTarget.value = showRequestDetails.value ? 'requestList' : showErrorDetails.value ? 'errorList' : null
   // Ensure only one modal visible at a time.
@@ -541,7 +519,7 @@ function openError(id: string) {
 // 从单条错误详情返回其来源列表，重新打开关联弹窗（保留筛选/分页状态）。
 function handleBackToList() {
   const target = detailReturnTarget.value
-  resumeListState.value = !errorDetailChanged.value
+  resumeListState.value = true
   if (target === 'requestList') {
     showErrorModal.value = false
     showErrorDetails.value = false
@@ -552,22 +530,16 @@ function handleBackToList() {
     showErrorDetails.value = true
   }
   detailReturnTarget.value = null
-  errorDetailChanged.value = false
   // 子组件 watch 在本次 show 变化中消费 resumeState 后复位，保证下次手动打开仍会重置筛选。
   window.setTimeout(() => {
     resumeListState.value = false
   }, 0)
 }
 
-function handleErrorResolutionChanged() {
-  errorDetailChanged.value = true
-  if (!cloudflareWorker) void fetchData()
-}
-
 function buildApiParams() {
   const params: any = {
     platform: platform.value || undefined,
-    group_id: legacyGroupId.value ?? undefined,
+    group_id: groupId.value ?? undefined,
     mode: queryMode.value
   }
 
@@ -589,7 +561,7 @@ function buildApiParams() {
 function buildSwitchTrendParams() {
   const params: any = {
     platform: platform.value || undefined,
-    group_id: legacyGroupId.value ?? undefined,
+    group_id: groupId.value ?? undefined,
     mode: queryMode.value
   }
   const endTime = new Date()
@@ -747,7 +719,7 @@ function isOpsDisabledError(err: unknown): boolean {
 }
 
 async function fetchData() {
-  if (cloudflareWorker || !opsEnabled.value) return
+  if (!opsEnabled.value) return
 
   abortDashboardFetch()
   dashboardFetchSeq += 1
@@ -827,11 +799,6 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
 
   await adminSettingsStore.fetch()
-  if (cloudflareWorker) {
-    loading.value = false
-    hasLoadedOnce.value = true
-    return
-  }
   if (!adminSettingsStore.opsMonitoringEnabled) {
     await router.replace('/admin/settings')
     return

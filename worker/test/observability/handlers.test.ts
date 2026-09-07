@@ -233,6 +233,226 @@ describe('request explorer HTTP contracts', () => {
     test.raw.close()
   })
 
+  it('serves the original Ops offset filters, request presets, opaque ids, and bounded related details', async () => {
+    const test = await fixture()
+    const now = Date.now()
+    test.raw.prepare(
+      `INSERT INTO api_keys (id,user_id,key_hash,key_prefix,name,created_at_ms,updated_at_ms)
+       VALUES ('key-alice','alice',?,'sk-live-…cdef','Alice key',?,?)`,
+    ).run('b'.repeat(64), now, now)
+    test.raw.prepare(
+      `INSERT INTO api_keys (id,user_id,key_hash,key_prefix,name,created_at_ms,updated_at_ms,revoked_at_ms)
+       VALUES ('key-revoked','alice',?,'sk-old-…cdef','Revoked key',?,?,?)`,
+    ).run('c'.repeat(64), now, now, now)
+    const client = await seed(test, { requestId: 'req-needle-client', userId: 'alice', at: now - 3, status: 418 })
+    const provider = await seed(test, {
+      requestId: 'req-needle-client', userId: 'alice', at: now - 2, status: 502, owner: 'provider',
+    })
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET status_code=599, upstream_endpoint='/responses', client_ip='203.0.113.8',
+              user_agent='ops-test-agent', client_request_id='shared-client-id'
+        WHERE id=?`,
+    ).run(provider.id)
+    const provider503 = await seed(test, {
+      requestId: 'req-needle-client', userId: 'alice', at: now - 1, status: 503, owner: 'provider',
+    })
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET api_key_id='key-revoked', client_request_id='shared-client-id'
+        WHERE id=?`,
+    ).run(provider503.id)
+    const unrelated = await seed(test, {
+      requestId: 'req-other', userId: 'alice', at: now, status: 504, owner: 'provider',
+    })
+    test.raw.prepare("UPDATE request_observations SET client_request_id='shared-client-id' WHERE id=?").run(unrelated.id)
+    const largeRelated = await recordRequestStart(test.env, {
+      requestId: 'req-needle-client', userId: 'alice', apiKeyId: 'key-alice', method: 'POST',
+      requestPath: '/v1/responses', requestedModel: 'gpt-5.5', occurredAtMs: now,
+    })
+    await recordRequestOutcome(test.env, largeRelated!, {
+      lifecycle: 'failed', statusCode: 501, completedAtMs: now + 10, durationMs: 10,
+      error: {
+        phase: 'upstream', type: 'upstream_error', owner: 'provider', source: 'upstream',
+        message: 'large upstream response', upstreamStatusCode: 501,
+      },
+      payload: { error: { body: { detail: 'x'.repeat(20_000) } } },
+    })
+    const success = await seed(test, { requestId: 'req-success', userId: 'bob', at: now - 1, status: 200 })
+    const started = await recordRequestStart(test.env, {
+      requestId: 'req-started', userId: 'alice', method: 'POST', requestPath: '/v1/responses',
+      requestedModel: 'gpt-5.5', occurredAtMs: now,
+    })
+    const cancelled = await recordRequestStart(test.env, {
+      requestId: 'req-cancelled', userId: 'alice', method: 'POST', requestPath: '/v1/responses',
+      requestedModel: 'gpt-5.5', occurredAtMs: now,
+    })
+    await recordRequestOutcome(test.env, cancelled!, {
+      lifecycle: 'cancelled', statusCode: 499, completedAtMs: now + 1, durationMs: 1,
+    })
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET group_id='group_01HZZ', duration_ms=900
+        WHERE id=?`,
+    ).run(success.id)
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET is_business_limited=1
+        WHERE id=?`,
+    ).run(client.id)
+
+    const errors = await app().request(
+      `/admin/ops/request-errors?page=1&page_size=10&q=alice%40example.test&error_owner=client&view=excluded&status_codes_other=1&sort_by=model&sort_order=asc&start_time=${encodeURIComponent(new Date(now - 1000).toISOString())}&end_time=${encodeURIComponent(new Date(now + 1000).toISOString())}`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(errors.status).toBe(200)
+    await expect(errors.json()).resolves.toMatchObject({
+      data: { total: 1, page: 1, page_size: 10, items: [{ id: client.id, request_id: 'req-needle-client' }] },
+    })
+    for (const [query, expected] of [['req-needle-client', 4], ['gpt-5.5', 5]] as const) {
+      const searched = await app().request(
+        `/admin/ops/request-errors?page=1&page_size=10&q=${encodeURIComponent(query)}&view=all`,
+        { headers: { authorization: test.auth.admin! } }, test.env,
+      )
+      expect(searched.status).toBe(200)
+      expect(((await searched.json()) as any).data.total).toBe(expected)
+    }
+
+    const requests = await app().request(
+      `/admin/ops/requests?page=1&page_size=10&kind=success&sort=duration_desc&min_duration_ms=800&max_duration_ms=1000&group_id=group_01HZZ`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(requests.status).toBe(200)
+    await expect(requests.json()).resolves.toMatchObject({
+      data: { total: 1, page: 1, page_size: 10, items: [{ id: success.id, group_id: 'group_01HZZ', duration_ms: 900 }] },
+    })
+
+    const allSettledRequests = await app().request(
+      '/admin/ops/requests?page=1&page_size=10&kind=all&sort=created_at_desc',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    await expect(allSettledRequests.json()).resolves.toMatchObject({ data: { total: 6 } })
+    const successfulRequests = await app().request(
+      '/admin/ops/requests?page=1&page_size=10&kind=success&sort=created_at_desc',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    const successfulRequestBody = await successfulRequests.json() as any
+    expect(successfulRequestBody.data).toMatchObject({
+      total: 1,
+      items: [{ id: success.id, kind: 'success' }],
+    })
+
+    const failedRequests = await app().request(
+      '/admin/ops/requests?page=1&page_size=10&kind=error&sort=created_at_desc',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    const failedRequestBody = await failedRequests.json() as any
+    expect(failedRequestBody.data.total).toBe(5)
+    expect(failedRequestBody.data.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: client.id, error_id: client.id, kind: 'error' }),
+      expect.objectContaining({ id: provider.id, error_id: provider.id, kind: 'error', status_code: 502 }),
+      expect.objectContaining({ id: provider503.id, error_id: provider503.id, kind: 'error', status_code: 503 }),
+    ]))
+    expect(failedRequestBody.data.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: started!.id }),
+      expect.objectContaining({ id: cancelled!.id }),
+    ]))
+
+    const upstream = await app().request(
+      '/admin/ops/upstream-errors?page=1&page_size=10&view=all&sort_by=status_code&sort_order=desc',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(upstream.status).toBe(200)
+    await expect(upstream.json()).resolves.toMatchObject({
+      data: {
+        total: 4,
+        items: [
+          { id: unrelated.id, status_code: 504 },
+          { id: provider503.id, status_code: 503 },
+          {
+            id: provider.id, status_code: 502, upstream_endpoint: '/responses',
+            client_ip: '203.0.113.8', user_agent: 'ops-test-agent', api_key_deleted: false,
+          },
+          { id: largeRelated!.id, status_code: 501 },
+        ],
+      },
+    })
+
+    const exactEffectiveStatus = await app().request(
+      '/admin/ops/request-errors?page=1&page_size=10&status_code=502&view=all',
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    await expect(exactEffectiveStatus.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ id: provider.id, status_code: 502 }] },
+    })
+
+    const detail = await app().request(`/admin/ops/request-errors/${client.id}`, {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    const detailBody = await detail.json() as any
+    expect(detailBody.data).toMatchObject({ api_key_prefix: 'sk-live-…cdef' })
+    expect(detailBody.data.error_body).toContain('[REDACTED]')
+    expect(detailBody.data.error_body).not.toContain('schema_version')
+    expect(detailBody.data.upstream_error_detail).toBeUndefined()
+
+    const related = await app().request(
+      `/admin/ops/request-errors/${client.id}/upstream-errors?page=1&page_size=100&view=all&include_detail=1`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(related.status).toBe(200)
+    const relatedBody = await related.json() as any
+    expect(relatedBody.data.total).toBe(3)
+    expect(relatedBody.data.page_size).toBe(100)
+    expect(relatedBody.data.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: provider.id,
+        payload: expect.objectContaining({ state: 'available', redacted: true }),
+      }),
+    ]))
+    expect(relatedBody.data.items[0].payload.body).not.toContain('sk-hidden-value')
+    expect(relatedBody.data.items.map((item: any) => item.id)).not.toContain(unrelated.id)
+    expect(relatedBody.data.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: provider503.id, api_key_deleted: true }),
+    ]))
+    const largeRelatedProjection = relatedBody.data.items.find((item: any) => item.id === largeRelated!.id)
+    expect(largeRelatedProjection.payload.body.length).toBeLessThanOrEqual(16_400)
+    expect(largeRelatedProjection.payload.body).toContain('…[truncated]')
+    expect(largeRelatedProjection.error_body).toContain('…[truncated]')
+
+    const unsupported = await app().request('/admin/ops/requests?page=1&page_size=10&unknown_filter=1', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(unsupported.status).toBe(400)
+    await expect(unsupported.json()).resolves.toMatchObject({ code: 'unsupported_ops_parameter' })
+    const invalidSort = await app().request('/admin/ops/request-errors?page=1&page_size=10&sort_by=secret', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(invalidSort.status).toBe(400)
+    await expect(invalidSort.json()).resolves.toMatchObject({ code: 'unsupported_error_sort' })
+    const paginationConflict = await app().request('/admin/ops/requests?page=1&cursor=forged', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(paginationConflict.status).toBe(400)
+    await expect(paginationConflict.json()).resolves.toMatchObject({ code: 'pagination_mode_conflict' })
+    const deepOffset = await app().request('/admin/ops/requests?page=102&page_size=100', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(deepOffset.status).toBe(400)
+    await expect(deepOffset.json()).resolves.toMatchObject({ code: 'ops_offset_too_deep' })
+    const wideSearch = await app().request(
+      `/admin/ops/request-errors?page=1&page_size=10&q=needle&start_time=${encodeURIComponent(new Date(now - 48 * 60 * 60 * 1000).toISOString())}&end_time=${encodeURIComponent(new Date(now).toISOString())}`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(wideSearch.status).toBe(422)
+    await expect(wideSearch.json()).resolves.toMatchObject({ code: 'ops_search_window_too_wide' })
+    const dashboardContract = await createApp().request('/api/v1/admin/ops/dashboard/overview', {
+      headers: { authorization: test.auth.admin! },
+    }, test.env)
+    expect(dashboardContract.status).toBe(501)
+    await expect(dashboardContract.json()).resolves.toMatchObject({ code: 'admin_ops_contract_not_migrated' })
+    test.raw.close()
+  })
+
   it('resolves a failed observation using an explicit version and server-derived actor', async () => {
     const test = await fixture()
     const failed = await seed(test, {
@@ -547,6 +767,18 @@ describe('request explorer HTTP contracts', () => {
       { headers: { authorization: test.auth.admin! } }, test.env,
     )
     expect(((await second.json()) as any).data.items[0].id).not.toBe(firstBody.data.items[0].id)
+    const changedFilter = await api.request(
+      `/admin/ops/requests?limit=1&group_id=changed&cursor=${encodeURIComponent(firstBody.data.next_cursor)}`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(changedFilter.status).toBe(400)
+    await expect(changedFilter.json()).resolves.toMatchObject({ code: 'invalid_cursor' })
+    const cursorDurationSort = await api.request(
+      `/admin/ops/requests?limit=1&sort=duration_desc&cursor=${encodeURIComponent(firstBody.data.next_cursor)}`,
+      { headers: { authorization: test.auth.admin! } }, test.env,
+    )
+    expect(cursorDurationSort.status).toBe(400)
+    await expect(cursorDurationSort.json()).resolves.toMatchObject({ code: 'unsupported_pagination_or_search' })
     const related = await api.request(
       `/admin/ops/request-errors/${clientError.id}/upstream-errors`,
       { headers: { authorization: test.auth.admin! } }, test.env,

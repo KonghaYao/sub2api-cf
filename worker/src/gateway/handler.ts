@@ -1088,6 +1088,7 @@ async function dispatchGateway(
   let observedRequestedModel: string | undefined
   let observedStream: boolean | undefined
   let observedAccountId: string | null = null
+  let observedUpstreamEndpoint: string | undefined
   try {
     observationRequest = {
       method: context.req.method,
@@ -1100,6 +1101,8 @@ async function dispatchGateway(
       method: context.req.method,
       requestPath: new URL(context.req.url).pathname,
       inboundEndpoint: endpoint,
+      clientIp: context.req.header('cf-connecting-ip'),
+      userAgent: context.req.header('user-agent'),
       occurredAtMs: startedAt,
     })
     const principal = await authenticateGatewayRequest(context.req.raw, context.env)
@@ -1150,6 +1153,7 @@ async function dispatchGateway(
       upstreamEndpoint,
     )
     const providerDispatch = prepared.resolveUpstream(model, upstreamEndpoint, provider)
+    observedUpstreamEndpoint = providerOperationPath(providerDispatch.operation, provider)
     const upstreamBody = providerDispatch.body
     const serviceTier = typeof upstreamBody.service_tier === 'string'
       ? upstreamBody.service_tier
@@ -1162,6 +1166,7 @@ async function dispatchGateway(
         platform: observedPlatform,
         requestedModel: observedRequestedModel,
         stream: observedStream,
+        upstreamEndpoint: observedUpstreamEndpoint,
       })
     }
     const pricedReservationMicros = reservationForRequest(
@@ -1382,6 +1387,7 @@ async function dispatchGateway(
           platform: observedPlatform,
           requestedModel: observedRequestedModel,
           stream: observedStream,
+          upstreamEndpoint: observedUpstreamEndpoint,
         })
       }
       await recordRequestOutcome(context.env, observation, {

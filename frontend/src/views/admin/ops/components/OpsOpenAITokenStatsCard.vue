@@ -5,11 +5,12 @@ import { useI18n } from 'vue-i18n'
 import Select from '@/components/common/Select.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { opsAPI, type OpsOpenAITokenStatsResponse, type OpsOpenAITokenStatsTimeRange } from '@/api/admin/ops'
+import type { GroupId } from '@/types'
 import { formatNumber } from '@/utils/format'
 
 interface Props {
   platformFilter?: string
-  groupIdFilter?: number | null
+  groupIdFilter?: GroupId | null
   refreshToken: number
 }
 
@@ -84,7 +85,7 @@ function buildParams() {
   const params: Record<string, any> = {
     time_range: timeRange.value,
     platform: props.platformFilter || undefined,
-    group_id: typeof props.groupIdFilter === 'number' && props.groupIdFilter > 0 ? props.groupIdFilter : undefined
+    group_id: props.groupIdFilter != null && String(props.groupIdFilter).trim() ? props.groupIdFilter : undefined
   }
 
   if (viewMode.value === 'topn') {

@@ -53,7 +53,7 @@ vi.mock('@vueuse/core', () => ({
 
 const DashboardHeaderStub = defineComponent({
   name: 'OpsDashboardHeader',
-  emits: ['open-error-details'],
+  emits: ['open-error-details', 'open-request-details'],
   template: '<button data-testid="open-errors" @click="$emit(\'open-error-details\', \'request\')" />',
 })
 
@@ -66,9 +66,16 @@ const ErrorListStub = defineComponent({
 
 const ErrorDetailStub = defineComponent({
   name: 'OpsErrorDetailModal',
-  props: { show: Boolean, backToList: Boolean },
+  props: { show: Boolean, backToList: Boolean, errorType: String },
   emits: ['changed', 'back', 'update:show'],
   template: '<div />',
+})
+
+const RequestListStub = defineComponent({
+  name: 'OpsRequestDetailsModal',
+  props: { modelValue: Boolean, preset: Object },
+  emits: ['openErrorDetail', 'update:modelValue'],
+  template: '<button data-testid="open-request-error" @click="$emit(\'openErrorDetail\', \'request-error-1\')" />',
 })
 
 describe('OpsDashboard error resolution refresh', () => {
@@ -93,7 +100,7 @@ describe('OpsDashboard error resolution refresh', () => {
     mocks.getErrorDistribution.mockResolvedValue({ total: 0, items: [] })
   })
 
-  it('refreshes dashboard data and reloads the source list after a detail resolution change', async () => {
+  it('returns from an error detail to the original error list without replacing the dashboard', async () => {
     const wrapper = shallowMount(OpsDashboard, {
       global: {
         stubs: {
@@ -105,26 +112,20 @@ describe('OpsDashboard error resolution refresh', () => {
       },
     })
     await flushPromises()
-    const initialRefreshes = mocks.getDashboardSnapshotV2.mock.calls.length
-
     await wrapper.get('[data-testid="open-errors"]').trigger('click')
     await wrapper.get('[data-testid="open-error"]').trigger('click')
     const detail = wrapper.findComponent(ErrorDetailStub)
     expect(detail.props('show')).toBe(true)
     expect(detail.props('backToList')).toBe(true)
 
-    detail.vm.$emit('changed')
-    await flushPromises()
-    expect(mocks.getDashboardSnapshotV2).toHaveBeenCalledTimes(initialRefreshes + 1)
-
     detail.vm.$emit('back')
     await wrapper.vm.$nextTick()
     const list = wrapper.findComponent(ErrorListStub)
     expect(list.props('show')).toBe(true)
-    expect(list.props('resumeState')).toBe(false)
+    expect(list.props('resumeState')).toBe(true)
   })
 
-  it('renders only Worker request/error explorers without legacy dashboard requests', async () => {
+  it('keeps the original dashboard in Worker mode and requests its real contracts', async () => {
     setCloudflareWorkerContractActive(true)
 
     const wrapper = shallowMount(OpsDashboard, {
@@ -138,12 +139,35 @@ describe('OpsDashboard error resolution refresh', () => {
     })
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="worker-ops-explorer"]').exists()).toBe(true)
-    expect(mocks.getAdvancedSettings).not.toHaveBeenCalled()
-    expect(mocks.getMetricThresholds).not.toHaveBeenCalled()
-    expect(mocks.getDashboardSnapshotV2).not.toHaveBeenCalled()
-    expect(mocks.getThroughputTrend).not.toHaveBeenCalled()
-    expect(mocks.getLatencyHistogram).not.toHaveBeenCalled()
-    expect(mocks.getErrorDistribution).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="worker-ops-explorer"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'OpsDashboardHeader' }).exists()).toBe(true)
+    expect(mocks.getAdvancedSettings).toHaveBeenCalled()
+    expect(mocks.getMetricThresholds).toHaveBeenCalled()
+    expect(mocks.getDashboardSnapshotV2).toHaveBeenCalled()
+    expect(mocks.getThroughputTrend).toHaveBeenCalled()
+    expect(mocks.getLatencyHistogram).toHaveBeenCalled()
+    expect(mocks.getErrorDistribution).toHaveBeenCalled()
+  })
+
+  it('resets an upstream list family before opening an error from request details', async () => {
+    const wrapper = shallowMount(OpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          OpsDashboardHeader: DashboardHeaderStub,
+          OpsErrorDetailsModal: ErrorListStub,
+          OpsErrorDetailModal: ErrorDetailStub,
+          OpsRequestDetailsModal: RequestListStub,
+        },
+      },
+    })
+    await flushPromises()
+    wrapper.findComponent(DashboardHeaderStub).vm.$emit('open-error-details', 'upstream')
+    await wrapper.vm.$nextTick()
+    wrapper.findComponent(DashboardHeaderStub).vm.$emit('open-request-details', { title: 'Requests' })
+    await wrapper.vm.$nextTick()
+    await wrapper.get('[data-testid="open-request-error"]').trigger('click')
+
+    expect(wrapper.findComponent(ErrorDetailStub).props('errorType')).toBe('request')
   })
 })
