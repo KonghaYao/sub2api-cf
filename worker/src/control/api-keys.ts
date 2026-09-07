@@ -34,6 +34,7 @@ interface ApiKeyRow {
   enabled: number
   expires_at_ms: number | null
   last_used_at_ms: number | null
+  last_used_ip?: string | null
   created_at_ms: number
   updated_at_ms: number
   group_id: string | null
@@ -764,6 +765,11 @@ function apiKeySelect(): string {
                  k.usage_5h_micros, k.usage_1d_micros, k.usage_7d_micros,
                  k.window_5h_start_ms, k.window_1d_start_ms, k.window_7d_start_ms,
                  k.quota_reset_epoch, k.rate_limit_reset_epoch,
+                 (SELECT observation.client_ip FROM request_observations observation
+                   WHERE observation.api_key_id = k.id AND observation.user_id = k.user_id
+                     AND observation.client_ip IS NOT NULL AND observation.client_ip <> ''
+                   ORDER BY observation.occurred_at_ms DESC, observation.id DESC
+                   LIMIT 1) AS last_used_ip,
                  k.ip_allowlist_json, k.ip_denylist_json,
                  g.name AS group_name, g.description AS group_description,
                  g.platform AS group_platform, g.enabled AS group_enabled,
@@ -879,7 +885,7 @@ function publicApiKey(
     revoked_at: nullableIso(row.revoked_at_ms),
     ip_whitelist: storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json'),
     ip_blacklist: storedPolicy(row.ip_denylist_json, 'ip_denylist_json'),
-    last_used_ip: null,
+    last_used_ip: row.last_used_ip ?? null,
     ...(group === null ? {} : { group: publicAdminApiKeyGroup(group) }),
   }
 }

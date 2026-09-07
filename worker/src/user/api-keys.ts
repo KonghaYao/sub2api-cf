@@ -34,6 +34,7 @@ interface ApiKeyRow {
   enabled: number
   expires_at_ms: number | null
   last_used_at_ms: number | null
+  last_used_ip?: string | null
   created_at_ms: number
   updated_at_ms: number
   group_id: string
@@ -596,6 +597,11 @@ function apiKeySelect(): string {
                  usage_5h_micros, usage_1d_micros, usage_7d_micros,
                  window_5h_start_ms, window_1d_start_ms, window_7d_start_ms,
                  quota_reset_epoch, rate_limit_reset_epoch,
+                 (SELECT observation.client_ip FROM request_observations observation
+                   WHERE observation.api_key_id = api_keys.id AND observation.user_id = api_keys.user_id
+                     AND observation.client_ip IS NOT NULL AND observation.client_ip <> ''
+                   ORDER BY observation.occurred_at_ms DESC, observation.id DESC
+                   LIMIT 1) AS last_used_ip,
                  ip_allowlist_json, ip_denylist_json
             FROM api_keys`
 }
@@ -896,7 +902,7 @@ function publicApiKey(row: ApiKeyRow): Record<string, unknown> {
     revoked_at: toIso(row.revoked_at_ms),
     ip_whitelist: storedPolicy(row.ip_allowlist_json, 'ip_allowlist_json'),
     ip_blacklist: storedPolicy(row.ip_denylist_json, 'ip_denylist_json'),
-    last_used_ip: null,
+    last_used_ip: row.last_used_ip ?? null,
   }
 }
 

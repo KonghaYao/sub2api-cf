@@ -424,7 +424,7 @@ async function listAdminUsageProjection(context: Context<Bindings>): Promise<Res
   }
 }
 
-function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; values: unknown[] } {
+export function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; values: unknown[] } {
   const clauses: string[] = []
   const values: unknown[] = []
   const exact = (name: string, column: string) => {
@@ -488,8 +488,7 @@ function adminUsageClauses(context: Context<Bindings>): { clauses: string[]; val
     values.push(billingMode)
   }
   const mismatch = context.req.query('upstream_model_mismatch')?.trim()
-  if (mismatch) {
-    queryBooleanValue(mismatch, 'upstream_model_mismatch')
+  if (mismatch && queryBooleanValue(mismatch, 'upstream_model_mismatch')) {
     throw new GatewayError(501, 'upstream_model_audit_not_migrated', 'Upstream response model evidence is not retained by this Worker')
   }
   const exactTotal = context.req.query('exact_total')?.trim()

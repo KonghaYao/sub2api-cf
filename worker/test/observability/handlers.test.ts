@@ -199,8 +199,8 @@ describe('request explorer HTTP contracts', () => {
     const analytics = await production.request('/api/v1/admin/dashboard/snapshot-v2', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
-    expect(analytics.status).toBe(501)
-    await expect(analytics.json()).resolves.toMatchObject({ code: 'admin_usage_analytics_not_migrated' })
+    expect(analytics.status).toBe(200)
+    await expect(analytics.json()).resolves.toMatchObject({ code: 0, data: { stats: { total_requests: 2 } } })
     test.raw.close()
   })
 

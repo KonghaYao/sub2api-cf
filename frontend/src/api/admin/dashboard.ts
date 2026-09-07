@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { getBrowserTimeZone } from '../../utils/format'
 import type {
   DashboardStats,
   TrendDataPoint,
@@ -298,9 +299,11 @@ export interface BatchUsersUsageResponse {
  * @returns Usage stats map keyed by user ID
  */
 export async function getBatchUsersUsage(userIds: number[]): Promise<BatchUsersUsageResponse> {
-  const { data } = await apiClient.post<BatchUsersUsageResponse>('/admin/dashboard/users-usage', {
-    user_ids: userIds
-  })
+  const { data } = await apiClient.post<BatchUsersUsageResponse>(
+    '/admin/dashboard/users-usage',
+    { user_ids: userIds },
+    { params: { timezone: getBrowserTimeZone() } }
+  )
   return data
 }
 
@@ -326,7 +329,8 @@ export async function getBatchApiKeysUsage(
     '/admin/dashboard/api-keys-usage',
     {
       api_key_ids: apiKeyIds
-    }
+    },
+    { params: { timezone: getBrowserTimeZone() } }
   )
   return data
 }
