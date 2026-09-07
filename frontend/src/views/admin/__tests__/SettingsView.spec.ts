@@ -1003,6 +1003,31 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
+  it("loads and persists an explicit permanent audit-log retention policy", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      cloudflare_worker_contract: true,
+      audit_log_retention_days: 30,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openSecurityTab(wrapper);
+
+    const retentionInput = findCardByText(
+      wrapper,
+      "admin.settings.security.auditRetention",
+    ).get('input[type="number"]');
+    expect((retentionInput.element as HTMLInputElement).value).toBe("30");
+
+    await retentionInput.setValue("0");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audit_log_retention_days: 0 }),
+    );
+  });
+
   it("keeps the original commercial feature controls and persists their values", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,

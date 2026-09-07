@@ -50,6 +50,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       data: {
         schema_version: 1,
         control_version: 7,
+        audit_log_retention_days: 45,
         public: {
           site_name: 'Sub2API CF',
           registration_enabled: true,
@@ -98,8 +99,46 @@ describe('admin settings Cloudflare Worker contract', () => {
       step_up_enabled: true,
       turnstile_secret_key_configured: true,
       cloudflare_worker_contract: true,
-      control_version: 7
+      control_version: 7,
+      audit_log_retention_days: 45,
     }))
+  })
+
+  it('round-trips an explicit zero audit retention without dropping it', async () => {
+    const response = (controlVersion: number) => ({
+      schema_version: 1,
+      control_version: controlVersion,
+      audit_log_retention_days: 0,
+      public: {
+        site_name: 'Sub2API',
+        registration_enabled: false,
+        email_verification_enabled: false,
+        turnstile_enabled: false,
+        turnstile_site_key: '',
+      },
+      security: { step_up_enabled: false },
+      secrets: { turnstile_secret_key_configured: false },
+      auth_source_defaults: {},
+      updated_at_ms: controlVersion,
+    })
+    get.mockResolvedValueOnce({ data: response(3), headers: { etag: '"3"' } })
+    put.mockResolvedValueOnce({ data: response(4), headers: { etag: '"4"' } })
+    const { getSettings, updateSettings } = await import('@/api/admin/settings')
+
+    await expect(getSettings()).resolves.toEqual(expect.objectContaining({
+      audit_log_retention_days: 0,
+    }))
+    await expect(updateSettings({ audit_log_retention_days: 0 })).resolves.toEqual(
+      expect.objectContaining({ audit_log_retention_days: 0, control_version: 4 }),
+    )
+    expect(put).toHaveBeenCalledWith('/admin/settings', {
+      audit_log_retention_days: 0,
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-settings-update-22222222-2222-4222-8222-222222222222',
+        'If-Match': '"3"',
+      },
+    })
   })
 
   it('round-trips the Worker auth source defaults as the supported nested patch', async () => {
@@ -123,6 +162,7 @@ describe('admin settings Cloudflare Worker contract', () => {
     const response = (controlVersion: number) => ({
       schema_version: 1,
       control_version: controlVersion,
+      audit_log_retention_days: 180,
       public: {
         site_name: 'Sub2API',
         registration_enabled: true,
@@ -194,6 +234,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       data: {
         schema_version: 1,
         control_version: 7,
+        audit_log_retention_days: 180,
         public: {
           site_name: 'Old',
           registration_enabled: true,
@@ -219,6 +260,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       data: {
         schema_version: 1,
         control_version: 8,
+        audit_log_retention_days: 180,
         public: {
           site_name: 'New',
           registration_enabled: false,
@@ -303,6 +345,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       data: {
         schema_version: 1,
         control_version: 4,
+        audit_log_retention_days: 180,
         public: {
           site_name: 'Sub2API',
           registration_enabled: false,
@@ -320,6 +363,7 @@ describe('admin settings Cloudflare Worker contract', () => {
       data: {
         schema_version: 1,
         control_version: 5,
+        audit_log_retention_days: 180,
         public: {
           site_name: 'Sub2API',
           registration_enabled: false,

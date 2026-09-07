@@ -1079,6 +1079,7 @@ export interface UpdateSettingsRequest {
 interface WorkerAdminSettings {
   schema_version: 1;
   control_version: number;
+  audit_log_retention_days: number;
   public: {
     site_name: string;
     backend_mode_enabled: boolean;
@@ -1118,6 +1119,7 @@ interface WorkerAdminSettings {
 }
 
 interface WorkerSettingsPatch {
+  audit_log_retention_days?: number;
   public?: Partial<WorkerAdminSettings["public"]>;
   security?: { step_up_enabled: boolean };
   secrets?: { turnstile_secret_key: string | null };
@@ -1156,6 +1158,9 @@ function isWorkerAdminSettings(value: unknown): value is WorkerAdminSettings {
   return (
     candidate.schema_version === 1 &&
     Number.isSafeInteger(candidate.control_version) &&
+    Number.isSafeInteger(candidate.audit_log_retention_days) &&
+    (candidate.audit_log_retention_days as number) >= 0 &&
+    (candidate.audit_log_retention_days as number) <= 3650 &&
     candidate.public !== null &&
     typeof candidate.public === "object" &&
     candidate.secrets !== null &&
@@ -1168,6 +1173,7 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     cloudflare_worker_contract: true,
     schema_version: settings.schema_version,
     control_version: settings.control_version,
+    audit_log_retention_days: settings.audit_log_retention_days,
     updated_at_ms: settings.updated_at_ms,
     site_name: settings.public.site_name,
     backend_mode_enabled: settings.public.backend_mode_enabled === true,
@@ -1294,6 +1300,9 @@ export async function updateSettings(
   }
 
   const patch: WorkerSettingsPatch = {};
+  if (settings.audit_log_retention_days !== undefined) {
+    patch.audit_log_retention_days = settings.audit_log_retention_days;
+  }
   if (Object.keys(publicPatch).length > 0) patch.public = publicPatch;
   if (settings.step_up_enabled !== undefined) {
     patch.security = { step_up_enabled: settings.step_up_enabled };
@@ -1305,6 +1314,7 @@ export async function updateSettings(
     patch.auth_source_defaults = settings.auth_source_defaults;
   }
   if (
+    patch.audit_log_retention_days === undefined &&
     patch.public === undefined &&
     patch.security === undefined &&
     patch.secrets === undefined &&

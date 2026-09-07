@@ -11130,6 +11130,9 @@ async function saveSettings() {
         promo_code_enabled: form.promo_code_enabled,
         invitation_code_enabled: form.invitation_code_enabled,
         affiliate_enabled: form.affiliate_enabled,
+        audit_log_retention_days: Number.isFinite(form.audit_log_retention_days)
+          ? form.audit_log_retention_days
+          : 180,
       });
       form.turnstile_secret_key_configured = updated.turnstile_secret_key_configured;
       form.turnstile_secret_key = "";

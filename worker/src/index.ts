@@ -21,6 +21,7 @@ import { recoverPendingMediaTasks } from './media/queue'
 import { recoverPendingProviderMediaJobs } from './media/provider-job'
 import { recoverImageTasks } from './media/image-task'
 import { recoverAccountStatsRollups } from './gateway/account-stats-rollup'
+import { runAdminRequestAuditRetention } from './control/request-audit-retention'
 
 export { ApiKeyLimitDO, AuthRateLimitDO, PoolStateDO, SubscriptionStateDO, UserStateDO } from './state'
 
@@ -45,6 +46,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverPendingProviderMediaJobs(env),
     recoverImageTasks(env),
     recoverAccountStatsRollups(env),
+    runAdminRequestAuditRetention(env, now),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -68,6 +70,7 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'media_provider_jobs',
           'image_tasks',
           'account_stats_rollups',
+          'admin_request_audit_retention',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

@@ -113,6 +113,11 @@ domain stream. Request bodies remain explicitly `[not_captured]`. The retained
 clear action requires both audit-read and operations-write permission, a normal
 user-access administrator session, a fresh TOTP proof and an idempotency key;
 its D1 transaction retains one truthful clear trace with the deleted row count.
+Migration 0077 persists the original UI's `audit_log_retention_days` setting
+(`0` means permanent retention). The scheduled handler applies the setting as
+an absolute UTC duration and deletes at most 500 oldest request-audit rows per
+tick while preserving the newest clear trace; immutable domain audit tables are
+never part of this cleanup.
 
 ## Checks
 

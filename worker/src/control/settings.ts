@@ -78,6 +78,7 @@ export interface PublicSystemSettings {
 export interface AdminSystemSettings {
   schema_version: typeof PUBLIC_SETTINGS_SCHEMA_VERSION
   control_version: number
+  audit_log_retention_days: number
   public: PublicSystemSettings
   security: {
     step_up_enabled: boolean
@@ -128,6 +129,7 @@ interface SecuritySettingsPatch {
 }
 
 interface SettingsPatch {
+  audit_log_retention_days?: number
   public?: PublicSettingsPatch
   security?: SecuritySettingsPatch
   secrets?: SecretSettingsPatch
@@ -148,6 +150,7 @@ interface SecretRow {
 interface SettingsRow {
   schema_version: number
   control_version: number
+  audit_log_retention_days: number
   public_json: string
   step_up_enabled: number
   updated_at_ms: number
@@ -242,6 +245,8 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
     const next: AdminSystemSettings = {
       schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
       control_version: nextVersion,
+      audit_log_retention_days:
+        patch.audit_log_retention_days ?? current.audit_log_retention_days,
       public: nextPublic,
       security: {
         step_up_enabled: nextStepUpEnabled,
@@ -266,6 +271,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
         `UPDATE system_settings
             SET control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
                 public_json = ?,
+                audit_log_retention_days = ?,
                 step_up_enabled = CASE
                   WHEN ? = 1 AND NOT EXISTS (
                     SELECT 1 FROM user_totp_credentials WHERE user_id = ?
@@ -278,6 +284,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
         current.control_version,
         nextVersion,
         JSON.stringify(nextPublic),
+        next.audit_log_retention_days,
         requiresTotpForEnable ? 1 : 0,
         actor.user_id,
         nextStepUpEnabled ? 1 : 0,
@@ -381,7 +388,8 @@ export async function readSystemSettingSecret(
 
 async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   const row = await env.DB.prepare(
-    `SELECT s.schema_version, s.control_version, s.public_json, s.step_up_enabled, s.updated_at_ms,
+    `SELECT s.schema_version, s.control_version, s.audit_log_retention_days,
+            s.public_json, s.step_up_enabled, s.updated_at_ms,
             CASE WHEN secret.key IS NULL THEN 0 ELSE 1 END AS turnstile_secret_key_configured,
             secret.key_version AS turnstile_secret_key_version
        FROM system_settings s
@@ -400,6 +408,9 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSettingsCore {
     row.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(row.control_version) ||
     row.control_version < 0 ||
+    !Number.isSafeInteger(row.audit_log_retention_days) ||
+    row.audit_log_retention_days < 0 ||
+    row.audit_log_retention_days > 3650 ||
     ![0, 1].includes(row.step_up_enabled) ||
     !Number.isSafeInteger(row.updated_at_ms) ||
     row.updated_at_ms < 0
@@ -420,6 +431,7 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSettingsCore {
   return {
     schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
     control_version: row.control_version,
+    audit_log_retention_days: row.audit_log_retention_days,
     public: normalizedPublicSettings,
     security: {
       step_up_enabled: row.step_up_enabled === 1,
@@ -624,8 +636,21 @@ function requireSettingsVersion(request: Request): number {
 }
 
 function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
-  rejectUnknownKeys(body, ['public', 'security', 'secrets', 'auth_source_defaults'])
+  rejectUnknownKeys(body, [
+    'audit_log_retention_days', 'public', 'security', 'secrets', 'auth_source_defaults',
+  ])
   const patch: SettingsPatch = {}
+  if (body.audit_log_retention_days !== undefined) {
+    const value = body.audit_log_retention_days
+    if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 3650) {
+      throw new GatewayError(
+        400,
+        'invalid_audit_log_retention_days',
+        'audit_log_retention_days must be an integer between 0 and 3650',
+      )
+    }
+    patch.audit_log_retention_days = value as number
+  }
   if (body.public !== undefined) {
     const value = requireObject(body.public, 'public')
     rejectUnknownKeys(value, [
@@ -762,7 +787,8 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
     if (Object.keys(authDefaults).length > 0) patch.auth_source_defaults = authDefaults
   }
   if (
-    patch.public === undefined && patch.security === undefined && patch.secrets === undefined &&
+    patch.audit_log_retention_days === undefined && patch.public === undefined &&
+    patch.security === undefined && patch.secrets === undefined &&
     patch.auth_source_defaults === undefined
   ) {
     throw new GatewayError(400, 'settings_patch_required', 'At least one system setting is required')
@@ -968,6 +994,7 @@ function authSourceDefaultWriteStatements(
 
 function changedFields(patch: SettingsPatch): string[] {
   const fields = Object.keys(patch.public ?? {}).map((key) => `public.${key}`).sort()
+  if (patch.audit_log_retention_days !== undefined) fields.push('audit_log_retention_days')
   fields.push(...Object.keys(patch.security ?? {}).map((key) => `security.${key}`).sort())
   if (patch.secrets?.turnstile_secret_key !== undefined) {
     fields.push(`secrets.turnstile_secret_key:${patch.secrets.turnstile_secret_key === null ? 'clear' : 'set'}`)
@@ -1051,11 +1078,15 @@ function publicProjection(settings: Pick<AdminSystemSettings, 'control_version' 
 function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>[0]): AdminSystemSettings {
   const value = parseIdempotentResponse<AdminSystemSettings>(row, 'system_settings')
   const normalizedPublic = normalizePublicSystemSettings(value.public)
+  const auditLogRetentionDays = value.audit_log_retention_days ?? 180
   if (
     row.resource_id !== 'global' ||
     value.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(value.control_version) ||
     value.control_version < 0 ||
+    !Number.isSafeInteger(auditLogRetentionDays) ||
+    auditLogRetentionDays < 0 ||
+    auditLogRetentionDays > 3650 ||
     !Number.isSafeInteger(value.updated_at_ms) ||
     value.updated_at_ms < 0 ||
     normalizedPublic === null ||
@@ -1067,6 +1098,7 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
   }
   return {
     ...value,
+    audit_log_retention_days: auditLogRetentionDays,
     public: normalizedPublic,
     security: value.security ?? { step_up_enabled: false },
   }

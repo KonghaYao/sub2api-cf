@@ -22,6 +22,7 @@ interface SettingsResponse {
   data: {
     schema_version: number
     control_version: number
+    audit_log_retention_days: number
     public: {
       site_name: string
       backend_mode_enabled: boolean
@@ -159,6 +160,7 @@ describe('admin system settings', () => {
       data: {
         schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
         control_version: 0,
+        audit_log_retention_days: 180,
         public: {
           site_name: 'Sub2API',
           backend_mode_enabled: false,
@@ -632,6 +634,87 @@ describe('admin system settings', () => {
     }, subject.env)
     expect(stale.status).toBe(409)
     expect((await responseJson(stale)).code).toBe('settings_version_conflict')
+  })
+
+  it('round-trips zero retention, preserves it when omitted, and audits the typed field', async () => {
+    const update = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-audit-retention-zero'),
+      body: JSON.stringify({ audit_log_retention_days: 0 }),
+    }, subject.env)
+    expect(update.status).toBe(200)
+    await expect(responseJson(update)).resolves.toMatchObject({
+      data: { control_version: 1, audit_log_retention_days: 0 },
+    })
+    expect(subject.raw.prepare(
+      "SELECT audit_log_retention_days FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ audit_log_retention_days: 0 })
+
+    const replay = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-audit-retention-zero'),
+      body: JSON.stringify({ audit_log_retention_days: 0 }),
+    }, subject.env)
+    expect(replay.status).toBe(200)
+    await expect(responseJson(replay)).resolves.toMatchObject({
+      data: { control_version: 1, audit_log_retention_days: 0 },
+    })
+    expect(subject.raw.prepare(
+      'SELECT COUNT(*) AS count FROM admin_settings_audit_events',
+    ).get()).toEqual({ count: 1 })
+    expect(JSON.parse((subject.raw.prepare(
+      'SELECT changed_fields_json FROM admin_settings_audit_events',
+    ).get() as { changed_fields_json: string }).changed_fields_json)).toContain(
+      'audit_log_retention_days',
+    )
+
+    const reload = await subject.app.request('/settings', {
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+    }, subject.env)
+    await expect(responseJson(reload)).resolves.toMatchObject({
+      data: { control_version: 1, audit_log_retention_days: 0 },
+    })
+
+    const omitted = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-audit-retention-omit', 1),
+      body: JSON.stringify({ public: { site_name: 'Retention preserved' } }),
+    }, subject.env)
+    expect(omitted.status).toBe(200)
+    await expect(responseJson(omitted)).resolves.toMatchObject({
+      data: { control_version: 2, audit_log_retention_days: 0 },
+    })
+    expect(subject.raw.prepare(
+      "SELECT audit_log_retention_days FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ audit_log_retention_days: 0 })
+
+    const stale = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers('settings-audit-retention-stale', 1),
+      body: JSON.stringify({ audit_log_retention_days: 30 }),
+    }, subject.env)
+    expect(stale.status).toBe(409)
+    await expect(responseJson(stale)).resolves.toMatchObject({
+      error: { code: 'settings_version_conflict' },
+    })
+    expect(subject.raw.prepare(
+      "SELECT control_version, audit_log_retention_days FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ control_version: 2, audit_log_retention_days: 0 })
+  })
+
+  it.each([-1, 3651, 1.5, '30'])('rejects invalid audit retention %j', async (value) => {
+    const response = await subject.app.request('/settings', {
+      method: 'PUT',
+      headers: headers(`settings-invalid-audit-retention-${String(value)}`),
+      body: JSON.stringify({ audit_log_retention_days: value }),
+    }, subject.env)
+    expect(response.status).toBe(400)
+    await expect(responseJson(response)).resolves.toMatchObject({
+      error: { code: 'invalid_audit_log_retention_days' },
+    })
+    expect(subject.raw.prepare(
+      "SELECT control_version, audit_log_retention_days FROM system_settings WHERE id = 'global'",
+    ).get()).toEqual({ control_version: 0, audit_log_retention_days: 180 })
   })
 
   it('returns an explicit failure on KV outage and repairs the projection on idempotent retry', async () => {
