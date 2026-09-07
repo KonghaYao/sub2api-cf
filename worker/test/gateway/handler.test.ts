@@ -2172,6 +2172,28 @@ describe('OpenAI-compatible gateway', () => {
     expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
   })
 
+  it('rejects a quota error embedded in HTTP 200 without charging for a successful completion', async () => {
+    const { env, user, pool, limit } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      model: 'gpt-upstream', choices: [{ message: { content: '' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+      error: { code: 'resource_exhausted', message: 'private upstream quota detail' },
+    })))
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+    }, env)
+    expect(response.status).toBe(429)
+    const text = await response.text()
+    expect(text).toContain('upstream_quota_exhausted')
+    expect(text).not.toContain('private upstream quota detail')
+    expect(user.calls.some((call) => call.path === '/settle')).toBe(false)
+    expect(user.calls.some((call) => call.path === '/cancel')).toBe(true)
+    expect(limit.calls.some((call) => call.path === '/monetary/cancel')).toBe(true)
+    expect(pool.calls.some((call) => call.path === '/release')).toBe(true)
+  })
+
   it('maps upstream auth failures to a sanitized 502 and releases both reservations', async () => {
     const { env, user, pool } = await harness()
     vi.stubGlobal(

@@ -1843,6 +1843,22 @@ async function createSynchronousResponse(
     } catch {
       // Compatible upstreams occasionally return non-JSON bodies; charge by bounded byte estimate.
     }
+    const embeddedError = objectValue(objectValue(parsed)?.error)
+    if (input.upstreamEndpoint === 'chat_completions' && embeddedError !== null) {
+      // Some compatible gateways encode provider failures inside HTTP 200.
+      // Never settle those empty/error replies as completed billable requests.
+      await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
+      const quota = embeddedError.code === 'resource_exhausted' || embeddedError.code === 'insufficient_quota'
+      const failure = new GatewayError(
+        quota ? 429 : 502,
+        quota ? 'upstream_quota_exhausted' : 'upstream_error',
+        quota ? 'Upstream account quota is exhausted' : 'Upstream service failed',
+        quota ? 'rate_limit_error' : 'server_error',
+      )
+      failure.upstreamAccountId = input.accountId
+      failure.upstreamDiagnostic = await captureUpstreamDiagnostic(new Response(bytes.buffer as ArrayBuffer), '')
+      throw failure
+    }
     const usage = extractProviderUsage(parsed, input.providerPlatform) ??
       estimatedUsage(input.inputBytes, input.endpoint === 'embeddings' ? 0 : bytes.byteLength)
     let downstreamValue: unknown = parsed
