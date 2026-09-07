@@ -14,7 +14,7 @@
           <div class="flex items-start justify-between">
             <div class="min-w-0 flex-1">
               <div class="mb-1 flex items-center gap-2"><span class="font-medium text-gray-900 dark:text-white">{{ key.name }}</span><span :class="['badge text-xs', key.status === 'active' ? 'badge-success' : 'badge-danger']">{{ key.status }}</span></div>
-              <p class="truncate font-mono text-sm text-gray-500">{{ key.key_prefix }}…</p>
+              <p class="truncate font-mono text-sm text-gray-500">{{ key.key.substring(0, 20) }}...{{ key.key.substring(key.key.length - 8) }}</p>
             </div>
           </div>
           <div class="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
@@ -121,7 +121,9 @@ const emit = defineEmits(['close'])
 const { t } = useI18n()
 const appStore = useAppStore()
 
-const apiKeys = ref<ApiKey[]>([])
+type DisplayApiKey = ApiKey & { key: string }
+
+const apiKeys = ref<DisplayApiKey[]>([])
 const allGroups = ref<AdminGroup[]>([])
 const loading = ref(false)
 const updatingKeyIds = ref(new Set<string | number>())
@@ -159,7 +161,10 @@ const load = async () => {
   groupButtonRefs.value.clear()
   try {
     const res = await adminAPI.users.getUserApiKeys(props.user.id)
-    apiKeys.value = res.items || []
+    apiKeys.value = (res.items || []).map((key) => ({
+      ...key,
+      key: key.key ?? `${key.key_prefix ?? ''}${'*'.repeat(8)}`,
+    }))
   } catch (error) {
     console.error('Failed to load API keys:', error)
   } finally {
@@ -215,7 +220,12 @@ const changeGroup = async (key: ApiKey, newGroupId: string | number | null) => {
       const group = newGroupId === null
         ? undefined
         : allGroups.value.find((candidate) => String(candidate.id) === String(newGroupId))
-      apiKeys.value[idx] = { ...result.api_key, group_id: newGroupId, group }
+      apiKeys.value[idx] = {
+        ...result.api_key,
+        key: result.api_key.key ?? apiKeys.value[idx].key,
+        group_id: newGroupId,
+        group,
+      }
     }
     if (result.auto_granted_group_access && result.granted_group_name) {
       appStore.showSuccess(t('admin.users.groupChangedWithGrant', { group: result.granted_group_name }))

@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
+import { commercialCodeDigest } from '../../src/commercial/registration'
 import { createApp } from '../../src/app'
 import type { Env } from '../../src/env'
 import { redeemCodeDigest } from '../../src/user/redeem'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'admin-redeem-test-pepper-value-at-least-32-bytes'
+const MASTER_KEY = 'admin-redeem-master-key-value-at-least-32-bytes'
 const DAY_MS = 86_400_000
 
 interface Fixture {
@@ -54,15 +56,36 @@ async function fixture(): Promise<Fixture> {
       APP_VERSION: 'test',
       ENVIRONMENT: 'test',
       API_KEY_PEPPER: PEPPER,
+      CREDENTIALS_MASTER_KEY: MASTER_KEY,
       ASSETS: { fetch: async () => new Response('asset') } as unknown as Fetcher,
       DB: d1,
-      CONFIG_KV: {} as KVNamespace,
+      CONFIG_KV: { get: async () => ({
+        registration_enabled: true,
+        email_verification_enabled: false,
+        turnstile_enabled: false,
+        promo_code_enabled: false,
+        invitation_code_enabled: true,
+        affiliate_enabled: false,
+      }) } as unknown as KVNamespace,
       OBJECTS: {} as R2Bucket,
       EVENTS_QUEUE: {} as Queue,
       USER_STATE: {} as DurableObjectNamespace,
       POOL_STATE: {} as DurableObjectNamespace,
+      AUTH_RATE_LIMIT: allowAuthRateLimit(),
     },
   }
+}
+
+function allowAuthRateLimit(): DurableObjectNamespace {
+  return {
+    idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+    get: () => ({ fetch: async (request: Request) => {
+      const path = new URL(request.url).pathname
+      if (path === '/success') return Response.json({ schema_version: 1, cleared: ['account'] })
+      if (path === '/failure') return Response.json({ schema_version: 1, recorded: true })
+      return Response.json({ schema_version: 1, allowed: true })
+    } }) as DurableObjectStub,
+  } as unknown as DurableObjectNamespace
 }
 
 async function adminRequest(test: Fixture, path: string, init: RequestInit = {}): Promise<Response> {
@@ -85,7 +108,7 @@ async function body(response: Response): Promise<any> {
 }
 
 describe('admin redeem code HTTP contract', () => {
-  it('generates balance codes in integer micros, stores only hashes, and hides plaintext on replay', async () => {
+  it('generates balance codes in integer micros and returns encrypted plaintext on replay', async () => {
     const test = await fixture()
     const request = {
       method: 'POST',
@@ -121,22 +144,42 @@ describe('admin redeem code HTTP contract', () => {
     expect(replayResponse.status).toBe(200)
     const replay = (await body(replayResponse)).data
     expect(replay).toHaveLength(2)
-    expect(replay[0].code).toMatch(/^[A-F0-9]{8}…$/)
-    expect(replay[0].warning).toMatch(/not shown again/i)
-    expect(replay[0].code).not.toBe(generated[0].code)
+    expect(replay[0].code).toBe(generated[0].code)
+    expect(replay[0].warning).toMatch(/encrypted storage/i)
   })
 
   it('lists masked detail, supports exact-code search, and validates subscription groups', async () => {
     const test = await fixture()
     expect((await createApp().request('/api/v1/admin/redeem-codes', {}, test.env)).status).toBe(401)
 
-    const invalidType = await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+    const invitationResponse = await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
       method: 'POST',
-      headers: mutationHeaders('redeem-generate-unsupported'),
-      body: JSON.stringify({ count: 1, type: 'invitation', value_micros: 1 }),
+      headers: mutationHeaders('redeem-generate-invitation'),
+      body: JSON.stringify({ count: 1, type: 'invitation', value: 0 }),
     })
-    expect(invalidType.status).toBe(400)
-    expect((await body(invalidType)).code).toBe('unsupported_redeem_code_type')
+    expect(invitationResponse.status).toBe(201)
+    const invitation = (await body(invitationResponse)).data[0]
+    expect(invitation).toMatchObject({
+      type: 'invitation', value: 0, status: 'unused',
+    })
+    expect(test.raw.prepare(
+      'SELECT id, code_hash, max_uses, status FROM invitation_codes WHERE id = ?',
+    ).get(invitation.id)).toEqual({
+      id: invitation.id,
+      code_hash: await commercialCodeDigest('invitation', invitation.code, PEPPER),
+      max_uses: 1,
+      status: 'active',
+    })
+
+    const concurrencyResponse = await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+      method: 'POST',
+      headers: mutationHeaders('redeem-generate-concurrency'),
+      body: JSON.stringify({ count: 1, type: 'concurrency', value: 3 }),
+    })
+    expect(concurrencyResponse.status).toBe(201)
+    expect((await body(concurrencyResponse)).data[0]).toMatchObject({
+      type: 'concurrency', value: 3, status: 'unused',
+    })
 
     const invalidGroup = await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
       method: 'POST',
@@ -190,13 +233,47 @@ describe('admin redeem code HTTP contract', () => {
     expect((await body(expired)).data.items).toMatchObject([{ id: balance.id, status: 'expired' }])
     const stats = (await body(await adminRequest(test, '/api/v1/admin/redeem-codes/stats'))).data
     expect(stats).toMatchObject({
-      total_codes: 2,
-      active_codes: 1,
+      total_codes: 4,
+      active_codes: 3,
       used_codes: 0,
       expired_codes: 1,
       total_value_distributed: 0,
-      by_type: { balance: 1, subscription: 1 },
+      by_type: { balance: 1, concurrency: 1, subscription: 1, invitation: 1 },
     })
+  })
+
+  it('exports filtered redeem codes as CSV', async () => {
+    const test = await fixture()
+    const generated = (await body(await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+      method: 'POST',
+      headers: mutationHeaders('redeem-generate-export'),
+      body: JSON.stringify({ count: 1, type: 'concurrency', value: 8 }),
+    }))).data[0]
+
+    const response = await adminRequest(
+      test,
+      '/api/v1/admin/redeem-codes/export?type=concurrency&status=unused&sort_by=value&sort_order=desc',
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/csv')
+    expect(response.headers.get('content-disposition')).toContain('redeem_codes.csv')
+    const csv = await response.text()
+    expect(csv).toContain('id,code,type,value,status,used_by,used_by_email,used_at,expires_at,created_at')
+    expect(csv).toContain(',concurrency,8,unused,')
+    expect(csv).toContain(generated.code)
+    expect(csv).not.toContain(`${generated.code.slice(0, 8)}…`)
+
+    test.raw.prepare(
+      `INSERT INTO redeem_codes (
+         id, code_hash, code_prefix, type, value_micros, status, created_at_ms, updated_at_ms
+       ) VALUES ('legacy-without-secret', ?, 'LEGACY12', 'balance', 1000000, 'unused', ?, ?)`,
+    ).run('d'.repeat(64), now, now)
+    const unavailable = await adminRequest(
+      test,
+      '/api/v1/admin/redeem-codes/export?search=LEGACY12',
+    )
+    expect(unavailable.status).toBe(409)
+    expect((await body(unavailable)).code).toBe('redeem_code_plaintext_unavailable')
   })
 
   it('expires and deletes idempotently with optimistic versions and safe state transitions', async () => {
@@ -327,6 +404,170 @@ describe('admin redeem code HTTP contract', () => {
     expect((await body(deleted)).data).toMatchObject({ deleted: 2 })
     expect(test.raw.prepare(`SELECT COUNT(*) AS total FROM redeem_codes`).get()).toEqual({ total: 0 })
     expect((await adminRequest(test, '/api/v1/admin/redeem-codes/batch-delete', deleteRequest)).status).toBe(200)
+  })
+
+  it('disables and re-enables unused codes with batch status updates', async () => {
+    const test = await fixture()
+    const generated = (await body(await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+      method: 'POST',
+      headers: mutationHeaders('redeem-generate-disable'),
+      body: JSON.stringify({ count: 1, type: 'invitation', value: 0 }),
+    }))).data[0]
+
+    const disabled = await adminRequest(test, '/api/v1/admin/redeem-codes/batch-update', {
+      method: 'POST',
+      headers: mutationHeaders('redeem-disable'),
+      body: JSON.stringify({
+        ids: [generated.id],
+        expected_control_versions: { [generated.id]: 0 },
+        fields: { status: 'disabled' },
+      }),
+    })
+    expect(disabled.status).toBe(200)
+    expect(test.raw.prepare('SELECT status, control_version FROM redeem_codes WHERE id = ?').get(
+      generated.id,
+    )).toEqual({ status: 'disabled', control_version: 1 })
+    expect(test.raw.prepare('SELECT status FROM invitation_codes WHERE id = ?').get(
+      generated.id,
+    )).toEqual({ status: 'disabled' })
+
+    const listed = await adminRequest(test, '/api/v1/admin/redeem-codes?status=disabled')
+    expect((await body(listed)).data.items).toMatchObject([{
+      id: generated.id, status: 'disabled', type: 'invitation',
+    }])
+
+    const enabled = await adminRequest(test, '/api/v1/admin/redeem-codes/batch-update', {
+      method: 'POST',
+      headers: mutationHeaders('redeem-enable'),
+      body: JSON.stringify({
+        ids: [generated.id],
+        expected_control_versions: { [generated.id]: 1 },
+        fields: { status: 'unused' },
+      }),
+    })
+    expect(enabled.status).toBe(200)
+    expect(test.raw.prepare('SELECT status, control_version FROM redeem_codes WHERE id = ?').get(
+      generated.id,
+    )).toEqual({ status: 'unused', control_version: 2 })
+    expect(test.raw.prepare('SELECT status FROM invitation_codes WHERE id = ?').get(
+      generated.id,
+    )).toEqual({ status: 'active' })
+  })
+
+  it('deletes disabled codes singly and in a batch', async () => {
+    const test = await fixture()
+    const generated = (await body(await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+      method: 'POST', headers: mutationHeaders('redeem-generate-disabled-delete'),
+      body: JSON.stringify({ count: 2, type: 'balance', value_micros: 1_000_000 }),
+    }))).data
+    const ids = generated.map((code: any) => code.id)
+    await adminRequest(test, '/api/v1/admin/redeem-codes/batch-update', {
+      method: 'POST', headers: mutationHeaders('redeem-disable-before-delete'),
+      body: JSON.stringify({
+        ids,
+        expected_control_versions: Object.fromEntries(ids.map((id: string) => [id, 0])),
+        fields: { status: 'disabled' },
+      }),
+    })
+
+    const single = await adminRequest(test, `/api/v1/admin/redeem-codes/${ids[0]}`, {
+      method: 'DELETE', headers: mutationHeaders('redeem-delete-disabled-single', 1), body: '{}',
+    })
+    expect(single.status).toBe(200)
+    const batch = await adminRequest(test, '/api/v1/admin/redeem-codes/batch-delete', {
+      method: 'POST', headers: mutationHeaders('redeem-delete-disabled-batch'),
+      body: JSON.stringify({
+        ids: [ids[1]], expected_control_versions: { [ids[1]]: 1 },
+      }),
+    })
+    expect(batch.status).toBe(200)
+    expect(test.raw.prepare('SELECT COUNT(*) AS total FROM redeem_codes').get()).toEqual({ total: 0 })
+  })
+
+  it('makes expired and deleted invitation redeem codes unavailable to registration', async () => {
+    const test = await fixture()
+    const generate = async (key: string) => (await body(await adminRequest(
+      test,
+      '/api/v1/admin/redeem-codes/generate',
+      {
+        method: 'POST', headers: mutationHeaders(key),
+        body: JSON.stringify({ count: 1, type: 'invitation', value: 0 }),
+      },
+    ))).data[0]
+    const expired = await generate('redeem-invite-expire')
+    const deleted = await generate('redeem-invite-delete')
+    const batchDeleted = await generate('redeem-invite-batch-delete')
+    expect((await adminRequest(test, `/api/v1/admin/redeem-codes/${expired.id}/expire`, {
+      method: 'POST', headers: mutationHeaders('expire-registration-invite', 0), body: '{}',
+    })).status).toBe(200)
+    expect((await adminRequest(test, '/api/v1/admin/redeem-codes/batch-update', {
+      method: 'POST', headers: mutationHeaders('annotate-expired-registration-invite'),
+      body: JSON.stringify({
+        ids: [expired.id],
+        expected_control_versions: { [expired.id]: 1 },
+        fields: { notes: 'expired campaign' },
+      }),
+    })).status).toBe(200)
+    expect(test.raw.prepare('SELECT status FROM invitation_codes WHERE id = ?').get(
+      expired.id,
+    )).toEqual({ status: 'disabled' })
+    expect((await adminRequest(test, `/api/v1/admin/redeem-codes/${deleted.id}`, {
+      method: 'DELETE', headers: mutationHeaders('delete-registration-invite', 0), body: '{}',
+    })).status).toBe(200)
+    expect((await adminRequest(test, '/api/v1/admin/redeem-codes/batch-delete', {
+      method: 'POST', headers: mutationHeaders('batch-delete-registration-invite'),
+      body: JSON.stringify({
+        ids: [batchDeleted.id], expected_control_versions: { [batchDeleted.id]: 0 },
+      }),
+    })).status).toBe(200)
+
+    for (const [index, invitation] of [expired, deleted, batchDeleted].entries()) {
+      const response = await createApp().request('/api/v1/auth/register', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          email: `blocked-${index}@example.test`,
+          password: 'correct horse battery staple',
+          invitation_code: invitation.code,
+        }),
+      }, test.env)
+      expect(response.status).toBe(400)
+      expect((await body(response)).code).toMatch(
+        index === 0 ? /INVITATION_CODE_(?:DISABLED|EXPIRED)/ : /INVITATION_CODE_NOT_FOUND/,
+      )
+    }
+  })
+
+  it('reverse-syncs admin invitation updates and deletion into redeem codes', async () => {
+    const test = await fixture()
+    const generated = (await body(await adminRequest(test, '/api/v1/admin/redeem-codes/generate', {
+      method: 'POST', headers: mutationHeaders('redeem-invite-reverse-sync'),
+      body: JSON.stringify({ count: 1, type: 'invitation', value: 0 }),
+    }))).data[0]
+
+    const disabled = await adminRequest(test, `/api/v1/admin/invitation-codes/${generated.id}`, {
+      method: 'PUT', headers: mutationHeaders('admin-invite-disable-mirror', 0),
+      body: JSON.stringify({ status: 'disabled' }),
+    })
+    expect(disabled.status).toBe(200)
+    expect(test.raw.prepare('SELECT status FROM redeem_codes WHERE id = ?').get(generated.id)).toEqual({
+      status: 'disabled',
+    })
+
+    const renamedCode = 'RENAMED-LEGACY-INVITE'
+    const renamed = await adminRequest(test, `/api/v1/admin/invitation-codes/${generated.id}`, {
+      method: 'PUT', headers: mutationHeaders('admin-invite-rename-mirror', 1),
+      body: JSON.stringify({ status: 'active', code: renamedCode }),
+    })
+    expect(renamed.status).toBe(200)
+    expect(test.raw.prepare('SELECT code_hash, status FROM redeem_codes WHERE id = ?').get(
+      generated.id,
+    )).toEqual({ code_hash: await redeemCodeDigest(renamedCode, PEPPER), status: 'unused' })
+
+    const deleted = await adminRequest(test, `/api/v1/admin/invitation-codes/${generated.id}`, {
+      method: 'DELETE', headers: mutationHeaders('admin-invite-delete-mirror', 2), body: '{}',
+    })
+    expect(deleted.status).toBe(200)
+    expect(test.raw.prepare('SELECT id FROM redeem_codes WHERE id = ?').get(generated.id)).toBeUndefined()
   })
 
   it('rolls back idempotent writes when a code disappears after the pre-read', async () => {

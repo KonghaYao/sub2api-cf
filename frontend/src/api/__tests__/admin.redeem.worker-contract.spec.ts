@@ -21,7 +21,7 @@ describe('admin redeem code Cloudflare Worker contract', () => {
     )
   })
 
-  it('generates only supported code types and sends integer micros with idempotency', async () => {
+  it('generates every admin redeem-code type with the original value contract', async () => {
     post.mockResolvedValueOnce({
       data: [{
         id: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
@@ -46,10 +46,55 @@ describe('admin redeem code Cloudflare Worker contract', () => {
       },
     })
 
-    await expect(generate(1, 'invitation', 0)).rejects.toMatchObject({
-      code: 'unsupported_redeem_code_type',
+    post.mockResolvedValueOnce({ data: [{
+      id: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb',
+      code: 'EEEEEEEE-FFFFFFFF-11111111-22222222',
+      type: 'concurrency',
+      value: 3,
+      status: 'unused',
+      control_version: 0,
+    }] })
+    await expect(generate(1, 'concurrency', 3)).resolves.toHaveLength(1)
+    expect(post).toHaveBeenNthCalledWith(2, '/admin/redeem-codes/generate', {
+      count: 1,
+      type: 'concurrency',
+      value: 3,
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-redeem-generate-55555555-5555-4555-8555-555555555555',
+      },
     })
-    expect(post).toHaveBeenCalledTimes(1)
+
+    post.mockResolvedValueOnce({ data: [{
+      id: 'cccccccc-cccc-5ccc-8ccc-cccccccccccc',
+      code: '33333333-44444444-55555555-66666666',
+      type: 'invitation',
+      value: 0,
+      status: 'unused',
+      control_version: 0,
+    }] })
+    await expect(generate(1, 'invitation', 0)).resolves.toHaveLength(1)
+    expect(post).toHaveBeenNthCalledWith(3, '/admin/redeem-codes/generate', {
+      count: 1,
+      type: 'invitation',
+      value: 0,
+    }, {
+      headers: {
+        'Idempotency-Key': 'admin-redeem-generate-55555555-5555-4555-8555-555555555555',
+      },
+    })
+  })
+
+  it('exports the current filters as a CSV blob', async () => {
+    const csv = new Blob(['id,code,type\n1,CODE,balance\n'], { type: 'text/csv' })
+    get.mockResolvedValueOnce({ data: csv })
+    const { exportCodes } = await import('@/api/admin/redeem')
+
+    await expect(exportCodes({ status: 'disabled', type: 'invitation' })).resolves.toBe(csv)
+    expect(get).toHaveBeenCalledWith('/admin/redeem-codes/export', {
+      params: { status: 'disabled', type: 'invitation' },
+      responseType: 'blob',
+    })
   })
 
   it('uses listed control versions for idempotent expire, batch update, and delete', async () => {
@@ -78,11 +123,11 @@ describe('admin redeem code Cloudflare Worker contract', () => {
       },
     })
 
-    await api.batchUpdate([second.id], { notes: 'campaign' })
+    await api.batchUpdate([second.id], { status: 'disabled', notes: 'campaign' })
     expect(post).toHaveBeenNthCalledWith(2, '/admin/redeem-codes/batch-update', {
       ids: [second.id],
       expected_control_versions: { [second.id]: 4 },
-      fields: { notes: 'campaign' },
+      fields: { status: 'disabled', notes: 'campaign' },
     }, {
       headers: {
         'Idempotency-Key': 'admin-redeem-batch-update-55555555-5555-4555-8555-555555555555',

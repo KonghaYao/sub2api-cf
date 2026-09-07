@@ -8,6 +8,7 @@ import type {
   UsageLog,
   UsageQueryParams,
   UsageStatsResponse,
+  PaginatedResponse,
   CursorPage,
   TrendDataPoint,
   ModelStat,
@@ -373,8 +374,8 @@ export async function getDashboardApiKeysUsage(
 
 export async function listMyErrorRequests(
   params: UserErrorListParams
-): Promise<CursorPage<UserErrorRequest>> {
-  const { data } = await apiClient.get<CursorPage<UserErrorRequest>>('/usage/errors', {
+): Promise<PaginatedResponse<UserErrorRequest>> {
+  const { data } = await apiClient.get<PaginatedResponse<UserErrorRequest>>('/usage/errors', {
     params
   })
   return data

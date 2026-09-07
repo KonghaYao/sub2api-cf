@@ -36,6 +36,9 @@
             >
               <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
             </button>
+            <button @click="handleExportCodes" class="btn btn-secondary">
+              {{ t('admin.redeem.exportCsv') }}
+            </button>
             <button
               data-test="batch-update-open"
               @click="openBatchUpdateDialog"
@@ -77,7 +80,6 @@
             <input
               data-test="select-code"
               type="checkbox"
-              :disabled="row.status !== 'unused'"
               class="h-4 w-4 cursor-pointer rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               :checked="selectedCodeIds.has(row.id)"
               @click.stop
@@ -285,8 +287,8 @@
               <label class="input-label">{{ t('admin.redeem.codeType') }}</label>
               <Select v-model="generateForm.type" :options="typeOptions" />
             </div>
-            <!-- 余额类型：显示数值输入 -->
-            <div v-if="generateForm.type === 'balance'">
+            <!-- 余额/并发类型：显示数值输入 -->
+            <div v-if="generateForm.type !== 'subscription' && generateForm.type !== 'invitation'">
               <label class="input-label">
                 {{
                   generateForm.type === 'balance'
@@ -302,6 +304,12 @@
                 required
                 class="input"
               />
+            </div>
+            <!-- 邀请码类型：显示提示信息 -->
+            <div v-if="generateForm.type === 'invitation'" class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
+              <p class="text-sm text-blue-700 dark:text-blue-300">
+                {{ t('admin.redeem.invitationHint') }}
+              </p>
             </div>
             <!-- 订阅类型：显示分组选择和有效天数 -->
             <template v-if="generateForm.type === 'subscription'">
@@ -419,6 +427,24 @@
           </p>
 
           <form data-test="batch-update-form" class="space-y-4" @submit.prevent="handleBatchUpdate">
+            <div class="space-y-2">
+              <label class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <input
+                  data-test="batch-field-status"
+                  v-model="batchUpdateForm.update_status"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                {{ t('admin.redeem.batchFields.status') }}
+              </label>
+              <Select
+                v-if="batchUpdateForm.update_status"
+                v-model="batchUpdateForm.status"
+                data-test="batch-status-select"
+                :options="batchStatusOptions"
+              />
+            </div>
+
             <div class="space-y-2">
               <label class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
                 <input
@@ -585,7 +611,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useClipboard } from '@/composables/useClipboard'
@@ -650,7 +676,10 @@ const subscriptionGroupOptions = computed(() => {
     }))
 })
 
-const batchGroupOptions = computed(() => subscriptionGroupOptions.value)
+const batchGroupOptions = computed(() => [
+  { value: null, label: t('admin.redeem.clearGroup') },
+  ...subscriptionGroupOptions.value
+])
 
 const generatedCodesText = computed(() => {
   return generatedCodes.value.map((code) => code.code).join('\n')
@@ -713,20 +742,30 @@ const columns = computed<Column[]>(() => [
 
 const typeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
-  { value: 'subscription', label: t('admin.redeem.subscription') }
+  { value: 'concurrency', label: t('admin.redeem.concurrency') },
+  { value: 'subscription', label: t('admin.redeem.subscription') },
+  { value: 'invitation', label: t('admin.redeem.invitation') }
 ])
 
 const filterTypeOptions = computed(() => [
   { value: '', label: t('admin.redeem.allTypes') },
   { value: 'balance', label: t('admin.redeem.balance') },
-  { value: 'subscription', label: t('admin.redeem.subscription') }
+  { value: 'concurrency', label: t('admin.redeem.concurrency') },
+  { value: 'subscription', label: t('admin.redeem.subscription') },
+  { value: 'invitation', label: t('admin.redeem.invitation') }
 ])
 
 const filterStatusOptions = computed(() => [
   { value: '', label: t('admin.redeem.allStatus') },
   { value: 'unused', label: t('admin.redeem.unused') },
   { value: 'used', label: t('admin.redeem.used') },
-  { value: 'expired', label: t('admin.redeem.status.expired') }
+  { value: 'expired', label: t('admin.redeem.status.expired') },
+  { value: 'disabled', label: t('admin.redeem.status.disabled') }
+])
+
+const batchStatusOptions = computed(() => [
+  { value: 'unused', label: t('admin.redeem.status.unused') },
+  { value: 'disabled', label: t('admin.redeem.status.disabled') }
 ])
 
 const batchExpiryModeOptions = computed(() => [
@@ -772,11 +811,12 @@ const {
   toggleVisible
 } = useTableSelection<RedeemCode, string | number>({
   rows: codes,
-  getId: (code) => code.id,
-  isSelectable: (code) => code.status === 'unused'
+  getId: (code) => code.id
 })
 
 const batchUpdateForm = reactive({
+  update_status: false,
+  status: 'disabled' as 'unused' | 'disabled',
   update_expires_at: false,
   expires_mode: 'clear' as 'clear' | 'custom',
   expires_at_local: '',
@@ -806,9 +846,21 @@ const generateForm = reactive({
   custom_expiry_days: 7
 })
 
+// 监听类型变化，邀请码类型时自动设置 value 为 0
+watch(
+  () => generateForm.type,
+  (newType) => {
+    if (newType === 'invitation') {
+      generateForm.value = 0
+    } else if (generateForm.value === 0) {
+      generateForm.value = 10
+    }
+  }
+)
+
 const buildRedeemQueryFilters = () => ({
   type: (filters.type || undefined) as RedeemCodeType | undefined,
-  status: (filters.status || undefined) as 'used' | 'expired' | 'unused' | undefined,
+  status: (filters.status || undefined) as 'used' | 'expired' | 'unused' | 'disabled' | undefined,
   search: searchQuery.value || undefined,
   sort_by: sortState.sort_by,
   sort_order: sortState.sort_order
@@ -919,6 +971,8 @@ const toDatetimeLocalInputValue = (date: Date) => {
 }
 
 const resetBatchUpdateForm = () => {
+  batchUpdateForm.update_status = false
+  batchUpdateForm.status = 'disabled'
   batchUpdateForm.update_expires_at = false
   batchUpdateForm.expires_mode = 'clear'
   batchUpdateForm.expires_at_local = toDatetimeLocalInputValue(
@@ -946,6 +1000,9 @@ const closeBatchUpdateDialog = () => {
 const buildBatchUpdateFields = (): BatchUpdateRedeemCodeFields | null => {
   const fields: BatchUpdateRedeemCodeFields = {}
 
+  if (batchUpdateForm.update_status) {
+    fields.status = batchUpdateForm.status
+  }
   if (batchUpdateForm.update_expires_at) {
     if (batchUpdateForm.expires_mode === 'clear') {
       fields.expires_at = null
@@ -962,10 +1019,6 @@ const buildBatchUpdateFields = (): BatchUpdateRedeemCodeFields | null => {
     fields.notes = batchUpdateForm.notes
   }
   if (batchUpdateForm.update_group_id) {
-    if (batchUpdateForm.group_id == null) {
-      appStore.showError(t('admin.redeem.groupRequired'))
-      return null
-    }
     fields.group_id = batchUpdateForm.group_id
   }
 
@@ -1019,6 +1072,24 @@ const copyToClipboard = async (text: string) => {
     setTimeout(() => {
       copiedCode.value = null
     }, 2000)
+  }
+}
+
+const handleExportCodes = async () => {
+  try {
+    const blob = await adminAPI.redeem.exportCodes(buildRedeemQueryFilters())
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `redeem-codes-${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+    appStore.showSuccess(t('admin.redeem.codesExported'))
+  } catch (error: any) {
+    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToExport'))
+    console.error('Error exporting codes:', error)
   }
 }
 
@@ -1078,6 +1149,7 @@ const handleBatchUpdate = async () => {
   }
 
   const hasSelectedFields =
+    batchUpdateForm.update_status ||
     batchUpdateForm.update_expires_at ||
     batchUpdateForm.update_notes ||
     batchUpdateForm.update_group_id

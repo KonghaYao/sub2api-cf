@@ -35,18 +35,13 @@ function mountModal() {
   })
 }
 
-describe('UserErrorDetailModal payload safety', () => {
+describe('UserErrorDetailModal original detail contract', () => {
   beforeEach(() => getMyErrorDetail.mockReset())
 
-  it('renders HTML-looking JSON only as text and preserves opaque IDs', async () => {
+  it('renders an HTML-looking error body only as text and preserves opaque IDs', async () => {
     getMyErrorDetail.mockResolvedValue({
       ...baseDetail,
-      payload: {
-        state: 'available',
-        body: '{"message":"<img src=x onerror=alert(1)>"}',
-        content_type: 'application/json',
-        redacted: true,
-      },
+      error_body: '{"message":"<img src=x onerror=alert(1)>"}',
     })
 
     const wrapper = mountModal()
@@ -54,22 +49,20 @@ describe('UserErrorDetailModal payload safety', () => {
     await flushPromises()
 
     expect(getMyErrorDetail).toHaveBeenCalledWith('err_opaque')
-    expect(wrapper.find('[data-testid="error-payload"]').text()).toContain('<img src=x onerror=alert(1)>')
+    expect(wrapper.text()).toContain('<img src=x onerror=alert(1)>')
     expect(wrapper.find('img').exists()).toBe(false)
-    expect(wrapper.text()).toContain('usage.explorer.payload.redacted')
   })
 
-  it.each(['missing', 'expired', 'pending_recovery'] as const)('shows the %s payload state', async (state) => {
+  it('omits the original response-body section when no body is retained', async () => {
     getMyErrorDetail.mockResolvedValue({
       ...baseDetail,
-      payload: { state, body: null, content_type: null, redacted: false },
+      error_body: '',
     })
 
     const wrapper = mountModal()
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    expect(wrapper.text()).toContain(`usage.explorer.payload.${state}`)
-    expect(wrapper.find('[data-testid="error-payload"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('usage.errors.detail.responseBody')
   })
 })

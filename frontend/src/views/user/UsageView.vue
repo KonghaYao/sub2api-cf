@@ -294,7 +294,7 @@ const errorKeyOptions = computed<SelectOption[]>(() => [
   ...apiKeys.value.map((k) => ({ value: k.id, label: k.name })),
 ])
 
-// 模型候选取自当前已加载错误；creatable 允许输入后端执行精确匹配的完整模型名。
+// 模型候选取自当前已加载错误中出现过的模型；creatable 允许输入任意片段做后端模糊。
 const errorModelOptions = computed<SelectOption[]>(() => {
   const seen = new Set<string>()
   const opts: SelectOption[] = []
@@ -321,10 +321,6 @@ const errorStatusOptions = computed<SelectOption[]>(() => [
 ])
 
 const applyErrorFilters = () => {
-  if (errorFilter.value.category) {
-    appStore.showError('Filtering error requests by category is not yet available in the Worker API.')
-    return
-  }
   errorPage.value = 1
   void loadErrors()
 }
@@ -808,17 +804,19 @@ const loadErrors = async () => {
   errorLoading.value = true
   try {
     const resp = await usageAPI.listMyErrorRequests({
-      limit: errorPageSize.value,
+      page: errorPage.value,
+      page_size: errorPageSize.value,
       start_date: startDate.value,
       end_date: endDate.value,
       model: (errorFilter.value.model ?? '').trim() || undefined,
-      api_key_id: errorFilter.value.api_key_id == null
-        ? undefined
-        : String(errorFilter.value.api_key_id),
+      category: errorFilter.value.category || undefined,
+      api_key_id: errorFilter.value.api_key_id ?? undefined,
       status_code: errorFilter.value.status_code ?? undefined,
+      sort_by: errorSortBy.value,
+      sort_order: errorSortOrder.value,
     })
     errorRows.value = resp.items
-    errorTotal.value = (resp as typeof resp & { total?: number }).total ?? resp.items.length
+    errorTotal.value = resp.total
   } catch (error) {
     console.error('[UsageView] loadErrors failed:', error)
     appStore.showError(t('usage.errors.failedToLoad'))

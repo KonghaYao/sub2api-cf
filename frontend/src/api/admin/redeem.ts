@@ -120,16 +120,14 @@ export async function generate(
   validityDays?: number,
   expiresInDays?: number | null
 ): Promise<RedeemCode[]> {
-  if (type !== 'balance' && type !== 'subscription') {
-    throw Object.assign(
-      new Error('Cloudflare Worker supports only balance and subscription redeem codes'),
-      { code: 'unsupported_redeem_code_type' }
-    )
-  }
-  const payload: GenerateRedeemCodesRequest & { value_micros: number } = {
+  const payload: GenerateRedeemCodesRequest = {
     count,
     type,
-    value_micros: type === 'balance' ? usdToMicros(value) : 0
+    ...(type === 'balance'
+      ? { value_micros: usdToMicros(value) }
+      : type === 'subscription'
+        ? { value_micros: 0 }
+        : { value })
   }
 
   // 订阅类型专用字段
@@ -218,16 +216,6 @@ export async function batchUpdate(
   message: string
 }> {
   requireBatchSize(ids)
-  if (fields.status !== undefined) {
-    throw Object.assign(new Error('Redeem code status cannot be batch updated on Cloudflare Worker'), {
-      code: 'unsupported_redeem_code_batch_status'
-    })
-  }
-  if (fields.group_id === null) {
-    throw Object.assign(new Error('Subscription group cannot be cleared from a redeem code'), {
-      code: 'invalid_group_id'
-    })
-  }
   const workerIDs = ids.map(String)
   const expected_control_versions = Object.fromEntries(
     workerIDs.map((id) => [id, requireControlVersion(id)])
@@ -301,6 +289,21 @@ export async function getStats(): Promise<{
   return data
 }
 
+/** Export filtered redeem codes as CSV. */
+export async function exportCodes(filters?: {
+  type?: RedeemCodeType
+  status?: 'used' | 'expired' | 'unused' | 'disabled'
+  search?: string
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}): Promise<Blob> {
+  const response = await apiClient.get('/admin/redeem-codes/export', {
+    params: filters,
+    responseType: 'blob'
+  })
+  return response.data
+}
+
 export const redeemAPI = {
   list,
   getById,
@@ -309,7 +312,8 @@ export const redeemAPI = {
   batchDelete,
   batchUpdate,
   expire,
-  getStats
+  getStats,
+  exportCodes
 }
 
 export default redeemAPI

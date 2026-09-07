@@ -8,6 +8,7 @@ const {
   getStats,
   getDashboardModels,
   getDashboardSnapshotV2,
+  listMyErrorRequests,
   list,
   getAvailable,
   showError,
@@ -19,6 +20,7 @@ const {
   getStats: vi.fn(),
   getDashboardModels: vi.fn(),
   getDashboardSnapshotV2: vi.fn(),
+  listMyErrorRequests: vi.fn(),
   list: vi.fn(),
   getAvailable: vi.fn(),
   showError: vi.fn(),
@@ -73,6 +75,7 @@ vi.mock('@/api', () => ({
     getStats,
     getDashboardModels,
     getDashboardSnapshotV2,
+    listMyErrorRequests,
   },
   keysAPI: {
     list,
@@ -157,6 +160,7 @@ describe('user UsageView', () => {
     getStats.mockReset()
     getDashboardModels.mockReset()
     getDashboardSnapshotV2.mockReset()
+    listMyErrorRequests.mockReset()
     list.mockReset()
     getAvailable.mockReset()
     showError.mockReset()
@@ -190,6 +194,9 @@ describe('user UsageView', () => {
       granularity: 'hour',
       trend: [],
       groups: [],
+    })
+    listMyErrorRequests.mockResolvedValue({
+      items: [], total: 0, page: 1, page_size: 20, pages: 0,
     })
     list.mockResolvedValue({ items: [{ id: 1, name: 'demo-key' }] })
     getAvailable.mockResolvedValue([{ id: 1, name: 'default' }])
@@ -266,5 +273,35 @@ describe('user UsageView', () => {
       expect.objectContaining({ page: 1, page_size: 20, sort_by: 'created_at', sort_order: 'desc' }),
       expect.anything(),
     )
+  })
+
+  it('loads the error tab with original filters, total pagination, and server sorting', async () => {
+    listMyErrorRequests.mockResolvedValue({
+      items: [], total: 41, page: 2, page_size: 50, pages: 1,
+    })
+    const wrapper = mountUsageView()
+    await flushPromises()
+
+    ;(wrapper.vm as any).errorPage = 2
+    ;(wrapper.vm as any).errorPageSize = 50
+    ;(wrapper.vm as any).errorFilter.model = 'gpt-'
+    ;(wrapper.vm as any).errorFilter.category = 'quota'
+    ;(wrapper.vm as any).errorFilter.api_key_id = 'key_opaque'
+    ;(wrapper.vm as any).errorFilter.status_code = 429
+    ;(wrapper.vm as any).errorSortBy = 'status_code'
+    ;(wrapper.vm as any).errorSortOrder = 'asc'
+    await (wrapper.vm as any).loadErrors()
+
+    expect(listMyErrorRequests).toHaveBeenLastCalledWith(expect.objectContaining({
+      page: 2,
+      page_size: 50,
+      model: 'gpt-',
+      category: 'quota',
+      api_key_id: 'key_opaque',
+      status_code: 429,
+      sort_by: 'status_code',
+      sort_order: 'asc',
+    }))
+    expect((wrapper.vm as any).errorTotal).toBe(41)
   })
 })

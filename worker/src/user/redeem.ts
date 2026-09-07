@@ -23,7 +23,7 @@ interface RedeemCodeRow {
   id: string
   code_hash: string
   code_prefix: string
-  type: 'balance' | 'subscription'
+  type: 'balance' | 'concurrency' | 'subscription' | 'invitation'
   value_micros: number
   group_id: string | null
   validity_days: number | null
@@ -42,7 +42,7 @@ interface RedemptionRow {
   user_id: string
   idempotency_key_hash: string
   status: 'processing' | 'completed'
-  type: 'balance' | 'subscription'
+  type: 'balance' | 'concurrency' | 'subscription'
   value_micros: number
   subscription_id: string | null
   result_json: string | null
@@ -94,6 +94,13 @@ export async function redeemCode(context: Context<UserBindings>): Promise<Respon
       if (availableCode === null) throw redeemUnavailable()
       code = availableCode
       validateRedeemAvailability(code, Date.now())
+      if (code.type === 'invitation') {
+        throw new GatewayError(
+          400,
+          'redeem_code_unsupported_type',
+          'Invitation codes can only be used during registration',
+        )
+      }
       if (code.type === 'subscription' && code.group_id !== null) {
         await requireRedeemableSubscriptionEntitlement(context.env, user.id, code.group_id)
       }
@@ -144,6 +151,9 @@ export async function redeemCode(context: Context<UserBindings>): Promise<Respon
       if (code.type === 'balance') {
         return controlSuccess(await fulfillBalanceRedemption(context.env, user, redemptionId, code))
       }
+      if (code.type === 'concurrency') {
+        return controlSuccess(await fulfillConcurrencyRedemption(context.env, user, redemptionId, code))
+      }
       return controlSuccess(
         await fulfillSubscriptionRedemption(context.env, user.id, redemptionId, code),
       )
@@ -178,7 +188,8 @@ export async function listUserRedemptions(context: Context<UserBindings>): Promi
       id: row.id,
       code: `${row.code_prefix}…`,
       type: row.type,
-      value: row.type === 'balance' ? microsToUsd(row.value_micros) : storedValidityDays(row),
+      value: row.type === 'balance' ? microsToUsd(row.value_micros)
+        : row.type === 'concurrency' ? row.value_micros : storedValidityDays(row),
       status: row.status === 'completed' ? 'used' : 'processing',
       used_at: nullableIso(row.completed_at_ms),
       created_at: iso(row.created_at_ms),
@@ -219,6 +230,58 @@ async function fulfillBalanceRedemption(
   }
   await finalizeRedemption(env, redemptionId, code.id, user.id, result, null)
   return result
+}
+
+async function fulfillConcurrencyRedemption(
+  env: Env,
+  user: { id: string; concurrency: number; state_version: number; status: string },
+  redemptionId: string,
+  code: RedeemCodeRow,
+): Promise<Record<string, unknown>> {
+  if (!Number.isSafeInteger(code.value_micros) || code.value_micros <= 0) {
+    throw new GatewayError(500, 'invalid_redeem_code', 'Redeem code is invalid', 'server_error')
+  }
+  const nextConcurrency = user.concurrency + code.value_micros
+  if (!Number.isSafeInteger(nextConcurrency) || nextConcurrency < 0) {
+    throw new GatewayError(409, 'concurrency_limit_overflow', 'Concurrency limit is outside the supported range')
+  }
+  const current = Date.now()
+  const result = {
+    message: 'Redeem code applied successfully',
+    type: 'concurrency',
+    value: code.value_micros,
+    new_concurrency: nextConcurrency,
+  }
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE users
+            SET concurrency = concurrency + ?,
+                state_version = CASE WHEN state_version = ? THEN state_version + 1 ELSE -1 END,
+                updated_at_ms = ?
+          WHERE id = ? AND status = 'active'`,
+      ).bind(code.value_micros, user.state_version, current, user.id),
+      env.DB.prepare(
+        `UPDATE redeem_codes
+            SET status = 'used', control_version = control_version + 1, updated_at_ms = ?
+          WHERE id = ? AND status = 'processing'
+            AND used_by_user_id = ? AND claimed_by_redemption_id = ?`,
+      ).bind(current, code.id, user.id, redemptionId),
+      env.DB.prepare(
+        `UPDATE redemptions
+            SET status = 'completed', result_json = ?, completed_at_ms = ?
+          WHERE id = ? AND status = 'processing' AND user_id = ?`,
+      ).bind(JSON.stringify(result), current, redemptionId, user.id),
+    ])
+  } catch (error) {
+    const recovered = await findRedemptionById(env, redemptionId)
+    if (recovered?.status !== 'completed') throw error
+  }
+  const completed = await findRedemptionById(env, redemptionId)
+  if (completed?.status !== 'completed') {
+    throw new GatewayError(503, 'redeem_result_unavailable', 'Redeem result is unavailable', 'server_error')
+  }
+  return parseStoredResult(completed)
 }
 
 async function fulfillSubscriptionRedemption(
@@ -687,6 +750,7 @@ function validateRedeemAvailability(code: RedeemCodeRow, current: number): void 
   if (code.status !== 'unused') throw redeemUnavailable()
   if (code.expires_at_ms !== null && code.expires_at_ms <= current) throw redeemUnavailable()
   if (code.type === 'balance' && code.value_micros <= 0) throw redeemUnavailable()
+  if (code.type === 'concurrency' && code.value_micros <= 0) throw redeemUnavailable()
   if (code.type === 'subscription' && (code.group_id === null || code.validity_days === null)) {
     throw redeemUnavailable()
   }
@@ -713,6 +777,18 @@ function validateRedeemPayload(code: RedeemCodeRow): void {
   }
   if (code.type === 'balance') {
     if (code.value_micros <= 0 || code.group_id !== null || code.validity_days !== null) {
+      throw new GatewayError(500, 'invalid_redeem_code', 'Redeem code is invalid', 'server_error')
+    }
+    return
+  }
+  if (code.type === 'concurrency') {
+    if (code.value_micros <= 0 || code.group_id !== null || code.validity_days !== null) {
+      throw new GatewayError(500, 'invalid_redeem_code', 'Redeem code is invalid', 'server_error')
+    }
+    return
+  }
+  if (code.type === 'invitation') {
+    if (code.value_micros !== 0 || code.group_id !== null || code.validity_days !== null) {
       throw new GatewayError(500, 'invalid_redeem_code', 'Redeem code is invalid', 'server_error')
     }
     return

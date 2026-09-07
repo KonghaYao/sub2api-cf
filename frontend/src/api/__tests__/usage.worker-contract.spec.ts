@@ -47,16 +47,30 @@ describe('usage Explorer Worker contract', () => {
     })
   })
 
-  it('uses encoded opaque IDs for owner-scoped details and payload-aware errors', async () => {
+  it('uses the original offset error-list contract and encoded opaque IDs for details', async () => {
     get.mockResolvedValue({ data: {} })
 
     await getById('usage/id 1')
-    await listMyErrorRequests({ limit: 10, cursor: 'err-cursor', api_key_id: 'key/1' })
+    await listMyErrorRequests({
+      page: 2,
+      page_size: 10,
+      api_key_id: 'key/1',
+      category: 'quota',
+      sort_by: 'status_code',
+      sort_order: 'asc',
+    })
     await getMyErrorDetail('error/id 1')
 
     expect(get).toHaveBeenCalledWith('/usage/usage%2Fid%201')
     expect(get).toHaveBeenCalledWith('/usage/errors', {
-      params: { limit: 10, cursor: 'err-cursor', api_key_id: 'key/1' },
+      params: {
+        page: 2,
+        page_size: 10,
+        api_key_id: 'key/1',
+        category: 'quota',
+        sort_by: 'status_code',
+        sort_order: 'asc',
+      },
     })
     expect(get).toHaveBeenCalledWith('/usage/errors/error%2Fid%201')
   })

@@ -199,8 +199,8 @@ describe('request explorer HTTP contracts', () => {
     const analytics = await production.request('/api/v1/admin/dashboard/snapshot-v2', {
       headers: { authorization: test.auth.admin! },
     }, test.env)
-    expect(analytics.status).toBe(501)
-    await expect(analytics.json()).resolves.toMatchObject({ code: 'admin_usage_analytics_not_migrated' })
+    expect(analytics.status).toBe(200)
+    await expect(analytics.json()).resolves.toMatchObject({ code: 0, data: { stats: { total_requests: 2 } } })
     test.raw.close()
   })
 
@@ -740,6 +740,112 @@ describe('request explorer HTTP contracts', () => {
     }, test.env)
     expect(production.status).toBe(200)
     expect(((await production.json()) as any).data.items[0].id).toBe(alice.id)
+    test.raw.close()
+  })
+
+  it('preserves the original owner error table offset, filters, sorting, and detail contract', async () => {
+    const test = await fixture()
+    const at = Date.parse('2026-09-06T16:00:00.000Z')
+    test.raw.prepare(
+      `INSERT INTO api_keys (id,user_id,key_hash,key_prefix,name,created_at_ms,updated_at_ms)
+       VALUES ('key-alice','alice',?,'sk-alice-…cdef','Alice key',?,?)`,
+    ).run('d'.repeat(64), at, at)
+    test.raw.prepare(
+      `INSERT INTO "groups" (id,name,platform,created_at_ms,updated_at_ms)
+       VALUES ('group-a','Premium','openai',?,?)`,
+    ).run(at, at)
+
+    const beta = await seed(test, {
+      requestId: 'req-owner-beta', userId: 'alice', at: at + 2, status: 402,
+    })
+    const alpha = await seed(test, {
+      requestId: 'req-owner-alpha', userId: 'alice', at: at + 1, status: 402,
+    })
+    const other = await seed(test, {
+      requestId: 'req-owner-other', userId: 'alice', at, status: 400,
+    })
+    const countTokens = await seed(test, {
+      requestId: 'req-owner-count-tokens', userId: 'alice', at: at + 3, status: 400,
+    })
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET requested_model=?, group_id='group-a', error_type='subscription_error',
+              is_business_limited=1, client_ip='203.0.113.42', user_agent='owner-agent'
+        WHERE id=?`,
+    ).run('gpt-beta', beta.id)
+    test.raw.prepare(
+      `UPDATE request_observations
+          SET requested_model=?, group_id='group-a', error_type='subscription_error'
+        WHERE id=?`,
+    ).run('gpt-alpha', alpha.id)
+    test.raw.prepare(
+      `UPDATE request_observations SET requested_model=? WHERE id=?`,
+    ).run('other-model', other.id)
+    test.raw.prepare(
+      `UPDATE request_observations SET request_path='/v1/messages/count_tokens' WHERE id=?`,
+    ).run(countTokens.id)
+
+    const first = await app().request(
+      '/usage/errors?page=1&page_size=1&model=gpt-&category=quota&api_key_id=key-alice&status_code=402&sort_by=model&sort_order=asc&timezone=Asia%2FShanghai&start_date=2026-09-07&end_date=2026-09-07',
+      { headers: { authorization: test.auth.alice! } }, test.env,
+    )
+    expect(first.status).toBe(200)
+    await expect(first.json()).resolves.toMatchObject({
+      data: {
+        total: 2, page: 1, page_size: 1, pages: 2,
+        items: [{
+          id: alpha.id, model: 'gpt-alpha', status_code: 402, category: 'quota',
+          key_name: 'Alice key', key_deleted: false, group_name: 'Premium',
+        }],
+      },
+    })
+
+    const second = await app().request(
+      '/usage/errors?page=2&page_size=1&model=gpt-&category=quota&api_key_id=key-alice&status_code=402&sort_by=model&sort_order=asc&timezone=Asia%2FShanghai&start_date=2026-09-07&end_date=2026-09-07',
+      { headers: { authorization: test.auth.alice! } }, test.env,
+    )
+    await expect(second.json()).resolves.toMatchObject({
+      data: { total: 2, page: 2, page_size: 1, pages: 2, items: [{ id: beta.id }] },
+    })
+
+    // The original handler normalizes unsupported sort values back to created_at DESC,
+    // includes business-limited failures, and omits count-token probes.
+    const fallbackSort = await app().request(
+      '/usage/errors?page=1&page_size=10&sort_by=secret&sort_order=nonsense',
+      { headers: { authorization: test.auth.alice! } }, test.env,
+    )
+    expect(fallbackSort.status).toBe(200)
+    await expect(fallbackSort.json()).resolves.toMatchObject({
+      data: {
+        total: 3,
+        items: [{ id: beta.id }, { id: alpha.id }, { id: other.id }],
+      },
+    })
+
+    const detail = await app().request(`/usage/errors/${beta.id}`, {
+      headers: { authorization: test.auth.alice! },
+    }, test.env)
+    expect(detail.status).toBe(200)
+    const detailBody = await detail.json() as any
+    expect(detailBody.data).toMatchObject({
+      id: beta.id,
+      upstream_status_code: 402,
+      key_name: 'Alice key',
+      key_deleted: false,
+      group_name: 'Premium',
+      client_ip: '203.0.113.42',
+      user_agent: 'owner-agent',
+    })
+    expect(detailBody.data.error_body).toContain('[REDACTED]')
+    expect(detailBody.data.error_body).not.toContain('sk-hidden-value')
+
+    test.raw.prepare(`UPDATE api_keys SET revoked_at_ms=? WHERE id='key-alice'`).run(at + 10)
+    const afterRevoke = await app().request('/usage/errors?page=1&page_size=1', {
+      headers: { authorization: test.auth.alice! },
+    }, test.env)
+    await expect(afterRevoke.json()).resolves.toMatchObject({
+      data: { items: [{ id: beta.id, key_name: 'Alice key', key_deleted: true }] },
+    })
     test.raw.close()
   })
 

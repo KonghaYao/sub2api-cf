@@ -1,3 +1,4 @@
+import { adminDashboard, adminDashboardBatch } from './control/dashboard'
 import { getAdminGroupUsageSummary } from './control/group-usage'
 import { getAdminGroupCapacitySummary } from './control/group-capacity'
 import { Hono } from 'hono'
@@ -191,6 +192,7 @@ import {
   batchDeleteAdminRedeemCodes,
   batchUpdateAdminRedeemCodes,
   deleteAdminRedeemCode,
+  exportAdminRedeemCodes,
   expireAdminRedeemCode,
   generateAdminRedeemCodes,
   getAdminRedeemCode,
@@ -367,7 +369,6 @@ import {
   searchAdminUsageApiKeys,
   searchAdminUsageUsers,
   unsupportedAdminUsageCleanup,
-  unsupportedAdminUsageAnalytics,
   unsupportedAdminOps,
 } from './observability'
 import {
@@ -618,8 +619,11 @@ export function createApp() {
   app.post('/api/v1/admin/usage/cleanup-tasks', unsupportedAdminUsageCleanup)
   app.post('/api/v1/admin/usage/cleanup-tasks/:id/cancel', unsupportedAdminUsageCleanup)
   app.get('/api/v1/admin/dashboard/models', getAdminUsageModels)
-  app.get('/api/v1/admin/dashboard/snapshot-v2', unsupportedAdminUsageAnalytics)
-  app.get('/api/v1/admin/dashboard/user-breakdown', unsupportedAdminUsageAnalytics)
+  for (const kind of ['snapshot-v2', 'stats', 'trend', 'groups', 'users-trend', 'users-ranking', 'api-keys-trend', 'user-breakdown'] as const) {
+    app.get(`/api/v1/admin/dashboard/${kind}`, adminDashboard(kind))
+  }
+  app.post('/api/v1/admin/dashboard/users-usage', adminDashboardBatch('users'))
+  app.post('/api/v1/admin/dashboard/api-keys-usage', adminDashboardBatch('api-keys'))
   app.get('/api/v1/admin/ops/requests', listAdminRequests)
   app.get('/api/v1/admin/ops/request-errors', listAdminRequestErrors)
   app.get('/api/v1/admin/ops/upstream-errors', listAdminUpstreamErrors)
@@ -772,6 +776,7 @@ export function createApp() {
   app.get('/api/v1/admin/users/:id/subscriptions', listAdminUserSubscriptions)
   app.get('/api/v1/admin/redeem-codes', listAdminRedeemCodes)
   app.post('/api/v1/admin/redeem-codes/generate', generateAdminRedeemCodes)
+  app.get('/api/v1/admin/redeem-codes/export', exportAdminRedeemCodes)
   app.get('/api/v1/admin/redeem-codes/stats', getAdminRedeemCodeStats)
   app.post('/api/v1/admin/redeem-codes/batch-delete', batchDeleteAdminRedeemCodes)
   app.post('/api/v1/admin/redeem-codes/batch-update', batchUpdateAdminRedeemCodes)

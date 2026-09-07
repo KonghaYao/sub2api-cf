@@ -4,6 +4,8 @@
  */
 
 import { apiClient } from '../client'
+import { getBrowserTimeZone } from '../../utils/format'
+import { isCloudflareWorkerContractActive } from '../../utils/adminCapabilities'
 import type {
   DashboardStats,
   TrendDataPoint,
@@ -15,6 +17,37 @@ import type {
   UserBreakdownItem,
   UsageRequestType
 } from '@/types'
+
+const workerGroupDisplayIds = new Map<string, number>()
+const workerGroupResourceIds = new Map<number, string>()
+
+function dashboardGroupDisplayId(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0
+  if (!isCloudflareWorkerContractActive() || typeof value === 'number') return Number(value)
+  const resourceId = String(value)
+  const existing = workerGroupDisplayIds.get(resourceId)
+  if (existing !== undefined) return existing
+  const displayId = workerGroupDisplayIds.size + 1
+  workerGroupDisplayIds.set(resourceId, displayId)
+  workerGroupResourceIds.set(displayId, resourceId)
+  return displayId
+}
+
+function adaptDashboardGroups<T extends { groups?: GroupStat[] }>(response: T): T {
+  if (!isCloudflareWorkerContractActive() || !Array.isArray(response.groups)) return response
+  return {
+    ...response,
+    groups: response.groups.map((group) => ({
+      ...group,
+      group_id: dashboardGroupDisplayId(group.group_id),
+    })),
+  }
+}
+
+function restoreWorkerGroupResourceId(value: string | number | undefined): string | number | undefined {
+  if (!isCloudflareWorkerContractActive() || typeof value !== 'number') return value
+  return workerGroupResourceIds.get(value) ?? value
+}
 
 /**
  * Get dashboard statistics
@@ -161,7 +194,7 @@ export interface DashboardSnapshotV2Response {
  */
 export async function getGroupStats(params?: GroupStatsParams): Promise<GroupStatsResponse> {
   const { data } = await apiClient.get<GroupStatsResponse>('/admin/dashboard/groups', { params })
-  return data
+  return adaptDashboardGroups(data)
 }
 
 export interface UserBreakdownParams {
@@ -193,7 +226,10 @@ export interface UserBreakdownResponse {
 
 export async function getUserBreakdown(params: UserBreakdownParams): Promise<UserBreakdownResponse> {
   const { data } = await apiClient.get<UserBreakdownResponse>('/admin/dashboard/user-breakdown', {
-    params
+    params: {
+      ...params,
+      group_id: restoreWorkerGroupResourceId(params.group_id),
+    }
   })
   return data
 }
@@ -205,7 +241,7 @@ export async function getSnapshotV2(params?: DashboardSnapshotV2Params): Promise
   const { data } = await apiClient.get<DashboardSnapshotV2Response>('/admin/dashboard/snapshot-v2', {
     params
   })
-  return data
+  return adaptDashboardGroups(data)
 }
 
 export interface ApiKeyTrendParams extends TrendParams {
@@ -298,9 +334,11 @@ export interface BatchUsersUsageResponse {
  * @returns Usage stats map keyed by user ID
  */
 export async function getBatchUsersUsage(userIds: number[]): Promise<BatchUsersUsageResponse> {
-  const { data } = await apiClient.post<BatchUsersUsageResponse>('/admin/dashboard/users-usage', {
-    user_ids: userIds
-  })
+  const { data } = await apiClient.post<BatchUsersUsageResponse>(
+    '/admin/dashboard/users-usage',
+    { user_ids: userIds },
+    { params: { timezone: getBrowserTimeZone() } }
+  )
   return data
 }
 
@@ -326,7 +364,8 @@ export async function getBatchApiKeysUsage(
     '/admin/dashboard/api-keys-usage',
     {
       api_key_ids: apiKeyIds
-    }
+    },
+    { params: { timezone: getBrowserTimeZone() } }
   )
   return data
 }

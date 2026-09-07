@@ -550,6 +550,18 @@ export async function toggleStatus(id: AdminUserId, status: 'active' | 'disabled
  */
 export async function getUserApiKeys(id: string | number): Promise<PaginatedResponse<ApiKey>> {
   const { data } = await apiClient.get<PaginatedResponse<ApiKey>>(`/admin/users/${id}/api-keys`)
+  if (isCloudflareWorkerContractActive()) {
+    data.items = data.items.map((key) => {
+      const prefix = key.key_prefix ?? ''
+      return {
+        ...key,
+        // Worker storage is deliberately one-way: the full secret only exists in
+        // the create response. Preserve the original modal's string contract with
+        // an explicitly masked value built from the non-secret prefix.
+        key: typeof key.key === 'string' ? key.key : `${prefix}${'*'.repeat(8)}`,
+      }
+    })
+  }
   return data
 }
 
