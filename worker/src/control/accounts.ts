@@ -1394,7 +1394,9 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
     if (context.req.raw.body !== null) {
       const input = await readJsonObject(context.req.raw)
       if (Object.hasOwn(input, 'model_id')) {
-        return testAccountModel(context, providerAccount(account), credential, input)
+        const extra = parseUiConfig(account.ui_config_json).extra
+        return testAccountModel(context, providerAccount(account), credential, input,
+          extra && typeof extra === 'object' && !Array.isArray(extra) ? extra as Record<string, unknown> : {})
       }
     }
     const plan = buildProviderHealthRequest({

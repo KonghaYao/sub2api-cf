@@ -128,7 +128,7 @@ describe('AccountTestModal', () => {
   })
 
   it('renders an actual text test result and does not hang on an empty response', async () => {
-    getAvailableModels.mockResolvedValue([{ id: 'gpt-test', display_name: 'GPT Test' }])
+    getAvailableModels.mockResolvedValue([{ id: 'claude-sonnet-test', display_name: 'Sonnet' }, { id: 'gpt-test', display_name: 'GPT Test' }])
     const wrapper = mountModal({ id: 'worker-account', name: 'pucoding', platform: 'openai', type: 'apikey', status: 'active' })
     await wrapper.setProps({ show: true })
     await flushPromises()

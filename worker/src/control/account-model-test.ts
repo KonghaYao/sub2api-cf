@@ -9,7 +9,7 @@ import { GatewayError } from '../gateway/errors'
 type TestEvent = { type: string; text?: string; image_url?: string; mime_type?: string }
 
 /** An explicit administrator test uses this account directly, outside user billing. */
-export function testAccountModel(context: Context<{ Bindings: Env }>, account: ProviderAccount, credential: ProviderCredential, input: Record<string, unknown>) {
+export function testAccountModel(context: Context<{ Bindings: Env }>, account: ProviderAccount, credential: ProviderCredential, input: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   const model = requireString(input, 'model_id', 256)
   const prompt = typeof input.prompt === 'string' && input.prompt.trim()
     ? requireString(input, 'prompt', 4000) : 'Reply with OK.'
@@ -23,9 +23,11 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
     operation = 'generate_content'
     body = { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 256 } }
   }
-  if (account.platform === 'codex' || input.mode === 'compact') {
+  const useResponses = extra.openai_responses_mode === 'force_responses' ||
+    (extra.openai_responses_mode !== 'force_chat_completions' && extra.openai_responses_supported !== false)
+  if (account.platform === 'codex' || (account.platform === 'openai' && useResponses) || input.mode === 'compact') {
     operation = input.mode === 'compact' ? 'responses_compact' : 'responses'
-    body = { model, input: prompt, max_output_tokens: 256, stream: false }
+    body = { model, instructions: 'Reply briefly to the user.', store: false, input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }] }], max_output_tokens: 256, stream: operation === 'responses' }
   }
   if (account.platform === 'openai' && model.startsWith('gpt-image-')) {
     operation = 'images_generations'

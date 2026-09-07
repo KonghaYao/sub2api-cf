@@ -776,9 +776,11 @@ const loadAvailableModels = async () => {
       if (props.account.platform === 'gemini') {
         selectedModelId.value = availableModels.value[0].id
       } else {
-        // Try to select Sonnet as default, otherwise use first model
-        const sonnetModel = availableModels.value.find((m) => m.id.includes('sonnet'))
-        selectedModelId.value = sonnetModel?.id || availableModels.value[0].id
+        // Prefer a model matching the account protocol in mixed upstream catalogs.
+        const preferredModel = props.account.platform === 'openai'
+          ? availableModels.value.find((m) => /^gpt-(?!image)/i.test(m.id))
+          : availableModels.value.find((m) => m.id.includes('sonnet'))
+        selectedModelId.value = preferredModel?.id || availableModels.value[0].id
       }
     }
   } catch (error) {

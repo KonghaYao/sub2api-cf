@@ -29,7 +29,7 @@ describe('upstream model sync through the Worker HTTP routes',()=>{
   })
   it('loads test-modal models and executes the selected model as SSE instead of a health probe',async()=>{
     const t=await fixture()
-    const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'model-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
+    const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'model-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1,extra:{openai_responses_mode:'force_chat_completions'}})},t.env)
     expect(created.status).toBe(201);const id=(await created.json() as any).data.id
     const fetcher=vi.fn().mockResolvedValueOnce(Response.json({data:[{id:'gpt-test'}]})).mockResolvedValueOnce(Response.json({choices:[{message:{content:'OK'}}]}))
     vi.stubGlobal('fetch',fetcher)
@@ -52,6 +52,17 @@ describe('upstream model sync through the Worker HTTP routes',()=>{
       const r=await t.app.request(`/api/v1/admin/accounts/${id}/test`,{method:'POST',headers:t.headers,body:JSON.stringify({model_id:'gpt-test'})},t.env)
       const output=await r.text();expect(output).toContain('"success":false');expect(output).not.toContain('"success":true');expect(output).not.toContain('test-upstream-secret')
     }
+  })
+  it('honors the default OpenAI Responses protocol and parses its completion stream',async()=>{
+    const t=await fixture()
+    const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'responses-test-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
+    const id=(await created.json() as any).data.id
+    const fetcher=vi.fn().mockResolvedValue(new Response('data: {"type":"response.output_text.delta","delta":"OK"}\n\ndata: {"type":"response.completed"}\n\n',{headers:{'content-type':'text/event-stream'}}))
+    vi.stubGlobal('fetch',fetcher)
+    const r=await t.app.request(`/api/v1/admin/accounts/${id}/test`,{method:'POST',headers:t.headers,body:JSON.stringify({model_id:'gpt-test'})},t.env)
+    const output=await r.text();expect(output).toContain('"success":true');expect(output).toContain('"text":"OK"')
+    expect(fetcher.mock.calls[0][0]).toBe('https://pucoding.com/v1/responses')
+    expect(JSON.parse(fetcher.mock.calls[0][1].body).stream).toBe(true)
   })
   it('uses the saved encrypted credential through the saved account route',async()=>{
     const t=await fixture(); const created=await t.app.request('/api/v1/admin/accounts',{method:'POST',headers:{...t.headers,'idempotency-key':'sync-account'},body:JSON.stringify({...body,name:'pucoding',max_concurrency:1})},t.env)
