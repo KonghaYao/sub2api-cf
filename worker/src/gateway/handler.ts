@@ -1,4 +1,5 @@
 import type { Context } from 'hono'
+import { captureUpstreamDiagnostic } from './upstream-diagnostics'
 import type { Env, UsageSettledPayload } from '../env'
 import { resolveAccountCostSnapshot } from './account-stats'
 import {
@@ -1393,12 +1394,13 @@ async function dispatchGateway(
       await recordRequestOutcome(context.env, observation, {
         lifecycle: normalized.status === 499 ? 'cancelled' : 'failed',
         statusCode: normalized.status,
-        accountId: observedAccountId,
+        accountId: observedAccountId ?? normalized.upstreamAccountId,
         durationMs: Math.max(0, Date.now() - startedAt),
         outcome: normalized.status === 499 ? 'cancelled' : 'failed',
         error: observationError(normalized),
         payload: {
           request: observationRequest,
+          response: normalized.upstreamDiagnostic,
           error: {
             status: normalized.status,
             code: normalized.code,
@@ -1563,6 +1565,8 @@ async function acquireUpstream(
       )
       if (retryableFailure && attempt + 1 < attempts) {
         lastError = mapUpstreamStatus(response)
+        lastError.upstreamAccountId = accountId
+        lastError.upstreamDiagnostic = await captureUpstreamDiagnostic(response, credential.api_key)
         await bestEffort(async () => response.body?.cancel())
         await bestEffort(() => recordPoolFailure(pool, accountId!, `${requestId}:failure:${attempt}`, FAILURE_COOLDOWN_MS))
         await bestEffort(() => releasePoolLease(pool, leaseId))
