@@ -1187,29 +1187,25 @@ export async function deleteAdminAccount(context: Context<ControlBindings>): Pro
     const expectedVersion = requireExpectedControlVersion(context.req.raw, {})
     const account = await requireAccount(context.env, context.req.param('id'))
     assertVersion(account, expectedVersion)
-    if (account.enabled === 0) return controlSuccess(publicAccount(account))
+    const target = { id: account.id, expected_control_version: account.control_version }
     const now = Date.now()
-    await runAccountBatch(
-      context.env,
-      [accountCasStatement(context.env, account.id, account.control_version, {
-        name: account.name,
-        enabled: false,
-        max_concurrency: account.max_concurrency,
-        base_url: account.base_url,
-        provider_config: parseProviderConfigProjection(account.provider_config_json),
-        image_adapter: account.image_adapter,
-        credential_kind: account.credential_kind,
-        billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
-        ui_config: parseUiConfig(account.ui_config_json),
-        config_version: incrementVersion(account.config_version, 'config_version'),
-        control_version: incrementVersion(account.control_version, 'control_version'),
-        now,
-        reset_health: false,
-      })],
-      account.id,
-      account.control_version,
-    )
-    return controlSuccess(publicAccount(await requireAccount(context.env, account.id)))
+    try {
+      await context.env.DB.batch([
+        batchDeleteVersionGuard(context.env, [target], now),
+        deleteAccountSyntheticProbeJobs(context.env, [target]),
+        detachMediaProviderAccounts(context.env, [target]),
+        deleteMediaProviderJobs(context.env, [target]),
+        deleteAccountsStatement(context.env, [target]),
+      ])
+    } catch (error) {
+      const current = await findAccount(context.env, account.id)
+      if (current === null) throw new GatewayError(404, 'account_not_found', 'Account was not found')
+      if (current.control_version !== expectedVersion) {
+        throw new GatewayError(412, 'account_version_conflict', 'Account changed; reload it and retry')
+      }
+      throw error
+    }
+    return controlSuccess({ message: 'Account deleted successfully' })
   } catch (error) {
     return controlError(asGatewayError(error))
   }

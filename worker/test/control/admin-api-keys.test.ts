@@ -70,7 +70,10 @@ class KeyStatement {
     }
     if (this.query.includes('COUNT(*) AS total')) {
       const userId = String(this.values[0])
-      return { total: [...this.database.keys.values()].filter((key) => key.user_id === userId).length } as T
+      return {
+        total: [...this.database.keys.values()]
+          .filter((key) => key.user_id === userId && key.revoked_at_ms === null).length,
+      } as T
     }
     if (this.query.includes('FROM users')) {
       return (this.values[0] === 'user-1'
@@ -121,9 +124,10 @@ class KeyStatement {
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
     if (this.query.includes('UPDATE api_keys') && this.query.includes('revoked_at_ms')) {
-      const [now, _updatedAt, id] = this.values
+      const [tombstoneHash, now, _updatedAt, id] = this.values
       const key = this.database.keys.get(String(id))
       if (key !== undefined && key.revoked_at_ms === null) {
+        key.key_hash = String(tombstoneHash)
         key.enabled = 0
         key.revoked_at_ms = Number(now)
         key.updated_at_ms = Number(now)
@@ -291,7 +295,7 @@ class KeyStatement {
     return {
       success: true,
       results: [...this.database.keys.values()]
-        .filter((key) => key.user_id === userId)
+        .filter((key) => key.user_id === userId && key.revoked_at_ms === null)
         .slice(offset, offset + limit)
         .map((key) => this.database.hydrate(key)) as T[],
       meta: {} as D1Meta & Record<string, unknown>,

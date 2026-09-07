@@ -354,12 +354,10 @@ describe('admin account control plane', () => {
     }
   })
 
-  it('enforces If-Match, rolls failed batches back, and soft-disables without deleting links/secrets', async () => {
+  it('enforces If-Match and rolls failed create batches back', async () => {
     const db = new MemoryDb(); const created = await json(await create(db)); const id = created.data.id
     const stale = await createApp().request(`/accounts/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': '4' }, body: JSON.stringify({ name: 'bad' }) }, env(db))
     expect(stale.status).toBe(412); expect(db.accounts.get(id)?.name).toBe('primary')
-    const removed = await json(await createApp().request(`/accounts/${id}`, { method: 'DELETE', headers: { 'if-match': '0' } }, env(db)))
-    expect(removed.data).toMatchObject({ status: 'inactive', config_version: 2, control_version: 1 }); expect(db.secrets).toHaveLength(1); expect(db.groupLinks).toHaveLength(1)
     const failed = new MemoryDb(); failed.failOn = 'INSERT INTO account_models'
     expect((await create(failed, 'account-create-fails')).status).toBe(500)
     expect(failed.accounts).toHaveLength(0); expect(failed.secrets).toHaveLength(0); expect(failed.idempotency).toHaveLength(0)
