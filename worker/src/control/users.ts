@@ -148,7 +148,7 @@ interface BalanceHistoryCursor {
 const MAX_BALANCE_HISTORY_CURSOR_BYTES = 1_024
 const LIVE_USER_SQL = `NOT (
   status = 'disabled' AND display_name = '[deleted]'
-  AND email = 'deleted+' || id || '@users.invalid'
+  AND email IN ('deleted-' || id || '@users.invalid', 'deleted+' || id || '@users.invalid')
 )`
 
 export async function createAdminUser(context: Context<ControlBindings>): Promise<Response> {
@@ -264,7 +264,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
     const orderBy = parseUserListOrder(context.req.query('sort_by'), context.req.query('sort_order'))
     const conditions: string[] = [`NOT (
       u.status = 'disabled' AND u.display_name = '[deleted]'
-      AND u.email = 'deleted+' || u.id || '@users.invalid'
+      AND u.email IN ('deleted-' || u.id || '@users.invalid', 'deleted+' || u.id || '@users.invalid')
     )`]
     const values: unknown[] = []
     const status = context.req.query('status')
@@ -1692,13 +1692,15 @@ async function findUserByIdIncludingDeleted(
 }
 
 function deletedUserEmail(id: string): string {
-  return `deleted+${id}@users.invalid`
+  // '+' tags are stripped by canonical_email_inbox. Keep the unique user ID
+  // in the mailbox itself so deleting a second user cannot collide.
+  return `deleted-${id}@users.invalid`
 }
 
 function isDeletedUser(user: Pick<UserRow, 'id' | 'email' | 'display_name' | 'status'>): boolean {
   return user.status === 'disabled' &&
     user.display_name === '[deleted]' &&
-    user.email === deletedUserEmail(user.id)
+    (user.email === deletedUserEmail(user.id) || user.email === `deleted+${user.id}@users.invalid`)
 }
 
 function userDeletedResponse(): { message: string } {
