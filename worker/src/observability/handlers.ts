@@ -42,6 +42,12 @@ const ADMIN_COLUMNS = `${COLUMNS},
     THEN 1 ELSE 0 END AS api_key_deleted,
   (SELECT name FROM accounts WHERE accounts.id=request_observations.account_id) AS account_name,
   (SELECT name FROM "groups" WHERE "groups".id=request_observations.group_id) AS group_name`
+const OWNER_COLUMNS = `${COLUMNS},
+  (SELECT name FROM api_keys WHERE api_keys.id=request_observations.api_key_id) AS api_key_name,
+  CASE WHEN request_observations.api_key_id IS NOT NULL AND NOT EXISTS
+    (SELECT 1 FROM api_keys WHERE api_keys.id=request_observations.api_key_id AND api_keys.revoked_at_ms IS NULL)
+    THEN 1 ELSE 0 END AS api_key_deleted,
+  (SELECT name FROM "groups" WHERE "groups".id=request_observations.group_id) AS group_name`
 
 interface ListFilters {
   limit: number
@@ -71,6 +77,7 @@ interface ListFilters {
   maxDurationMs?: number
   sortColumn?: 'occurred_at_ms' | 'status_code' | 'COALESCE(upstream_status_code,status_code)' | 'requested_model' | 'duration_ms'
   sortDirection?: 'ASC' | 'DESC'
+  modelFuzzy?: boolean
   family: Family
 }
 
@@ -90,7 +97,9 @@ interface ResolutionAuditRow {
 }
 
 export const listOwnerRequests = (context: Context<Bindings>) => listFor(context, 'owner', 'all', 'usage')
-export const listOwnerErrors = (context: Context<Bindings>) => listFor(context, 'owner', 'errors', 'usage')
+export const listOwnerErrors = (context: Context<Bindings>) => listFor(
+  context, 'owner', 'errors', 'usage', true, true,
+)
 export const listAdminUsage = (context: Context<Bindings>) => {
   if (context.req.query('page') !== undefined || context.req.query('page_size') !== undefined) {
     return listAdminUsageProjection(context)
@@ -262,7 +271,14 @@ async function ownerDetail(context: Context<Bindings>, family: Family): Promise<
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const row = await findObservation(context.env, requireResourceId(context.req.param('id'), 'observation'), user.id)
     if (row === null || !rowMatchesFamily(row, family)) throw notFound()
-    return controlSuccess({ ...projectRow(row, 'owner'), payload: await projectPayload(context.env, row) })
+    const payload = await projectPayload(context.env, row)
+    const legacy = legacyPayloadProjection(payload)
+    return controlSuccess({
+      ...projectRow(row, 'owner'),
+      upstream_status_code: row.upstream_status_code ?? undefined,
+      error_body: typeof legacy.error_body === 'string' ? legacy.error_body : '',
+      payload,
+    })
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -361,16 +377,26 @@ async function listFor(
   family: Family,
   timeContract: 'usage' | 'ops',
   legacyOffset = false,
+  ownerErrorContract = false,
 ): Promise<Response> {
   try {
     let owner: string | undefined
     if (view === 'owner') owner = (await authenticateUserRequest(context.req.raw, context.env)).id
     else await authenticateAdminSession(context.req.raw, context.env)
-    const filters = await parseFilters(context, family, timeContract, owner, true, legacyOffset)
+    const filters = await parseFilters(
+      context, family, timeContract, owner, true, legacyOffset, ownerErrorContract,
+    )
     const clauses: string[] = []
     const values: unknown[] = []
     addFamilyClause(family, clauses)
     if (family === 'all' && timeContract === 'ops') clauses.push(`lifecycle IN ('completed','failed')`)
+    if (ownerErrorContract) {
+      // The original user view deliberately includes business/quota failures and
+      // excludes internal count-token probes from the user's request history.
+      filters.view = 'all'
+      filters.modelFuzzy = true
+      clauses.push(`request_path NOT LIKE '%/count_tokens' COLLATE NOCASE`)
+    }
     addSharedClauses(filters, clauses, values)
     return await listResponse(context.env, filters, clauses, values, view)
   } catch (error) {
@@ -613,7 +639,7 @@ async function listResponse(
   view: View,
   includeDetail = false,
 ): Promise<Response> {
-  const columns = view === 'admin' ? ADMIN_COLUMNS : COLUMNS
+  const columns = view === 'admin' ? ADMIN_COLUMNS : OWNER_COLUMNS
   const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`
   if (filters.page !== undefined) {
     const sortColumn = filters.sortColumn ?? 'occurred_at_ms'
@@ -660,6 +686,7 @@ async function parseFilters(
   forcedUserId?: string,
   defaultOpsRange = true,
   legacyOffset = false,
+  ownerErrorContract = false,
 ): Promise<ListFilters> {
   validateOpsQueryParameters(context, family, timeContract)
   const offsetRequested =
@@ -682,7 +709,7 @@ async function parseFilters(
   if (offsetRequested) {
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     filters.limit = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
-    if ((page - 1) * filters.limit > 10_000) {
+    if (!ownerErrorContract && (page - 1) * filters.limit > 10_000) {
       throw new GatewayError(400, 'ops_offset_too_deep', 'Ops offset pagination is limited to 10,000 rows')
     }
     filters.page = page
@@ -691,10 +718,14 @@ async function parseFilters(
     const sortColumns: Record<string, ListFilters['sortColumn']> = {
       created_at: 'occurred_at_ms', status: 'COALESCE(upstream_status_code,status_code)', status_code: 'COALESCE(upstream_status_code,status_code)', model: 'requested_model',
     }
-    if (!Object.hasOwn(sortColumns, sortBy)) throw new GatewayError(400, 'unsupported_error_sort', 'sort_by is not supported')
-    if (sortOrder !== 'asc' && sortOrder !== 'desc') throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
-    filters.sortColumn = sortColumns[sortBy]
-    filters.sortDirection = sortOrder.toUpperCase() as 'ASC' | 'DESC'
+    if (!Object.hasOwn(sortColumns, sortBy) && !ownerErrorContract) {
+      throw new GatewayError(400, 'unsupported_error_sort', 'sort_by is not supported')
+    }
+    if (sortOrder !== 'asc' && sortOrder !== 'desc' && !ownerErrorContract) {
+      throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
+    }
+    filters.sortColumn = sortColumns[sortBy] ?? 'occurred_at_ms'
+    filters.sortDirection = sortOrder === 'asc' ? 'ASC' : 'DESC'
   }
   const rawCursor = context.req.query('cursor')
   const cursor = rawCursor === undefined ? undefined : await decodeCursor(context.env, rawCursor)
@@ -756,8 +787,15 @@ async function parseFilters(
     filters.statusCode = Number(status)
   }
   if (timeContract === 'usage') {
-    filters.startMs = parseDate(context.req.query('start_date'), false) ?? cursor?.start_ms
-    filters.endMs = parseDate(context.req.query('end_date'), true) ?? cursor?.end_ms
+    const timezone = parseTimezone(context.req.query('timezone'))
+    const startDate = context.req.query('start_date')
+    const endDate = context.req.query('end_date')
+    filters.startMs = (startDate === undefined || startDate === ''
+      ? undefined
+      : zonedDayStart(parseCalendarDate(startDate), timezone)) ?? cursor?.start_ms
+    filters.endMs = (endDate === undefined || endDate === ''
+      ? undefined
+      : zonedDayStart(addCalendarDays(parseCalendarDate(endDate), 1), timezone)) ?? cursor?.end_ms
   } else {
     const explicitStart = parseTimestamp(context.req.query('start_time')) ?? cursor?.start_ms
     const explicitEnd = parseTimestamp(context.req.query('end_time')) ?? cursor?.end_ms
@@ -801,13 +839,22 @@ function addSharedClauses(filters: ListFilters, clauses: string[], values: unkno
   const equality: Array<[string, unknown]> = [
     ['user_id', filters.userId], ['api_key_id', filters.apiKeyId],
     ['account_id', filters.accountId], ['group_id', filters.groupId],
-    ['platform', filters.platform], ['requested_model', filters.model],
+    ['platform', filters.platform],
     ['request_id', filters.requestId],
   ]
   for (const [column, value] of equality) {
     if (value === undefined) continue
     clauses.push(`${column} = ?`)
     values.push(value)
+  }
+  if (filters.model !== undefined) {
+    if (filters.modelFuzzy) {
+      clauses.push(`requested_model LIKE ? ESCAPE '\\' COLLATE NOCASE`)
+      values.push(`%${escapeLike(filters.model)}%`)
+    } else {
+      clauses.push('requested_model = ?')
+      values.push(filters.model)
+    }
   }
   if (filters.statusCode !== undefined) {
     clauses.push('COALESCE(upstream_status_code,status_code) = ?')
@@ -888,8 +935,9 @@ async function findObservation(
   id: string,
   userId?: string,
 ): Promise<ObservationRow | null> {
+  const columns = userId === undefined ? COLUMNS : OWNER_COLUMNS
   return env.DB.prepare(
-    `SELECT ${COLUMNS} FROM request_observations WHERE id = ?${userId === undefined ? '' : ' AND user_id = ?'}`,
+    `SELECT ${columns} FROM request_observations WHERE id = ?${userId === undefined ? '' : ' AND user_id = ?'}`,
   ).bind(id, ...(userId === undefined ? [] : [userId])).first<ObservationRow>()
 }
 
@@ -977,6 +1025,11 @@ function projectRow(row: ObservationRow, view: View): Record<string, unknown> {
     api_key_deleted: (row as any).api_key_deleted === 1,
     account_name: (row as any).account_name ?? undefined,
     group_name: (row as any).group_name ?? undefined,
+  })
+  else Object.assign(base, {
+    key_name: (row as any).api_key_name ?? '',
+    key_deleted: (row as any).api_key_deleted === 1,
+    ...((row as any).group_name == null ? {} : { group_name: (row as any).group_name }),
   })
   return base
 }

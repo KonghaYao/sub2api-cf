@@ -22,6 +22,7 @@ describe('admin API key Cloudflare Worker contract', () => {
     const result = {
       items: [{
         id: 'key-1',
+        key_prefix: 'sk-sub2api-safe',
         group_id: 'group-2',
         group: {
           id: 'group-2',
@@ -40,7 +41,10 @@ describe('admin API key Cloudflare Worker contract', () => {
     }
     get.mockResolvedValueOnce({ data: result })
 
-    await expect(getUserApiKeys('user-1')).resolves.toEqual(result)
+    await expect(getUserApiKeys('user-1')).resolves.toEqual({
+      ...result,
+      items: [{ ...result.items[0], key: 'sk-sub2api-safe********' }]
+    })
     expect(get).toHaveBeenCalledWith('/admin/users/user-1/api-keys')
   })
 

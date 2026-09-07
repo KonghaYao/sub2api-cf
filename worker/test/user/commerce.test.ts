@@ -416,7 +416,7 @@ async function seedRedeemCode(
   code: string,
   input: {
     id: string
-    type: 'balance' | 'subscription'
+    type: 'balance' | 'concurrency' | 'subscription' | 'invitation'
     valueMicros?: number
     validityDays?: number
     groupId?: string
@@ -538,6 +538,39 @@ describe('user subscriptions', () => {
 })
 
 describe('redeem codes', () => {
+  it('atomically applies a concurrency redeem code and records its history value', async () => {
+    const test = await fixture()
+    await seedRedeemCode(test.raw, 'CONCURRENCY-3', {
+      id: 'concurrency-code',
+      type: 'concurrency',
+      valueMicros: 3,
+    })
+
+    const response = await app().request('/redeem', {
+      method: 'POST',
+      headers: {
+        authorization: test.authorization.alice,
+        'content-type': 'application/json',
+        'idempotency-key': 'redeem-concurrency-alice-1',
+      },
+      body: JSON.stringify({ code: 'CONCURRENCY-3' }),
+    }, test.env)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: { type: 'concurrency', value: 3, new_concurrency: 8 },
+    })
+    expect(test.raw.prepare(
+      `SELECT concurrency FROM users WHERE id = 'alice'`,
+    ).get()).toEqual({ concurrency: 8 })
+    const history = await app().request('/redeem/history', {
+      headers: { authorization: test.authorization.alice },
+    }, test.env)
+    await expect(history.json()).resolves.toMatchObject({
+      data: [{ type: 'concurrency', value: 3, status: 'used' }],
+    })
+  })
+
   it('atomically credits a balance code and replays the same idempotency key without a second credit', async () => {
     const test = await fixture()
     await seedRedeemCode(test.raw, 'BALANCE-10', {

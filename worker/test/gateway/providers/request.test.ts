@@ -442,7 +442,7 @@ describe('provider request adapters', () => {
   ] as const)('builds a bounded %s health probe', (platform, url, authHeader) => {
     const plan = buildProviderHealthRequest({ account: account(platform), credential })
 
-    expect(plan).toMatchObject({ url, method: 'GET', timeout_ms: 4_000 })
+    expect(plan).toMatchObject({ url, method: 'GET', timeout_ms: 20_000 })
     expect(plan.headers.has(authHeader)).toBe(true)
   })
 

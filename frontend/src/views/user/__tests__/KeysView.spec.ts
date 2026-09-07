@@ -449,13 +449,30 @@ describe('user KeysView column settings', () => {
     expect(wrapper.get('[data-test="current-concurrency"]').text()).toBe('3')
   })
 
-  it('disables current concurrency sorting for the Worker because the value lives in a Durable Object', async () => {
+  it('keeps current concurrency sorting available for the Worker', async () => {
     const wrapper = await mountView()
 
     const currentConcurrencyColumn = visibleColumnMeta(wrapper).find(
       (column) => column.key === 'current_concurrency'
     )
-    expect(currentConcurrencyColumn?.sortable).toBe(false)
+    expect(currentConcurrencyColumn?.sortable).toBe(true)
+  })
+
+  it('loads and renders the original per-key usage cards from the Worker batch endpoint', async () => {
+    getDashboardApiKeysUsage.mockResolvedValueOnce({
+      stats: {
+        '1': { api_key_id: 1, today_actual_cost: 1.25, total_actual_cost: 9.5 },
+      },
+    })
+
+    const wrapper = await mountView()
+
+    expect(getDashboardApiKeysUsage).toHaveBeenCalledWith(
+      [1],
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(wrapper.get('[data-test="usage-cell"]').text()).toContain('$1.2500')
+    expect(wrapper.get('[data-test="usage-cell"]').text()).toContain('$9.5000')
   })
 
   it('keeps current concurrency sortable against the legacy API', async () => {
@@ -603,6 +620,39 @@ describe('user KeysView column settings', () => {
     await wrapper.get('#key-form').trigger('submit')
     await flushPromises()
     expect(createKey.mock.calls[0][8]).toEqual({ expiresAt: new Date(selectedDate).toISOString() })
+    wrapper.unmount()
+  })
+
+  it('does not inject a newly created key into a page where the server did not return it', async () => {
+    getAvailableGroups.mockResolvedValueOnce([{ id: 'group-a', name: 'OpenAI' }])
+    listKeys
+      .mockResolvedValueOnce({
+        items: [createApiKey({ id: 'existing-key', name: 'existing-key' })],
+        total: 21,
+        page: 1,
+        page_size: 20,
+        pages: 2,
+      })
+      .mockResolvedValueOnce({
+        items: [createApiKey({ id: 'existing-key', name: 'existing-key' })],
+        total: 21,
+        page: 1,
+        page_size: 20,
+        pages: 2,
+      })
+    const wrapper = await mountView()
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('new-key')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')!
+    groupSelect.vm.$emit('update:modelValue', 'group-a')
+    await nextTick()
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="key-cell"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain('existing-key')
+    expect(wrapper.text()).not.toContain('sk-c***')
     wrapper.unmount()
   })
 

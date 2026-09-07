@@ -71,7 +71,9 @@ const CONTRACTS: Record<ProviderPlatform, ProviderContract> = {
 }
 
 const HEADER_TIMEOUT_MS = 30_000
-const HEALTH_TIMEOUT_MS = 4_000
+// Allow compatible model catalogs to respond without exceeding the health
+// consumer's 30-second processing lease. A timeout remains an unhealthy result.
+const HEALTH_TIMEOUT_MS = 20_000
 const CODEX_ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/
 const CODEX_UNSUPPORTED_RESPONSE_FIELDS = [
   'max_output_tokens',

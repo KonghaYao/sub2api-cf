@@ -192,6 +192,7 @@ import {
   batchDeleteAdminRedeemCodes,
   batchUpdateAdminRedeemCodes,
   deleteAdminRedeemCode,
+  exportAdminRedeemCodes,
   expireAdminRedeemCode,
   generateAdminRedeemCodes,
   getAdminRedeemCode,
@@ -775,6 +776,7 @@ export function createApp() {
   app.get('/api/v1/admin/users/:id/subscriptions', listAdminUserSubscriptions)
   app.get('/api/v1/admin/redeem-codes', listAdminRedeemCodes)
   app.post('/api/v1/admin/redeem-codes/generate', generateAdminRedeemCodes)
+  app.get('/api/v1/admin/redeem-codes/export', exportAdminRedeemCodes)
   app.get('/api/v1/admin/redeem-codes/stats', getAdminRedeemCodeStats)
   app.post('/api/v1/admin/redeem-codes/batch-delete', batchDeleteAdminRedeemCodes)
   app.post('/api/v1/admin/redeem-codes/batch-update', batchUpdateAdminRedeemCodes)

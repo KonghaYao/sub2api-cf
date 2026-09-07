@@ -3,10 +3,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import RedeemView from '../RedeemView.vue'
 
-const { listRedeemCodes, batchUpdateRedeemCodes, getAllGroups, showSuccess, showError, showInfo } =
+const { listRedeemCodes, batchUpdateRedeemCodes, exportRedeemCodes, getAllGroups, showSuccess, showError, showInfo } =
   vi.hoisted(() => ({
     listRedeemCodes: vi.fn(),
     batchUpdateRedeemCodes: vi.fn(),
+    exportRedeemCodes: vi.fn(),
     getAllGroups: vi.fn(),
     showSuccess: vi.fn(),
     showError: vi.fn(),
@@ -20,7 +21,8 @@ vi.mock('@/api/admin', () => ({
       generate: vi.fn(),
       delete: vi.fn(),
       batchDelete: vi.fn(),
-      batchUpdate: batchUpdateRedeemCodes
+      batchUpdate: batchUpdateRedeemCodes,
+      exportCodes: exportRedeemCodes
     },
     groups: {
       getAll: getAllGroups
@@ -105,6 +107,7 @@ describe('admin RedeemView batch update', () => {
 
     listRedeemCodes.mockReset()
     batchUpdateRedeemCodes.mockReset()
+    exportRedeemCodes.mockReset()
     getAllGroups.mockReset()
     showSuccess.mockReset()
     showError.mockReset()
@@ -170,8 +173,8 @@ describe('admin RedeemView batch update', () => {
     await wrapper.get('[data-test="batch-update-open"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[data-test="batch-field-status"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="batch-status-select"]').exists()).toBe(false)
+    await wrapper.get('[data-test="batch-field-status"]').setValue(true)
+    await wrapper.get('[data-test="batch-status-select"]').setValue('disabled')
     await wrapper.get('[data-test="batch-field-notes"]').setValue(true)
     await wrapper.get('[data-test="batch-notes-input"]').setValue('maintenance')
     await wrapper.get('[data-test="batch-update-form"]').trigger('submit')
@@ -180,6 +183,7 @@ describe('admin RedeemView batch update', () => {
     expect(batchUpdateRedeemCodes).toHaveBeenCalledWith([
       'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa'
     ], {
+      status: 'disabled',
       notes: 'maintenance'
     })
     expect(showSuccess).toHaveBeenCalledWith('admin.redeem.batchUpdateSuccess')

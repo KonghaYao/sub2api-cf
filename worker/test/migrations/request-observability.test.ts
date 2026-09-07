@@ -55,4 +55,25 @@ describe('request observability migration', () => {
     ).get()).toEqual({ row_count: 1 })
     raw.close()
   })
+
+  it('uses the owner-error partial index for total pagination in the original user table', () => {
+    const { raw } = createSqliteD1()
+    applyMigrations(raw)
+    expect(raw.prepare(
+      'SELECT version, name FROM schema_migrations WHERE version = 80',
+    ).get()).toEqual({ version: 80, name: 'owner_error_list_index' })
+
+    const plan = raw.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT id FROM request_observations
+        WHERE lifecycle = 'failed' AND user_id = ?
+          AND request_path NOT LIKE '%/count_tokens' COLLATE NOCASE
+        ORDER BY occurred_at_ms DESC, id DESC
+        LIMIT ? OFFSET ?`,
+    ).all('user-one', 20, 0) as Array<{ detail: string }>
+    expect(plan.map((step) => step.detail).join('\n')).toContain(
+      'idx_request_observations_owner_error_seek',
+    )
+    raw.close()
+  })
 })

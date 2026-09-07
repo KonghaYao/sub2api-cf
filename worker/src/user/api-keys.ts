@@ -88,7 +88,7 @@ interface UpdateApiKeyPatch {
 }
 
 type ApiKeyListStatus = 'active' | 'inactive' | 'expired' | 'quota_exhausted'
-type ApiKeyListSort = keyof typeof API_KEY_LIST_SORT_COLUMNS
+type ApiKeyListSort = keyof typeof API_KEY_LIST_SORT_COLUMNS | 'current_concurrency'
 type ApiKeyListSortOrder = 'asc' | 'desc'
 
 interface ApiKeyListQuery {
@@ -117,24 +117,56 @@ export async function listUserApiKeys(context: Context<UserBindings>): Promise<R
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 10, 1, 100)
     const query = parseApiKeyListQuery(context)
     const { where, values } = apiKeyListWhere(user.id, query)
+    const concurrencyPromise = apiKeyConcurrencyById(context.env, user.id)
+    let rows: ApiKeyRow[]
+    let total: number
+    if (query.sortBy === 'current_concurrency') {
+      const [rowsResult, concurrencyById] = await Promise.all([
+        context.env.DB.prepare(`${apiKeySelect()} ${where}`).bind(...values).all<ApiKeyRow>(),
+        concurrencyPromise,
+      ])
+      const direction = query.sortOrder === 'asc' ? 1 : -1
+      const allRows = rowsResult.results
+      allRows.sort((left, right) => {
+        const concurrencyOrder = ((concurrencyById.get(left.id) ?? 0) -
+          (concurrencyById.get(right.id) ?? 0)) * direction
+        if (concurrencyOrder !== 0) return concurrencyOrder
+        return compareApiKeyIds(left.id, right.id) * direction
+      })
+      total = allRows.length
+      const offset = (page - 1) * pageSize
+      rows = allRows.slice(offset, offset + pageSize)
+      return controlSuccess({
+        items: rows.map((row) => publicApiKey(row, concurrencyById.get(row.id) ?? 0)),
+        total,
+        page,
+        page_size: pageSize,
+        pages: total === 0 ? 0 : Math.ceil(total / pageSize),
+      })
+    }
+
     const direction = query.sortOrder.toUpperCase()
     const sortColumn = API_KEY_LIST_SORT_COLUMNS[query.sortBy]
     const stableOrder = query.sortBy === 'id' ? '' : `, id ${direction}`
-    const [countResult, rowsResult] = await context.env.DB.batch([
-      context.env.DB.prepare(`SELECT COUNT(*) AS total FROM api_keys ${where}`).bind(...values),
-      context.env.DB.prepare(
-        `${apiKeySelect()} ${where}
-         ORDER BY ${sortColumn} ${direction}${stableOrder}
-         LIMIT ? OFFSET ?`,
-      ).bind(...values, pageSize, (page - 1) * pageSize),
+    const [[countResult, rowsResult], concurrencyById] = await Promise.all([
+      context.env.DB.batch([
+        context.env.DB.prepare(`SELECT COUNT(*) AS total FROM api_keys ${where}`).bind(...values),
+        context.env.DB.prepare(
+          `${apiKeySelect()} ${where}
+           ORDER BY ${sortColumn} ${direction}${stableOrder}
+           LIMIT ? OFFSET ?`,
+        ).bind(...values, pageSize, (page - 1) * pageSize),
+      ]),
+      concurrencyPromise,
     ])
     const totalValue = (countResult.results[0] as { total?: unknown } | undefined)?.total
     if (!Number.isSafeInteger(totalValue) || (totalValue as number) < 0) {
       throw new GatewayError(500, 'invalid_api_key_count', 'API key count is invalid', 'server_error')
     }
-    const total = totalValue as number
+    total = totalValue as number
+    rows = rowsResult.results as unknown as ApiKeyRow[]
     return controlSuccess({
-      items: (rowsResult.results as unknown as ApiKeyRow[]).map(publicApiKey),
+      items: rows.map((row) => publicApiKey(row, concurrencyById.get(row.id) ?? 0)),
       total,
       page,
       page_size: pageSize,
@@ -159,12 +191,13 @@ function parseApiKeyListQuery(context: Context<UserBindings>): ApiKeyListQuery {
   const sortByRaw = optionalApiKeyListValue(context.req.query('sort_by'), 'sort_by', 32)
   if (
     sortByRaw !== undefined &&
+    sortByRaw !== 'current_concurrency' &&
     !Object.hasOwn(API_KEY_LIST_SORT_COLUMNS, sortByRaw)
   ) {
     throw new GatewayError(
       400,
       'invalid_sort_by',
-      `sort_by must be one of: ${Object.keys(API_KEY_LIST_SORT_COLUMNS).join(', ')}`,
+      `sort_by must be one of: ${[...Object.keys(API_KEY_LIST_SORT_COLUMNS), 'current_concurrency'].join(', ')}`,
     )
   }
   const sortOrderRaw = optionalApiKeyListValue(context.req.query('sort_order'), 'sort_order', 4)
@@ -880,7 +913,36 @@ function samePolicy(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((rule, index) => rule === right[index])
 }
 
-function publicApiKey(row: ApiKeyRow): Record<string, unknown> {
+async function apiKeyConcurrencyById(env: Env, userId: string): Promise<Map<string, number>> {
+  const counts = new Map<string, number>()
+  if (env.API_KEY_LIMIT_STATE === undefined) return counts
+  try {
+    const stub = env.API_KEY_LIMIT_STATE.get(
+      env.API_KEY_LIMIT_STATE.idFromName(`user:${userId}`),
+    )
+    const response = await stub.fetch('https://state.internal/snapshot')
+    if (!response.ok) return counts
+    const snapshot = await response.json() as { leases?: unknown }
+    if (!Array.isArray(snapshot.leases)) return counts
+    for (const lease of snapshot.leases) {
+      if (lease === null || typeof lease !== 'object') continue
+      const value = lease as { api_key_id?: unknown; status?: unknown }
+      if (value.status !== 'active' || typeof value.api_key_id !== 'string') continue
+      counts.set(value.api_key_id, (counts.get(value.api_key_id) ?? 0) + 1)
+    }
+  } catch {
+    // Live concurrency is an operational enhancement. D1 remains authoritative
+    // for key CRUD when the state object is temporarily unavailable.
+  }
+  return counts
+}
+
+function compareApiKeyIds(left: string, right: string): number {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+function publicApiKey(row: ApiKeyRow, currentConcurrency = 0): Record<string, unknown> {
   const windows = effectiveRateLimitWindows(row, Date.now())
   return {
     id: row.id,
@@ -888,6 +950,7 @@ function publicApiKey(row: ApiKeyRow): Record<string, unknown> {
     name: row.name,
     group_id: row.group_id,
     status: apiKeyStatus(row),
+    current_concurrency: currentConcurrency,
     key_prefix: row.key_prefix,
     control_version: row.control_version,
     quota_micros: row.quota_micros,

@@ -21,7 +21,9 @@ interface TestFixture {
   authorization: Record<'alice' | 'bob', string>
 }
 
-async function fixture(): Promise<TestFixture> {
+async function fixture(
+  concurrencyByKey: Record<string, number> = {},
+): Promise<TestFixture> {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
   const now = Date.now()
@@ -75,6 +77,21 @@ async function fixture(): Promise<TestFixture> {
       EVENTS_QUEUE: {} as Queue,
       USER_STATE: {} as DurableObjectNamespace,
       POOL_STATE: {} as DurableObjectNamespace,
+      API_KEY_LIMIT_STATE: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          fetch: async () => Response.json({
+            schema_version: 1,
+            active_concurrency: Object.values(concurrencyByKey).reduce((sum, count) => sum + count, 0),
+            leases: Object.entries(concurrencyByKey).flatMap(([apiKeyId, count]) =>
+              Array.from({ length: count }, (_, index) => ({
+                request_id: `${apiKeyId}-${index}`,
+                api_key_id: apiKeyId,
+                status: 'active',
+              }))),
+          }),
+        }),
+      } as unknown as DurableObjectNamespace,
     },
   }
 }
@@ -885,7 +902,6 @@ describe('user API keys', () => {
     const checks = [
       ['status=revoked', 'invalid_status'],
       ['sort_by=key_hash', 'invalid_sort_by'],
-      ['sort_by=current_concurrency', 'invalid_sort_by'],
       ['sort_order=sideways', 'invalid_sort_order'],
       [`search=${'x'.repeat(101)}`, 'invalid_search'],
       ['group_id=invalid%21', 'invalid_group_id'],
@@ -905,6 +921,33 @@ describe('user API keys', () => {
     }, test.env)
     expect(empty.status).toBe(200)
     await expect(empty.json()).resolves.toMatchObject({ data: { items: [], total: 0 } })
+  })
+
+  it('projects and paginates authoritative per-key concurrency in the original sort order', async () => {
+    const test = await fixture({ 'alice-a': 3, 'alice-b': 1, 'alice-c': 3 })
+    seedKey(test.raw, { id: 'alice-a', userId: 'alice', name: 'A', hashByte: 'a' })
+    seedKey(test.raw, { id: 'alice-b', userId: 'alice', name: 'B', hashByte: 'b' })
+    seedKey(test.raw, { id: 'alice-c', userId: 'alice', name: 'C', hashByte: 'c' })
+
+    const response = await app().request(
+      '/keys?sort_by=current_concurrency&sort_order=desc&page=1&page_size=2',
+      { headers: { authorization: test.authorization.alice } },
+      test.env,
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        total: 3,
+        page: 1,
+        page_size: 2,
+        pages: 2,
+        items: [
+          { id: 'alice-c', current_concurrency: 3 },
+          { id: 'alice-a', current_concurrency: 3 },
+        ],
+      },
+    })
   })
 
   it('creates integer monetary limits and exposes the complete effective projection', async () => {

@@ -2197,18 +2197,23 @@ export interface UserErrorRequest {
 }
 
 export interface UserErrorRequestDetail extends UserErrorRequest {
+  error_body: string
   upstream_status_code?: number
-  payload: ExplorerPayload
+  payload?: ExplorerPayload
 }
 
 export interface UserErrorListParams {
-  limit?: number
-  cursor?: string
+  page?: number
+  page_size?: number
   start_date?: string
   end_date?: string
+  timezone?: string
   model?: string
   status_code?: number
-  api_key_id?: OpaqueId
+  category?: string
+  api_key_id?: OpaqueId | number
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
 }
 
 export interface UsageQueryParams {

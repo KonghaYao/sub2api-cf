@@ -1117,6 +1117,7 @@
 </template>
 
 <script setup lang="ts">
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 	import { ref, reactive, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 	import { useI18n } from 'vue-i18n'
 	import { useAppStore } from '@/stores/app'
@@ -1125,7 +1126,7 @@
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
-import { keysAPI, authAPI, userGroupsAPI } from '@/api'
+import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import DataTable from '@/components/common/DataTable.vue'
@@ -1147,7 +1148,6 @@ import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import { hasPlaintextApiKey } from '@/utils/apiKeySecret'
-import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1186,8 +1186,7 @@ const allColumns = computed<Column[]>(() => [
   {
     key: 'current_concurrency',
     label: t('keys.currentConcurrency'),
-    // Worker values are read from Durable Objects and cannot be globally ordered in D1.
-    sortable: !isCloudflareWorkerContractActive(),
+    sortable: true
   },
   { key: 'usage', label: t('keys.usage'), sortable: false },
   { key: 'rate_limit', label: t('keys.rateLimitColumn'), sortable: false },
@@ -1497,6 +1496,14 @@ const loadApiKeys = async () => {
     pagination.value.total = response.total
     pagination.value.pages = response.pages
 
+    if (response.items.length > 0) {
+      const keyIds = response.items.map((key) => key.id)
+      const usageResponse = await usageAPI.getDashboardApiKeysUsage(keyIds, { signal })
+      if (signal.aborted) return
+      usageStats.value = usageResponse.stats
+    } else {
+      usageStats.value = {}
+    }
   } catch (error) {
     if (isAbortError(error)) {
       return
@@ -1794,11 +1801,6 @@ const handleSubmit = async () => {
             ...apiKeys.value[refreshedIndex],
             key: created.key,
           }
-        } else {
-          created.group = groups.value.find(
-            (group) => String(group.id) === String(created.group_id),
-          ) as Group | undefined
-          apiKeys.value = [created, ...apiKeys.value]
         }
       }
       return

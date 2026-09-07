@@ -25,6 +25,7 @@ import { commercialCodeDigest, normalizeCommercialCode } from '../commercial/reg
 import type { Env } from '../env'
 import { decryptCredential, encryptCredential, randomToken } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { redeemCodeDigest } from '../user/redeem'
 
 type ControlBindings = { Bindings: Env }
 type CodeKind = 'promotion' | 'invitation'
@@ -55,6 +56,11 @@ interface CodePatch {
   status?: 'active' | 'disabled'
   expiresAtMs?: number | null
   notes?: string
+}
+
+interface LegacyRedeemInvitationMirror {
+  status: 'unused' | 'processing' | 'used' | 'expired' | 'disabled'
+  secret_key_version: number | null
 }
 
 export async function listAdminPromotionCodes(context: Context<ControlBindings>): Promise<Response> {
@@ -406,6 +412,14 @@ async function updateCode(context: Context<ControlBindings>, kind: CodeKind): Pr
     const current = await findCode(context.env, kind, id)
     if (current === null) throw notFound(kind)
     if (current.control_version !== expected) throw versionConflict()
+    const legacyMirror = kind === 'invitation'
+      ? await context.env.DB.prepare(
+        `SELECT rc.status, secret.secret_key_version
+           FROM redeem_codes rc
+           LEFT JOIN redeem_code_secrets secret ON secret.redeem_code_id = rc.id
+          WHERE rc.id = ? AND rc.type = 'invitation'`,
+      ).bind(id).first<LegacyRedeemInvitationMirror>()
+      : null
     if (patch.maxUses !== undefined && patch.maxUses > 0 && patch.maxUses < current.used_count) {
       throw new GatewayError(409, 'max_uses_below_usage', 'max_uses cannot be less than used_count')
     }
@@ -422,6 +436,13 @@ async function updateCode(context: Context<ControlBindings>, kind: CodeKind): Pr
     const nextMax = patch.maxUses ?? current.max_uses
     if (kind === 'invitation' && nextMax < 1) {
       throw new GatewayError(400, 'invalid_max_uses', 'Invitation max_uses must be positive')
+    }
+    if (legacyMirror !== null && nextMax !== 1) {
+      throw new GatewayError(
+        409,
+        'legacy_invitation_single_use_required',
+        'Redeem invitation codes must remain single-use',
+      )
     }
     const nextStatus = patch.status ?? current.status
     const nextExpiry = patch.expiresAtMs === undefined ? current.expires_at_ms : patch.expiresAtMs
@@ -446,34 +467,81 @@ async function updateCode(context: Context<ControlBindings>, kind: CodeKind): Pr
       updated_at_ms: now,
     })
     const sealedResponse = await sealIdempotentResponse(context.env, idempotency, response)
-    try {
-      await context.env.DB.batch([
-        guardedIdempotencyInsert(
-          context.env,
-          idempotency,
-          `${kind}_code`,
-          id,
-          sealedResponse,
-          now,
-          `EXISTS (SELECT 1 FROM ${table} WHERE id = ? AND control_version = ?)`,
-          [id, expected],
-        ),
-        context.env.DB.prepare(
-          `UPDATE ${table}
-              SET code_hash = ?, code_prefix = ?, secret_key_version = ?,
-                  secret_nonce_b64 = ?, secret_ciphertext_b64 = ?${bonusSet},
-                  max_uses = ?, status = ?, expires_at_ms = ?, notes = ?,
-                  control_version = control_version + 1, updated_at_ms = ?
-            WHERE id = ? AND control_version = ?`,
+    const statements: D1PreparedStatement[] = [
+      guardedIdempotencyInsert(
+        context.env,
+        idempotency,
+        `${kind}_code`,
+        id,
+        sealedResponse,
+        now,
+        `EXISTS (SELECT 1 FROM ${table} WHERE id = ? AND control_version = ?)`,
+        [id, expected],
+      ),
+      context.env.DB.prepare(
+        `UPDATE ${table}
+            SET code_hash = ?, code_prefix = ?, secret_key_version = ?,
+                secret_nonce_b64 = ?, secret_ciphertext_b64 = ?${bonusSet},
+                max_uses = ?, status = ?, expires_at_ms = ?, notes = ?,
+                control_version = control_version + 1, updated_at_ms = ?
+          WHERE id = ? AND control_version = ?`,
+      ).bind(
+        nextCodeHash,
+        code.slice(0, 8), nextKeyVersion, secret.nonce_b64, secret.ciphertext_b64,
+        ...(kind === 'promotion' ? [nextBonus] : []),
+        nextMax, nextStatus, nextExpiry, nextNotes, now, id, expected,
+      ),
+    ]
+    if (legacyMirror !== null) {
+      const redeemHash = await redeemCodeDigest(code, requirePepper(context.env))
+      statements.push(context.env.DB.prepare(
+        `UPDATE redeem_codes
+            SET code_hash = ?, code_prefix = ?,
+                status = CASE WHEN status IN ('used', 'processing') THEN status ELSE ? END,
+                expires_at_ms = ?, notes = ?, control_version = control_version + 1,
+                updated_at_ms = ?
+          WHERE id = ? AND type = 'invitation'`,
+      ).bind(
+        redeemHash,
+        code.slice(0, 8),
+        nextStatus === 'disabled' ? 'disabled' : 'unused',
+        nextExpiry,
+        nextNotes,
+        now,
+        id,
+      ))
+      if (patch.code !== undefined) {
+        if (legacyMirror.secret_key_version === null) {
+          throw new GatewayError(
+            409,
+            'redeem_code_plaintext_unavailable',
+            'The mirrored redeem code has no secure plaintext storage',
+          )
+        }
+        const redeemSecretVersion = legacyMirror.secret_key_version + 1
+        const redeemSecret = await encryptCredential(
+          { api_key: code },
+          requireMasterKey(context.env),
+          `redeem-code:v1:${id}:${redeemSecretVersion}`,
+        )
+        statements.push(context.env.DB.prepare(
+          `UPDATE redeem_code_secrets
+              SET secret_key_version = ?, secret_nonce_b64 = ?, secret_ciphertext_b64 = ?,
+                  updated_at_ms = ?
+            WHERE redeem_code_id = ?`,
         ).bind(
-          nextCodeHash,
-          code.slice(0, 8), nextKeyVersion, secret.nonce_b64, secret.ciphertext_b64,
-          ...(kind === 'promotion' ? [nextBonus] : []),
-          nextMax, nextStatus, nextExpiry, nextNotes, now, id, expected,
-        ),
-        auditStatement(context.env, actor, `${kind}_code.update`, `${kind}_code`, id,
-          expected + 1, Object.keys(patch), now),
-      ])
+          redeemSecretVersion,
+          redeemSecret.nonce_b64,
+          redeemSecret.ciphertext_b64,
+          now,
+          id,
+        ))
+      }
+    }
+    statements.push(auditStatement(context.env, actor, `${kind}_code.update`, `${kind}_code`, id,
+      expected + 1, Object.keys(patch), now))
+    try {
+      await context.env.DB.batch(statements)
     } catch (error) {
       const recovered = await findControlIdempotency(context.env, idempotency)
       if (recovered !== null) {
@@ -532,27 +600,33 @@ async function deleteCode(context: Context<ControlBindings>, kind: CodeKind): Pr
         : 'Invitation code deleted successfully',
     }
     const sealedResponse = await sealIdempotentResponse(context.env, idempotency, response)
+    const statements = [
+      guardedIdempotencyInsert(
+        context.env,
+        idempotency,
+        `${kind}_code_delete`,
+        id,
+        sealedResponse,
+        now,
+        `EXISTS (
+          SELECT 1 FROM ${codeTable(kind)}
+           WHERE id = ? AND control_version = ? AND used_count = 0
+        )`,
+        [id, expected],
+      ),
+      auditStatement(context.env, actor, `${kind}_code.delete`, `${kind}_code`, id,
+        expected, ['deleted'], now),
+      ...(kind === 'invitation'
+        ? [context.env.DB.prepare(
+          `DELETE FROM redeem_codes WHERE id = ? AND type = 'invitation'`,
+        ).bind(id)]
+        : []),
+      context.env.DB.prepare(
+        `DELETE FROM ${codeTable(kind)} WHERE id = ? AND control_version = ? AND used_count = 0`,
+      ).bind(id, expected),
+    ]
     try {
-      await context.env.DB.batch([
-        guardedIdempotencyInsert(
-          context.env,
-          idempotency,
-          `${kind}_code_delete`,
-          id,
-          sealedResponse,
-          now,
-          `EXISTS (
-            SELECT 1 FROM ${codeTable(kind)}
-             WHERE id = ? AND control_version = ? AND used_count = 0
-          )`,
-          [id, expected],
-        ),
-        auditStatement(context.env, actor, `${kind}_code.delete`, `${kind}_code`, id,
-          expected, ['deleted'], now),
-        context.env.DB.prepare(
-          `DELETE FROM ${codeTable(kind)} WHERE id = ? AND control_version = ? AND used_count = 0`,
-        ).bind(id, expected),
-      ])
+      await context.env.DB.batch(statements)
     } catch (error) {
       const recovered = await findControlIdempotency(context.env, idempotency)
       if (recovered !== null) {

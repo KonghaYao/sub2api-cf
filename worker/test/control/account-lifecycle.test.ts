@@ -387,6 +387,77 @@ describe('scheduled account health lifecycle', () => {
     test.raw.close()
   })
 
+  function delayedHealthResponse(delayMs: number) {
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const aborted = vi.fn()
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const signal = init?.signal
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort)
+        resolve(Response.json({ data: [] }))
+      }, delayMs)
+      const abort = () => {
+        clearTimeout(timer)
+        aborted()
+        reject(new DOMException('The operation was aborted', 'AbortError'))
+      }
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
+      entered()
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    return { started, aborted, fetchMock }
+  }
+
+  it('keeps a probe alive beyond four seconds and restores a delayed models endpoint', async () => {
+    const test = fixture()
+    const accountId = await seedAccount(test, 'openai')
+    linkResponsePool(test, accountId, 'openai')
+    test.raw.prepare("UPDATE accounts SET health_status='unhealthy', consecutive_health_failures=3 WHERE id=?").run(accountId)
+    const upstream = delayedHealthResponse(10_000)
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+    const pending = consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
+    await upstream.started
+    await vi.advanceTimersByTimeAsync(4_100)
+    expect(upstream.aborted).not.toHaveBeenCalled()
+    expect(job(test, accountId).status).toBe('probing')
+    await vi.advanceTimersByTimeAsync(5_900)
+    await pending
+    expect(upstream.fetchMock).toHaveBeenCalledWith(expect.stringContaining('/v1/models'), expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) }))
+    expect(account(test, accountId)).toMatchObject({ health_status: 'healthy', consecutive_health_failures: 0, last_latency_ms: 10_000 })
+    expect(test.pool.calls.at(-1)?.body.accounts).toEqual(expect.arrayContaining([expect.objectContaining({ account_id: accountId })]))
+    test.raw.close()
+  })
+
+  it('aborts at twenty seconds, remains unhealthy, and recovers on a later successful probe', async () => {
+    const test = fixture()
+    const accountId = await seedAccount(test, 'openai')
+    linkResponsePool(test, accountId, 'openai')
+    const stalled = delayedHealthResponse(25_000)
+    await scheduleAccountHealthLifecycle(test.env, NOW)
+    const pending = consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
+    await stalled.started
+    await vi.advanceTimersByTimeAsync(19_999)
+    expect(stalled.aborted).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await pending
+    expect(stalled.aborted).toHaveBeenCalledOnce()
+    expect(account(test, accountId)).toMatchObject({ health_status: 'unhealthy', consecutive_health_failures: 1, last_health_error: 'Upstream probe timed out', last_latency_ms: 20_000, next_health_probe_at_ms: NOW + 80_000 })
+    expect(test.pool.calls.at(-1)?.body.accounts).toEqual([])
+    const retryAt = NOW + 80_000
+    vi.setSystemTime(retryAt)
+    const recovered = delayedHealthResponse(10_000)
+    await scheduleAccountHealthLifecycle(test.env, retryAt)
+    const retry = consumeAccountHealthProbe(test.queue.messages[1] as AccountHealthProbeEvent, test.env, retryAt)
+    await recovered.started
+    await vi.advanceTimersByTimeAsync(10_000)
+    await retry
+    expect(account(test, accountId)).toMatchObject({ health_status: 'healthy', consecutive_health_failures: 0 })
+    expect(test.pool.calls.at(-1)?.body.accounts).toEqual(expect.arrayContaining([expect.objectContaining({ account_id: accountId })]))
+    test.raw.close()
+  })
+
   it('classifies timeouts and exponentially backs off repeated failures', async () => {
     const test = fixture()
     const accountId = await seedAccount(test, 'gemini')
