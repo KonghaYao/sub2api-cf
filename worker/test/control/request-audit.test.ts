@@ -66,8 +66,10 @@ async function harness(): Promise<Harness> {
   })
   app.post('/api/v1/admin/widgets/rejected', (context) => context.json({ ok: false }, 422))
   app.post('/api/v1/admin/widgets/failure', () => { throw new Error('handler failure') })
+  app.post('/api/v1/admin/widgets/body', async (context) => context.json({ body: await context.req.json() }))
   app.get('/api/v1/admin/settings', (context) => context.json({ ok: true }))
   app.get('/api/v1/admin/public-summary', (context) => context.json({ ok: true }))
+  app.options('/api/v1/admin/public-summary', (context) => context.json({ ok: true }))
   app.get('/api/v1/admin/audit-logs', listAdminRequestAuditLogs)
   app.post('/api/v1/admin/audit-logs/clear', clearAdminRequestAuditLogs)
   app.get('/api/v1/admin/audit-logs/:id', getAdminRequestAuditLog)
@@ -75,10 +77,16 @@ async function harness(): Promise<Harness> {
   return { app, env, raw: database.raw }
 }
 
-function request(path: string, method = 'GET', headers: Record<string, string> = {}): Request {
+function request(
+  path: string,
+  method = 'GET',
+  headers: Record<string, string> = {},
+  body?: string,
+): Request {
   return new Request(`https://worker.example${path}`, {
     method,
     headers: { authorization: `Bearer ${TOKEN}`, ...headers },
+    body,
   })
 }
 
@@ -122,7 +130,8 @@ describe('admin request audit middleware', () => {
       'cf-connecting-ip': '198.51.100.7',
       'x-forwarded-for': '192.0.2.99',
       'user-agent': 'audit-test-agent',
-    }), undefined, subject.env)
+      'content-type': 'application/json; charset=utf-8',
+    }, JSON.stringify({ outcome: expectedStatus })), undefined, subject.env)
 
     expect(response.status).toBe(expectedStatus)
     expect(response.headers.get('x-request-id')).toBe('request-ray-123')
@@ -133,11 +142,50 @@ describe('admin request audit middleware', () => {
       route_template: path,
       request_id: 'request-ray-123', client_ip: '198.51.100.7',
       user_agent: 'audit-test-agent', status_code: expectedStatus,
-      request_body: '[not_captured]',
+      request_body: `{"outcome":${expectedStatus}}`,
     })
     expect(row.credential_masked).not.toContain(TOKEN)
     expect(row.action).toContain('POST ')
     expect(row.latency_ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('captures from a clone and leaves the original JSON body readable by the handler', async () => {
+    const subject = await harness()
+    const response = await subject.app.request(new Request(
+      'https://worker.example/api/v1/admin/widgets/body',
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ label: 'kept', password: 'must-not-appear' }),
+      },
+    ), undefined, subject.env)
+    await expect(response.json()).resolves.toEqual({
+      body: { label: 'kept', password: 'must-not-appear' },
+    })
+    expect(subject.raw.prepare(
+      'SELECT request_body FROM admin_request_audit_logs',
+    ).get()).toEqual({ request_body: '{"label":"kept","password":"[REDACTED]"}' })
+  })
+
+  it('does not clone or read the body of a route that is outside the audit allowlist', async () => {
+    const subject = await harness()
+    const input = new Request('https://worker.example/api/v1/admin/public-summary', {
+      method: 'OPTIONS',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: '{"password":"not-read"}',
+    })
+    const clone = vi.spyOn(input, 'clone')
+    const response = await subject.app.request(input, undefined, subject.env)
+    expect(response.status).toBe(200)
+    expect(clone).not.toHaveBeenCalled()
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM admin_request_audit_logs').get())
+      .toEqual({ count: 0 })
   })
 
   it('audits only explicitly sensitive GET routes and skips rejected clear requests', async () => {
@@ -193,6 +241,31 @@ describe('admin request audit middleware', () => {
     const response = await subject.app.request(request('/api/v1/admin/widgets', 'POST'), undefined, subject.env)
     expect(response.status).toBe(201)
     await expect(response.json()).resolves.toEqual({ ok: true })
+  })
+
+  it('does not rewrite a business response when body capture fails', async () => {
+    const subject = await harness()
+    const input = new Request('https://worker.example/api/v1/admin/widgets', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: '{"label":"safe"}',
+    })
+    vi.spyOn(input, 'clone').mockImplementation(() => {
+      throw new Error('clone unavailable')
+    })
+
+    const response = await subject.app.request(input, undefined, subject.env)
+    expect(response.status).toBe(201)
+    await expect(response.json()).resolves.toEqual({ ok: true })
+    expect(subject.raw.prepare(
+      'SELECT request_body, extra_json FROM admin_request_audit_logs',
+    ).get()).toEqual({
+      request_body: '[body_capture_failed]',
+      extra_json: '{"request_body_capture":"failed"}',
+    })
   })
 })
 
@@ -400,7 +473,7 @@ describe('admin request audit clear', () => {
       client_ip: '198.51.100.88',
       user_agent: 'clear-test-agent',
       status_code: 200,
-      request_body: '[not_captured]',
+      request_body: '[sensitive_body_not_captured]',
     })
     expect(JSON.parse(rows[0].extra_json)).toMatchObject({
       kind: 'clear_trace', deleted_rows: 2,
@@ -528,7 +601,10 @@ describe('admin request audit list and detail', () => {
   it('returns stable paginated rows without bodies and exposes the body only in detail', async () => {
     const subject = await harness()
     insertAudit(subject.raw, { event_key: 'event-one-0000001', created_at_ms: 2_000, request_body: '[not_captured]' })
-    const secondId = insertAudit(subject.raw, { event_key: 'event-two-0000002', created_at_ms: 2_000, actor_email: 'other@example.com' })
+    const secondId = insertAudit(subject.raw, {
+      event_key: 'event-two-0000002', created_at_ms: 2_000,
+      actor_email: 'other@example.com', request_body: '{"token":"[REDACTED]"}',
+    })
     insertAudit(subject.raw, { event_key: 'event-three-00003', created_at_ms: 1_000 })
 
     const list = await subject.app.request(request('/api/v1/admin/audit-logs?page=1&page_size=2'), undefined, subject.env)
@@ -540,7 +616,9 @@ describe('admin request audit list and detail', () => {
 
     const detail = await subject.app.request(request(`/api/v1/admin/audit-logs/${secondId}`), undefined, subject.env)
     expect(detail.status).toBe(200)
-    await expect(data(detail)).resolves.toMatchObject({ id: secondId, request_body: '[not_captured]' })
+    await expect(data(detail)).resolves.toMatchObject({
+      id: secondId, request_body: '{"token":"[REDACTED]"}',
+    })
     const missing = await subject.app.request(request('/api/v1/admin/audit-logs/99999'), undefined, subject.env)
     expect(missing.status).toBe(404)
   })

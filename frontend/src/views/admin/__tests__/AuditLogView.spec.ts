@@ -77,7 +77,7 @@ describe('admin request audit view', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     list.mockResolvedValue({ items: [auditLog], total: 21, page: 1, page_size: 20, pages: 2 })
-    get.mockResolvedValue({ ...auditLog, request_body: '[not_captured]' })
+    get.mockResolvedValue({ ...auditLog, request_body: '{"token":"[REDACTED]"}' })
     clear.mockResolvedValue({ deleted: 3 })
     getStatus.mockResolvedValue({ enabled: true })
   })
@@ -100,6 +100,7 @@ describe('admin request audit view', () => {
     await flushPromises()
     expect(get).toHaveBeenCalledWith(42)
     expect(wrapper.find('[data-test="dialog"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('[REDACTED]')
     expect(wrapper.text()).toContain('admin.audit.clearAll')
     expect(wrapper.find('.btn-danger').exists()).toBe(true)
   })

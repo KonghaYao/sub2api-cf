@@ -109,7 +109,14 @@ log is available at `GET /api/v1/admin/audit-logs` and
 `GET /api/v1/admin/audit-logs/:id`. Migration 0076 stores event-time actor,
 authentication, route, trusted Cloudflare client IP, response status, latency,
 and shared request-ID snapshots without fabricating HTTP metadata for the
-domain stream. Request bodies remain explicitly `[not_captured]`. The retained
+domain stream. Audited administrator mutations clone JSON bodies before the
+handler, recursively replace normalized secret fields with fixed `[REDACTED]`
+values, reject raw bodies above 256 KiB, and store at most 16 KiB as valid JSON
+with an explicit truncation marker. Credential/account/OAuth/TOTP/passkey and
+payment-secret routes never capture a body; empty, invalid, non-JSON, oversized,
+and capture-failure cases use distinct placeholders. Headers, query strings,
+multipart, form and binary bodies are never projected into `request_body` or
+`extra_json`. The retained
 clear action requires both audit-read and operations-write permission, a normal
 user-access administrator session, a fresh TOTP proof and an idempotency key;
 its D1 transaction retains one truthful clear trace with the deleted row count.

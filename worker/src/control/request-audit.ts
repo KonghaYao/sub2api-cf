@@ -23,6 +23,10 @@ import {
   findControlIdempotency,
   parseIdempotentResponse,
 } from './idempotency'
+import {
+  captureAdminRequestBody,
+  REQUEST_BODY_PLACEHOLDERS,
+} from './request-audit-body'
 
 export type RequestAuditBindings = {
   Bindings: Env
@@ -60,7 +64,7 @@ const SENSITIVE_GET_ROUTES = [
   /^\/api\/v1\/admin\/api-keys\/[^/]+$/,
   /^\/api\/v1\/admin\/rbac\/users\/[^/]+\/roles$/,
 ]
-const REQUEST_BODY_PLACEHOLDER = '[not_captured]'
+const REQUEST_BODY_PLACEHOLDER = REQUEST_BODY_PLACEHOLDERS.notCaptured
 const CLEAR_IDEMPOTENCY_SCOPE = 'admin.audit-logs.clear.v1'
 const CLEAR_IDEMPOTENCY_RESOURCE = 'admin_request_audit_clear'
 const CLEAR_IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1_000
@@ -91,6 +95,10 @@ export const auditAdminRequest: MiddlewareHandler<RequestAuditBindings> = async 
     console.error('admin request audit actor resolution failed', error)
   }
 
+  const bodyCapture = actor !== undefined && AUDITED_MUTATIONS.has(method)
+    ? await captureAdminRequestBody(context.req.raw, url.pathname)
+    : { body: REQUEST_BODY_PLACEHOLDER, kind: 'not_applicable' }
+
   let handlerError: unknown
   try {
     await next()
@@ -119,8 +127,8 @@ export const auditAdminRequest: MiddlewareHandler<RequestAuditBindings> = async 
       bounded(url.pathname, 2_048), routeTemplate, bounded(requestId, 128),
       trustedClientIp(context.req.raw), bounded(context.req.header('user-agent') ?? '', 1_024),
       statusCode, Math.min(Math.max(0, completedAt - startedAt), 86_400_000),
-      REQUEST_BODY_PLACEHOLDER,
-      JSON.stringify({ request_body_capture: 'disabled' }),
+      bodyCapture.body,
+      JSON.stringify({ request_body_capture: bodyCapture.kind }),
     ).run()
   } catch (error) {
     console.error('admin request audit write failed', error)
@@ -269,7 +277,7 @@ export async function clearAdminRequestAuditLogs(
           trustedClientIp(context.req.raw),
           bounded(context.req.header('user-agent') ?? '', 1_024),
           Math.min(Math.max(0, completedAt - startedAt), 86_400_000),
-          REQUEST_BODY_PLACEHOLDER,
+          REQUEST_BODY_PLACEHOLDERS.sensitive,
           idempotency.key_hash,
           idempotency.scope,
           idempotency.key_hash,

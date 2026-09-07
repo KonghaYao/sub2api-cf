@@ -35,9 +35,12 @@ describe('admin request audit Cloudflare Worker contract', () => {
   })
 
   it('uses the numeric detail route', async () => {
-    get.mockResolvedValueOnce({ data: { id: 42 } })
+    get.mockResolvedValueOnce({ data: { id: 42, request_body: '{"token":"[REDACTED]"}' } })
     const api = await import('@/api/admin/audit')
-    await api.get(42)
+    await expect(api.get(42)).resolves.toEqual({
+      id: 42,
+      request_body: '{"token":"[REDACTED]"}',
+    })
     expect(get).toHaveBeenCalledWith('/admin/audit-logs/42')
   })
 
