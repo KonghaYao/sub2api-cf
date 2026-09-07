@@ -1,0 +1,56 @@
+import { requestRiskUnban } from '../risk/ban-state'
+import type { Context } from 'hono'
+import type { Env } from '../env'
+import { controlSuccess,controlError,readJsonObject,requireExpectedControlVersion } from './http'
+import { GatewayError,asGatewayError } from '../gateway/errors'
+import { configView,readRiskConfig,parseRiskPatch,riskKeys,keyStatus,newRiskKey,invalid } from '../risk/config'
+import { callModeration,transientTestKey,extractModerationContent } from '../risk/moderator'
+export type RiskContext=Context<{Bindings:Env}>
+async function reply(fn:()=>Promise<unknown>){try{return controlSuccess(await fn())}catch(error){return controlError(asGatewayError(error))}}
+export const getRiskConfig=(c:RiskContext)=>reply(()=>configView(c.env))
+export const updateRiskConfig=(c:RiskContext)=>reply(async()=>{
+ const body=await readJsonObject(c.req.raw,2*1024*1024),current=await readRiskConfig(c.env),expected=requireExpectedControlVersion(c.req.raw,{...body,expected_control_version:body.expected_control_version??body.control_version})
+ if(current.control_version!==expected)throw new GatewayError(412,'control_version_conflict','Risk configuration changed; reload first')
+ const next=await parseRiskPatch(c.env,body,current),old=await riskKeys(c.env),clear=body.clear_api_key===true||body.api_keys_mode==='replace'
+ if(body.clear_api_key!==undefined&&typeof body.clear_api_key!=='boolean')invalid('clear_api_key must be a boolean')
+ if(body.api_keys_mode!==undefined&&!['append','replace'].includes(String(body.api_keys_mode)))invalid('Invalid API key update mode')
+ if(body.delete_api_key_hashes!==undefined&&(!Array.isArray(body.delete_api_key_hashes)||body.delete_api_key_hashes.some(v=>typeof v!=='string'||!/^[a-f0-9]{64}$/.test(v))))invalid('Invalid API key hashes')
+ const deleted=new Set(Array.isArray(body.delete_api_key_hashes)?body.delete_api_key_hashes as string[]:[]),raw=body.api_keys??(body.api_key?[body.api_key]:[])
+ if(!Array.isArray(raw)||raw.length>8||raw.some(key=>typeof key!=='string'))invalid('At most eight moderation keys are supported')
+ const additions=await Promise.all(raw.filter(key=>String(key).trim()).map(key=>newRiskKey(c.env,String(key)))),remaining=new Set((clear?[]:old).filter(key=>!deleted.has(key.key_hash)).map(key=>key.key_hash));for(const key of additions)remaining.add(key.key_hash);if(remaining.size>8)invalid('At most eight moderation keys are supported')
+ const token=crypto.randomUUID(),now=Date.now(),serialized={...next} as Record<string,unknown>;delete serialized.control_version
+ if(new TextEncoder().encode(JSON.stringify(serialized)).byteLength>750000)invalid('Risk configuration exceeds the storage size limit')
+ const condition="EXISTS(SELECT 1 FROM risk_settings WHERE id='global' AND mutation_token=?)",statements:D1PreparedStatement[]=[c.env.DB.prepare(`INSERT INTO risk_settings(id,config_json,control_version,updated_at_ms,mutation_token) SELECT 'global',?,1,?,? WHERE ?=0 OR EXISTS(SELECT 1 FROM risk_settings WHERE id='global') ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json,control_version=risk_settings.control_version+1,updated_at_ms=excluded.updated_at_ms,mutation_token=excluded.mutation_token WHERE risk_settings.control_version=?`).bind(JSON.stringify(serialized),now,token,expected,expected)]
+ if(clear)statements.push(c.env.DB.prepare('DELETE FROM risk_api_keys WHERE '+condition).bind(token));else if(deleted.size)statements.push(c.env.DB.prepare('DELETE FROM risk_api_keys WHERE key_hash IN(SELECT value FROM json_each(?)) AND '+condition).bind(JSON.stringify([...deleted]),token))
+ for(const key of additions)statements.push(c.env.DB.prepare(`INSERT INTO risk_api_keys(key_hash,masked,nonce_b64,ciphertext_b64,created_at_ms) SELECT ?,?,?,?,? WHERE ${condition} ON CONFLICT(key_hash) DO NOTHING`).bind(key.key_hash,key.masked,key.nonce_b64,key.ciphertext_b64,now,token))
+ await c.env.DB.batch(statements)
+ const applied=await c.env.DB.prepare("SELECT mutation_token FROM risk_settings WHERE id='global'").first<{mutation_token:string}>();if(applied?.mutation_token!==token)throw new GatewayError(412,'control_version_conflict','Risk configuration changed; reload first')
+ return configView(c.env)
+})
+export const getRiskStatus=(c:RiskContext)=>reply(async()=>{
+ const config=await readRiskConfig(c.env),keys=await riskKeys(c.env),now=Date.now(),runtime=await c.env.DB.prepare("SELECT * FROM risk_runtime WHERE id='global'").first<Record<string,number>>(),jobs=(await c.env.DB.prepare("SELECT status,api_key_hash,json_extract(context_json,'$.moderation_mode') AS mode,COUNT(*) AS count FROM risk_jobs WHERE status='pending' OR status='processing' AND lease_expires_at_ms>? GROUP BY status,api_key_hash,mode").bind(now).all<{status:string;api_key_hash:string;mode:string;count:number}>()).results
+ const active=jobs.filter(j=>j.status==='processing').reduce((n,j)=>n+j.count,0),queued=jobs.filter(j=>j.status==='pending').reduce((n,j)=>n+j.count,0),hashes=await c.env.DB.prepare('SELECT COUNT(*) AS count FROM risk_hashes WHERE expires_at_ms>?').bind(now).first<{count:number}>(),risk=(await c.env.DB.prepare("SELECT json_extract(gateway_json,'$.risk_control_enabled') AS enabled FROM system_settings WHERE id='global'").first<{enabled:number}>())?.enabled===1
+ return {...runtime,enabled:config.enabled,risk_control_enabled:risk,mode:config.mode,worker_count:config.worker_count,max_workers:32,active_workers:active,idle_workers:Math.max(0,config.worker_count-active),queue_size:config.queue_size,queue_length:queued,queue_usage_percent:queued/config.queue_size*100,pre_block_active:jobs.filter(j=>j.status==='processing'&&j.mode==='pre_block').reduce((n,j)=>n+j.count,0),pre_block_avg_latency_ms:runtime?.pre_block_checked?runtime.pre_block_latency_ms/runtime.pre_block_checked:0,pre_block_api_key_active:jobs.filter(j=>j.status==='processing'&&j.api_key_hash).reduce((n,j)=>n+j.count,0),pre_block_api_key_available_count:keys.filter(k=>k.frozen_until_ms<=now).length,pre_block_api_key_total_calls:keys.reduce((n,k)=>n+k.total,0),pre_block_api_key_loads:keys.map((k,index)=>({...keyStatus(k,index),active:jobs.filter(j=>j.status==='processing'&&j.api_key_hash===k.key_hash).reduce((n,j)=>n+j.count,0),total:k.total,success:k.success_count,errors:k.failure_count,avg_latency_ms:k.total?k.total_latency_ms/k.total:0})),api_key_statuses:keys.map(keyStatus),flagged_hash_count:hashes?.count??0,last_cleanup_at:runtime?.last_cleanup_at_ms?new Date(runtime.last_cleanup_at_ms).toISOString():undefined,source:'durable_risk_jobs'}
+})
+export const testRiskAPIKeys=(c:RiskContext)=>reply(async()=>{
+ const body=await readJsonObject(c.req.raw,13*1024*1024),current=await readRiskConfig(c.env),patch=Object.fromEntries(Object.entries(body).filter(([key])=>['base_url','model','timeout_ms','proxy_id'].includes(key))),config=await parseRiskPatch(c.env,patch,current)
+ if(body.api_keys!==undefined&&(!Array.isArray(body.api_keys)||body.api_keys.length>8||body.api_keys.some(key=>typeof key!=='string'||!key.trim())))invalid('Use up to eight nonempty API keys')
+ if(body.images!==undefined&&(!Array.isArray(body.images)||body.images.length>1||body.images.some(image=>typeof image!=='string'||image.length>12*1024*1024)))invalid('Test supports at most one image of 12 MiB')
+ const content=extractModerationContent({messages:[{role:'user',content:[{type:'text',text:typeof body.prompt==='string'?body.prompt:'Hello'},...(Array.isArray(body.images)?body.images.map(url=>({type:'image_url',image_url:{url}})):[])]}]})
+ if(Array.isArray(body.images)&&content.images.length!==body.images.length)invalid('Use an HTTPS image URL or a supported base64 image')
+ const keys=Array.isArray(body.api_keys)&&body.api_keys.length?await Promise.all(body.api_keys.map(key=>transientTestKey(c.env,key as string))):await riskKeys(c.env),items:unknown[]=[];let audit_result:unknown
+ for(const key of keys){const tested=await callModeration(c.env,{...config,retry_count:0},content,{keys:[key],test:true,signal:c.req.raw.signal});items.push(...tested.statuses.map(status=>({...status,index:items.length,configured:!Array.isArray(body.api_keys)||body.api_keys.length===0})));if(!tested.result.error)audit_result={...tested.result,composite_score:tested.result.highest_score,thresholds:config.thresholds}}
+ return {items,audit_result,image_count:content.images.length}
+})
+export const listRiskLogs=(c:RiskContext)=>reply(async()=>{
+ const q=c.req.query(),where:string[]=['1=1'],args:unknown[]=[],page=Number(q.page??1),size=Number(q.page_size??20);if(!Number.isSafeInteger(page)||page<1||page>100000||!Number.isSafeInteger(size)||size<1||size>100)invalid('Invalid pagination')
+ if(q.group_id){where.push('l.group_id=?');args.push(q.group_id)}if(q.endpoint){where.push('l.endpoint=?');args.push(q.endpoint)}
+ if(q.result){const mapped:Record<string,string>={hit:'l.flagged=1',flagged:'l.flagged=1',pass:"l.flagged=0 AND l.error=''",non_hit:"l.flagged=0 AND l.error=''",allowed:"l.flagged=0 AND l.error=''",error:"l.error<>''",blocked:"l.action IN('block','keyword_block','hash_block','cyber_policy')",auto_banned:'l.auto_banned=1'};if(!mapped[q.result])invalid('Invalid result filter');where.push(mapped[q.result])}
+ for(const [key,operator]of [['from','>='],['to','<=']] as const)if(q[key]){const value=Date.parse(q[key]);if(!Number.isFinite(value))invalid('Invalid date filter');where.push('l.created_at_ms'+operator+'?');args.push(value+(key==='to'&&/^\d{4}-\d{2}-\d{2}$/.test(q[key])?86399999:0))}
+ if(q.search){where.push("instr(lower(l.request_id||' '||COALESCE(u.email,'')||' '||l.model||' '||l.input_excerpt),lower(?))>0");args.push(q.search)}
+ const join='FROM risk_logs l LEFT JOIN users u ON u.id=l.user_id LEFT JOIN api_keys k ON k.id=l.api_key_id LEFT JOIN "groups" g ON g.id=l.group_id',clause=where.join(' AND '),rows=await c.env.DB.prepare(`SELECT l.*,COALESCE(u.email,'') AS user_email,COALESCE(u.status,'') AS user_status,COALESCE(k.name,'') AS api_key_name,COALESCE(g.name,'') AS group_name ${join} WHERE ${clause} ORDER BY l.created_at_ms DESC,l.id DESC LIMIT ? OFFSET ?`).bind(...args,size,(page-1)*size).all<Record<string,any>>(),count=await c.env.DB.prepare(`SELECT COUNT(*) AS total ${join} WHERE ${clause}`).bind(...args).first<{total:number}>()
+ return {items:rows.results.map(row=>({...row,flagged:!!row.flagged,auto_banned:!!row.auto_banned,email_sent:!!row.email_sent,category_scores:JSON.parse(row.category_scores_json),threshold_snapshot:JSON.parse(row.threshold_snapshot_json),created_at:new Date(row.created_at_ms).toISOString()})),total:count?.total??0,page,page_size:size,pages:Math.ceil((count?.total??0)/size)}
+})
+export const unbanRiskUser=(c:RiskContext)=>reply(()=>requestRiskUnban(c.env,c.req.param('user_id')??''))
+export const deleteRiskHash=(c:RiskContext)=>reply(async()=>{const body=await readJsonObject(c.req.raw);if(typeof body.input_hash!=='string'||!/^[a-f0-9]{64}$/.test(body.input_hash))invalid('Invalid input hash');const result=await c.env.DB.prepare('DELETE FROM risk_hashes WHERE input_hash=?').bind(body.input_hash).run();return {input_hash:body.input_hash,deleted:!!result.meta.changes}})
+export const clearRiskHashes=(c:RiskContext)=>reply(async()=>{const result=await c.env.DB.prepare('DELETE FROM risk_hashes').run();return {deleted:result.meta.changes??0}})

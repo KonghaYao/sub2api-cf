@@ -319,11 +319,17 @@ describe('Worker-native email challenges', () => {
       password: 'registered-correct-horse-password',
       verify_code: test.events[0].payload.token,
     })
-    expect(interrupted.status).toBe(503)
+    expect(interrupted.status).toBe(201)
+    expect(stateCalls).toBe(0)
+    expect(test.raw.prepare(
+      `SELECT status, attempts FROM subscription_state_sync`,
+    ).get()).toEqual({ status: 'pending', attempts: 0 })
+
+    // A subscription DO outage is retried without failing an already committed signup.
+    expect(await recoverPendingSubscriptionState(test.env)).toBe(0)
     expect(test.raw.prepare(
       `SELECT status, attempts FROM subscription_state_sync`,
     ).get()).toEqual({ status: 'pending', attempts: 1 })
-
     await recoverPendingSubscriptionState(test.env)
     expect(test.raw.prepare(
       `SELECT status, attempts FROM subscription_state_sync`,

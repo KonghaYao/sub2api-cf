@@ -4939,7 +4939,7 @@
                     {{ t("admin.settings.scheduling.allowUngroupedKeyHint") }}
                   </p>
                 </div>
-                <Toggle v-model="form.allow_ungrouped_key_scheduling" />
+                <Toggle v-model="form.allow_ungrouped_key_scheduling" :title="cloudflareWorkerSettings ? localText('开启后使用独立的未分组目录，需在专用组配置模型与价格；仅调度未分配普通组的账号。', 'Uses a separate ungrouped catalog with explicitly configured models and prices. Only accounts without ordinary group assignments are eligible.') : undefined" />
               </div>
 
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
@@ -11101,6 +11101,9 @@ async function saveSettings() {
       const pageOptions = parseTablePageSizeOptionsInput(tablePageSizeOptionsInput.value);
       if (!pageOptions) throw new Error("Invalid page size options");
       if (!await saveWebSearchConfig()) return;
+      form.codex_cli_only_blacklist = serializeCodexRowsToJSON(codexBlacklistRows.value);
+      form.codex_cli_only_whitelist = serializeCodexRowsToJSON(codexWhitelistRows.value);
+      form.codex_cli_only_engine_fingerprint_signals = serializeFingerprintRowsToJSON(codexFingerprintRows.value);
       form.claude_oauth_system_prompt_blocks = serializeClaudeOAuthSystemPromptBlocksToJSON(claudeOAuthSystemPromptBlocks.value);
       form.forwarded_client_ip_headers = normalizeForwardedClientIpHeaders(form.forwarded_client_ip_headers);
       const updated = await adminAPI.settings.updateSettings({

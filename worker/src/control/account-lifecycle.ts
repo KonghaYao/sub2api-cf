@@ -1,3 +1,4 @@
+import { effectiveProviderAccount } from './provider-runtime'
 import { accountFetcher } from '../proxy/account-fetch'
 import type { Env, PlatformEvent } from '../env'
 import { decryptCredential, sha256Hex } from '../gateway/crypto'
@@ -537,13 +538,13 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
       credentialAad(env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
     plan = buildProviderHealthRequest({
-      account: {
+      account: await effectiveProviderAccount(env, {
         platform: account.platform,
         protocol: account.protocol,
         auth_scheme: account.auth_scheme,
         base_url: account.base_url,
         provider_config: config,
-      },
+      }),
       credential,
     })
   } catch {
@@ -564,6 +565,7 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
     const response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
       method: plan.method,
       headers: plan.headers,
+      body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual',
       cache: 'no-store',
       signal: controller.signal,

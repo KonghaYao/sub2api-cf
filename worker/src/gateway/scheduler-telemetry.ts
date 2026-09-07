@@ -47,7 +47,7 @@ export function canMovePreviousResponse(body:unknown):boolean {
 
 export interface UpstreamQuotaSnapshot { headroom: number; reset_at_ms: number; observed_at_ms:number }
 /** Read real provider rate-limit windows; never infer a quota from customer balance. */
-export function upstreamQuotaSnapshot(headers:Headers,now=Date.now()):UpstreamQuotaSnapshot|null {
+export function upstreamQuotaSnapshot(headers:Headers,now=Date.now(),maxWindowMs=8*3600000,capLongReset=false):UpstreamQuotaSnapshot|null {
  const windows:Array<{headroom:number;reset_at_ms:number}>=[]
  for(const dimension of ['tokens','requests']){
   const limitRaw=headers.get(`x-ratelimit-limit-${dimension}`),remainingRaw=headers.get(`x-ratelimit-remaining-${dimension}`),reset=headers.get(`x-ratelimit-reset-${dimension}`)
@@ -61,7 +61,8 @@ export function upstreamQuotaSnapshot(headers:Headers,now=Date.now()):UpstreamQu
   } else if(/^\d+(?:\.\d+)?$/.test(reset)) {
    const n=Number(reset);resetAt=n>1000000000?n*1000:now+n*1000
   } else resetAt=Date.parse(reset)
-  if(!Number.isSafeInteger(resetAt)||resetAt<=now||resetAt-now>8*3600000)continue
+  if(capLongReset && Number.isSafeInteger(resetAt) && resetAt>now+maxWindowMs)resetAt=now+maxWindowMs
+  if(!Number.isSafeInteger(resetAt)||resetAt<=now||resetAt-now>maxWindowMs)continue
   windows.push({headroom:remaining/limit,reset_at_ms:resetAt})
  }
  if(windows.length===0)return null

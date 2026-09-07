@@ -1,3 +1,7 @@
+import { antigravityDefaults, parseAntigravitySettings } from '../gateway/providers/antigravity'
+import { grokDefaults, parseGrokSettings } from './grok-settings'
+import { accountSchedulingDefaults, parseAccountSchedulingThresholds } from './account-scheduling-settings'
+import { codexCLIOnlyDefaults, parseCodexCLIOnlyPatch } from './codex-cli-policy'
 import { providerForwardingDefaults, parseProviderForwardingSettings, normalizeProviderForwardingSettings } from './provider-forwarding-settings'
 import { securityDefaults, parseSecuritySettings, normalizeSecuritySettings } from './gateway-security-settings'
 import { fastPolicyDefaults, normalizeOpenAIFastPolicy } from './openai-fast-policy'
@@ -7,7 +11,11 @@ import type { Env } from '../env'
 import { GatewayError } from '../gateway/errors'
 
 export const gatewayDefaults = {
+  ...antigravityDefaults,
+  ...grokDefaults,
+  ...codexCLIOnlyDefaults,
   ...schedulerDefaults,
+  ...accountSchedulingDefaults,
   ...providerForwardingDefaults,
   ...securityDefaults,
   ...fastPolicyDefaults,
@@ -30,6 +38,10 @@ export function parseGatewaySettingsPatch(value: unknown, allowReadonly = false)
   const result: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(value)) {
     if (!(key in gatewayDefaults)) throw invalid(key)
+    if (key in antigravityDefaults) { Object.assign(result, parseAntigravitySettings({ [key]: item })); continue }
+    if (key in grokDefaults) { Object.assign(result, parseGrokSettings({[key]:item})); continue }
+    if (key in codexCLIOnlyDefaults) { Object.assign(result, parseCodexCLIOnlyPatch({ [key]: item })); continue }
+    if (key === 'account_scheduling_thresholds') { result[key] = parseAccountSchedulingThresholds(item); continue }
     if (key === 'openai_fast_policy_settings') { result[key] = normalizeOpenAIFastPolicy(item); continue }
     if (key in securityDefaults) { Object.assign(result, parseSecuritySettings({ [key]: item })); continue }
     if (key in providerForwardingDefaults) { Object.assign(result, parseProviderForwardingSettings({ [key]: item }, allowReadonly)); continue }

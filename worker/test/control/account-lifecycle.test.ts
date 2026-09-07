@@ -9,7 +9,8 @@ import type { Env, PlatformEvent } from '../../src/env'
 import { encryptCredential } from '../../src/gateway/crypto'
 import { consumeEvents } from '../../src/gateway/queue'
 import { credentialAad } from '../../src/gateway/repository'
-import type { ProviderPlatform } from '../../src/gateway/providers'
+import type { ProviderPlatform as AllProviderPlatforms } from '../../src/gateway/providers'
+type ProviderPlatform = Exclude<AllProviderPlatforms, 'antigravity'>
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const MASTER_KEY = 'lifecycle-master-key-material-32-bytes'
@@ -137,6 +138,7 @@ const providers = {
   gemini: {
     protocol: 'gemini', auth: 'x-goog-api-key', base: 'https://gemini.lifecycle.test', config: {},
   },
+  grok: { protocol:'openai', auth:'bearer', base:'https://grok.lifecycle.test/v1', config:{} },
   codex: {
     protocol: 'codex', auth: 'bearer', base: 'https://codex.lifecycle.test',
     config: { account_id: 'workspace-lifecycle' },
@@ -358,7 +360,7 @@ describe('scheduled account health lifecycle', () => {
     })
     expect(test.raw.prepare(
       `SELECT COUNT(*) AS total FROM account_health_probes WHERE status = 'completed'`,
-    ).get()).toEqual({ total: 4 })
+    ).get()).toEqual({ total: Object.keys(providers).length })
     expect(fetchMock.mock.calls.map(([url, init]) => ({
       url: String(url), headers: Object.fromEntries(new Headers((init as RequestInit).headers)),
       signal: (init as RequestInit).signal,

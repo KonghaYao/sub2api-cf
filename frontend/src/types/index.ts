@@ -1208,6 +1208,9 @@ export interface Account {
     tier: { status: 'unknown' | 'unsupported'; value: unknown | null }
     privacy: { status: 'unknown' | 'unsupported'; value: unknown | null }
   }
+  /** Worker provider connection metadata; credentials remain redacted. */
+  base_url?: string
+  provider_config?: Record<string, unknown>
   /** Worker account mutation version used by guarded bulk/probe operations. */
   control_version?: number
   /** Worker-only, per-model capabilities retained for synthetic probes. */

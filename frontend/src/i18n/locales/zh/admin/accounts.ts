@@ -1,5 +1,8 @@
 export default {
     accounts: {
+      importedOAuthHint: '请导入已经取得的 Access Token。当前部署未提供此平台的 OAuth 授权和自动刷新；令牌到期后请重新导入。',
+      importedOAuthToken: '导入 Access Token',
+      importedOAuthRequired: '请输入 Access Token；Antigravity 还需要项目 ID。',
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
       createAccount: '添加账号',

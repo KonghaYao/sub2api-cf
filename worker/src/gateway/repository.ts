@@ -1,3 +1,4 @@
+import { effectiveProviderAccount } from '../control/provider-runtime'
 import { normalizeSecuritySettings, securityDefaults } from '../control/gateway-security-settings'
 import type { Env } from '../env'
 import { resolveCompositeRoute } from '../control/composite-routes'
@@ -439,11 +440,11 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
              AND (
                (m.endpoint = 'chat_completions' AND (
                  am.chat_completions = 1 OR
-                 (a.platform IN ('openai', 'codex') AND am.responses = 1)
+                 (a.platform IN ('openai', 'codex', 'grok', 'antigravity') AND am.responses = 1)
                )) OR
                (m.endpoint = 'responses' AND (
                  am.responses = 1 OR
-                 (a.platform = 'openai' AND am.chat_completions = 1)
+                 (a.platform IN ('openai', 'grok', 'antigravity') AND am.chat_completions = 1)
                )) OR
                (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
                (m.embeddings = 1 AND am.embeddings = 1) OR
@@ -1274,15 +1275,19 @@ function externalAliasCandidatesStatement(
 ): D1PreparedStatement {
   const cte = externalAliasCte(groupId, publicName, modelEndpoint)
   const platformPredicate = platformConstraint === 'openai'
-    ? "AND a.platform = 'openai'"
+    ? "AND a.platform IN ('openai', 'grok', 'antigravity')"
     : platformConstraint === 'openai_or_codex'
-      ? "AND a.platform IN ('openai', 'codex')"
+      ? "AND a.platform IN ('openai', 'codex', 'grok', 'antigravity')"
       : ''
   return env.DB.prepare(
     `${cte.sql}
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
+            CASE WHEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.credential_ref') = a.credential_ref
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.base_url') = a.base_url
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.platform') = a.platform
+                 THEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe') END AS upstream_billing_probe_json,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1694,9 +1699,9 @@ function accountCandidatesStatement(
   compositePlatform?: string | null,
 ): D1PreparedStatement {
   const platformPredicate = platformConstraint === 'openai'
-    ? "AND a.platform = 'openai'"
+    ? "AND a.platform IN ('openai', 'grok', 'antigravity')"
     : platformConstraint === 'openai_or_codex'
-      ? "AND a.platform IN ('openai', 'codex')"
+      ? "AND a.platform IN ('openai', 'codex', 'grok', 'antigravity')"
       : ''
   const modelCapability = modelEndpoint === 'embeddings'
     ? 'm.embeddings = 1'
@@ -1725,6 +1730,10 @@ function accountCandidatesStatement(
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
+            CASE WHEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.credential_ref') = a.credential_ref
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.base_url') = a.base_url
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.platform') = a.platform
+                 THEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe') END AS upstream_billing_probe_json,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1760,6 +1769,8 @@ export async function getAccountCredential(
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
             json_extract(a.ui_config_json, '$.proxy_id') AS proxy_id,
+            json_extract(a.ui_config_json, '$.extra.codex_cli_only') AS codex_cli_only,
+            json_extract(a.ui_config_json, '$.extra.codex_cli_only_allow_app_server') AS codex_cli_only_allow_app_server,
             a.image_adapter, a.credential_kind,
             a.provider_config_json,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
@@ -1771,7 +1782,7 @@ export async function getAccountCredential(
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND ${capabilityColumn} = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
+        AND ${capabilityColumn} = 1 AND g.enabled = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
         AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL
       LIMIT 1`,
@@ -1781,7 +1792,7 @@ export async function getAccountCredential(
   if (row === null) {
     throw new GatewayError(503, 'credential_unavailable', 'Upstream account credential is unavailable', 'server_error')
   }
-  return parseAccountCredential(row)
+  return effectiveProviderAccount(env, parseAccountCredential(row))
 }
 
 export function credentialAad(
@@ -1922,8 +1933,8 @@ function parseProviderAccountProjection(row: ProviderAccountProjection): {
 } {
   if (!isProviderPlatform(row.platform)) return invalidProviderAccount()
   const expected = row.platform
-  const valid = row.protocol === expected && (
-    (expected === 'openai' && row.auth_scheme === 'bearer') ||
+  const valid = row.protocol === (expected === 'grok' ? 'openai' : expected === 'antigravity' ? 'gemini' : expected) && (
+    ((expected === 'openai' || expected === 'grok' || expected === 'antigravity') && row.auth_scheme === 'bearer') ||
     (expected === 'anthropic' && row.auth_scheme === 'x-api-key') ||
     (expected === 'gemini' && row.auth_scheme === 'x-goog-api-key') ||
     (expected === 'codex' && row.auth_scheme === 'bearer')

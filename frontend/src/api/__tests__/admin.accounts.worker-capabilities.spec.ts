@@ -59,7 +59,7 @@ describe('admin accounts Worker transport capabilities', () => {
     })
   })
 
-  it.each(['openai', 'anthropic', 'gemini', 'codex'])(
+  it.each(['openai', 'anthropic', 'gemini', 'codex', 'grok', 'antigravity'])(
     'forwards the supported %s Worker platform filter',
     async (platform) => {
       get.mockResolvedValueOnce({ data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 } })
@@ -81,6 +81,7 @@ describe('admin accounts Worker transport capabilities', () => {
     ['anthropic', 'anthropic', 'x-api-key'],
     ['gemini', 'gemini', 'x-goog-api-key'],
     ['codex', 'codex', 'bearer'],
+    ['antigravity', 'gemini', 'bearer'],
   ] as const)(
     'adapts the %s Worker account tuple without losing provider metadata',
     async (platform, protocol, authScheme) => {

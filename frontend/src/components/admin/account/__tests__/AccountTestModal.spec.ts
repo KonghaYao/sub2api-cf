@@ -250,4 +250,19 @@ describe('AccountTestModal', () => {
       mode: 'compact'
     })
   })
+  it('loads live Antigravity models and sends the selected model to the real account test route', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gemini-live', display_name: 'Live model' }])
+    const wrapper = mountModal({ id: 'antigravity-worker', name: 'Imported OAuth', platform: 'antigravity', type: 'oauth', status: 'active' })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(getAvailableModels).toHaveBeenCalledWith('antigravity-worker')
+    global.fetch = vi.fn().mockResolvedValue(createStreamResponse(['data: {"type":"content","text":"Native Gemini result"}\n', 'data: {"type":"test_complete","success":true}\n'])) as any
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect(String((global.fetch as any).mock.calls[0][0])).toContain('/admin/accounts/antigravity-worker/test')
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe('gemini-live')
+    expect(wrapper.text()).toContain('Native Gemini result')
+    wrapper.unmount()
+  })
+
 })

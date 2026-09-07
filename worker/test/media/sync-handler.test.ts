@@ -124,6 +124,18 @@ function configureCompositeOpenAiQuota(test: Awaited<ReturnType<typeof fixture>>
 }
 
 describe('synchronous image handler', () => {
+  it('enforces Codex OAuth CLI-only on images before preparing any provider request',async()=>{
+    const test=await fixture('codex')
+    test.raw.exec(`UPDATE accounts SET ui_config_json='{"extra":{"codex_cli_only":true}}' WHERE id='account-1'`)
+    const response=await app().request('/v1/images/generations',{method:'POST',headers:{authorization:`Bearer ${RAW_KEY}`,'content-type':'application/json'},body:JSON.stringify({prompt:'draw a square',size:'1024x1024'})},test.env as never)
+    expect(response.status,await response.clone().text()).toBe(403)
+    expect(await response.text()).toContain('codex_cli_only')
+    expect(test.upstreamFetch).not.toHaveBeenCalled()
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.cancel).toHaveBeenCalled()
+    test.raw.close()
+  })
+
   it.each(['/v1/images/generations', '/images/generations'])('serves %s through the image account pool', async (path) => {
     const test = await fixture()
     const response = await app().request(path, {

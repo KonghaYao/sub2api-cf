@@ -14,11 +14,30 @@ export default defineConfig(async () => {
           serviceBindings: { EMAIL_DELIVERY: emailDeliveryFixture },
           outboundService: async (request) => {
             const url = new URL(request.url)
+            if (url.origin === 'https://chatgpt.com' && request.headers.get('authorization') === 'Bearer official-quota-local-fixture') {
+              if (url.pathname === '/backend-api/wham/usage') return Response.json({rate_limit:{primary_window:{used_percent:85,limit_window_seconds:18000,reset_at:Math.floor(Date.now()/1000)+3600}}})
+              if (url.pathname === '/backend-api/codex/responses') return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'quota-fixture',status:'completed',output:[],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+              return Response.json({error:'unexpected quota fixture path'},{status:502})
+            }
             if (
               url.origin !== 'https://upstream.e2e.invalid' &&
               url.origin !== 'https://upstream-fallback.e2e.invalid'
             ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
+            }
+            if (url.pathname.startsWith('/v1internal:')) {
+              const body = await request.json() as any
+              if (request.method !== 'POST' || request.headers.get('authorization') !== 'Bearer antigravity-local-fixture' || body.project !== 'antigravity-project') return Response.json({error:'invalid Antigravity fixture credentials/project'},{status:401})
+              if (url.pathname === '/v1internal:fetchAvailableModels') return Response.json({models:{'gemini-antigravity-fixture':{displayName:'Antigravity fixture'}}})
+              if (url.pathname !== '/v1internal:streamGenerateContent' || url.searchParams.get('alt') !== 'sse' || !Array.isArray(body.request?.contents) || body.userAgent !== 'antigravity') return Response.json({error:'invalid Antigravity fixture path/body'},{status:400})
+              const parts = body.request.systemInstruction?.parts ?? []
+              if (!parts.some((part:any)=>typeof part.text==='string'&&part.text.includes('Antigravity'))) return Response.json({error:'missing configured identity'},{status:400})
+              if (body.model === 'anti-cross-error') return new Response('data: '+JSON.stringify({error:{code:500,message:'fixture failure'}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+              if (body.model === 'anti-cross-truncated') return new Response('data: '+JSON.stringify({response:{candidates:[{index:0,content:{role:'model',parts:[{text:'partial'}]}}]}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+              const response = {candidates:[{index:0,content:{role:'model',parts:[{text:'Antigravity OK'}]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:10,candidatesTokenCount:5,totalTokenCount:15},modelVersion:body.model}
+              const {usageMetadata,...content}=response
+              const encode=new TextEncoder()
+              return new Response(new ReadableStream({start(controller){controller.enqueue(encode.encode('data: '+JSON.stringify({response:content})+'\n\n'));controller.enqueue(encode.encode('data: '+JSON.stringify({response:{usageMetadata}})+'\n\n'));controller.close()}}),{headers:{'content-type':'text/event-stream'}})
             }
             if (url.pathname === '/v1/sub2api/billing') return Response.json({object:'sub2api.key_billing',schema_version:1,billing_scope:'token',group_rate_multiplier:0.25,resolved_rate_multiplier:0.25,effective_rate_multiplier:0.25,peak_rate_enabled:false,observed_at:new Date().toISOString()})
             if (url.pathname === '/v1/messages' || url.pathname === '/v1/responses' || url.pathname === '/backend-api/codex/responses') {
@@ -216,6 +235,12 @@ export default defineConfig(async () => {
                   // return as soon as the Responses terminal event is observed.
                 },
               }), { headers: { 'content-type': 'text/event-stream' } })
+            }
+            const body = request.method === 'POST' ? await request.clone().json() as any : {}
+            if (typeof body.model === 'string' && /^(?:grok-native-fixture|gpt-grok-fixture)/.test(body.model)) {
+              const completion={id:'grok-fixture',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:body.model},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}}
+              if(body.stream)return new Response('data: '+JSON.stringify({choices:[{delta:{content:body.model}}]})+'\n\ndata: '+JSON.stringify({choices:[],usage:completion.usage})+'\n\ndata: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}})
+              return Response.json(completion)
             }
             return Response.json({
               id: 'chatcmpl-binding-e2e',

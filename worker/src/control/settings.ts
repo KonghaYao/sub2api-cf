@@ -803,6 +803,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
   }
   if (
     patch.audit_log_retention_days === undefined && patch.public === undefined &&
+    (patch.gateway === undefined || Object.keys(patch.gateway).length === 0) &&
     patch.security === undefined && patch.secrets === undefined &&
     patch.auth_source_defaults === undefined
   ) {

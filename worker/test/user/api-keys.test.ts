@@ -1215,3 +1215,17 @@ describe('user API keys', () => {
     })
   })
 })
+
+it('creates an explicitly ungrouped key only when the isolated virtual group is enabled',async()=>{
+ const test=await fixture()
+ const create=(suffix:string)=>app().request('/keys',{method:'POST',headers:{authorization:test.authorization.alice,'content-type':'application/json','idempotency-key':'ungrouped-create-'+suffix},body:JSON.stringify({name:'Ungrouped',group_id:null})},test.env)
+ expect((await create('disabled')).status).not.toBe(201)
+ test.raw.prepare("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.allow_ungrouped_key_scheduling',json('true')) WHERE id='global'").run()
+ const response=await create('enabled');expect(response.status,await response.clone().text()).toBe(201)
+ const body=await response.json() as any
+ expect(test.raw.prepare("SELECT group_id FROM api_keys WHERE name='Ungrouped'").get().group_id).toBe('worker-ungrouped-default')
+ expect(JSON.stringify(body)).toContain('worker-ungrouped-default')
+ test.raw.prepare("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.allow_ungrouped_key_scheduling',json('false')) WHERE id='global'").run()
+ expect((await create('disabled-again')).status).not.toBe(201)
+ test.raw.close()
+})

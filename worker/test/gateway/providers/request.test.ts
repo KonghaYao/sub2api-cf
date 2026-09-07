@@ -11,13 +11,14 @@ import {
 const credential = { api_key: 'provider-secret' }
 
 function account(
-  platform: ProviderAccount['platform'],
+  platform: Exclude<ProviderAccount['platform'], 'antigravity'>,
   overrides: Partial<ProviderAccount> = {},
 ): ProviderAccount {
   const contract = {
     openai: { protocol: 'openai', auth_scheme: 'bearer', base_url: 'https://api.openai.test/v1' },
     anthropic: { protocol: 'anthropic', auth_scheme: 'x-api-key', base_url: 'https://api.anthropic.test' },
     gemini: { protocol: 'gemini', auth_scheme: 'x-goog-api-key', base_url: 'https://generativelanguage.test' },
+    grok: { protocol:'openai', auth_scheme:'bearer', base_url:'https://grok.provider.test/v1' },
     codex: { protocol: 'codex', auth_scheme: 'bearer', base_url: 'https://chatgpt.test' },
   } as const
   return {

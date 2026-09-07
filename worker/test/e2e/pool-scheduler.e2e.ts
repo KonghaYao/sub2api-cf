@@ -77,3 +77,16 @@ it('balances actual bounded wait queues and wakes queued calls after capacity is
  const snapshot=await (await pool.fetch('https://pool.test/snapshot')).json() as {active_leases:Array<{request_id:string}>}
  expect(snapshot.active_leases.some(x=>x.request_id==='cancel-wait')).toBe(false)
 },10000)
+
+it('enforces legacy low-rate policy in the real Pool DO without bypassing capacity',async()=>{
+ const pool=env.POOL_STATE.get(env.POOL_STATE.idFromName('legacy-cost-'+crypto.randomUUID()))
+ async function post(path:string,body:object){const response=await pool.fetch('https://pool.test'+path,{method:'POST',body:JSON.stringify({schema_version:1,...body})});expect(response.status,await response.clone().text()).toBe(200);return response.json() as Promise<any>}
+ await post('/accounts/upsert',{account_id:'expensive',enabled:true,max_concurrency:1,priority:0})
+ await post('/accounts/upsert',{account_id:'cheap',enabled:true,max_concurrency:1,priority:10})
+ const scheduler:PoolSchedulerPolicy={enabled:false,legacy_low_rate_priority:true,sticky_weighted:false,top_k:1,weights:{priority:1,load:1,error_rate:1,ttft:1,session_sticky:0}}
+ const body={lease_ttl_ms:60000,scheduler,account_cost_rates:{expensive:2000000,cheap:500000}}
+ expect((await post('/reserve',{...body,request_id:'low'})).lease.account_id).toBe('cheap')
+ expect((await post('/reserve',{...body,request_id:'full'})).lease.account_id).toBe('expensive')
+ await post('/release',{request_id:'low'});await post('/release',{request_id:'full'})
+ expect((await post('/reserve',{...body,request_id:'off',scheduler:{...scheduler,legacy_low_rate_priority:false}})).lease.account_id).toBe('expensive')
+})

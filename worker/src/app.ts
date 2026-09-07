@@ -1,3 +1,4 @@
+import * as riskControl from './control/risk-control'
 import * as ollamaUsage from './control/ollama-cloud-usage'
 import * as opsSystemLogs from './control/ops-system-logs'
 import * as opsAlerts from './control/ops-alerts'
@@ -531,9 +532,9 @@ export function createApp() {
       ? await isPaymentEnabled(context.env)
       : Boolean(resolved.payment_enabled)
     const oauth = await oauthPublicSettings(context.env)
-    const [monitor, notifications] = typeof context.env.DB.prepare === 'function'
-      ? await Promise.all([channelMonitors.readChannelMonitorSettings(context.env), readNotificationSettings(context.env)])
-      : [null, null]
+    const [monitor, notifications, riskEnabled] = typeof context.env.DB.prepare === 'function'
+      ? await Promise.all([channelMonitors.readChannelMonitorSettings(context.env), readNotificationSettings(context.env), context.env.DB.prepare("SELECT json_extract(gateway_json, '$.risk_control_enabled') AS enabled FROM system_settings WHERE id='global'").first<{ enabled: number }>()])
+      : [null, null, null]
 
     return context.json({
       code: 0,
@@ -546,6 +547,7 @@ export function createApp() {
         available_channels_enabled: resolved.available_channels_enabled === true,
         ...oauth,
         payment_enabled: paymentEnabled,
+        risk_control_enabled: riskEnabled?.enabled === 1,
         ...(monitor ? {
           channel_monitor_enabled: monitor.channel_monitor_enabled,
           channel_monitor_mode: monitor.channel_monitor_mode,
@@ -799,6 +801,15 @@ export function createApp() {
   app.post('/api/v1/admin/ops/system-logs/cleanup', opsSystemLogs.cleanupOpsSystemLogs)
   app.get('/api/v1/admin/ops/system-logs/health', opsSystemLogs.getOpsSystemLogHealth)
   app.all('/api/v1/admin/ops/*', unsupportedAdminOps)
+  app.get('/api/v1/admin/risk-control/config', riskControl.getRiskConfig)
+  app.put('/api/v1/admin/risk-control/config', riskControl.updateRiskConfig)
+  app.get('/api/v1/admin/risk-control/status', riskControl.getRiskStatus)
+  app.post('/api/v1/admin/risk-control/api-keys/test', riskControl.testRiskAPIKeys)
+  app.get('/api/v1/admin/risk-control/logs', riskControl.listRiskLogs)
+  app.post('/api/v1/admin/risk-control/users/:user_id/unban', requireAdminPermission('admin.users.write'), riskControl.unbanRiskUser)
+  app.delete('/api/v1/admin/risk-control/hashes', riskControl.deleteRiskHash)
+  app.delete('/api/v1/admin/risk-control/hashes/all', riskControl.clearRiskHashes)
+
   app.get('/api/v1/admin/announcements', listAdminAnnouncements)
   app.post('/api/v1/admin/announcements', createAdminAnnouncement)
   app.get('/api/v1/admin/announcements/:id', getAdminAnnouncement)

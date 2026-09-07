@@ -17,7 +17,8 @@ import {
 import type { Env } from '../../src/env'
 import { decryptCredential } from '../../src/gateway/crypto'
 import { credentialAad, getAccountCredential } from '../../src/gateway/repository'
-import type { ProviderPlatform } from '../../src/gateway/providers'
+import type { ProviderPlatform as AllProviderPlatforms } from '../../src/gateway/providers'
+type ProviderPlatform = Exclude<AllProviderPlatforms, 'antigravity'>
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const MASTER_KEY = 'm'.repeat(32)
@@ -80,6 +81,7 @@ const providerInputs = {
     auth_scheme: 'x-goog-api-key',
     base_url: 'https://generativelanguage.test',
   },
+  grok: { protocol:'openai', auth_scheme:'bearer', base_url:'https://grok.provider.test/v1' },
   codex: {
     protocol: 'codex',
     auth_scheme: 'bearer',
@@ -338,7 +340,7 @@ describe('admin provider account control plane on D1', () => {
       data: { total: 1, items: [{ platform: 'anthropic' }] },
     })
     const all = await test.app.request('/accounts', {}, test.env)
-    await expect(all.json()).resolves.toMatchObject({ data: { total: 4 } })
+    await expect(all.json()).resolves.toMatchObject({ data: { total: Object.keys(providerInputs).length } })
     expect(created.find((account) => account.platform === 'codex')).toMatchObject({
       provider_config: { account_id: 'workspace_123' },
     })
@@ -1161,4 +1163,21 @@ describe('admin provider account control plane on D1', () => {
       },
     })
   })
+})
+
+it('uses the saved Grok default endpoint for real health calls and preserves explicit endpoint overrides',async()=>{
+ const test=fixture()
+ const create=await test.app.request('/accounts',{method:'POST',headers:{'content-type':'application/json','idempotency-key':'grok-default'},body:JSON.stringify({name:'Grok default',platform:'grok',api_key:'grok-private-key',base_url:''})},test.env)
+ expect(create.status,await create.clone().text()).toBe(201);const account=(await create.json() as any).data
+ expect(account.provider_config).toMatchObject({use_default_base_url:true})
+ const upstream=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{expect(new Headers(init?.headers).get('authorization')).toBe('Bearer grok-private-key');return Response.json({data:[{id:'grok-4.6'}]})})
+ const probe=()=>test.app.request('/accounts/'+account.id+'/test',{method:'POST'},test.env)
+ test.raw.prepare("UPDATE system_settings SET gateway_json=? WHERE id='global'").run(JSON.stringify({grok_default_base_url_mode:'eu-west-1'}))
+ expect((await probe()).status).toBe(200);expect(String(upstream.mock.calls.at(-1)![0])).toBe('https://eu-west-1.api.x.ai/v1/models')
+ const version=test.raw.prepare('SELECT control_version FROM accounts WHERE id=?').get(account.id).control_version
+ const change=await test.app.request('/accounts/'+account.id,{method:'PUT',headers:{'content-type':'application/json','if-match':'"'+version+'"','idempotency-key':'grok-explicit'},body:JSON.stringify({base_url:'https://custom-grok.test/v1'})},test.env)
+ expect(change.status,await change.clone().text()).toBe(200)
+ test.raw.prepare("UPDATE system_settings SET gateway_json=? WHERE id='global'").run(JSON.stringify({grok_default_base_url_mode:'cli'}))
+ expect((await probe()).status).toBe(200);expect(String(upstream.mock.calls.at(-1)![0])).toBe('https://custom-grok.test/v1/models')
+ test.raw.close()
 })

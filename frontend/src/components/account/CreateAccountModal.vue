@@ -993,6 +993,7 @@
           <button
             type="button"
             @click="antigravityAccountType = 'upstream'"
+            :disabled="isCloudflareWorkerContractActive()"
             :class="[
               'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
               antigravityAccountType === 'upstream'
@@ -3408,7 +3409,20 @@
 
     <!-- Step 2: OAuth Authorization -->
     <div v-else class="space-y-5">
-      <OAuthAuthorizationFlow
+      <div v-if="importedOAuthOnly" class="space-y-4" data-testid="imported-oauth-form">
+        <p class="input-hint">{{ t('admin.accounts.importedOAuthHint') }}</p>
+        <label class="input-label">{{ t('admin.accounts.importedOAuthToken') }}</label>
+        <input v-model="importedAccessToken" type="password" autocomplete="new-password" class="input" data-testid="imported-access-token" />
+        <template v-if="form.platform === 'antigravity'">
+          <label class="input-label">{{ t('admin.accounts.antigravityProjectIdLabel') }}</label>
+          <input v-model="antigravityProjectId" class="input" data-testid="imported-project-id" />
+          <label class="input-label">Base URL</label>
+          <input v-model="importedBaseUrl" class="input" placeholder="https://cloudcode-pa.googleapis.com" data-testid="imported-base-url" />
+        </template>
+        <button type="button" class="btn btn-secondary" :disabled="importedModelsLoading || !importedAccessToken.trim()" data-testid="imported-models-sync" @click="previewImportedModels">{{ t('admin.accounts.syncUpstreamModels') }}</button>
+        <p v-if="importedModels.length" data-testid="imported-models">{{ importedModels.join(', ') }}</p>
+      </div>
+      <OAuthAuthorizationFlow v-else
         ref="oauthFlowRef"
         :add-method="form.platform === 'anthropic' ? addMethod : 'oauth'"
         :auth-url="currentAuthUrl"
@@ -3487,11 +3501,12 @@
         </button>
       </div>
       <div v-else class="flex justify-between gap-3">
+        <button v-if="importedOAuthOnly" type="button" class="btn btn-primary" :disabled="submitting || !importedAccessToken.trim()" data-testid="imported-oauth-submit" @click="handleImportedOAuth">{{ t('common.create') }}</button>
         <button type="button" class="btn btn-secondary" @click="goBackToBasicInfo">
           {{ t('common.back') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="isManualInputMethod && !importedOAuthOnly"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -3758,6 +3773,7 @@
 </template>
 
 <script setup lang="ts">
+import { isCloudflareWorkerContractActive, requiresImportedOAuthToken } from '@/utils/adminCapabilities'
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -4658,6 +4674,9 @@ watch(
     } else {
       allowOverages.value = false
       antigravityProjectId.value = ''
+  importedAccessToken.value = ''
+  importedBaseUrl.value = ''
+  importedModels.value = []
       antigravityWhitelistModels.value = []
       antigravityModelMappings.value = []
       antigravityModelRestrictionMode.value = 'mapping'
@@ -5401,6 +5420,53 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
   applyVertexServiceAccountJson(await file.text())
 }
 
+const importedOAuthOnly = computed(() => requiresImportedOAuthToken(form.platform))
+const importedAccessToken = ref('')
+const importedBaseUrl = ref('')
+const importedModels = ref<string[]>([])
+const importedModelsLoading = ref(false)
+const previewImportedModels = async () => {
+  if (!importedAccessToken.value.trim() || (form.platform === 'antigravity' && !antigravityProjectId.value.trim())) {
+    appStore.showError(t('admin.accounts.importedOAuthRequired'))
+    return
+  }
+  importedModelsLoading.value = true
+  try {
+    const result = await adminAPI.accounts.syncUpstreamModelsPreview({
+      platform: form.platform, type: 'oauth', api_key: importedAccessToken.value.trim(),
+      base_url: form.platform === 'antigravity' ? importedBaseUrl.value.trim() || 'https://cloudcode-pa.googleapis.com' : grokOAuthCustomBaseUrlEnabled.value ? grokOAuthBaseUrl.value.trim() : '',
+      ...(form.platform === 'antigravity' ? { project_id: antigravityProjectId.value.trim() } : {}),
+    })
+    importedModels.value = result.models
+    upstreamModelsPreviewed.value = true
+    if (form.platform === 'antigravity') {
+      const existing = new Set(antigravityModelMappings.value.map(mapping => mapping.from))
+      for (const model of result.models) if (!existing.has(model)) antigravityModelMappings.value.push({ from: model, to: model })
+    }
+  } catch (error) {
+    appStore.showError(error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed'))
+  } finally { importedModelsLoading.value = false }
+}
+const handleImportedOAuth = async () => {
+  if (!importedAccessToken.value.trim() || (form.platform === 'antigravity' && !antigravityProjectId.value.trim())) {
+    appStore.showError(t('admin.accounts.importedOAuthRequired'))
+    return
+  }
+  const credentials: Record<string, unknown> = { access_token: importedAccessToken.value.trim() }
+  if (form.platform === 'antigravity') {
+    credentials.project_id = antigravityProjectId.value.trim()
+    credentials.base_url = importedBaseUrl.value.trim() || 'https://cloudcode-pa.googleapis.com'
+    const mapping = buildModelMappingObject('mapping', [], antigravityModelMappings.value)
+    if (mapping) credentials.model_mapping = mapping
+  } else {
+    if (!validateGrokOAuthUpstreamConfig()) return
+    applyGrokOAuthUpstreamConfig(credentials)
+    const mapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    if (mapping) credentials.model_mapping = mapping
+  }
+  await createAccountAndFinish(form.platform, 'oauth', credentials, form.platform === 'antigravity' ? buildAntigravityExtra() : undefined)
+}
+
 const handleSubmit = async () => {
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
@@ -5554,7 +5620,7 @@ const handleSubmit = async () => {
       : form.platform === 'gemini'
         ? 'https://generativelanguage.googleapis.com'
         : form.platform === 'grok'
-          ? 'https://api.x.ai/v1'
+          ? (isCloudflareWorkerContractActive() ? '' : 'https://api.x.ai/v1')
           : 'https://api.anthropic.com'
 
   // Build credentials with optional model mapping
@@ -5755,7 +5821,7 @@ const createAccountAndFinish = async (
   }
   if (platform === 'grok') {
     if (!credentials.base_url) {
-      credentials.base_url = apiKeyBaseUrl.value.trim() || 'https://api.x.ai/v1'
+      credentials.base_url = apiKeyBaseUrl.value.trim() || (isCloudflareWorkerContractActive() ? '' : 'https://api.x.ai/v1')
     }
     const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
     if (modelMapping) {

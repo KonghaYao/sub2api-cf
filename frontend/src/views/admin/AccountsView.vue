@@ -486,6 +486,7 @@
 </template>
 
 <script setup lang="ts">
+import { requiresImportedOAuthToken } from '@/utils/adminCapabilities'
 import { ref, reactive, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
@@ -1926,7 +1927,7 @@ const handleBulkRefreshToken = async () => {
   if (!confirm(t('common.confirm'))) return
   try {
     const result = await adminAPI.accounts.batchRefresh(
-      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts() : selIds.value,
+      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts(true) : selIds.value,
     )
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', { success: result.success, failed: result.failed }))
@@ -2080,7 +2081,7 @@ const selectedWorkerDeleteAccounts = async () => {
   return targets as Array<{ id: number | string; control_version: number }>
 }
 
-const selectedWorkerRefreshAccounts = async () => {
+const selectedWorkerRefreshAccounts = async (requireRefreshSupport = false) => {
   if (selIds.value.length === 0 || selIds.value.length > 25) {
     throw new Error(t('admin.accounts.workerBatchLimit'))
   }
@@ -2093,6 +2094,7 @@ const selectedWorkerRefreshAccounts = async () => {
   }
   const targets = selected.map((id) => {
     const account = loaded.get(id)
+    if (requireRefreshSupport && requiresImportedOAuthToken(account?.platform)) throw new Error(t('admin.accounts.importedOAuthHint'))
     return { id, control_version: (account as unknown as { control_version?: number })?.control_version }
   })
   if (targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)) {

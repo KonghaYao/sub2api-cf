@@ -1,3 +1,5 @@
+import { enforceCodexCLIOnly } from '../control/codex-cli-policy'
+import { loadGatewaySettings } from '../control/gateway-settings'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { decryptCredential } from '../gateway/crypto'
@@ -144,7 +146,8 @@ async function executeSyncImages(
   let lifecycleTransferred = false
   try {
     principal = principalOverride ?? await authenticateGatewayRequest(context.req.raw, context.env)
-    const manifest = await parseSyncImageRequest(context.req.raw, operation)
+    let originalBody: unknown
+    const manifest = await parseSyncImageRequest(context.req.raw, operation, value => { originalBody = structuredClone(value) })
     if (!moderationChecked) await moderateSyncImageRequest(context.env, principal, manifest)
 
     const [pricing, route] = await Promise.all([
@@ -242,6 +245,9 @@ async function executeSyncImages(
           'images',
           accountId,
         )
+        if ((account.platform === 'openai' || account.platform === 'codex') && account.credential_kind === 'oauth' && (account.codex_cli_only === true || account.codex_cli_only === 1)) {
+          enforceCodexCLIOnly(await loadGatewaySettings(context.env), account, context.req.raw.headers, originalBody)
+        }
         if (!context.env.CREDENTIALS_MASTER_KEY) {
           throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
         }
@@ -571,6 +577,7 @@ export async function moderateSyncImageRequest(
 export async function parseSyncImageRequest(
   request: Request,
   operation: SyncImageOperation,
+  captureOriginal?: (value: unknown) => void,
 ): Promise<SyncImageManifest> {
   const rawContentType = request.headers.get('content-type') ?? ''
   const contentType = rawContentType.split(';', 1)[0].trim().toLowerCase()
@@ -603,6 +610,7 @@ export async function parseSyncImageRequest(
         fields[key] = value
       }
     }
+    captureOriginal?.(fields)
     return parseSyncImageEditMultipart({ fields, images, mask })
   }
   if (contentType !== 'application/json') {
@@ -615,6 +623,7 @@ export async function parseSyncImageRequest(
   } catch {
     throw new GatewayError(400, 'IMAGE_INVALID_JSON', 'Request body must contain valid JSON')
   }
+  captureOriginal?.(value)
   return operation === 'generations' ? parseSyncImageGeneration(value) : parseSyncImageEditJson(value)
 }
 

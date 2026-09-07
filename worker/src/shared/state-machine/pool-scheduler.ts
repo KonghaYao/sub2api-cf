@@ -1,4 +1,5 @@
 export interface PoolSchedulerPolicy {
+  legacy_low_rate_priority?: boolean
   enabled: boolean
   sticky_weighted: boolean
   top_k: number
@@ -7,7 +8,8 @@ export interface PoolSchedulerPolicy {
 export interface PoolSchedulerMetric { error_rate: number; ttft_ms: number | null; quota_headroom?:number; quota_reset_at_ms?:number; queue_depth?:number }
 export function parsePoolSchedulerPolicy(value: unknown): PoolSchedulerPolicy {
   const p = value as PoolSchedulerPolicy
-  if (!p || typeof p !== 'object' || Object.keys(p).some(k=>!['enabled','sticky_weighted','top_k','weights'].includes(k)) ||
+  if (!p || typeof p !== 'object' || Object.keys(p).some(k=>!['enabled','sticky_weighted','top_k','weights','legacy_low_rate_priority'].includes(k)) ||
+    (p.legacy_low_rate_priority!==undefined && typeof p.legacy_low_rate_priority!=='boolean') ||
     typeof p.enabled !== 'boolean' || typeof p.sticky_weighted !== 'boolean' || !Number.isSafeInteger(p.top_k) || p.top_k < 1 || p.top_k > 100 ||
     !p.weights || typeof p.weights !== 'object' || Object.keys(p.weights).some(k=>!['priority','load','error_rate','ttft','session_sticky','upstream_cost','previous_response','reset','quota_headroom','queue'].includes(k)) ||
     ['priority','load','error_rate','ttft','session_sticky'].some(k=>!Number.isFinite(p.weights[k as keyof typeof p.weights]) || p.weights[k as keyof typeof p.weights]! < 0 || p.weights[k as keyof typeof p.weights]! > 1000000) ||

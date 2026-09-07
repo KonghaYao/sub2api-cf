@@ -102,6 +102,12 @@ class FakeUserStateStorage {
   private exec(query: string, params: unknown[]): object[] {
     const normalized = query.replace(/\s+/g, " ").trim();
     if (normalized.startsWith("CREATE ")) return [];
+    if (normalized.startsWith("SELECT mutation_id FROM (")) {
+      return [...this.ledger.values(), ...this.tombstones.values()]
+        .filter(row => row.entry_type === "enabled_change")
+        .sort((left, right) => (right.ledger_sequence ?? 0) - (left.ledger_sequence ?? 0))
+        .slice(0, 1).map(row => ({ mutation_id: row.mutation_id }));
+    }
     if (normalized === "PRAGMA table_info(user_profile)") {
       return Array.from(this.profileColumns, (name) => ({ name }));
     }

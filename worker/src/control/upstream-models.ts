@@ -19,7 +19,7 @@ export async function fetchUpstreamModels(account: ProviderAccount, credential: 
   })
   const fetchCatalog = async () => {
     const response = await upstreamFetch(plan.url, {
-      method: plan.method, headers: plan.headers, redirect: 'manual',
+      method: plan.method, headers: plan.headers, body: plan.body === undefined ? undefined : JSON.stringify(plan.body), redirect: 'manual',
       cache: 'no-store', signal: controller.signal,
     })
     if (!response.ok) {
@@ -43,7 +43,8 @@ export async function fetchUpstreamModels(account: ProviderAccount, credential: 
     let value: unknown
     try { value = JSON.parse(text) } catch { throw invalidCatalog() }
     const catalog = record(value)
-    const rows = catalog?.data ?? catalog?.models
+    const nativeModels = catalog?.models
+    const rows = account.platform === 'antigravity' && record(nativeModels) ? Object.entries(nativeModels as Record<string, unknown>).map(([id, info]) => ({...record(info), id})) : catalog?.data ?? catalog?.models
     if (!Array.isArray(rows)) throw invalidCatalog()
     const models: string[] = []
     const metadata: Record<string, Record<string, unknown>> = Object.create(null)

@@ -1,3 +1,8 @@
+import { recoveryMaintenanceTasks } from './recovery'
+import { recoverRiskBanCommands } from '../risk/ban-state'
+import { recoverRiskJobs } from '../gateway/risk-moderation'
+import { deliverRiskNotifications } from '../risk/effects'
+import { projectCyberRiskEvents, cleanupRiskData } from '../risk/maintenance'
 import { runOllamaCloudUsageMaintenance } from '../control/ollama-cloud-usage'
 import { runOpsSystemLogRetention } from '../control/ops-system-logs'
 import { runCodexVersionSync } from '../control/codex-version-sync'
@@ -10,6 +15,12 @@ import { scanSystemNotifications } from '../notifications/scanner'
 import { runScheduledChannelMonitors } from '../control/channel-monitors'
 
 const tasks = {
+  ...recoveryMaintenanceTasks,
+  risk_ban_commands: (env:Env) => recoverRiskBanCommands(env),
+  risk_job_recovery: (env:Env) => recoverRiskJobs(env),
+  risk_notifications: (env:Env) => deliverRiskNotifications(env),
+  risk_cyber_projection: (env:Env) => projectCyberRiskEvents(env),
+  risk_cleanup: (env:Env) => cleanupRiskData(env),
   ollama_cloud_usage: (env:Env) => runOllamaCloudUsageMaintenance(env),
   ops_log_retention: (env:Env) => runOpsSystemLogRetention(env),
   codex_version_sync: (env:Env) => runCodexVersionSync(env),
@@ -23,10 +34,12 @@ const tasks = {
 type TaskName=keyof typeof tasks
 export async function enqueueSettingsMaintenance(env:Env,nowMs=Date.now()):Promise<void>{
   const minute=Math.floor(nowMs/60000)
+  let failures=0
   for(const task of Object.keys(tasks) as TaskName[]){
     const event:PlatformEvent<{task:TaskName;scheduled_at_ms?:number}>={schema_version:1,event_id:`settings-maintenance:${task}:${minute}`,event_type:'settings.maintenance.v1',occurred_at_ms:nowMs,aggregate_type:'maintenance',aggregate_id:task,payload:{task,scheduled_at_ms:nowMs}}
-    await env.EVENTS_QUEUE.send(event)
+    try{await env.EVENTS_QUEUE.send(event)}catch{failures++}
   }
+  if(failures)throw new Error(`Maintenance dispatch failed for ${failures} tasks`)
 }
 export async function consumeSettingsMaintenance(value:unknown,env:Env):Promise<boolean>{
   if(!value||typeof value!=='object'||(value as Record<string,unknown>).event_type!=='settings.maintenance.v1')return false

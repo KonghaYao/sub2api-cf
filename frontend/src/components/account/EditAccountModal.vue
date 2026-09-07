@@ -15,6 +15,15 @@
         <label class="input-label">{{ t('common.name') }}</label>
         <input v-model="form.name" type="text" required class="input" data-tour="edit-account-form-name" />
       </div>
+      <div v-if="importedOAuthOnly" class="space-y-2" data-testid="edit-imported-oauth">
+        <p class="input-hint">{{ t('admin.accounts.importedOAuthHint') }}</p>
+        <label class="input-label">{{ t('admin.accounts.importedOAuthToken') }}</label>
+        <input v-model="importedAccessToken" type="password" autocomplete="new-password" class="input" data-testid="edit-imported-access-token" />
+        <template v-if="account?.platform === 'antigravity'">
+          <label class="input-label">Base URL</label>
+          <input v-model="importedBaseUrl" class="input" placeholder="https://cloudcode-pa.googleapis.com" data-testid="edit-imported-base-url" />
+        </template>
+      </div>
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
         <textarea
@@ -2867,6 +2876,7 @@
 </template>
 
 <script setup lang="ts">
+import { requiresImportedOAuthToken } from '@/utils/adminCapabilities'
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -3586,6 +3596,9 @@ const mixedChannelWarningMessageText = computed(() => {
   return mixedChannelWarningRawMessage.value
 })
 
+const importedOAuthOnly = computed(() => props.account?.type === 'oauth' && requiresImportedOAuthToken(props.account.platform))
+const importedAccessToken = ref('')
+const importedBaseUrl = ref('')
 const form = reactive({
   name: '',
   notes: '',
@@ -3715,11 +3728,13 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   editVertexProjectId.value = ''
   editVertexClientEmail.value = ''
   editVertexLocation.value = 'us-central1'
+  importedAccessToken.value = ''
+  importedBaseUrl.value = String(newAccount.base_url || credentials?.base_url || '')
   antigravityProjectId.value =
     newAccount.platform === 'antigravity' &&
     newAccount.type === 'oauth' &&
-    typeof credentials?.antigravity_project_id === 'string'
-      ? credentials.antigravity_project_id.trim()
+    typeof (credentials?.antigravity_project_id ?? credentials?.project_id ?? newAccount.provider_config?.project_id) === 'string'
+      ? String(credentials?.antigravity_project_id ?? credentials?.project_id ?? newAccount.provider_config?.project_id).trim()
       : ''
 
   // Load mixed scheduling setting (only for antigravity accounts)
@@ -5033,6 +5048,20 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+    }
+
+    if (importedOAuthOnly.value) {
+      const credentials = { ...(updatePayload.credentials as Record<string, unknown> || {}) }
+      if (importedAccessToken.value.trim()) credentials.access_token = importedAccessToken.value.trim()
+      if (props.account.platform === 'antigravity') {
+        if (!antigravityProjectId.value.trim()) {
+          appStore.showError(t('admin.accounts.importedOAuthRequired'))
+          return
+        }
+        credentials.project_id = antigravityProjectId.value.trim()
+        credentials.base_url = importedBaseUrl.value.trim() || 'https://cloudcode-pa.googleapis.com'
+      }
+      updatePayload.credentials = credentials
     }
 
     // For antigravity accounts, handle mixed_scheduling and allow_overages in extra

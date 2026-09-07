@@ -173,4 +173,12 @@ describe('AccountActionMenu — spark shadow 按钮可见性', () => {
 
     wrapper.unmount()
   })
+  it.each(['antigravity', 'grok'] as const)('retains %s testing/token replacement and hides unavailable OAuth refresh', (platform) => {
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account: makeAccount({ platform, type: 'oauth' }), position }, attachTo: document.body })
+    expect(getBodyText()).toContain('admin.accounts.testConnection')
+    expect(getBodyText()).toContain('admin.accounts.reAuthorize')
+    expect(getBodyText()).not.toContain('admin.accounts.refreshToken')
+    wrapper.unmount()
+  })
+
 })

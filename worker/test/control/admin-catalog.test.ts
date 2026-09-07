@@ -811,7 +811,7 @@ describe('admin catalog control plane', () => {
   it('rejects an enabled provider that the Worker gateway cannot consume', async () => {
     const response = await request(new CatalogDatabase(), '/api/v1/admin/groups', 'POST', 'catalog-create-2', {
       name: 'unsupported',
-      platform: 'grok',
+      platform: 'unimplemented-provider',
     })
 
     expect(response.status).toBe(409)

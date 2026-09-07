@@ -1,8 +1,9 @@
+import { wrapAntigravityRequest, antigravityDefaults, antigravityUserAgent, normalizeAntigravityResponse, type AntigravitySettings } from './antigravity'
 import { GatewayError } from '../errors'
 import { validateBaseUrl } from '../repository'
 
-export type ProviderPlatform = 'openai' | 'anthropic' | 'gemini' | 'codex'
-export type ProviderProtocol = ProviderPlatform
+export type ProviderPlatform = 'openai' | 'anthropic' | 'gemini' | 'codex' | 'grok' | 'antigravity'
+export type ProviderProtocol = 'openai' | 'anthropic' | 'gemini' | 'codex'
 export type ProviderAuthScheme = 'bearer' | 'x-api-key' | 'x-goog-api-key'
 export type ProviderOperation =
   | 'models'
@@ -19,12 +20,15 @@ export type ProviderOperation =
   | 'stream_generate_content'
 
 export interface ProviderConfig {
+  project_id?: string
+  use_default_base_url?: boolean
   account_id?: string
   /** OpenAI OAuth subscription tier used only by the account scheduler. */
   subscription_plan?: string
 }
 
 export interface ProviderAccount {
+  antigravity_settings?: AntigravitySettings
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
@@ -51,6 +55,7 @@ export interface BuildProviderRequestInput {
 }
 
 export interface ProviderRequestPlan {
+  response_adapter?: 'antigravity_sse' | 'antigravity_json'
   url: string
   method: 'GET' | 'POST'
   headers: Headers
@@ -65,6 +70,8 @@ interface ProviderContract {
 
 const CONTRACTS: Record<ProviderPlatform, ProviderContract> = {
   openai: { protocol: 'openai', auth_scheme: 'bearer' },
+  grok: { protocol: 'openai', auth_scheme: 'bearer' },
+  antigravity: { protocol: 'gemini', auth_scheme: 'bearer' },
   anthropic: { protocol: 'anthropic', auth_scheme: 'x-api-key' },
   gemini: { protocol: 'gemini', auth_scheme: 'x-goog-api-key' },
   codex: { protocol: 'codex', auth_scheme: 'bearer' },
@@ -103,6 +110,7 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
   // is copied. The provider layer is the sole authority for upstream headers.
   void input.client_headers
 
+  if (input.account.platform === 'antigravity') return buildAntigravityPlan(input)
   const url = operationUrl(input.account, input.operation, input.model)
   const stream = input.operation === 'stream_generate_content' || bodyStreams(input.body)
   const headers = providerHeaders(input.account, credential, true, stream)
@@ -128,6 +136,7 @@ export function buildProviderHealthRequest(
 ): ProviderRequestPlan {
   assertAccountContract(input.account)
   const credential = requireCredential(input.credential)
+  if (input.account.platform === 'antigravity') return { ...buildAntigravityPlan({...input, operation:'models'}), timeout_ms:HEALTH_TIMEOUT_MS }
   return {
     url: operationUrl(input.account, 'models'),
     method: 'GET',
@@ -156,10 +165,13 @@ function validateProviderConfig(platform: ProviderPlatform, config: ProviderConf
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
   }
+  if (config.project_id !== undefined && (platform !== 'antigravity' || typeof config.project_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(config.project_id))) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is invalid')
+  if (platform === 'antigravity' && !config.project_id) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is required')
   const keys = Object.keys(config)
-  if (keys.some((key) => key !== 'account_id' && key !== 'subscription_plan')) {
+  if (keys.some((key) => key !== 'account_id' && key !== 'subscription_plan' && key !== 'use_default_base_url' && key !== 'project_id')) {
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config contains an unsupported field')
   }
+  if (config.use_default_base_url !== undefined && (platform !== 'grok' || typeof config.use_default_base_url !== 'boolean')) throw new GatewayError(400, 'invalid_provider_config', 'use_default_base_url is supported only for Grok')
   if (platform !== 'codex' && config.account_id !== undefined) {
     throw new GatewayError(400, 'invalid_provider_config', 'account_id is supported only for Codex')
   }
@@ -203,6 +215,8 @@ function providerHeaders(
   const headers = new Headers({ accept: stream ? 'text/event-stream' : 'application/json' })
   if (hasBody) headers.set('content-type', 'application/json')
   switch (account.platform) {
+    case 'antigravity':
+    case 'grok':
     case 'openai':
       headers.set('authorization', `Bearer ${credential}`)
       break
@@ -280,6 +294,9 @@ function providerPath(
   model?: string,
 ): { pathname: string; search: string } {
   switch (platform) {
+    case 'antigravity':
+      return unsupportedOperation(platform, operation)
+    case 'grok':
     case 'openai':
       return openAiPath(operation)
     case 'anthropic':
@@ -579,4 +596,19 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+function buildAntigravityPlan(input: BuildProviderRequestInput): ProviderRequestPlan {
+  const { account, operation } = input
+  const settings = account.antigravity_settings ?? antigravityDefaults
+  const modelCatalog = operation === 'models'
+  if (!modelCatalog && operation !== 'generate_content' && operation !== 'stream_generate_content') return unsupportedOperation(account.platform, operation)
+  const url = validateBaseUrl(account.base_url)
+  url.pathname = url.pathname.replace(/\/$/, '') + '/v1internal:' + (modelCatalog ? 'fetchAvailableModels' : 'streamGenerateContent')
+  url.search = modelCatalog ? '' : '?alt=sse'
+  const headers = new Headers({'authorization':'Bearer '+requireCredential(input.credential),'content-type':'application/json','user-agent':antigravityUserAgent(settings),'accept':modelCatalog?'application/json':'text/event-stream'})
+  return {url:url.toString(),method:'POST',headers,body:modelCatalog?{project:account.provider_config.project_id}:wrapAntigravityRequest(account.provider_config.project_id!,input.model??'',input.body,settings),timeout_ms:HEADER_TIMEOUT_MS,...(modelCatalog?{}:{response_adapter:operation==='stream_generate_content'?'antigravity_sse' as const:'antigravity_json' as const})}
+}
+export async function normalizeProviderResponse(plan: ProviderRequestPlan, response: Response, signal?: AbortSignal): Promise<Response> {
+  return plan.response_adapter ? normalizeAntigravityResponse(response, plan.response_adapter === 'antigravity_sse', signal) : response
 }

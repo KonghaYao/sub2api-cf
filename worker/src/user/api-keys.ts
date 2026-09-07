@@ -657,7 +657,7 @@ function parseCreateInput(body: Record<string, unknown>): CreateApiKeyInput {
   const customKey = parseCustomKey(body)
   return {
     name: requireString(body, 'name', 128),
-    group_id: requireResourceId(requireString(body, 'group_id', 128), 'group'),
+    group_id: body.group_id === null || body.group_id === undefined ? 'worker-ungrouped-default' : requireResourceId(requireString(body, 'group_id', 128), 'group'),
     expires_at_ms: parseExpiresAt(body),
     quota_micros: optionalMonetaryLimit(body, 'quota_micros'),
     rate_limit_5h_micros: optionalMonetaryLimit(body, 'rate_limit_5h_micros'),
@@ -678,7 +678,7 @@ function parseUpdatePatch(body: Record<string, unknown>): UpdateApiKeyPatch {
   const patch: UpdateApiKeyPatch = {}
   if (Object.hasOwn(body, 'name')) patch.name = requireString(body, 'name', 128)
   if (Object.hasOwn(body, 'group_id')) {
-    patch.group_id = requireResourceId(requireString(body, 'group_id', 128), 'group')
+    patch.group_id = body.group_id === null ? 'worker-ungrouped-default' : requireResourceId(requireString(body, 'group_id', 128), 'group')
   }
   if (Object.hasOwn(body, 'expires_at') || Object.hasOwn(body, 'expires_at_ms')) {
     patch.expires_at_ms = parseExpiresAt(body)

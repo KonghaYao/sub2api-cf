@@ -134,3 +134,17 @@ it('bounds twenty distinct encrypted proxies and explicitly defers unclaimed acc
  expect(t.raw.prepare('SELECT count(*) AS count FROM accounts WHERE billing_probe_claim_token IS NOT NULL').get().count).toBe(0)
  t.raw.close()
 })
+
+it('never carries a fresh upstream rate across an account upstream identity change',async()=>{
+ const t=await fixture()
+ vi.stubGlobal('fetch',async()=>Response.json(billing(.25)))
+ expect((await t.request('/account-0/upstream-billing-probe',{})).status).toBe(200)
+ t.raw.prepare("UPDATE accounts SET base_url='https://changed.e2e.invalid/v1',control_version=control_version+1,config_version=config_version+1 WHERE id='account-0'").run()
+ vi.stubGlobal('fetch',async()=>Response.json({error:'fixture denied'},{status:401}))
+ const response=await t.request('/account-0/upstream-billing-probe',{})
+ expect(response.status,await response.clone().text()).toBe(200)
+ const snapshot=(await response.json() as any).data.snapshot
+ expect(snapshot.status).toBe('failed');expect(snapshot.data).toBeUndefined();expect(snapshot.received_at).toBeUndefined()
+ expect(snapshot.identity.base_url).toBe('https://changed.e2e.invalid/v1')
+ t.raw.close()
+})

@@ -11,6 +11,7 @@ import { credentialAad, validateBaseUrl } from '../gateway/repository'
 type Bindings = { Bindings: Env }
 interface Settings { enabled: boolean; interval_minutes: number }
 interface Snapshot {
+  identity?: { credential_ref: string; base_url: string; platform: string }
   status: 'ok' | 'unsupported' | 'failed'
   data?: Record<string, unknown>
   received_at?: string
@@ -50,7 +51,7 @@ function extra(account: Account): Record<string, unknown> {
   return ui.extra && typeof ui.extra === 'object' && !Array.isArray(ui.extra) ? ui.extra : {}
 }
 function eligible(account: Account): boolean {
-  return account.credential_kind === 'api_key' && ['openai','anthropic','gemini','codex'].includes(account.platform)
+  return account.credential_kind === 'api_key' && ['openai','anthropic','gemini','codex','grok'].includes(account.platform)
 }
 
 export async function getUpstreamBillingProbeSettings(c: Context<Bindings>): Promise<Response> {
@@ -164,7 +165,8 @@ async function probeAccounts(env:Env,ids:string[],config?:Settings,dueOnly=false
 
 async function observe(env:Env,account:Account,config:Settings):Promise<Snapshot> {
   const now=Date.now(),base=config.interval_minutes*60000
-  const previous=extra(account).upstream_billing_probe as Snapshot|undefined
+  const stored=extra(account).upstream_billing_probe as Snapshot|undefined
+  const previous=stored?.identity?.credential_ref===account.credential_ref && stored.identity.base_url===account.base_url && stored.identity.platform===account.platform ? stored : undefined
   let status:Snapshot['status']='failed',http=0,reason='request_failed',data:Record<string,unknown>|undefined
   let retryAfter=0
   try {
@@ -198,7 +200,7 @@ async function observe(env:Env,account:Account,config:Settings):Promise<Snapshot
   } catch { /* Persist a bounded reason only; provider responses can contain credentials. */ }
   const failureCount=status==='ok'?0:Math.min(1000,(previous?.failure_count??0)+1)
   const delay=Math.min(DAY,Math.max(base*(status==='unsupported'?8:1),Number.isFinite(retryAfter)?retryAfter:0))
-  const snapshot:Snapshot={status,last_attempt_at:new Date(now).toISOString(),next_probe_at:new Date(now+delay).toISOString(),http_status:http,...(failureCount?{failure_count:failureCount,last_error:reason}:{})}
+  const snapshot:Snapshot={identity:{credential_ref:account.credential_ref,base_url:account.base_url,platform:account.platform},status,last_attempt_at:new Date(now).toISOString(),next_probe_at:new Date(now+delay).toISOString(),http_status:http,...(failureCount?{failure_count:failureCount,last_error:reason}:{})}
   if(data){snapshot.data=data;snapshot.received_at=new Date(now).toISOString();snapshot.fresh_until=new Date(now+2*base).toISOString()}
   else if(previous?.data){snapshot.data=previous.data;snapshot.received_at=previous.received_at;snapshot.fresh_until=previous.fresh_until}
   const flags=extra(account),declared=data?.resolved_rate_multiplier

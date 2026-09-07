@@ -1085,6 +1085,9 @@ export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModels
 }
 
 export interface SyncUpstreamPreviewParams {
+  project_id?: string
+  provider_config?: Record<string, unknown>
+  access_token?: string
   platform: string
   type: string
   base_url?: string

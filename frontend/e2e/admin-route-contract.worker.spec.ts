@@ -35,6 +35,7 @@ const RETAINED_ADMIN_ROUTES = [
   '/admin/orders/plans',
   '/admin/usage',
   '/admin/audit-logs',
+  '/admin/risk-control',
   '/admin/settings',
 ] as const
 
@@ -134,6 +135,7 @@ async function prepareAdministrator(request: APIRequestContext): Promise<{
       'if-match': settingsResponse.headers()['etag'] ?? '"0"',
     },
     data: {
+      gateway: { risk_control_enabled: true },
       public: {
         site_name: 'Admin Route Patrol',
         registration_enabled: true,

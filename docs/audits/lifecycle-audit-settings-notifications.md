@@ -83,3 +83,42 @@ Scheduled database work was further bounded: notifications default one entity pe
 - No test sent email to a real recipient. Real createApp + SQLite tests traverse request start/outcome → queue → log row → filter → cleanup, and rules → sustained breach → event → failed email → same-identity retry → resolution → silence. Additional tests cover interrupted outbox insertion recovery, actual DO queue metrics and unavailable-state handling.
 
 Final focused validation for this Ops batch: 8 Worker suites / 25 tests passed, followed by the additional delayed-report schedule regression (alert suite now 4 tests, total 26); 13 frontend suites / 39 tests passed; Worker and frontend type checks passed. Queue continuation preserves the original scheduled timestamp, so delayed daily/weekly cron execution neither skips its intended minute nor creates a second report identity. All results are local; root owns production verification/deployment.
+
+## Risk control follow-up (0096, local validation; pending root integration)
+
+Original `/admin/risk-control` template is retained. The page now submits the configuration CAS version, and IDs accept Worker string IDs. Eight original API routes are implemented with actual configuration, encrypted moderation keys, test transport, persistent runtime status, filtered/paginated logs, hash deletion and risk-owned unban (UserState integration delegated to lifecycle_users).
+
+Configuration drives moderation scope (groups/models), keyword rules, threshold evaluation, deterministic sampling, explicit hash gate, pre-block versus queued observe processing, retry/timeouts/key freezing, bounded execution leases/admission, log retention, violation windows and notification outbox. Provider calls use the saved account proxy transport. Observe prompt payloads are encrypted in R2; Queue messages contain only request identity; completed/cancelled jobs delete their R2 payloads. Queue send failure leaves a recoverable durable job; admission failure removes the just-written object. No test delivers real email.
+
+Specific fixes verified:
+
+- A newly rejected moderation key was retried from a stale available-key array. The same request now skips newly frozen keys; eight configured keys and six 429 failures make six distinct attempts.
+- An R2 prompt could be orphaned when D1 job admission failed. The encrypted object is removed on this failure path.
+- Original UI sends `result=pass`; log endpoint accepts it, with non-hit/no-error semantics.
+- Original UI configuration saves require `expected_control_version`; component test submits the fetched version 7.
+- Immediate keyword/hash results recheck global enablement/config version before effects, and queued jobs cancel after the global flag is disabled.
+- The original independent pre-hash tooltip explicitly promises blocking previously flagged hashes even during observe. This behavior remains; hash blocks do not increment violations or send emails.
+- Oversized provider JSON is bounded to 256 KiB and reader is cancelled. Real AbortSignal timeout ends provider calls; transport failures fail open and persist error records instead of inventing flags.
+- Initial D1-only user disable implementation was removed before deployment review: UserState is the status authority and subsequent balance projection could otherwise reactivate a user. Effects now atomically claim persistent `risk_ban_commands`; lifecycle_users owns real DO execution/unban ownership/recovery validation. Pending commands protect referenced logs from retention.
+
+Validation so far: `risk-control-negative.test.ts` 10 passed (real createApp+SQLite; no mock SQL responses), original `RiskControlView.spec.ts` 4 passed including CAS, plus pre-existing observe/hash/global-race integration scenarios. Consumer test counts D1 statements and confirms <=50 with eight keys and six provider failures. These are local results, not a production completion claim; actual DO ban/unban regression and root browser/gateway integration remain required. Current whole-Worker typecheck is blocked by in-progress Antigravity platform exhaustiveness changes outside risk files.
+
+Additional negative coverage: duplicate concurrent Queue delivery makes one provider call; disabled global policy cancels queued mail; retention preserves logs referenced by pending ban commands; unsupported moderation-test image formats and non-boolean key-clearing input are rejected without changing saved credentials.
+
+## Antigravity/Grok imported OAuth and Cron isolation (0.44 local preparation)
+
+Antigravity/Grok Worker OAuth forms now import an existing access token instead of invoking unavailable external authorization/refresh. Antigravity requires an actual project ID, loads it from Worker provider_config during edit, and submits project/token/base URL with the existing CAS version. Model preview sends project ID and actual credentials; the existing account-model test button uses the real account test route. Token replacement retains the account identity and clears draft secrets when the target changes. Individual refresh is hidden for these import-only providers; bulk refresh explains the required token import. Original Go flows remain available under their own contract.
+
+All four original Antigravity settings (fallback model, identity patch enabled/prompt, user-agent version) are carried by the existing gateway field bridge; no replacement settings layout was introduced. Eight frontend test files / 161 tests and vue-tsc passed. The original seven account-template hashes are unchanged; parity normalization covers only explicit Worker imported-token additions, whose behavior has mounted-component tests.
+
+Cron previously ran 18 recovery functions concurrently in the same invocation while dispatching 14 newer maintenance tasks. It now only dispatches 32 independent `settings.maintenance.v1` tasks. Each handler is retried by the existing Queue consumer; one dispatch failure does not prevent the other task sends. Financial/media multi-operation recovery calls use small explicit pages, while existing aggregated account-stat rollups and bounded health/synthetic schedules retain their tested page sizes. No recovery function was removed.
+
+Concrete budget evidence and fixes:
+
+- Observability payload repair at the former limit 50 performs 1 SELECT plus one R2 HEAD and D1 UPDATE per record: 101 calls. Its maintenance page is now 10; real SQLite integration measures 21 calls and leaves 40 remaining records recoverable.
+- Orphan R2 cleanup at 50 similarly reaches 101 calls. Maintenance now processes 10, measures 23 including persisted scan-cursor read/write, and advances past fully referenced pages rather than repeatedly scanning only the first page.
+- Image recovery at 25 could spend 53 calls on stale tasks alone. Maintenance uses one task per category. A single expired task's prior unbounded R2/S3 cleanup is now resumable: at most three external outputs and ten R2 keys per invocation, with `deleting` retained until all objects are removed. External references clear only after successful deletion; R2 scans restart from the first remaining prefix key so partial failure never skips nested objects.
+- Integration covers an 85-object nested prefix with injected deletion failure, and eight real encrypted S3 locators with first-attempt transport failure. Every invocation counts D1/R2/Queue/provider calls and remains <=50. Completion removes all owned objects and task metadata.
+- Auth-source first-bind grants allow 100 subscriptions; even one grant could exceed 100 subscription-sync queries. lifecycle_users is completing the shared registration/recovery boundary rather than merely hiding it behind a maintenance page limit; final validation is owned by that agent.
+
+Validation: `test/maintenance/queue.test.ts`, `test/maintenance/recovery-budget.test.ts`, `test/media/image-task.test.ts`: 36 passed; Worker tsc passed. The financial paths retain their existing domain tests; these new checks do not claim a proof that every adversarial CAS retry combination in all financial functions is below the platform ceiling. Root owns final whole-suite/bindings checks and deployment. No deployment or real email was performed by this subagent.

@@ -400,7 +400,16 @@ function reserve(
     if (preferred !== undefined) candidates = [preferred];
   }
 
+  const rates=command.account_cost_rates ?? {};
+  const knownRates=candidates.map(a=>rates[a.account_id]).filter((rate):rate is number=>Number.isFinite(rate) && rate>=0);
+  const preferRate=!scheduler?.enabled && scheduler?.legacy_low_rate_priority && knownRates.length>=2 && knownRates.some(rate=>rate!==knownRates[0]);
   candidates.sort((left, right) => {
+    if(preferRate) {
+      const l=rates[left.account_id],r=rates[right.account_id];
+      const lk=Number.isFinite(l)&&l>=0,rk=Number.isFinite(r)&&r>=0;
+      if(lk!==rk)return lk?-1:1;
+      if(lk && l!==r)return l-r;
+    }
     if (left.priority !== right.priority) return left.priority - right.priority;
     const leftActive = activeCounts[left.account_id] ?? 0;
     const rightActive = activeCounts[right.account_id] ?? 0;

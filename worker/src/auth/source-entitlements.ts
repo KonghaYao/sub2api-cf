@@ -174,16 +174,11 @@ export async function settleAuthSourceGrant(env: Env, grantId: string | null): P
   ).bind(grantId).first<PendingBalanceEffectRow>()
   if (effect !== null && effect.status === 'pending') await settleBalanceEffect(env, effect)
 
-  const subscriptions = await env.DB.prepare(
-    `SELECT id FROM user_subscriptions WHERE source_type = 'registration'
-       AND source_id = ? ORDER BY id`,
-  ).bind(grantId).all<{ id: string }>()
-  if (subscriptions.results.length > 0) {
-    const { synchronizeSubscriptionState } = await import('../control/subscriptions')
-    for (const subscription of subscriptions.results) {
-      await synchronizeSubscriptionState(env, subscription.id)
-    }
-  }
+  // Entitlements and their durable subscription_state_sync intents were committed
+  // together. The dedicated bounded recovery task applies them; gateway first use
+  // also configures the selected subscription. Never fan out across every grant
+  // subscription in an authentication request.
+
 }
 
 export async function findAuthSourceGrantId(
@@ -203,31 +198,23 @@ export async function findAuthSourceGrantId(
 export async function recoverPendingAuthSourceGrants(
   env: Env,
   userId: string,
-  limit = 16,
+  limit = 1,
 ): Promise<void> {
   const rows = await env.DB.prepare(
     `SELECT grant.id
        FROM auth_source_entitlement_grants grant
        LEFT JOIN auth_source_entitlement_balance_effects effect ON effect.grant_id = grant.id
       WHERE grant.user_id = ? AND grant.reason = 'first_bind'
-        AND (
-          effect.status = 'pending'
-          OR EXISTS (
-            SELECT 1 FROM user_subscriptions subscription
-            JOIN subscription_state_sync sync ON sync.subscription_id = subscription.id
-             WHERE subscription.source_type = 'registration'
-               AND subscription.source_id = grant.id AND sync.status = 'pending'
-          )
-        )
+        AND effect.status = 'pending'
       ORDER BY grant.created_at_ms, grant.id LIMIT ?`,
-  ).bind(userId, limit).all<{ id: string }>()
+  ).bind(userId, Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 1) : 1).all<{ id: string }>()
   for (const row of rows.results) await settleAuthSourceGrant(env, row.id)
 }
 
 /** Cron recovery for users who continue through API keys or passkeys after a partial bind. */
 export async function recoverPendingAuthSourceGrantEffects(
   env: Env,
-  limit = 16,
+  limit = 1,
 ): Promise<number> {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new Error('auth source grant recovery limit must be between 1 and 100')
@@ -237,15 +224,7 @@ export async function recoverPendingAuthSourceGrantEffects(
        FROM auth_source_entitlement_grants grant
        LEFT JOIN auth_source_entitlement_balance_effects effect ON effect.grant_id = grant.id
       WHERE grant.reason = 'first_bind'
-        AND (
-          effect.status = 'pending'
-          OR EXISTS (
-            SELECT 1 FROM user_subscriptions subscription
-            JOIN subscription_state_sync sync ON sync.subscription_id = subscription.id
-             WHERE subscription.source_type = 'registration'
-               AND subscription.source_id = grant.id AND sync.status = 'pending'
-          )
-        )
+        AND effect.status = 'pending'
       ORDER BY grant.created_at_ms, grant.id LIMIT ?`,
   ).bind(limit).all<{ id: string }>()
   let recovered = 0

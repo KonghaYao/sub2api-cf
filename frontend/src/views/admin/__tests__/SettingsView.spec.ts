@@ -829,6 +829,19 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
+  it("serializes Worker CLI policy editor rows into the gateway save payload", async () => {
+    const { adminAPI } = await import("@/api");
+    vi.mocked(adminAPI.settings.buildWorkerGatewaySettings).mockImplementationOnce((form) => Object.fromEntries(Object.entries(form).filter(([key]) => key.startsWith("codex_cli_only_"))));
+    getSettings.mockResolvedValue({ ...baseSettingsResponse, cloudflare_worker_contract: true, codex_cli_only_allow_app_server_clients: true, codex_cli_only_blacklist: '[{"originator":"blocked","ua_contains":[]}]', codex_cli_only_whitelist: '[{"originator":"tool","ua_contains":["tool/"],"skip_engine_fingerprint":true}]', codex_cli_only_engine_fingerprint_signals: '[{"type":"body_path","match":["client_metadata.engine"],"required":true}]' });
+    const wrapper = mountView(); await flushPromises();
+    await wrapper.find('form').trigger('submit.prevent'); await flushPromises();
+    const gateway = (updateSettings.mock.calls.at(-1)![0] as any).gateway;
+    expect(gateway.codex_cli_only_allow_app_server_clients).toBe(true);
+    expect(JSON.parse(gateway.codex_cli_only_blacklist)).toEqual([expect.objectContaining({originator:'blocked'})]);
+    expect(JSON.parse(gateway.codex_cli_only_whitelist)).toEqual([expect.objectContaining({originator:'tool',ua_contains:['tool/'],skip_engine_fingerprint:true})]);
+    expect(JSON.parse(gateway.codex_cli_only_engine_fingerprint_signals)).toEqual([{type:'body_path',match:['client_metadata.engine'],required:true}]);
+  });
+
   it("saves global user defaults, visibility flags, fast rules and payment admission settings on Worker", async () => {
     getSettings.mockResolvedValue({ ...baseSettingsResponse, cloudflare_worker_contract: true, default_balance: 2.5, default_concurrency: 7, plugin_management_enabled: true, allow_user_view_error_requests: true, openai_fast_policy_settings: { rules: [{ service_tier: 'priority', action: 'block', scope: 'all', user_ids: ['worker-user-id'] }] } });
     getPaymentConfig.mockResolvedValue({ data: { enabled: false, enabled_payment_types: [], min_amount: 0, max_amount: 0, daily_limit: 0, order_timeout_minutes: 30, max_pending_orders: 3, balance_disabled: true, balance_recharge_multiplier: 1, subscription_usd_to_cny_rate: 0, recharge_fee_rate: 0, product_name_prefix: '', product_name_suffix: '', help_image_url: '', help_text: '', load_balance_strategy: 'least_amount', cancel_rate_limit_enabled: true, cancel_rate_limit_max: 3, cancel_rate_limit_window: 2, cancel_rate_limit_unit: 'hour', cancel_rate_limit_window_mode: 'fixed' } });

@@ -1,3 +1,4 @@
+import { normalizeProviderResponse } from '../gateway/providers'
 import type { AccountFetcher } from '../proxy/account-fetch'
 import type { Context } from 'hono'
 import { streamSSE } from 'hono/streaming'
@@ -20,7 +21,7 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
   let operation: ProviderOperation = 'chat_completions'
   let body: Record<string, unknown> = { model, messages: [{ role: 'user', content: prompt }], max_tokens: 256, stream: false }
   if (account.platform === 'anthropic') operation = 'messages'
-  if (account.platform === 'gemini') {
+  if (account.platform === 'gemini' || account.platform === 'antigravity') {
     operation = 'generate_content'
     body = { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 256 } }
   }
@@ -47,10 +48,11 @@ export function testAccountModel(context: Context<{ Bindings: Env }>, account: P
         timer = setTimeout(() => { stop(); reject(new Error('Upstream model test timed out')) }, 60_000)
       })
       const run = async () => {
-        const response = await upstreamFetch(plan.url, {
+        let response = await upstreamFetch(plan.url, {
           method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body),
           redirect: 'manual', cache: 'no-store', signal: controller.signal,
         })
+        response = await normalizeProviderResponse(plan, response, controller.signal)
         reader = response.body?.getReader()
         const decoder = new TextDecoder()
         let text = '', size = 0

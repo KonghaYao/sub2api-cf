@@ -292,7 +292,7 @@ export async function recoverImageTasks(
   for (const task of expired.results) {
     if (await claimExpiredTask(env, task.id, now) === false) continue
     try {
-      await deleteImageTaskObjects(env, task.id)
+      if (!await deleteImageTaskObjects(env, task.id)) continue
       const result = await env.DB.prepare(
         "DELETE FROM image_tasks WHERE id=? AND expires_at_ms <= ? AND status='deleting'",
       ).bind(task.id, now).run()
@@ -304,15 +304,24 @@ export async function recoverImageTasks(
   return { enqueued, failed, deleted }
 }
 
-async function deleteImageTaskObjects(env: Env, taskId: string): Promise<void> {
-  await deleteExternalImageOutputs(env, taskId)
-  const prefix = imageTaskPrefix(env, taskId)
-  let cursor: string | undefined
-  do {
-    const page = await env.OBJECTS.list({ prefix, ...(cursor === undefined ? {} : { cursor }) })
-    for (const object of page.objects) await env.OBJECTS.delete(object.key)
-    cursor = page.truncated ? page.cursor : undefined
-  } while (cursor !== undefined)
+async function deleteImageTaskObjects(env: Env, taskId: string): Promise<boolean> {
+  // Clear references only after successful deletion. A crash leaves the same
+  // reference retryable; already deleted objects are safe to delete again.
+  const external = await env.DB.prepare(
+    'SELECT external_storage_ref FROM image_task_outputs WHERE task_id=? AND external_storage_ref IS NOT NULL LIMIT 4',
+  ).bind(taskId).all<{ external_storage_ref: string }>()
+  for (const output of external.results.slice(0, 3)) {
+    await deleteConfiguredImage(env, output.external_storage_ref)
+    await env.DB.prepare('UPDATE image_task_outputs SET external_storage_ref=NULL WHERE task_id=? AND external_storage_ref=?')
+      .bind(taskId, output.external_storage_ref).run()
+  }
+  if (external.results.length > 3) return false
+
+  // Always restart at the first remaining key. Deletions advance the prefix
+  // naturally, avoiding a cursor that skips objects after a partial failure.
+  const page = await env.OBJECTS.list({ prefix: imageTaskPrefix(env, taskId), limit: 10 })
+  for (const object of page.objects.slice(0, 10)) await env.OBJECTS.delete(object.key)
+  return !page.truncated && page.objects.length <= 10
 }
 
 async function deleteExternalImageOutputs(env: Env, taskId: string): Promise<void> {

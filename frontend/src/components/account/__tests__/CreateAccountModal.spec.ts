@@ -42,6 +42,7 @@ vi.mock('@/api/admin', () => ({
       create: createAccountMock,
       probeUpstreamBilling: probeUpstreamBillingMock,
       syncUpstreamModels: syncUpstreamModelsMock,
+      syncUpstreamModelsPreview: syncUpstreamModelsMock,
       checkMixedChannelRisk: vi.fn().mockResolvedValue({ has_risk: false }),
       importCodexSession: importCodexSessionMock,
       createOpenAICodexPAT: createOpenAICodexPATMock,
@@ -69,6 +70,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -213,6 +215,7 @@ async function openCodexImportStep(toggleClicks = 0) {
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(true)
     authIsSimpleMode.value = true
     createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
@@ -497,6 +500,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   it('antigravity upstream 创建默认携带上游倍率探测开关', async () => {
+    setCloudflareWorkerContractActive(false)
     // antigravity upstream 走独立创建 helper，
     // 也必须与其余 API-key 平台一样默认开启探测并传递开关。
     const wrapper = mountModal()
@@ -570,4 +574,26 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(false)
   })
+  it.each(['antigravity', 'grok'])('imports an existing %s Worker OAuth token without authorization endpoints', async (platform) => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, platform === 'antigravity' ? 'Antigravity' : 'Grok')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Imported account')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="imported-oauth-form"]').exists()).toBe(true)
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
+    await wrapper.get('[data-testid="imported-access-token"]').setValue('existing-oauth-token')
+    if (platform === 'antigravity') {
+      await wrapper.get('[data-testid="imported-project-id"]').setValue('actual-project')
+      syncUpstreamModelsMock.mockResolvedValueOnce({ models: ['gemini-real'], metadata: {} })
+      await wrapper.get('[data-testid="imported-models-sync"]').trigger('click')
+      await flushPromises()
+      expect(syncUpstreamModelsMock).toHaveBeenCalledWith(expect.objectContaining({ platform: 'antigravity', project_id: 'actual-project', api_key: 'existing-oauth-token' }))
+      expect(wrapper.get('[data-testid="imported-models"]').text()).toContain('gemini-real')
+    }
+    await wrapper.get('[data-testid="imported-oauth-submit"]').trigger('click')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ platform, type: 'oauth', credentials: expect.objectContaining({ access_token: 'existing-oauth-token', ...(platform === 'antigravity' ? { project_id: 'actual-project', model_mapping: { 'gemini-real': 'gemini-real' } } : {}) }) }))
+  })
+
 })

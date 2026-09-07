@@ -2,6 +2,8 @@ import type { Env } from '../env'
 import { GatewayError } from '../gateway/errors'
 import type { PoolSchedulerPolicy } from '../shared/state-machine/pool-scheduler'
 export const schedulerDefaults = {
+  openai_low_upstream_rate_priority_enabled: false,
+  openai_oauth_scheduling_rate_multiplier: 1,
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
   openai_advanced_scheduler_lb_top_k: '',
@@ -26,6 +28,7 @@ export function parseSchedulerSettingsPatch(value: unknown): Partial<SchedulerSe
   for(const [key,item] of Object.entries(value as Record<string,unknown>)) {
     if(!(key in schedulerDefaults)) invalid(key)
     if(typeof item !== typeof schedulerDefaults[key as keyof SchedulerSettings]) invalid(key)
+    if(typeof item==='number' && (!Number.isFinite(item) || item<0 || item>1000000)) invalid(key)
     if(typeof item==='string') {
       if(item.length>32 || (item!=='' && (!/^\d+(?:\.\d+)?$/.test(item) || !Number.isFinite(Number(item)) || Number(item)>1000000))) invalid(key)
       if(key.endsWith('lb_top_k') && item!=='' && (!Number.isInteger(Number(item)) || Number(item)<1 || Number(item)>100)) invalid(key)
@@ -47,7 +50,7 @@ export function schedulerPolicy(value:SchedulerSettings):PoolSchedulerPolicy {
     if(item!=='') weights[key]=Number(item)
   }
   if(weights.priority+weights.load+weights.error_rate+weights.ttft+weights.upstream_cost+weights.reset+weights.quota_headroom+weights.queue<=0) invalid('base_weights')
-  return {enabled:value.openai_advanced_scheduler_enabled,sticky_weighted:value.openai_advanced_scheduler_sticky_weighted_enabled,top_k:Number(value.openai_advanced_scheduler_lb_top_k||7),weights}
+  return {legacy_low_rate_priority:value.openai_low_upstream_rate_priority_enabled,enabled:value.openai_advanced_scheduler_enabled,sticky_weighted:value.openai_advanced_scheduler_sticky_weighted_enabled,top_k:Number(value.openai_advanced_scheduler_lb_top_k||7),weights}
 }
 export function schedulerEffectiveSettings(value:SchedulerSettings):Record<string,string> {
  const policy=schedulerPolicy(value)

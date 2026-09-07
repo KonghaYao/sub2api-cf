@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -55,6 +55,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+import { setCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -333,6 +334,7 @@ function mountModal(account = buildAccount()) {
 
 describe('EditAccountModal', () => {
   beforeEach(() => {
+    setCloudflareWorkerContractActive(true)
     authIsSimpleMode.value = true
   })
 
@@ -1471,7 +1473,8 @@ describe('EditAccountModal', () => {
     )
   })
 
-  it('clears Antigravity configured project fallback when input is empty', async () => {
+  it('clears Antigravity configured project fallback in the original Go contract when input is empty', async () => {
+    setCloudflareWorkerContractActive(false)
     const account = buildAntigravityAccount('configured-project')
     updateAccountMock.mockReset()
     checkMixedChannelRiskMock.mockReset()
@@ -1549,4 +1552,18 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     expect(updateAccountMock).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it('loads the Worker Antigravity project and updates its imported token with the current control version', async () => {
+    setCloudflareWorkerContractActive(true)
+    const account = { ...buildAccount(), platform: 'antigravity', type: 'oauth', control_version: 8, credentials: {}, provider_config: { project_id: 'project-from-worker' }, base_url: 'https://cloudcode-pa.googleapis.com' }
+    updateAccountMock.mockReset().mockResolvedValue({ ...account, control_version: 9 })
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-imported-access-token"]').setValue('rotated-access-token')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledWith(account.id, expect.objectContaining({ credentials: expect.objectContaining({ project_id: 'project-from-worker', access_token: 'rotated-access-token', base_url: 'https://cloudcode-pa.googleapis.com' }) }), 8)
+    wrapper.unmount()
+  })
+
 })

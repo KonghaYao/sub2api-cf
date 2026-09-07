@@ -1199,13 +1199,14 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const defaultBlockMessage = () => t('admin.riskControl.defaultBlockMessage')
 
+const configControlVersion = ref<number | undefined>(undefined)
 const loading = ref(true)
 const saving = ref(false)
 const logsLoading = ref(false)
 const statusLoading = ref(false)
 const apiKeyTesting = ref(false)
 const hashActionLoading = ref(false)
-const unbanningUserID = ref<number | null>(null)
+const unbanningUserID = ref<number | string | null>(null)
 const settingsOpen = ref(false)
 const activeSettingsTab = ref<SettingsTab>('basic')
 const groupSearch = ref('')
@@ -1241,7 +1242,7 @@ const configForm = reactive({
   retry_count: 2,
   sample_rate: 100,
   all_groups: true,
-  group_ids: [] as number[],
+  group_ids: [] as Array<number | string>,
   record_non_hits: false,
   worker_count: 4,
   queue_size: 32768,
@@ -1271,7 +1272,7 @@ const pagination = reactive({
 
 const filters = reactive({
   result: '',
-  group_id: 0,
+  group_id: 0 as number | string,
   endpoint: '',
   search: '',
   from: '',
@@ -1699,6 +1700,7 @@ const runtimeBadgeClass = computed(() => {
 })
 
 function applyConfig(config: ContentModerationConfig) {
+  configControlVersion.value = config.control_version
   configForm.enabled = config.enabled
   configForm.mode = config.mode
   configForm.base_url = config.base_url || 'https://api.openai.com'
@@ -1794,6 +1796,7 @@ async function saveConfig() {
       return
     }
     const payload: UpdateContentModerationConfig = {
+      expected_control_version: configControlVersion.value,
       enabled: configForm.enabled,
       mode: configForm.mode,
       base_url: configForm.base_url,
@@ -2103,7 +2106,7 @@ function fileToDataURL(file: File): Promise<string> {
   })
 }
 
-function toggleGroup(groupID: number) {
+function toggleGroup(groupID: number | string) {
   const index = configForm.group_ids.indexOf(groupID)
   if (index >= 0) {
     configForm.group_ids.splice(index, 1)
@@ -2112,7 +2115,7 @@ function toggleGroup(groupID: number) {
   }
 }
 
-function isGroupSelected(groupID: number): boolean {
+function isGroupSelected(groupID: number | string): boolean {
   return configForm.group_ids.includes(groupID)
 }
 

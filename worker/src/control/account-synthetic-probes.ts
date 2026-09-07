@@ -1,3 +1,5 @@
+import { normalizeProviderResponse } from '../gateway/providers'
+import { effectiveProviderAccount } from './provider-runtime'
 import { accountFetcher } from '../proxy/account-fetch'
 import type { Context } from 'hono'
 
@@ -639,11 +641,11 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
     )
     const operation = providerOperation(account.platform, account.capability)
     plan = buildProviderRequest({
-      account: {
+      account: await effectiveProviderAccount(env, {
         platform: account.platform, protocol: account.protocol,
         auth_scheme: account.auth_scheme, base_url: account.base_url,
         provider_config: providerConfig,
-      },
+      }),
       credential,
       operation,
       model: account.upstream_model,
@@ -655,11 +657,12 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.min(plan.timeout_ms, 8_000))
   try {
-    const response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
+    let response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
       method: plan.method, headers: plan.headers,
       body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual', cache: 'no-store', signal: controller.signal,
     })
+    response = await normalizeProviderResponse(plan, response, controller.signal)
     if (response.ok) {
       const body = await readBoundedProviderJson(response)
       if (!validProviderResponse(account.platform, account.capability, body)) {
@@ -688,7 +691,7 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
 function providerOperation(platform: ProviderPlatform, capability: SyntheticProbeCapability): ProviderOperation {
   if (capability === 'embeddings') return 'embeddings'
   if (platform === 'anthropic') return 'messages'
-  if (platform === 'gemini') return 'generate_content'
+  if (platform === 'gemini' || platform === 'antigravity') return 'generate_content'
   if (platform === 'codex') return 'responses'
   return capability
 }
@@ -702,7 +705,7 @@ export function minimalProbeBody(
   if (platform === 'anthropic') {
     return { model, max_tokens: 1, stream: false, messages: [{ role: 'user', content: prompt }] }
   }
-  if (platform === 'gemini') {
+  if (platform === 'gemini' || platform === 'antigravity') {
     return capability === 'embeddings'
       ? { content: { parts: [{ text: prompt }] } }
       : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1 } }
@@ -748,7 +751,7 @@ export function validProviderResponse(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const body = value as Record<string, unknown>
   if (capability === 'embeddings') {
-    if (platform === 'gemini') {
+    if (platform === 'gemini' || platform === 'antigravity') {
       return hasFiniteEmbeddingValue(objectRecord(body.embedding)?.values)
     }
     return Array.isArray(body.data) && body.data.some((item) =>
@@ -760,7 +763,7 @@ export function validProviderResponse(
       return part?.type === 'text' && nonEmptyText(part.text)
     })
   }
-  if (platform === 'gemini') {
+  if (platform === 'gemini' || platform === 'antigravity') {
     return Array.isArray(body.candidates) && body.candidates.some((candidate) => {
       const parts = objectRecord(objectRecord(candidate)?.content)?.parts
       return Array.isArray(parts) && parts.some((part) => nonEmptyText(objectRecord(part)?.text))

@@ -436,4 +436,13 @@ describe('admin settings Cloudflare Worker contract', () => {
       }
     })
   })
+  it('bridges all four original Antigravity settings through the canonical Worker gateway payload', async () => {
+    const gateway = { fallback_model_antigravity: 'gemini-selected', enable_identity_patch: true, identity_patch_prompt: 'Configured identity', antigravity_user_agent_version: '1.2.3' }
+    get.mockResolvedValue({ data: { schema_version: 1, control_version: 8, audit_log_retention_days: 30, gateway, public: {}, security: {}, secrets: {} }, headers: { etag: '"8"' } })
+    const { getSettings, buildWorkerGatewaySettings } = await import('@/api/admin/settings')
+    const form = await getSettings()
+    expect(form).toMatchObject(gateway)
+    expect(buildWorkerGatewaySettings({ ...form, enable_identity_patch: false, identity_patch_prompt: 'Changed identity' })).toEqual({ ...gateway, enable_identity_patch: false, identity_patch_prompt: 'Changed identity' })
+  })
+
 })

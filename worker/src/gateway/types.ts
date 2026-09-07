@@ -164,6 +164,7 @@ export interface ModelRoute {
 
 export interface AccountCandidate {
   account_id: string
+  upstream_billing_probe_json?: string | null
   billing_rate_multiplier_ppm?: number
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind
@@ -185,6 +186,8 @@ export type AccountImageAdapter = 'direct_images' | 'responses_image_tool'
 export type AccountCredentialKind = 'api_key' | 'oauth' | 'setup_token'
 
 export interface AccountCredential {
+  codex_cli_only?: number | boolean
+  codex_cli_only_allow_app_server?: number | boolean
   proxy_id?: number | null
   account_id: string
   image_adapter: AccountImageAdapter

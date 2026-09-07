@@ -83,3 +83,8 @@ export function sanitizeCloudflareAccountCreatePayload<T>(payload: T): T {
 export function sanitizeCloudflareAccountUpdatePayload<T>(payload: T): T {
   return allowWorkerAccountFields(payload, WORKER_ACCOUNT_UPDATE_FIELDS)
 }
+
+/** These Worker providers currently accept existing tokens; authorization and refresh require an external OAuth client. */
+export function requiresImportedOAuthToken(platform: string | undefined): boolean {
+  return cloudflareWorkerContractActive && (platform === 'antigravity' || platform === 'grok')
+}

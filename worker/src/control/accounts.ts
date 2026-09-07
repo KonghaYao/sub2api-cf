@@ -1,3 +1,6 @@
+import { effectiveProviderAccount } from './provider-runtime'
+import { readGrokSettings } from './grok-runtime'
+import { grokBaseURLs, resolveGrokModel } from './grok-settings'
 import { enrichAccountOllamaUsage } from './ollama-cloud-usage'
 import { accountFetcher, accountProxyId, type AccountFetcher } from '../proxy/account-fetch'
 import { validateAccountProxy } from './proxies'
@@ -197,6 +200,8 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
         OR (a.platform = 'anthropic' AND a.protocol = 'anthropic' AND a.auth_scheme = 'x-api-key')
         OR (a.platform = 'gemini' AND a.protocol = 'gemini' AND a.auth_scheme = 'x-goog-api-key')
         OR (a.platform = 'codex' AND a.protocol = 'codex' AND a.auth_scheme = 'bearer')
+        OR (a.platform = 'grok' AND a.protocol = 'openai' AND a.auth_scheme = 'bearer')
+        OR (a.platform = 'antigravity' AND a.protocol = 'gemini' AND a.auth_scheme = 'bearer')
       )`,
       'a.base_url IS NOT NULL',
     ]
@@ -1364,11 +1369,11 @@ export async function previewAdminUpstreamModels(context: Context<ControlBinding
   try {
     const body = await readJsonObject(context.req.raw)
     const platform = requireProviderPlatform(body.platform)
-    const defaults = { openai: 'https://api.openai.com', anthropic: 'https://api.anthropic.com', gemini: 'https://generativelanguage.googleapis.com', codex: 'https://chatgpt.com/backend-api/codex' }
-    const baseUrl = body.base_url === undefined ? defaults[platform] : requireString(body, 'base_url', 2048)
-    const account: ProviderAccount = { platform, ...providerContract(platform), base_url: baseUrl, provider_config: {} }
-    const credential = { api_key: requireProviderCredential(body, 'api_key') }
-    return controlSuccess(await fetchUpstreamModels(account, credential, accountFetcher(context.env, body.proxy_id)))
+    const defaults = { openai: 'https://api.openai.com', anthropic: 'https://api.anthropic.com', gemini: 'https://generativelanguage.googleapis.com', codex: 'https://chatgpt.com/backend-api/codex', grok: grokBaseURLs.cli, antigravity: 'https://cloudcode-pa.googleapis.com' }
+    const baseUrl = body.base_url === undefined || body.base_url === '' ? defaults[platform] : requireString(body, 'base_url', 2048)
+    const account: ProviderAccount = { platform, ...providerContract(platform), base_url: baseUrl, provider_config: platform === 'grok' && (body.base_url === undefined || body.base_url === '') ? {use_default_base_url:true} : platform === 'antigravity' ? parseProviderConfig(body.provider_config ?? { project_id: body.project_id }, platform) : {} }
+    const credential = { api_key: requireProviderCredential({...body,api_key:body.api_key ?? body.access_token}, 'api_key') }
+    return controlSuccess(await fetchUpstreamModels(await effectiveProviderAccount(context.env, account), credential, accountFetcher(context.env, body.proxy_id)))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -1382,7 +1387,7 @@ export async function syncAdminUpstreamModels(context: Context<ControlBindings>)
       account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
       credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
-    return controlSuccess(await fetchUpstreamModels(providerAccount(account), credential, accountFetcher(context.env, accountProxyId(account.ui_config_json), account)))
+    return controlSuccess(await fetchUpstreamModels(await effectiveProviderAccount(context.env, providerAccount(account)), credential, accountFetcher(context.env, accountProxyId(account.ui_config_json), account)))
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -1409,12 +1414,12 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       const input = await readJsonObject(context.req.raw)
       if (Object.hasOwn(input, 'model_id')) {
         const extra = parseUiConfig(account.ui_config_json).extra
-        return testAccountModel(context, providerAccount(account), credential, input,
+        return testAccountModel(context, await effectiveProviderAccount(context.env, providerAccount(account)), credential, account.platform === 'grok' ? {...input,model_id:resolveGrokModel(await readGrokSettings(context.env),String(input.model_id??''))} : input,
           extra && typeof extra === 'object' && !Array.isArray(extra) ? extra as Record<string, unknown> : {}, accountFetcher(context.env, accountProxyId(account.ui_config_json), account))
       }
     }
     const plan = buildProviderHealthRequest({
-      account: providerAccount(account),
+      account: await effectiveProviderAccount(context.env, providerAccount(account)),
       credential,
     })
     const started = Date.now()
@@ -1426,6 +1431,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       const response = await accountFetcher(context.env, accountProxyId(account.ui_config_json), account)(plan.url, {
         method: plan.method,
         headers: plan.headers,
+        body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
         redirect: 'manual',
         cache: 'no-store',
         signal: controller.signal,
@@ -1625,7 +1631,8 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     ? {}
     : requireCredentialObject(body.credentials, 'credentials', true)
   const rawBaseUrl = body.base_url ?? submittedCredentials.base_url
-  const baseUrl = normalizeBaseUrl(requireString({ base_url: rawBaseUrl }, 'base_url', 2_048))
+  const useDefaultGrok = platform === 'grok' && (rawBaseUrl === undefined || rawBaseUrl === '')
+  const baseUrl = normalizeBaseUrl(requireString({ base_url: useDefaultGrok ? grokBaseURLs.cli : platform === 'antigravity' && !rawBaseUrl ? 'https://cloudcode-pa.googleapis.com' : rawBaseUrl }, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
   const imageAdapter = body.image_adapter === undefined
     ? defaultImageAdapter(platform)
@@ -1635,7 +1642,7 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     : requireAccountCredentialKind(body.credential_kind)
   validateAccountExecution(platform, imageAdapter, credentialKind)
   validateAccountType(body, platform, credentialKind)
-  const rawApiKey = body.api_key ?? submittedCredentials.api_key
+  const rawApiKey = body.api_key ?? submittedCredentials.api_key ?? (['antigravity','grok'].includes(platform) ? submittedCredentials.access_token : undefined)
   const apiKey = requireProviderCredential({ api_key: rawApiKey }, 'api_key')
   const credential = {
     ...submittedCredentials,
@@ -1657,7 +1664,7 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     auth_scheme: authScheme,
     provider_config: applySubscriptionPlan(
       assertProviderConfigSubscriptionPlanEligible(
-        parseProviderConfig(body.provider_config, platform),
+        parseProviderConfig(useDefaultGrok ? {...requireObjectOrEmpty(body.provider_config),use_default_base_url:true} : platform === 'antigravity' ? {...requireObjectOrEmpty(body.provider_config),project_id:requireObjectOrEmpty(body.provider_config).project_id ?? submittedCredentials.project_id ?? submittedCredentials.antigravity_project_id} : body.provider_config, platform),
         platform,
         credentialKind,
       ),
@@ -1693,11 +1700,15 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   const patch: AccountPatch = {}
   const currentUiConfig = parseUiConfig(account.ui_config_json)
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
-  if (body.base_url !== undefined) patch.base_url = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
+  if (body.base_url !== undefined) patch.base_url = ['grok','antigravity'].includes(account.platform) && body.base_url === '' ? (account.platform === 'grok' ? grokBaseURLs.cli : 'https://cloudcode-pa.googleapis.com') : normalizeBaseUrl(requireString(body, 'base_url', 2_048))
   if (body.credentials !== undefined) {
     patch.credential_patch = requireCredentialObject(body.credentials, 'credentials', false)
+    if (['grok','antigravity'].includes(account.platform) && patch.credential_patch.access_token !== undefined) {
+      if (patch.credential_patch.access_token === '') delete patch.credential_patch.access_token
+      else patch.credential_patch.api_key = requireProviderCredential(patch.credential_patch, 'access_token')
+    }
     if (Object.prototype.hasOwnProperty.call(patch.credential_patch, 'base_url')) {
-      patch.base_url = normalizeBaseUrl(requireString(patch.credential_patch, 'base_url', 2_048))
+      patch.base_url = ['grok','antigravity'].includes(account.platform) && patch.credential_patch.base_url === '' ? (account.platform === 'grok' ? grokBaseURLs.cli : 'https://cloudcode-pa.googleapis.com') : normalizeBaseUrl(requireString(patch.credential_patch, 'base_url', 2_048))
       patch.credential_patch.base_url = patch.base_url
     }
   }
@@ -1706,6 +1717,13 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   }
   if (body.provider_config !== undefined) {
     patch.provider_config = parseProviderConfig(body.provider_config, account.platform)
+  }
+  if (account.platform === 'antigravity' && patch.credential_patch && (Object.hasOwn(patch.credential_patch, 'project_id') || Object.hasOwn(patch.credential_patch, 'antigravity_project_id'))) {
+    patch.provider_config = parseProviderConfig({...accountProviderConfig(account),...patch.provider_config,project_id:patch.credential_patch.project_id ?? patch.credential_patch.antigravity_project_id}, account.platform)
+  }
+  if (account.platform === 'grok' && (body.base_url !== undefined || (body.credentials && typeof body.credentials === 'object' && Object.hasOwn(body.credentials, 'base_url')))) {
+    const raw = body.base_url ?? (body.credentials as Record<string,unknown>).base_url
+    patch.provider_config = {...accountProviderConfig(account),...patch.provider_config,use_default_base_url:raw === ''}
   }
   if (body.image_adapter !== undefined) {
     patch.image_adapter = requireAccountImageAdapter(body.image_adapter)
@@ -1871,7 +1889,7 @@ function validateAccountType(
   const expected = credentialKind === 'api_key'
     ? 'apikey'
     : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'
-  if (body.type !== expected || (platform !== 'codex' && platform !== 'openai' && body.type !== 'apikey')) {
+  if (body.type !== expected || (!['codex','openai','grok','antigravity','anthropic'].includes(platform) && body.type !== 'apikey')) {
     throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
   }
 }
@@ -1879,7 +1897,7 @@ function validateAccountType(
 function credentialKindForType(value: unknown, platform: ProviderPlatform): AccountCredentialKind {
   if (value === undefined) return defaultCredentialKind(platform)
   if (value === 'apikey') return 'api_key'
-  if ((platform === 'codex' || platform === 'openai') && value === 'oauth') return 'oauth'
+  if (['codex','openai','grok','antigravity','anthropic'].includes(platform) && value === 'oauth') return 'oauth'
   if (platform === 'codex' && value === 'setup-token') return 'setup_token'
   throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
 }
@@ -2055,10 +2073,10 @@ function requireProviderCredential(body: Record<string, unknown>, field: string)
 }
 
 function requireProviderPlatform(value: unknown): ProviderPlatform {
-  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex') {
+  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex' || value === 'grok' || value === 'antigravity') {
     return value
   }
-  throw new GatewayError(409, 'platform_not_supported', 'Supported platforms are openai, anthropic, gemini, and codex')
+  throw new GatewayError(409, 'platform_not_supported', 'Supported platforms are openai, anthropic, gemini, codex, grok, and antigravity')
 }
 
 function requireProviderProtocol(value: unknown): ProviderProtocol {
@@ -2096,7 +2114,7 @@ function defaultImageAdapter(platform: ProviderPlatform): AccountImageAdapter {
 }
 
 function defaultCredentialKind(platform: ProviderPlatform): AccountCredentialKind {
-  return platform === 'codex' ? 'oauth' : 'api_key'
+  return platform === 'codex' || platform === 'antigravity' ? 'oauth' : 'api_key'
 }
 
 function validateAccountExecution(
@@ -2107,7 +2125,9 @@ function validateAccountExecution(
   const supported = platform === 'codex'
     ? imageAdapter === 'responses_image_tool' &&
       (credentialKind === 'oauth' || credentialKind === 'setup_token')
-    : platform === 'openai'
+    : platform === 'antigravity'
+      ? imageAdapter === 'direct_images' && credentialKind === 'oauth'
+    : platform === 'openai' || platform === 'grok'
       ? imageAdapter === 'direct_images' && (credentialKind === 'api_key' || credentialKind === 'oauth')
       : platform === 'anthropic'
         ? imageAdapter === 'direct_images' && ['api_key','oauth','setup_token'].includes(credentialKind)
@@ -2138,7 +2158,7 @@ function parseProviderConfig(value: unknown, platform: ProviderPlatform): Provid
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
   }
   const raw = value as Record<string, unknown>
-  const unsupported = Object.keys(raw).find((key) => key !== 'account_id' && key !== 'subscription_plan')
+  const unsupported = Object.keys(raw).find((key) => key !== 'account_id' && key !== 'subscription_plan' && key !== 'use_default_base_url' && key !== 'project_id')
   if (unsupported !== undefined) {
     throw new GatewayError(400, 'invalid_provider_config', `provider_config field '${unsupported}' is not supported`)
   }
@@ -2146,6 +2166,15 @@ function parseProviderConfig(value: unknown, platform: ProviderPlatform): Provid
     throw new GatewayError(400, 'invalid_provider_config', 'account_id is supported only for Codex')
   }
   const config: ProviderConfig = {}
+  if (raw.project_id !== undefined) {
+    if (platform !== 'antigravity' || typeof raw.project_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(raw.project_id)) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is invalid')
+    config.project_id = raw.project_id
+  }
+  if (platform === 'antigravity' && !config.project_id) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is required')
+  if (raw.use_default_base_url !== undefined) {
+    if (platform !== 'grok' || typeof raw.use_default_base_url !== 'boolean') throw new GatewayError(400, 'invalid_provider_config', 'use_default_base_url is supported only for Grok')
+    config.use_default_base_url = raw.use_default_base_url
+  }
   if (raw.account_id !== undefined) {
     const accountId = requireString(raw, 'account_id', 256)
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(accountId)) {
@@ -2687,6 +2716,8 @@ function compatibilityProjection(
   uiConfig: Record<string, unknown>,
   value: {
     base_url: string
+    platform: ProviderPlatform
+    provider_config: ProviderConfig
     credential_kind: AccountCredentialKind
     max_concurrency: number
     group_links: GroupLink[]
@@ -2701,7 +2732,7 @@ function compatibilityProjection(
     type: uiConfig.type ?? (value.credential_kind === 'api_key'
       ? 'apikey'
       : value.credential_kind === 'setup_token' ? 'setup-token' : 'oauth'),
-    credentials: { ...credentials, base_url: value.base_url },
+    credentials: { ...credentials, base_url: value.base_url, ...(value.platform === 'antigravity' ? {project_id:value.provider_config.project_id,antigravity_project_id:value.provider_config.project_id} : {}) },
     concurrency: value.max_concurrency,
     group_ids: value.group_links.map((link) => link.group_id),
   }
@@ -2847,3 +2878,5 @@ function containsSensitiveCredentialField(value: unknown): boolean {
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
+
+function requireObjectOrEmpty(value:unknown):Record<string,unknown>{if(value===undefined)return {};if(!value||typeof value!=='object'||Array.isArray(value))throw new GatewayError(400,'invalid_provider_config','provider_config must be an object');return value as Record<string,unknown>}
