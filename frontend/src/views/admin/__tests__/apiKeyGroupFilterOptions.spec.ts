@@ -90,4 +90,12 @@ describe('buildApiKeyGroupFilterOptions', () => {
   it('returns only the all-option when there are no groups', () => {
     expect(buildApiKeyGroupFilterOptions([], labels)).toEqual([{ value: null, label: 'All' }])
   })
+
+  it('preserves Worker UUID group values', () => {
+    const groups = [g({ id: 'group-worker-uuid' as unknown as number, name: 'Worker group' })]
+    expect(buildApiKeyGroupFilterOptions(groups, labels)).toContainEqual({
+      value: 'group-worker-uuid',
+      label: 'Worker group',
+    })
+  })
 })

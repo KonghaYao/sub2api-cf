@@ -1110,7 +1110,7 @@ const filters = reactive({
   role: '',
   status: '',
   group: '',  // group name for fuzzy match, '' = all
-  apiKeyGroup: null as number | null  // group id bound to the user's API keys, null = all
+  apiKeyGroup: null as string | number | null  // group id bound to the user's API keys, null = all
 })
 const activeAttributeFilters = reactive<Record<string, string>>({})
 
@@ -1159,7 +1159,9 @@ const loadSavedFilters = () => {
       if (parsed.role) filters.role = parsed.role
       if (parsed.status) filters.status = parsed.status
       if (parsed.group) filters.group = parsed.group
-      if (typeof parsed.apiKeyGroup === 'number') filters.apiKeyGroup = parsed.apiKeyGroup
+      if (typeof parsed.apiKeyGroup === 'number' || typeof parsed.apiKeyGroup === 'string') {
+        filters.apiKeyGroup = parsed.apiKeyGroup
+      }
       if (parsed.attributes) {
         Object.assign(activeAttributeFilters, parsed.attributes)
       }

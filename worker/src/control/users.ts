@@ -3,6 +3,7 @@ import type { Env } from '../env'
 import { hashPassword, PasswordValidationError, validateNewPassword } from '../auth/password'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { normalizeSubscriptionWindows } from '../subscription-windows'
 import { authenticateAdminSession, type AdminActor } from './admin-auth'
 import {
   controlIdempotency,
@@ -41,6 +42,53 @@ interface UserRow {
   restrict_public_groups: number
   created_at_ms: number
   updated_at_ms: number
+}
+
+interface UserListRow extends UserRow {
+  last_active_at_ms: number | null
+  last_used_at_ms: number | null
+}
+
+interface UserGroupPermissionRow {
+  user_id: string
+  group_id: string
+}
+
+interface UserGroupRateRow extends UserGroupPermissionRow {
+  rate_multiplier_ppm: number
+}
+
+interface UserListSubscriptionRow {
+  id: string
+  user_id: string
+  group_id: string
+  status: 'active' | 'suspended' | 'revoked' | 'expired'
+  starts_at_ms: number
+  expires_at_ms: number
+  daily_quota_micros: number | null
+  weekly_quota_micros: number | null
+  monthly_quota_micros: number | null
+  daily_used_micros: number
+  weekly_used_micros: number
+  monthly_used_micros: number
+  daily_anchor_ms: number
+  daily_window_start_ms: number | null
+  weekly_window_start_ms: number | null
+  monthly_window_start_ms: number | null
+  control_version: number
+  created_at_ms: number
+  updated_at_ms: number
+  group_name: string
+  group_description: string | null
+  group_platform: string
+  group_enabled: number
+  group_type: 'standard' | 'subscription'
+  group_is_exclusive: number
+  effective_rate_multiplier_ppm: number
+}
+
+interface UserConcurrencySnapshot {
+  active_concurrency?: unknown
 }
 
 interface CreateUserInput {
@@ -214,14 +262,17 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
     const orderBy = parseUserListOrder(context.req.query('sort_by'), context.req.query('sort_order'))
-    const conditions: string[] = [LIVE_USER_SQL]
+    const conditions: string[] = [`NOT (
+      u.status = 'disabled' AND u.display_name = '[deleted]'
+      AND u.email = 'deleted+' || u.id || '@users.invalid'
+    )`]
     const values: unknown[] = []
     const status = context.req.query('status')
     if (status !== undefined) {
       if (status !== 'active' && status !== 'disabled') {
         throw new GatewayError(400, 'invalid_status', 'status must be active or disabled')
       }
-      conditions.push('status = ?')
+      conditions.push('u.status = ?')
       values.push(status)
     }
     const role = context.req.query('role')
@@ -229,7 +280,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
       if (role !== 'user' && role !== 'admin') {
         throw new GatewayError(400, 'invalid_role', 'role must be user or admin')
       }
-      conditions.push('role = ?')
+      conditions.push('u.role = ?')
       values.push(role)
     }
     const search = context.req.query('search')?.trim()
@@ -237,18 +288,80 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
       if (search.length > 320) {
         throw new GatewayError(400, 'invalid_search', 'search must not exceed 320 characters')
       }
-      conditions.push(`(email LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')`)
+      conditions.push(
+        `(u.email LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR u.display_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR EXISTS (
+            SELECT 1
+              FROM api_keys search_key
+             WHERE search_key.user_id = u.id
+               AND search_key.revoked_at_ms IS NULL
+               AND (search_key.name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                    OR search_key.key_prefix LIKE ? ESCAPE '\\' COLLATE NOCASE)
+          ))`,
+      )
       const pattern = `%${escapeLike(search)}%`
-      values.push(pattern, pattern)
+      values.push(pattern, pattern, pattern, pattern)
     }
+
+    const groupName = context.req.query('group_name')?.trim()
+    if (groupName) {
+      if (groupName.length > 128) {
+        throw new GatewayError(400, 'invalid_group_name', 'group_name must not exceed 128 characters')
+      }
+      conditions.push(
+        `EXISTS (
+           SELECT 1
+             FROM user_group_permissions permission
+             JOIN "groups" allowed_group ON allowed_group.id = permission.group_id
+            WHERE permission.user_id = u.id
+              AND allowed_group.name LIKE ? ESCAPE '\\' COLLATE NOCASE
+         )`,
+      )
+      values.push(`%${escapeLike(groupName)}%`)
+    }
+
+    const apiKeyGroupIdValue = context.req.query('api_key_group_id')?.trim()
+    if (apiKeyGroupIdValue) {
+      const apiKeyGroupId = requireResourceId(apiKeyGroupIdValue, 'group')
+      conditions.push(
+        `EXISTS (
+           SELECT 1
+             FROM api_keys api_key
+            WHERE api_key.user_id = u.id
+              AND api_key.group_id = ?
+              AND api_key.revoked_at_ms IS NULL
+         )`,
+      )
+      values.push(apiKeyGroupId)
+    }
+
+    for (const [attributeId, attributeValue] of parseUserAttributeFilters(context.req.raw)) {
+      conditions.push(
+        `EXISTS (
+           SELECT 1
+             FROM user_attribute_values attribute_value
+            WHERE attribute_value.user_id = u.id
+              AND attribute_value.attribute_id = ?
+              AND attribute_value.value LIKE ? ESCAPE '\\' COLLATE NOCASE
+         )`,
+      )
+      values.push(attributeId, `%${escapeLike(attributeValue)}%`)
+    }
+
     const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
     const countStatement = context.env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM users ${where}`,
+      `SELECT COUNT(*) AS total FROM users u ${where}`,
     ).bind(...values)
     const rowsStatement = context.env.DB.prepare(
-      `SELECT id, email, display_name, role, status, balance_micros, concurrency, rpm_limit,
-              state_version, control_version, created_at_ms, updated_at_ms
-         FROM users
+      `SELECT u.id, u.email, u.display_name, u.role, u.status, u.balance_micros,
+              u.concurrency, u.rpm_limit, u.state_version, u.control_version,
+              u.restrict_public_groups, u.created_at_ms, u.updated_at_ms,
+              u.last_login_at_ms AS last_active_at_ms,
+              (SELECT MAX(usage.occurred_at_ms)
+                 FROM usage_projection usage
+                WHERE usage.user_id = u.id) AS last_used_at_ms
+         FROM users u
          ${where}
         ORDER BY ${orderBy}
         LIMIT ? OFFSET ?`,
@@ -259,8 +372,14 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
       throw new GatewayError(500, 'invalid_user_count', 'User count projection is invalid', 'server_error')
     }
     const total = totalValue as number
+    const rows = rowsResult.results as unknown as UserListRow[]
+    const includeSubscriptions = parseUserListBoolean(
+      context.req.query('include_subscriptions'),
+      true,
+    )
+    const items = await hydrateAdminUserList(context.env, rows, includeSubscriptions)
     return controlSuccess({
-      items: rowsResult.results as unknown as UserRow[],
+      items,
       total,
       page,
       page_size: pageSize,
@@ -272,25 +391,262 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
 }
 
 function parseUserListOrder(sortBy: string | undefined, sortOrder: string | undefined): string {
-  const columns: Record<string, string> = {
-    id: 'id',
-    email: 'email COLLATE NOCASE',
-    username: 'display_name COLLATE NOCASE',
-    role: 'role',
-    balance: 'balance_micros',
-    concurrency: 'concurrency',
-    status: 'status',
-    created_at: 'created_at_ms',
+  const columns: Record<string, { column: string, nulls?: 'first' | 'last' | 'directional' }> = {
+    id: { column: 'u.id' },
+    email: { column: 'u.email COLLATE NOCASE' },
+    username: { column: 'u.display_name COLLATE NOCASE' },
+    role: { column: 'u.role' },
+    balance: { column: 'u.balance_micros' },
+    concurrency: { column: 'u.concurrency' },
+    rpm: { column: 'u.rpm_limit' },
+    rpm_limit: { column: 'u.rpm_limit' },
+    status: { column: 'u.status' },
+    last_active_at: { column: 'last_active_at_ms', nulls: 'last' },
+    last_used_at: { column: 'last_used_at_ms', nulls: 'directional' },
+    created_at: { column: 'u.created_at_ms' },
   }
   const key = sortBy ?? 'created_at'
-  const column = columns[key]
-  if (column === undefined) {
+  const projection = columns[key]
+  if (projection === undefined) {
     throw new GatewayError(422, 'unsupported_user_sort', `User sort ${key} is not supported`)
   }
   if (sortOrder !== undefined && sortOrder !== 'asc' && sortOrder !== 'desc') {
     throw new GatewayError(400, 'invalid_sort_order', 'sort_order must be asc or desc')
   }
-  return `${column} ${(sortOrder ?? 'desc').toUpperCase()}, id DESC`
+  const direction = (sortOrder ?? 'desc').toUpperCase()
+  const nullPlacement = projection.nulls === 'directional'
+    ? (direction === 'ASC' ? 'first' : 'last')
+    : projection.nulls
+  const nullOrdering = projection.nulls === undefined
+    ? ''
+    : `${projection.column} IS NULL ${nullPlacement === 'last' ? 'ASC' : 'DESC'}, `
+  const tieDirection = direction === 'ASC' ? 'ASC' : 'DESC'
+  return `${nullOrdering}${projection.column} ${direction}, u.id ${tieDirection}`
+}
+
+function parseUserAttributeFilters(request: Request): Array<[number, string]> {
+  const filters = new Map<number, string>()
+  for (const [key, value] of new URL(request.url).searchParams) {
+    const match = /^attr\[(\d+)\]$/.exec(key)
+    if (match === null || value.length === 0) continue
+    const attributeId = Number(match[1])
+    if (!Number.isSafeInteger(attributeId) || attributeId <= 0 || filters.has(attributeId)) continue
+    if (value.length > 16_384) {
+      throw new GatewayError(400, 'invalid_attribute_filter', 'Attribute filter is too long')
+    }
+    filters.set(attributeId, value)
+    if (filters.size > 50) {
+      throw new GatewayError(400, 'too_many_attribute_filters', 'At most 50 attribute filters are allowed')
+    }
+  }
+  return [...filters]
+}
+
+function parseUserListBoolean(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback
+  switch (raw.trim().toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+    case 'on':
+      return true
+    case '0':
+    case 'false':
+    case 'no':
+    case 'off':
+      return false
+    default:
+      return fallback
+  }
+}
+
+async function hydrateAdminUserList(
+  env: Env,
+  rows: UserListRow[],
+  includeSubscriptions: boolean,
+): Promise<Array<Record<string, unknown>>> {
+  const now = Date.now()
+  const currentConcurrency = await loadUserCurrentConcurrency(env, rows.map((row) => row.id))
+  const items = rows.map((row) => {
+    const { last_active_at_ms: lastActiveAt, last_used_at_ms: lastUsedAt, ...user } = row
+    return {
+      ...user,
+      allowed_groups: [] as string[],
+      group_rates: Object.create(null) as Record<string, number>,
+      current_concurrency: currentConcurrency.get(row.id) ?? 0,
+      last_active_at: nullableUserListIso(lastActiveAt ?? null),
+      last_used_at: nullableUserListIso(lastUsedAt ?? null),
+      ...(includeSubscriptions ? { subscriptions: [] as Array<Record<string, unknown>> } : {}),
+    }
+  })
+  if (items.length === 0) return items
+
+  const ids = rows.map((row) => row.id)
+  const placeholders = ids.map(() => '?').join(', ')
+  const statements = [
+    env.DB.prepare(
+      `SELECT user_id, group_id
+         FROM user_group_permissions
+        WHERE user_id IN (${placeholders})
+        ORDER BY user_id ASC, group_id ASC`,
+    ).bind(...ids),
+    env.DB.prepare(
+      `SELECT user_id, group_id, rate_multiplier_ppm
+         FROM user_group_rate_overrides
+        WHERE user_id IN (${placeholders})
+        ORDER BY user_id ASC, group_id ASC`,
+    ).bind(...ids),
+  ]
+  if (includeSubscriptions) {
+    statements.push(env.DB.prepare(
+      `SELECT subscription.id, subscription.user_id, subscription.group_id,
+              subscription.status, subscription.starts_at_ms, subscription.expires_at_ms,
+              subscription.daily_quota_micros, subscription.weekly_quota_micros,
+              subscription.monthly_quota_micros, subscription.daily_used_micros,
+              subscription.weekly_used_micros, subscription.monthly_used_micros,
+              subscription.daily_anchor_ms, subscription.daily_window_start_ms,
+              subscription.weekly_window_start_ms, subscription.monthly_window_start_ms,
+              subscription.control_version, subscription.created_at_ms,
+              subscription.updated_at_ms, subscription_group.name AS group_name,
+              subscription_group.description AS group_description,
+              subscription_group.platform AS group_platform,
+              subscription_group.enabled AS group_enabled,
+              subscription_group.group_type AS group_type,
+              subscription_group.is_exclusive AS group_is_exclusive,
+              COALESCE(rate.rate_multiplier_ppm, subscription_group.rate_multiplier_ppm)
+                AS effective_rate_multiplier_ppm
+         FROM user_subscriptions subscription
+         JOIN "groups" subscription_group ON subscription_group.id = subscription.group_id
+         LEFT JOIN user_group_rate_overrides rate
+           ON rate.user_id = subscription.user_id AND rate.group_id = subscription.group_id
+        WHERE subscription.user_id IN (${placeholders})
+          AND subscription.status = 'active'
+        ORDER BY subscription.user_id ASC, subscription.expires_at_ms DESC, subscription.id ASC`,
+    ).bind(...ids))
+  }
+
+  const results = await env.DB.batch(statements)
+  const itemById = new Map(items.map((item) => [item.id as string, item]))
+  for (const row of results[0].results as unknown as UserGroupPermissionRow[]) {
+    const item = itemById.get(row.user_id)
+    if (item !== undefined) (item.allowed_groups as string[]).push(row.group_id)
+  }
+  for (const row of results[1].results as unknown as UserGroupRateRow[]) {
+    const item = itemById.get(row.user_id)
+    if (item !== undefined) {
+      const rates = item.group_rates as Record<string, number>
+      rates[row.group_id] = userListMicros(row.rate_multiplier_ppm)
+    }
+  }
+  if (includeSubscriptions) {
+    for (const row of results[2].results as unknown as UserListSubscriptionRow[]) {
+      const item = itemById.get(row.user_id)
+      if (item !== undefined) {
+        const subscriptions = item.subscriptions as Array<Record<string, unknown>>
+        subscriptions.push(publicUserListSubscription(row, now))
+      }
+    }
+  }
+  return items
+}
+
+function publicUserListSubscription(
+  row: UserListSubscriptionRow,
+  now: number,
+): Record<string, unknown> {
+  const normalized = normalizeSubscriptionWindows(row, now)
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    group_id: row.group_id,
+    status: row.status === 'active' && (row.starts_at_ms > now || row.expires_at_ms <= now)
+      ? 'expired'
+      : row.status,
+    starts_at: userListIso(row.starts_at_ms),
+    expires_at: userListIso(row.expires_at_ms),
+    daily_usage_usd: userListMicros(normalized.daily_used_micros),
+    weekly_usage_usd: userListMicros(normalized.weekly_used_micros),
+    monthly_usage_usd: userListMicros(normalized.monthly_used_micros),
+    daily_window_start: nullableUserListIso(normalized.daily_window_start_ms),
+    weekly_window_start: nullableUserListIso(normalized.weekly_window_start_ms),
+    monthly_window_start: nullableUserListIso(normalized.monthly_window_start_ms),
+    created_at: userListIso(row.created_at_ms),
+    updated_at: userListIso(row.updated_at_ms),
+    revoked_at: null,
+    control_version: row.control_version,
+    group: {
+      id: row.group_id,
+      name: row.group_name,
+      description: row.group_description,
+      platform: row.group_platform,
+      status: row.group_enabled === 1 ? 'active' : 'inactive',
+      subscription_type: row.group_type,
+      is_exclusive: row.group_is_exclusive === 1,
+      rate_multiplier: userListMicros(row.effective_rate_multiplier_ppm),
+      daily_limit_usd: nullableUserListMicros(row.daily_quota_micros),
+      weekly_limit_usd: nullableUserListMicros(row.weekly_quota_micros),
+      monthly_limit_usd: nullableUserListMicros(row.monthly_quota_micros),
+    },
+  }
+}
+
+async function loadUserCurrentConcurrency(
+  env: Env,
+  userIds: string[],
+): Promise<Map<string, number>> {
+  const result = new Map(userIds.map((userId) => [userId, 0]))
+  if (env.API_KEY_LIMIT_STATE === undefined || userIds.length === 0) return result
+
+  await boundedUserListMap(userIds, 16, async (userId) => {
+    try {
+      const stub = env.API_KEY_LIMIT_STATE!.get(
+        env.API_KEY_LIMIT_STATE!.idFromName(`user:${userId}`),
+      )
+      const response = await stub.fetch('https://state.internal/snapshot')
+      if (!response.ok) return
+      const snapshot = await response.json() as UserConcurrencySnapshot
+      const current = snapshot.active_concurrency
+      if (Number.isSafeInteger(current) && (current as number) >= 0) {
+        result.set(userId, current as number)
+      }
+    } catch {
+      // The original service treats transient concurrency-state lookup failures as zero.
+    }
+  })
+  return result
+}
+
+async function boundedUserListMap<T>(
+  items: T[],
+  limit: number,
+  visit: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) await visit(items[next++]!)
+  }))
+}
+
+function userListMicros(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new GatewayError(500, 'invalid_user_list_projection', 'User list projection is invalid', 'server_error')
+  }
+  return value / 1_000_000
+}
+
+function nullableUserListMicros(value: number | null): number | null {
+  return value === null ? null : userListMicros(value)
+}
+
+function userListIso(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) {
+    throw new GatewayError(500, 'invalid_user_list_projection', 'User list projection is invalid', 'server_error')
+  }
+  return new Date(value).toISOString()
+}
+
+function nullableUserListIso(value: number | null): string | null {
+  return value === null ? null : userListIso(value)
 }
 
 export async function getAdminUser(context: Context<ControlBindings>): Promise<Response> {

@@ -377,11 +377,22 @@ describe('admin accounts Worker transport capabilities', () => {
     )
   })
 
+  it('does not write a Worker health error status when replacing credentials', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { update } = await import('@/api/admin/accounts')
+    await update('cursor-account', { status: 'error', credentials: { api_key: 'crsr_test-replacement' } }, 0)
+    expect(put).toHaveBeenCalledWith('/admin/accounts/cursor-account',
+      { credentials: { api_key: 'crsr_test-replacement' } },
+      { headers: { 'If-Match': '"0"' } },
+    )
+  })
+
   it('does not change the legacy update request when a loaded version is available', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(false)
     const { update } = await import('@/api/admin/accounts')
-    const request = { name: 'legacy updated', notes: 'preserved' }
+    const request = { name: 'legacy updated', notes: 'preserved', status: 'error' as const }
 
     await update(7, request, 8)
 

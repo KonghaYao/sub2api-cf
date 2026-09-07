@@ -377,7 +377,11 @@ export async function update(
   const updateRecord = updates as unknown as Record<string, unknown>
   const expectedVersion = expectedControlVersion ?? updateRecord.expected_control_version
   const payload = workerContract
-    ? Object.fromEntries(Object.entries(updateRecord).filter(([key]) => key !== 'expected_control_version'))
+    ? Object.fromEntries(Object.entries(updateRecord).filter(([key, value]) =>
+        key !== 'expected_control_version' &&
+        // Worker 'error' is a derived health status, not an editable enabled state.
+        !(key === 'status' && value === 'error'),
+      ))
     : updates
   const { data } = await apiClient.put<Account>(
     `/admin/accounts/${id}`,

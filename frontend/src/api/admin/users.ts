@@ -5,7 +5,13 @@
 
 import { apiClient } from '../client'
 import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
-import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
+import type {
+  AdminUser,
+  UpdateUserRequest,
+  PaginatedResponse,
+  ApiKey,
+  UserSubscription,
+} from '@/types'
 
 export type AdminUserId = string | number
 
@@ -33,15 +39,31 @@ function workerUserListParams(
     status?: 'active' | 'disabled'
     role?: 'admin' | 'user'
     search?: string
+    group_name?: string
+    api_key_group_id?: string | number
+    attributes?: Record<number, string>
+    include_subscriptions?: boolean
     sort_by?: string
     sort_order?: 'asc' | 'desc'
   }
-): Record<string, string | number> {
-  const params: Record<string, string | number> = { page, page_size: pageSize }
+): Record<string, string | number | boolean> {
+  const params: Record<string, string | number | boolean> = { page, page_size: pageSize }
   if (filters?.status) params.status = filters.status
   if (filters?.role) params.role = filters.role
   const search = filters?.search?.trim()
   if (search) params.search = search
+  if (filters?.group_name !== undefined) params.group_name = filters.group_name
+  if (filters?.api_key_group_id !== undefined) {
+    params.api_key_group_id = filters.api_key_group_id
+  }
+  if (filters?.attributes) {
+    for (const [attributeId, value] of Object.entries(filters.attributes)) {
+      if (value) params[`attr[${attributeId}]`] = value
+    }
+  }
+  if (filters?.include_subscriptions !== undefined) {
+    params.include_subscriptions = filters.include_subscriptions
+  }
   if (filters?.sort_by) params.sort_by = filters.sort_by
   if (filters?.sort_order) params.sort_order = filters.sort_order
   return params
@@ -52,7 +74,48 @@ function timestampToIso(value: unknown): string {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : ''
 }
 
+function nullableTimestampToIso(value: unknown): string | null {
+  return value === null ? null : timestampToIso(value)
+}
+
+function workerMicrosToDollars(value: unknown): number {
+  const micros = Number(value)
+  return Number.isFinite(micros) ? micros / 1_000_000 : 0
+}
+
+function adaptWorkerSubscription(value: Record<string, unknown>): UserSubscription {
+  const adapted: Record<string, unknown> = { ...value }
+  for (const [workerField, legacyField] of [
+    ['starts_at_ms', 'starts_at'],
+    ['expires_at_ms', 'expires_at'],
+    ['daily_window_start_ms', 'daily_window_start'],
+    ['weekly_window_start_ms', 'weekly_window_start'],
+    ['monthly_window_start_ms', 'monthly_window_start'],
+    ['revoked_at_ms', 'revoked_at'],
+    ['created_at_ms', 'created_at'],
+    ['updated_at_ms', 'updated_at'],
+  ] as const) {
+    if (Object.prototype.hasOwnProperty.call(value, workerField)) {
+      adapted[legacyField] = nullableTimestampToIso(value[workerField])
+    }
+  }
+  for (const [workerField, legacyField] of [
+    ['daily_used_micros', 'daily_usage_usd'],
+    ['weekly_used_micros', 'weekly_usage_usd'],
+    ['monthly_used_micros', 'monthly_usage_usd'],
+  ] as const) {
+    if (Object.prototype.hasOwnProperty.call(value, workerField)) {
+      adapted[legacyField] = workerMicrosToDollars(value[workerField])
+    }
+  }
+  return adapted as unknown as UserSubscription
+}
+
 function adaptWorkerUser(value: WorkerAdminUser): AdminUser {
+  const subscriptions = Array.isArray(value.subscriptions)
+    ? value.subscriptions.map((subscription) =>
+        adaptWorkerSubscription(subscription as Record<string, unknown>))
+    : undefined
   return {
     ...value,
     // The legacy UI type is numeric, but Worker user IDs must remain UUIDs at runtime.
@@ -63,6 +126,13 @@ function adaptWorkerUser(value: WorkerAdminUser): AdminUser {
     rpm_limit: value.rpm_limit,
     created_at: timestampToIso(value.created_at_ms),
     updated_at: timestampToIso(value.updated_at_ms),
+    ...(Object.prototype.hasOwnProperty.call(value, 'last_active_at_ms')
+      ? { last_active_at: nullableTimestampToIso(value.last_active_at_ms) }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(value, 'last_used_at_ms')
+      ? { last_used_at: nullableTimestampToIso(value.last_used_at_ms) }
+      : {}),
+    ...(subscriptions === undefined ? {} : { subscriptions }),
     notes: '',
     allowed_groups: value.allowed_groups ?? [],
     group_rates: value.group_rates,
@@ -258,7 +328,7 @@ export async function list(
     role?: 'admin' | 'user'
     search?: string
     group_name?: string         // fuzzy filter by allowed group name
-    api_key_group_id?: number   // filter users by the group their API keys are bound to
+    api_key_group_id?: string | number   // filter users by the group their API keys are bound to
     attributes?: Record<number, string>  // attributeId -> value
     include_subscriptions?: boolean
     sort_by?: string
