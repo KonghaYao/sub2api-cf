@@ -184,6 +184,9 @@ const DataTableStub = {
           <slot name="cell-id" :value="row.id" :row="row" />
         </div>
         <slot name="cell-name" :value="row.name" :row="row" />
+        <div data-test="key-cell">
+          <slot name="cell-key" :value="row.key" :row="row" />
+        </div>
         <div data-test="current-concurrency">
           <slot name="cell-current_concurrency" :value="row.current_concurrency" :row="row" />
         </div>
@@ -535,6 +538,52 @@ describe('user KeysView column settings', () => {
 
     wrapper.unmount()
     vi.useRealTimers()
+  })
+
+  it('keeps a newly created secret in the original table copy action until the next reload', async () => {
+    getAvailableGroups.mockResolvedValueOnce([{ id: 'group-a', name: 'OpenAI' }])
+    listKeys
+      .mockResolvedValueOnce({
+        items: [createApiKey()],
+        total: 1,
+        page: 1,
+        page_size: 20,
+        pages: 1,
+      })
+      .mockResolvedValueOnce({
+        items: [createApiKey({
+          id: 'created-key',
+          key: undefined,
+          key_prefix: 'sk-sub2api-redacted',
+          name: 'new-key',
+          group_id: 'group-a',
+        })],
+        total: 1,
+        page: 1,
+        page_size: 20,
+        pages: 1,
+      })
+    const wrapper = await mountView()
+    await getButtonByText(wrapper, 'Create API Key').trigger('click')
+    await wrapper.get('input[data-tour="key-form-name"]').setValue('new-key')
+    const groupSelect = wrapper.findAllComponents({ name: 'Select' })
+      .find((select) => select.attributes('data-tour') === 'key-form-group')!
+    groupSelect.vm.$emit('update:modelValue', 'group-a')
+    await nextTick()
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(createKey).toHaveBeenCalledOnce()
+    const createdRow = wrapper.findAll('[data-test="key-cell"]')
+      .find((cell) => cell.text().includes('sk-c***'))
+    expect(createdRow).toBeDefined()
+    await createdRow!.get('button').trigger('click')
+    expect(copyToClipboard).toHaveBeenCalledWith('sk-created', 'keys.copied')
+
+    await wrapper.get('button[title="Refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('sk-c***')
+    wrapper.unmount()
   })
 
   it('submits an enabled quota from the existing create form', async () => {

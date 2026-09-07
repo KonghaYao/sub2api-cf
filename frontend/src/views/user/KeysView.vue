@@ -1312,8 +1312,6 @@ const showCcsClientSelect = ref(false)
 const showColumnDropdown = ref(false)
 const pendingCcsRow = ref<ApiKey | null>(null)
 const selectedKey = ref<ApiKey | null>(null)
-const createdApiKeySecret = ref('')
-const createdApiKeyWarning = ref('This API key is shown only once. Store it securely before closing.')
 const copiedKeyId = ref<string | number | null>(null)
 const groupSelectorKeyId = ref<string | number | null>(null)
 const publicSettings = ref<PublicSettings | null>(null)
@@ -1780,12 +1778,21 @@ const handleSubmit = async () => {
         onboardingStore.nextStep(500)
       }
       closeModals()
-      if (created.key) {
-        createdApiKeySecret.value = created.key
-        createdApiKeyWarning.value = (created as ApiKey & { warning?: string }).warning
-          || 'This API key is shown only once. Store it securely before closing.'
+      await loadApiKeys()
+      if (hasPlaintextApiKey(created)) {
+        const refreshedIndex = apiKeys.value.findIndex((key) => String(key.id) === String(created.id))
+        if (refreshedIndex >= 0) {
+          apiKeys.value[refreshedIndex] = {
+            ...apiKeys.value[refreshedIndex],
+            key: created.key,
+          }
+        } else {
+          created.group = groups.value.find(
+            (group) => String(group.id) === String(created.group_id),
+          ) as Group | undefined
+          apiKeys.value = [created, ...apiKeys.value]
+        }
       }
-      loadApiKeys()
       return
     }
     closeModals()
