@@ -261,7 +261,7 @@ describe('production admin route permission matrix', () => {
     const audit = await request('/api/v1/admin/audit/events')
     const requestAudit = await request('/api/v1/admin/audit-logs')
     const requestAuditDetail = await request('/api/v1/admin/audit-logs/999')
-    const unsupportedClear = await request('/api/v1/admin/audit-logs/clear', 'POST')
+    const deniedClear = await request('/api/v1/admin/audit-logs/clear', 'POST')
     const operations = await request('/api/v1/admin/payment/dashboard')
 
     expect(audit.status).toBe(200)
@@ -279,9 +279,12 @@ describe('production admin route permission matrix', () => {
     await expect(requestAuditDetail.json()).resolves.toMatchObject({
       error: { code: 'audit_log_not_found' },
     })
-    expect(unsupportedClear.status).toBe(501)
-    await expect(unsupportedClear.json()).resolves.toMatchObject({
-      error: { code: 'audit_log_clear_not_migrated' },
+    expect(deniedClear.status).toBe(403)
+    await expect(deniedClear.json()).resolves.toMatchObject({
+      error: {
+        code: 'admin_permission_required',
+        message: expect.stringContaining('admin.operations.write'),
+      },
     })
     expect(operations.status).toBe(403)
     await expect(operations.json()).resolves.toMatchObject({

@@ -1,9 +1,28 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../env'
+import {
+  claimTotpVerificationAttempt,
+  findTotpCredential,
+  verifyStoredTotpCode,
+  verifyTotpCode,
+} from '../auth/totp'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { requestIdFor } from '../request-id'
 import { getAuthenticatedAdminActor } from './admin-auth'
-import { controlError, controlSuccess, queryInteger, requireResourceId } from './http'
+import {
+  controlError,
+  controlSuccess,
+  deterministicUuid,
+  queryInteger,
+  readJsonObject,
+  requireIdempotencyKey,
+  requireResourceId,
+} from './http'
+import {
+  controlIdempotency,
+  findControlIdempotency,
+  parseIdempotentResponse,
+} from './idempotency'
 
 export type RequestAuditBindings = {
   Bindings: Env
@@ -42,6 +61,14 @@ const SENSITIVE_GET_ROUTES = [
   /^\/api\/v1\/admin\/rbac\/users\/[^/]+\/roles$/,
 ]
 const REQUEST_BODY_PLACEHOLDER = '[not_captured]'
+const CLEAR_IDEMPOTENCY_SCOPE = 'admin.audit-logs.clear.v1'
+const CLEAR_IDEMPOTENCY_RESOURCE = 'admin_request_audit_clear'
+const CLEAR_IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1_000
+const DUMMY_TOTP_SECRET = 'JBSWY3DPEHPK3PXP'
+
+interface ClearAuditResponse {
+  deleted: number
+}
 
 /**
  * Records authenticated management-plane requests after authentication, RBAC,
@@ -158,13 +185,178 @@ export async function getAdminRequestAuditLog(
   }
 }
 
-export function clearAdminRequestAuditLogs(): Response {
-  return controlError(new GatewayError(
-    501,
-    'audit_log_clear_not_migrated',
-    'Audit log clearing with fresh TOTP verification is not migrated to Cloudflare Workers yet',
+export async function clearAdminRequestAuditLogs(
+  context: Context<RequestAuditBindings>,
+): Promise<Response> {
+  try {
+    const startedAt = Date.now()
+    const actor = await getAuthenticatedAdminActor(context.req.raw)
+    if (actor.session_type !== 'user_access') {
+      throw new GatewayError(
+        403,
+        'audit_log_clear_user_access_required',
+        'Audit logs can only be cleared from an authenticated user session',
+        'permission_error',
+      )
+    }
+
+    const idempotency = await controlIdempotency(
+      CLEAR_IDEMPOTENCY_SCOPE,
+      requireIdempotencyKey(context.req.raw),
+      { actor_user_id: actor.user_id },
+    )
+    const body = await readJsonObject(context.req.raw, 1_024)
+    const totpCode = body.totp_code
+    const verifiedAt = Date.now()
+    const credential = await findTotpCredential(context.env, actor.user_id)
+    const validTotp = credential === null
+      ? await verifyTotpCode(totpCode, DUMMY_TOTP_SECRET, verifiedAt)
+      : await verifyStoredTotpCode(context.env, credential, totpCode, verifiedAt)
+    if (credential === null || !validTotp) {
+      await claimTotpVerificationAttempt(context.env, actor.user_id, verifiedAt)
+      throw new GatewayError(
+        403,
+        'audit_log_clear_totp_invalid',
+        'A valid current TOTP code is required to clear audit logs',
+        'permission_error',
+      )
+    }
+
+    const replay = await findControlIdempotency(context.env, idempotency)
+    if (replay !== null) {
+      return controlSuccess(parseIdempotentResponse<ClearAuditResponse>(
+        replay,
+        CLEAR_IDEMPOTENCY_RESOURCE,
+      ))
+    }
+
+    const completedAt = Date.now()
+    const eventKey = await deterministicUuid('admin-request-audit-clear-trace:v1', idempotency.key_hash)
+    const requestId = bounded(requestIdFor(context.req.raw), 128)
+    const path = '/api/v1/admin/audit-logs/clear'
+    let statements: D1Result<unknown>[]
+    try {
+      statements = await context.env.DB.batch([
+        context.env.DB.prepare(
+          `INSERT INTO admin_request_audit_logs (
+           event_key, created_at_ms, actor_user_id, actor_email, actor_role,
+           auth_method, credential_masked, action, method, path, route_template,
+           request_id, client_ip, user_agent, status_code, latency_ms,
+           request_body, extra_json
+         )
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'POST', ?, ?, ?, ?, ?, 200, ?, ?,
+                json_object(
+                  'kind', 'clear_trace',
+                  'deleted_rows', (SELECT COUNT(*) FROM admin_request_audit_logs),
+                  'idempotency_key_hash', ?
+                )
+          WHERE NOT EXISTS (
+            SELECT 1 FROM control_idempotency WHERE scope = ? AND key_hash = ?
+          )
+         RETURNING CAST(json_extract(extra_json, '$.deleted_rows') AS INTEGER) AS deleted_rows`,
+        ).bind(
+          eventKey,
+          completedAt,
+          actor.user_id,
+          bounded(actor.actor_email, 320),
+          bounded(actor.actor_role, 128),
+          actor.auth_method,
+          actor.credential_masked,
+          'POST /api/v1/admin/audit-logs/clear',
+          path,
+          path,
+          requestId,
+          trustedClientIp(context.req.raw),
+          bounded(context.req.header('user-agent') ?? '', 1_024),
+          Math.min(Math.max(0, completedAt - startedAt), 86_400_000),
+          REQUEST_BODY_PLACEHOLDER,
+          idempotency.key_hash,
+          idempotency.scope,
+          idempotency.key_hash,
+        ),
+        context.env.DB.prepare(
+          `DELETE FROM admin_request_audit_logs
+          WHERE event_key <> ?
+            AND NOT EXISTS (
+              SELECT 1 FROM control_idempotency WHERE scope = ? AND key_hash = ?
+            )`,
+        ).bind(eventKey, idempotency.scope, idempotency.key_hash),
+        context.env.DB.prepare(
+          `INSERT INTO control_idempotency (
+           scope, key_hash, request_hash, resource_type, resource_id,
+           response_json, created_at_ms, expires_at_ms
+         )
+         SELECT ?, ?, ?, ?, ?,
+                json_object(
+                  'deleted', CAST(json_extract(extra_json, '$.deleted_rows') AS INTEGER)
+                ),
+                ?, ?
+           FROM admin_request_audit_logs
+          WHERE event_key = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM control_idempotency WHERE scope = ? AND key_hash = ?
+            )`,
+        ).bind(
+          idempotency.scope,
+          idempotency.key_hash,
+          idempotency.request_hash,
+          CLEAR_IDEMPOTENCY_RESOURCE,
+          eventKey,
+          completedAt,
+          completedAt + CLEAR_IDEMPOTENCY_TTL_MS,
+          eventKey,
+          idempotency.scope,
+          idempotency.key_hash,
+        ),
+        context.env.DB.prepare(
+          'DELETE FROM user_totp_verification_budgets WHERE user_id = ?',
+        ).bind(actor.user_id),
+      ])
+    } catch (error) {
+      try {
+        const concurrent = await findControlIdempotency(context.env, idempotency)
+        if (concurrent !== null) {
+          return controlSuccess(parseIdempotentResponse<ClearAuditResponse>(
+            concurrent,
+            CLEAR_IDEMPOTENCY_RESOURCE,
+          ))
+        }
+      } catch {
+        // A D1 outage can fail both the transaction and the recovery read. The
+        // caller still receives the stable retryable clear-specific boundary.
+      }
+      console.error('admin request audit clear transaction failed', {
+        name: error instanceof Error ? error.name : 'unknown',
+      })
+      throw invalidClearTransaction()
+    }
+    const inserted = statements[0]?.results[0] as { deleted_rows?: number } | undefined
+    if (inserted !== undefined) {
+      const deleted = Number(inserted.deleted_rows)
+      if (!Number.isSafeInteger(deleted) || deleted < 0) throw invalidClearTransaction()
+      return controlSuccess({ deleted })
+    }
+
+    const concurrent = await findControlIdempotency(context.env, idempotency)
+    if (concurrent !== null) {
+      return controlSuccess(parseIdempotentResponse<ClearAuditResponse>(
+        concurrent,
+        CLEAR_IDEMPOTENCY_RESOURCE,
+      ))
+    }
+    throw invalidClearTransaction()
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+function invalidClearTransaction(): GatewayError {
+  return new GatewayError(
+    503,
+    'audit_log_clear_unavailable',
+    'Audit log clearing is temporarily unavailable',
     'server_error',
-  ))
+  )
 }
 
 function shouldAudit(method: string, pathname: string): boolean {

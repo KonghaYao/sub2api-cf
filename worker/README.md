@@ -109,9 +109,10 @@ log is available at `GET /api/v1/admin/audit-logs` and
 `GET /api/v1/admin/audit-logs/:id`. Migration 0076 stores event-time actor,
 authentication, route, trusted Cloudflare client IP, response status, latency,
 and shared request-ID snapshots without fabricating HTTP metadata for the
-domain stream. Request bodies remain explicitly `[not_captured]`; the retained
-clear action returns `audit_log_clear_not_migrated` until its fresh-TOTP delete
-transaction is implemented.
+domain stream. Request bodies remain explicitly `[not_captured]`. The retained
+clear action requires both audit-read and operations-write permission, a normal
+user-access administrator session, a fresh TOTP proof and an idempotency key;
+its D1 transaction retains one truthful clear trace with the deleted row count.
 
 ## Checks
 

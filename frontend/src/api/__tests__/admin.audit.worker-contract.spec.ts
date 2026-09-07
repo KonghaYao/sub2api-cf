@@ -41,10 +41,14 @@ describe('admin request audit Cloudflare Worker contract', () => {
     expect(get).toHaveBeenCalledWith('/admin/audit-logs/42')
   })
 
-  it('keeps the original clear action wired to the explicit Worker route', async () => {
+  it('sends a unique idempotency key with the original clear action', async () => {
     post.mockResolvedValueOnce({ data: { deleted: 3 } })
     const api = await import('@/api/admin/audit')
     await expect(api.clear('123456')).resolves.toEqual({ deleted: 3 })
-    expect(post).toHaveBeenCalledWith('/admin/audit-logs/clear', { totp_code: '123456' })
+    expect(post).toHaveBeenCalledWith(
+      '/admin/audit-logs/clear',
+      { totp_code: '123456' },
+      { headers: { 'Idempotency-Key': expect.stringMatching(/^[0-9a-f-]{36}$/) } },
+    )
   })
 })

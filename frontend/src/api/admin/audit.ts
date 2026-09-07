@@ -59,12 +59,13 @@ export async function get(id: number): Promise<AuditLog> {
   return data
 }
 
-/**
- * Clear all audit logs. The Worker currently returns the explicit
- * audit_log_clear_not_migrated error until fresh-TOTP deletion is implemented.
- */
+/** Clear all audit logs after a fresh TOTP proof. */
 export async function clear(totpCode: string): Promise<{ deleted: number }> {
-  const { data } = await apiClient.post('/admin/audit-logs/clear', { totp_code: totpCode })
+  const { data } = await apiClient.post(
+    '/admin/audit-logs/clear',
+    { totp_code: totpCode },
+    { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+  )
   return data
 }
 

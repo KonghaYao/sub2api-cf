@@ -50,6 +50,11 @@ const BaseDialogStub = defineComponent({
   props: { show: { type: Boolean, default: false } },
   template: '<div v-if="show" data-test="dialog"><slot /><slot name="footer" /></div>',
 })
+const ConfirmDialogStub = defineComponent({
+  props: { show: { type: Boolean, default: false } },
+  emits: ['confirm', 'cancel'],
+  template: '<button v-if="show" data-test="confirm-clear" @click="$emit(\'confirm\')">confirm</button>',
+})
 
 function mountView() {
   return mount(AuditLogView, {
@@ -60,7 +65,7 @@ function mountView() {
         DataTable: DataTableStub,
         Pagination: PaginationStub,
         BaseDialog: BaseDialogStub,
-        ConfirmDialog: true,
+        ConfirmDialog: ConfirmDialogStub,
         Select: true,
         Icon: true,
       },
@@ -73,7 +78,7 @@ describe('admin request audit view', () => {
     vi.clearAllMocks()
     list.mockResolvedValue({ items: [auditLog], total: 21, page: 1, page_size: 20, pages: 2 })
     get.mockResolvedValue({ ...auditLog, request_body: '[not_captured]' })
-    clear.mockRejectedValue({ code: 'audit_log_clear_not_migrated', message: 'not migrated' })
+    clear.mockResolvedValue({ deleted: 3 })
     getStatus.mockResolvedValue({ enabled: true })
   })
 
@@ -97,5 +102,27 @@ describe('admin request audit view', () => {
     expect(wrapper.find('[data-test="dialog"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('admin.audit.clearAll')
     expect(wrapper.find('.btn-danger').exists()).toBe(true)
+  })
+
+  it('runs the original confirm and fresh-TOTP clear flow', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const clearButton = wrapper.findAll('button').find((button) =>
+      button.text().includes('admin.audit.clearAll'))
+    await clearButton!.trigger('click')
+    await flushPromises()
+    expect(getStatus).toHaveBeenCalledOnce()
+
+    await wrapper.get('[data-test="confirm-clear"]').trigger('click')
+    const input = wrapper.get('input[autocomplete="one-time-code"]')
+    await input.setValue('123456')
+    const dangerButtons = wrapper.findAll('.btn-danger')
+    const submit = dangerButtons[dangerButtons.length - 1]
+    await submit!.trigger('click')
+    await flushPromises()
+
+    expect(clear).toHaveBeenCalledWith('123456')
+    expect(showSuccess).toHaveBeenCalledWith('admin.audit.clearConfirm.success')
+    expect(list).toHaveBeenCalledTimes(2)
   })
 })

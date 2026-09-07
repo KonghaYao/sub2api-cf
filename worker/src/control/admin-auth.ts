@@ -66,14 +66,15 @@ export const requireAdminMutationSecurity: MiddlewareHandler<AdminBindings> = as
     await next()
     return
   }
-  // The request-audit clear endpoint is an explicit non-mutating 501 boundary
-  // until its own fresh-TOTP deletion transaction is migrated.
-  if (new URL(context.req.url).pathname === '/api/v1/admin/audit-logs/clear') {
-    await next()
-    return
-  }
   try {
     requireTrustedAdminOrigin(context.req.raw)
+    // Clearing the request-audit log has its own mandatory fresh-TOTP check. Do
+    // not allow the generic step-up window (or recovery-session bypass) to stand
+    // in for that per-request proof, while retaining the origin boundary above.
+    if (new URL(context.req.url).pathname === '/api/v1/admin/audit-logs/clear') {
+      await next()
+      return
+    }
     const actor = await authenticateAdminSession(context.req.raw, context.env)
     // A recovery session is minted only after presenting the independent
     // break-glass Worker secret. Treat it as an emergency elevation so an

@@ -1,9 +1,14 @@
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../../src/env'
+import {
+  encryptTotpSecret,
+  generateTotpCode,
+} from '../../src/auth/totp'
+import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
 import { apiKeyDigest } from '../../src/gateway/crypto'
 import { requestIdFor } from '../../src/request-id'
-import { requireAdminSession } from '../../src/control/admin-auth'
+import { requireAdminMutationSecurity, requireAdminSession } from '../../src/control/admin-auth'
 import {
   auditAdminRequest,
   clearAdminRequestAuditLogs,
@@ -14,6 +19,7 @@ import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'p'.repeat(32)
 const TOKEN = 'admin-request-audit-test-token'
+const TOTP_SECRET = 'JBSWY3DPEHPK3PXP'
 
 interface Harness {
   app: Hono<{ Bindings: Env }>
@@ -45,7 +51,12 @@ async function harness(): Promise<Harness> {
     await next()
     context.header('x-request-id', requestId)
   })
-  app.use('/api/v1/admin/*', requireAdminSession, auditAdminRequest)
+  app.use(
+    '/api/v1/admin/*',
+    requireAdminSession,
+    requireAdminMutationSecurity,
+    auditAdminRequest,
+  )
   app.post('/api/v1/admin/widgets', (context) => context.json({ ok: true }, 201))
   app.post('/api/v1/admin/widgets/change-actor', async (context) => {
     await context.env.DB.prepare(
@@ -129,14 +140,14 @@ describe('admin request audit middleware', () => {
     expect(row.latency_ms).toBeGreaterThanOrEqual(0)
   })
 
-  it('audits only explicitly sensitive GET routes and skips clear', async () => {
+  it('audits only explicitly sensitive GET routes and skips rejected clear requests', async () => {
     const subject = await harness()
     await subject.app.request(request('/api/v1/admin/settings'), undefined, subject.env)
     await subject.app.request(request('/api/v1/admin/public-summary'), undefined, subject.env)
     const clear = await subject.app.request(request('/api/v1/admin/audit-logs/clear', 'POST'), undefined, subject.env)
 
-    expect(clear.status).toBe(501)
-    expect((await clear.json() as any).error.code).toBe('audit_log_clear_not_migrated')
+    expect(clear.status).toBe(403)
+    expect((await clear.json() as any).error.code).toBe('audit_log_clear_user_access_required')
     const rows = subject.raw.prepare('SELECT method, path FROM admin_request_audit_logs').all()
     expect(rows).toEqual([{ method: 'GET', path: '/api/v1/admin/settings' }])
   })
@@ -182,6 +193,334 @@ describe('admin request audit middleware', () => {
     const response = await subject.app.request(request('/api/v1/admin/widgets', 'POST'), undefined, subject.env)
     expect(response.status).toBe(201)
     await expect(response.json()).resolves.toEqual({ ok: true })
+  })
+})
+
+interface ClearHarness extends Harness {
+  accessToken: string
+}
+
+async function clearHarness(enableTotp = true): Promise<ClearHarness> {
+  const database = createSqliteD1()
+  applyMigrations(database.raw)
+  const now = Date.now()
+  const accessToken = createOpaqueToken('access')
+  const refreshToken = createOpaqueToken('refresh')
+  database.raw.prepare(
+    `INSERT INTO users (
+       id, email, display_name, role, status, auth_version, created_at_ms, updated_at_ms
+     ) VALUES ('clear-admin', 'clear@example.com', 'Clear Admin', 'admin', 'active', 1, ?, ?)`,
+  ).run(now, now)
+  database.raw.prepare(
+    `INSERT INTO user_sessions (
+       id, family_id, user_id, auth_version, access_token_hash, refresh_token_hash,
+       created_at_ms, access_expires_at_ms, refresh_expires_at_ms, step_up_expires_at_ms
+     ) VALUES ('clear-session', 'clear-family', 'clear-admin', 1, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    await tokenDigest(accessToken, PEPPER, 'access'),
+    await tokenDigest(refreshToken, PEPPER, 'refresh'),
+    now,
+    now + 60_000,
+    now + 120_000,
+    now + 60_000,
+  )
+  const env = {
+    APP_VERSION: 'test', ENVIRONMENT: 'test', API_KEY_PEPPER: PEPPER,
+    CREDENTIALS_MASTER_KEY: 'm'.repeat(32),
+    DB: database.d1, ASSETS: {} as Fetcher, CONFIG_KV: {} as KVNamespace,
+    OBJECTS: {} as R2Bucket, EVENTS_QUEUE: {} as Queue,
+    USER_STATE: {} as DurableObjectNamespace, POOL_STATE: {} as DurableObjectNamespace,
+  } as Env
+  if (enableTotp) {
+    const encrypted = await encryptTotpSecret(env, 'clear-admin', TOTP_SECRET)
+    database.raw.prepare(
+      `INSERT INTO user_totp_credentials (
+         user_id, secret_version, nonce_b64, ciphertext_b64,
+         enabled_at_ms, created_at_ms, updated_at_ms
+       ) VALUES ('clear-admin', ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      encrypted.secret_version,
+      encrypted.nonce_b64,
+      encrypted.ciphertext_b64,
+      now,
+      now,
+      now,
+    )
+  }
+  const app = new Hono<{ Bindings: Env }>()
+  app.use('*', async (context, next) => {
+    const requestId = requestIdFor(context.req.raw)
+    await next()
+    context.header('x-request-id', requestId)
+  })
+  app.use(
+    '/api/v1/admin/*',
+    requireAdminSession,
+    requireAdminMutationSecurity,
+    auditAdminRequest,
+  )
+  app.post('/api/v1/admin/audit-logs/clear', clearAdminRequestAuditLogs)
+  return { app, env, raw: database.raw, accessToken }
+}
+
+function clearRequest(
+  token: string,
+  totpCode: unknown,
+  key = 'audit-clear-request-0001',
+): Request {
+  return new Request('https://worker.example/api/v1/admin/audit-logs/clear', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'idempotency-key': key,
+      'cf-ray': 'clear-request-ray',
+      'cf-connecting-ip': '198.51.100.88',
+      'user-agent': 'clear-test-agent',
+    },
+    body: JSON.stringify({ totp_code: totpCode }),
+  })
+}
+
+describe('admin request audit clear', () => {
+  it('retains the same-origin mutation boundary', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-origin-old-01' })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const request = clearRequest(subject.accessToken, code)
+    request.headers.set('origin', 'https://attacker.example')
+    request.headers.set('sec-fetch-site', 'cross-site')
+    const response = await subject.app.request(request, undefined, subject.env)
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'admin_origin_forbidden' },
+    })
+    expect(subject.raw.prepare('SELECT event_key FROM admin_request_audit_logs').all()).toEqual([
+      { event_key: 'clear-origin-old-01' },
+    ])
+  })
+
+  it('requires an idempotency key before accepting a fresh TOTP proof', async () => {
+    const subject = await clearHarness()
+    const code = await generateTotpCode(TOTP_SECRET)
+    const request = clearRequest(subject.accessToken, code)
+    request.headers.delete('idempotency-key')
+    const response = await subject.app.request(request, undefined, subject.env)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'invalid_idempotency_key' },
+    })
+    expect(subject.raw.prepare(
+      "SELECT 1 FROM user_totp_verification_budgets WHERE user_id = 'clear-admin'",
+    ).get()).toBeUndefined()
+  })
+
+  it('rejects a missing TOTP field with the stable invalid-proof error', async () => {
+    const subject = await clearHarness()
+    const response = await subject.app.request(
+      clearRequest(subject.accessToken, undefined), undefined, subject.env,
+    )
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_totp_invalid' },
+    })
+  })
+
+  it('uses the same typed error for missing credentials and wrong codes', async () => {
+    const missing = await clearHarness(false)
+    const absent = await missing.app.request(
+      clearRequest(missing.accessToken, 'invalid'), undefined, missing.env,
+    )
+    expect(absent.status).toBe(403)
+    await expect(absent.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_totp_invalid' },
+    })
+
+    const configured = await clearHarness()
+    const wrong = await configured.app.request(
+      clearRequest(configured.accessToken, 'invalid'), undefined, configured.env,
+    )
+    expect(wrong.status).toBe(403)
+    await expect(wrong.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_totp_invalid' },
+    })
+    expect(configured.raw.prepare(
+      "SELECT attempt_count FROM user_totp_verification_budgets WHERE user_id = 'clear-admin'",
+    ).get()).toEqual({ attempt_count: 1 })
+  })
+
+  it('rate limits failed fresh-TOTP attempts', async () => {
+    const subject = await clearHarness()
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await subject.app.request(
+        clearRequest(subject.accessToken, 'invalid', `audit-clear-failure-${attempt}`),
+        undefined,
+        subject.env,
+      )
+      expect(response.status).toBe(403)
+    }
+    const limited = await subject.app.request(
+      clearRequest(subject.accessToken, 'invalid', 'audit-clear-failure-5'),
+      undefined,
+      subject.env,
+    )
+    expect(limited.status).toBe(429)
+    await expect(limited.json()).resolves.toMatchObject({
+      error: { code: 'TOTP_TOO_MANY_ATTEMPTS' },
+    })
+  })
+
+  it('atomically deletes old rows and retains one truthful clear trace', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-old-event-001' })
+    insertAudit(subject.raw, { event_key: 'clear-old-event-002' })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const response = await subject.app.request(
+      clearRequest(subject.accessToken, code), undefined, subject.env,
+    )
+
+    expect(response.status).toBe(200)
+    await expect(data(response)).resolves.toEqual({ deleted: 2 })
+    expect(response.headers.get('x-request-id')).toBe('clear-request-ray')
+    const rows = subject.raw.prepare('SELECT * FROM admin_request_audit_logs').all()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      actor_user_id: 'clear-admin',
+      actor_email: 'clear@example.com',
+      actor_role: 'admin',
+      auth_method: 'jwt',
+      action: 'POST /api/v1/admin/audit-logs/clear',
+      method: 'POST',
+      path: '/api/v1/admin/audit-logs/clear',
+      route_template: '/api/v1/admin/audit-logs/clear',
+      request_id: 'clear-request-ray',
+      client_ip: '198.51.100.88',
+      user_agent: 'clear-test-agent',
+      status_code: 200,
+      request_body: '[not_captured]',
+    })
+    expect(JSON.parse(rows[0].extra_json)).toMatchObject({
+      kind: 'clear_trace', deleted_rows: 2,
+    })
+    expect(subject.raw.prepare(
+      "SELECT 1 FROM user_totp_verification_budgets WHERE user_id = 'clear-admin'",
+    ).get()).toBeUndefined()
+  })
+
+  it('replays the same key after a fresh TOTP without creating a second trace', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-replay-old-01' })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const first = await subject.app.request(
+      clearRequest(subject.accessToken, code, 'audit-clear-replay-key'), undefined, subject.env,
+    )
+    const replay = await subject.app.request(
+      clearRequest(subject.accessToken, code, 'audit-clear-replay-key'), undefined, subject.env,
+    )
+
+    await expect(data(first)).resolves.toEqual({ deleted: 1 })
+    await expect(data(replay)).resolves.toEqual({ deleted: 1 })
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM admin_request_audit_logs').get()).toEqual({ count: 1 })
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM control_idempotency').get()).toEqual({ count: 1 })
+  })
+
+  it('linearizes eight concurrent retries to one trace and one deleted count', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-race-old-0001' })
+    insertAudit(subject.raw, { event_key: 'clear-race-old-0002' })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      subject.app.request(
+        clearRequest(subject.accessToken, code, 'audit-clear-race-key'), undefined, subject.env,
+      )))
+
+    for (const response of responses) {
+      expect(response.status).toBe(200)
+      await expect(data(response)).resolves.toEqual({ deleted: 2 })
+    }
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM admin_request_audit_logs').get()).toEqual({ count: 1 })
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM control_idempotency').get()).toEqual({ count: 1 })
+  })
+
+  it('rolls back trace, deletion, and idempotency when the batch fails', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-rollback-old' })
+    const base = subject.env.DB
+    subject.env.DB = new Proxy(base, {
+      get(target, property) {
+        if (property === 'batch') {
+          return (statements: D1PreparedStatement[]) => target.batch([
+            ...statements,
+            target.prepare(
+              "INSERT INTO admin_request_audit_logs (event_key) VALUES ('forced-batch-failure')",
+            ),
+          ])
+        }
+        const value = target[property as keyof D1Database]
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const response = await subject.app.request(
+      clearRequest(subject.accessToken, code, 'audit-clear-rollback-key'), undefined, subject.env,
+    )
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_unavailable' },
+    })
+    expect(subject.raw.prepare('SELECT event_key FROM admin_request_audit_logs').all()).toEqual([
+      { event_key: 'clear-rollback-old' },
+    ])
+    expect(subject.raw.prepare('SELECT COUNT(*) AS count FROM control_idempotency').get()).toEqual({ count: 0 })
+    expect(subject.raw.prepare(
+      "SELECT 1 FROM user_totp_verification_budgets WHERE user_id = 'clear-admin'",
+    ).get()).toBeUndefined()
+  })
+
+  it('returns the stable unavailable error when both the batch and recovery read fail', async () => {
+    const subject = await clearHarness()
+    insertAudit(subject.raw, { event_key: 'clear-outage-old-01' })
+    const base = subject.env.DB
+    let batchFailed = false
+    subject.env.DB = new Proxy(base, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async () => {
+            batchFailed = true
+            throw new Error('injected D1 outage')
+          }
+        }
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (batchFailed && sql.includes('FROM control_idempotency')) {
+              return {
+                bind() { return this },
+                first: async () => { throw new Error('injected recovery read outage') },
+              }
+            }
+            return target.prepare(sql)
+          }
+        }
+        const value = target[property as keyof D1Database]
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const code = await generateTotpCode(TOTP_SECRET)
+    const response = await subject.app.request(
+      clearRequest(subject.accessToken, code, 'audit-clear-outage-key'), undefined, subject.env,
+    )
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'audit_log_clear_unavailable' },
+    })
+    expect(subject.raw.prepare('SELECT event_key FROM admin_request_audit_logs').all()).toEqual([
+      { event_key: 'clear-outage-old-01' },
+    ])
   })
 })
 

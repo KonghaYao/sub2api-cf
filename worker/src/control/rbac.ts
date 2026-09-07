@@ -191,6 +191,9 @@ async function enforceAdminPermission(
 
 function adminRoutePermissions(pathname: string, method: string): AdminPermission[] {
   if (pathname.startsWith('/api/v1/admin/rbac/')) return []
+  if (pathname === '/api/v1/admin/audit-logs/clear') {
+    return ['admin.audit.read', 'admin.operations.write']
+  }
   const write = method !== 'GET' && method !== 'HEAD'
   const category = (read: AdminPermission, mutation: AdminPermission): AdminPermission =>
     write ? mutation : read
