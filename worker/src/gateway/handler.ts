@@ -944,6 +944,8 @@ function extractProviderUsage(value: unknown, platform: ProviderPlatform): Token
       output,
       nonNegativeInteger(usage.cache_creation_input_tokens) ?? 0,
       nonNegativeInteger(usage.cache_read_input_tokens) ?? 0,
+      nonNegativeInteger(objectValue(usage.cache_creation)?.ephemeral_5m_input_tokens) ?? 0,
+      nonNegativeInteger(objectValue(usage.cache_creation)?.ephemeral_1h_input_tokens) ?? 0,
     )
   }
   if (platform === 'gemini' || platform === 'antigravity') {
@@ -968,6 +970,8 @@ function normalizedAnthropicUsage(
   outputTokens: number,
   cacheCreationTokens: number,
   cacheReadTokens: number,
+  cacheCreation5mTokens = 0,
+  cacheCreation1hTokens = 0,
 ): TokenUsage | null {
   const totalInputTokens = inputTokens + cacheCreationTokens + cacheReadTokens
   if (!Number.isSafeInteger(totalInputTokens)) return null
@@ -979,6 +983,8 @@ function normalizedAnthropicUsage(
     output_tokens: outputTokens,
     cache_read_tokens: cacheReadTokens,
     ...(cacheCreationTokens > 0 ? { cache_write_tokens: cacheCreationTokens } : {}),
+    ...(cacheCreation5mTokens > 0 ? { cache_write_5m_tokens: cacheCreation5mTokens } : {}),
+    ...(cacheCreation1hTokens > 0 ? { cache_write_1h_tokens: cacheCreation1hTokens } : {}),
     estimated: false,
   }
 }
@@ -2911,6 +2917,8 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
   private inputTokens: number | null = null
   private outputTokens: number | null = null
   private cacheCreationTokens = 0
+  private cacheCreation5mTokens = 0
+  private cacheCreation1hTokens = 0
   private cacheReadTokens = 0
   private terminalValue: 'completed' | 'failed' | null = null
   private ended=false
@@ -2945,6 +2953,8 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
         this.outputTokens,
         this.cacheCreationTokens,
         this.cacheReadTokens,
+        this.cacheCreation5mTokens,
+        this.cacheCreation1hTokens,
       )
     }
     return {
@@ -3056,6 +3066,10 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
     this.outputTokens = merge(usage.output_tokens, this.outputTokens)
     this.cacheCreationTokens = merge(usage.cache_creation_input_tokens, this.cacheCreationTokens) ?? 0
     this.cacheReadTokens = merge(usage.cache_read_input_tokens, this.cacheReadTokens) ?? 0
+    // Unlike aggregate delta fields, explicit zero TTL details are authoritative.
+    const creation = objectValue(usage.cache_creation)
+    this.cacheCreation5mTokens = nonNegativeInteger(creation?.ephemeral_5m_input_tokens) ?? this.cacheCreation5mTokens
+    this.cacheCreation1hTokens = nonNegativeInteger(creation?.ephemeral_1h_input_tokens) ?? this.cacheCreation1hTokens
   }
 
   private encode(value: string): Uint8Array {

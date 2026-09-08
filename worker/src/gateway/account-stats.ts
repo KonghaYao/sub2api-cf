@@ -1,3 +1,4 @@
+import { normalizeCacheCreationBreakdown } from './cache-creation'
 import type { TokenUsage } from './types'
 import { calculateCost } from './usage'
 
@@ -254,10 +255,14 @@ function calculateCustomCost(
   const cached = Math.min(usage.cache_read_tokens, usage.input_tokens)
   const cacheWrite = Math.min(usage.cache_write_tokens ?? 0, usage.input_tokens - cached)
   const regularInput = usage.input_tokens - cached - cacheWrite
+  const [five, hour] = normalizeCacheCreationBreakdown(cacheWrite, usage.cache_write_5m_tokens, usage.cache_write_1h_tokens)
+  const writeCost = source.cache_write_1h_micros_per_million !== null && (five > 0 || hour > 0)
+    ? BigInt(priced(five, source.cache_write_micros_per_million)) + BigInt(priced(hour, source.cache_write_1h_micros_per_million))
+    : BigInt(priced(cacheWrite, source.cache_write_micros_per_million))
   const cost =
     BigInt(priced(regularInput, source.input_micros_per_million)) +
     BigInt(priced(usage.output_tokens, source.output_micros_per_million)) +
-    BigInt(priced(cacheWrite, source.cache_write_micros_per_million)) +
+    writeCost +
     BigInt(priced(cached, source.cache_read_micros_per_million))
   const value = checkedNumber(cost)
   return value > 0 ? value : null
@@ -293,7 +298,7 @@ function validateInput(input: AccountCostInput): void {
     !safeNonNegative(input.usage.input_tokens) ||
     !safeNonNegative(input.usage.output_tokens) ||
     !safeNonNegative(input.usage.cache_read_tokens) ||
-    (input.usage.cache_write_tokens !== undefined && !safeNonNegative(input.usage.cache_write_tokens))
+    (['cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens'] as const).some(field => input.usage[field] !== undefined && !safeNonNegative(input.usage[field]!))
   ) throw new Error('Invalid account-cost input')
 }
 

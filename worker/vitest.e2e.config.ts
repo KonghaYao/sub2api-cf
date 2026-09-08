@@ -48,7 +48,7 @@ export default defineConfig(async () => {
             if (url.pathname === '/v1/messages' || url.pathname === '/v1/responses' || url.pathname === '/backend-api/codex/responses') {
               const body = await request.clone().json() as any
               if (url.pathname === '/v1/messages' && body.model === 'anthropic-cache-alias-fixture') {
-                const message={id:'msg_cache_fixture',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'Cache OK'}],stop_reason:'end_turn',usage:{input_tokens:8,output_tokens:2,cache_creation_input_tokens:5,cache_read_input_tokens:0,cached_tokens:3}}
+                const message={id:'msg_cache_fixture',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'Cache OK'}],stop_reason:'end_turn',usage:{input_tokens:8,output_tokens:2,cache_creation_input_tokens:5,cache_read_input_tokens:0,cached_tokens:3,cache_creation:{ephemeral_5m_input_tokens:2,ephemeral_1h_input_tokens:3}}}
                 if (!body.stream) return Response.json(message)
                 const events=[{type:'message_start',message:{...message,content:[],usage:{...message.usage,output_tokens:0}}},
                   {type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Cache OK'}},

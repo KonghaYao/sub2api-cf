@@ -218,6 +218,8 @@ export interface TokenUsage {
   cache_read_tokens: number
   /** Cache-creation input included in input_tokens, when the provider reports it. */
   cache_write_tokens?: number
+  cache_write_5m_tokens?: number
+  cache_write_1h_tokens?: number
   estimated: boolean
 }
 

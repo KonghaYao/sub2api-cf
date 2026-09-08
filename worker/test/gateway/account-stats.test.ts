@@ -93,6 +93,25 @@ describe('gateway account-cost snapshots', () => {
     expect(result).toMatchObject({ account_stats_cost_micros: 30, account_cost_micros: 38 })
   })
 
+  it.each([
+    { five: 2, hour: 1, price: 11000000, expected: 34 },
+    { five: 0, hour: 0, price: 11000000, expected: 30 },
+    { five: 2, hour: 1, price: null, expected: 30 },
+    { five: 2, hour: 1, price: 0, expected: 23 },
+    { five: 4, hour: 2, price: 11000000, expected: 34 },
+  ])('uses original cache TTL account prices ($five/$hour price=$price)', async ({five,hour,price,expected}) => {
+    raw.exec(`
+      INSERT INTO channel_account_stats_pricing_rules (id,channel_id,name,sort_order,created_at_ms,updated_at_ms) VALUES ('ttl','channel-1','ttl',0,1,1);
+      INSERT INTO channel_account_stats_rule_groups (rule_id,group_id,created_at_ms) VALUES ('ttl','group-1',1);
+      INSERT INTO channel_account_stats_model_pricing (id,rule_id,platform,billing_mode,input_micros_per_million,cache_write_micros_per_million,cache_read_micros_per_million,sort_order,created_at_ms,updated_at_ms) VALUES ('ttl','ttl','openai','token',1000000,7000000,2000000,0,1,1);
+      INSERT INTO channel_account_stats_pricing_models (pricing_id,model_pattern,is_wildcard,sort_order,created_at_ms) VALUES ('ttl','gpt-upstream',0,0,1);
+    `)
+    raw.prepare('UPDATE channel_account_stats_model_pricing SET cache_write_1h_micros_per_million=? WHERE id=?').run(price,'ttl')
+    const usage={input_tokens:10,output_tokens:0,cache_read_tokens:2,cache_write_tokens:3,cache_write_5m_tokens:five,cache_write_1h_tokens:hour,estimated:false}
+    const result=await resolveAccountCostSnapshot({DB:d1},{accountId:'account-1',groupId:'group-1',platform:'openai',upstreamModel:'gpt-upstream',usage,standardCostMicros:100,requestCount:1})
+    expect(result.account_stats_cost_micros).toBe(expected)
+  })
+
   it('uses the left-open/right-closed token interval and optional platform match', async () => {
     raw.exec(`
       INSERT INTO channel_account_stats_pricing_rules (id,channel_id,name,sort_order,created_at_ms,updated_at_ms)
