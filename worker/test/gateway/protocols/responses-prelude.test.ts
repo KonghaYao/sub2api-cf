@@ -1,10 +1,45 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { inspectResponsesSsePrelude } from '../../../src/gateway/protocols/responses-prelude'
 
 const encoder = new TextEncoder()
+afterEach(() => vi.useRealTimers())
 
 describe('Responses SSE prelude inspection', () => {
+  it('allows slow reasoning beyond 15 seconds and renews leases before visible output', async () => {
+    vi.useFakeTimers()
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const keepAlive = vi.fn(async () => {})
+    const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; c.enqueue(encoder.encode('data: {"type":"response.created"}\n\n')) } })
+    let finished = false
+    const pending = inspectResponsesSsePrelude(new Response(body), { keepAlive }).then(result => { finished = true; return result })
+    await vi.advanceTimersByTimeAsync(65000)
+    expect(finished).toBe(false)
+    expect(keepAlive).toHaveBeenCalledTimes(3)
+    controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"OK"}\n\n'))
+    const result = await pending
+    expect(result.decision).toEqual({ kind: 'visible' })
+    await result.response.body!.cancel()
+  })
+
+  it('resets the idle deadline on upstream data while retaining an overall limit', async () => {
+    vi.useFakeTimers()
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({ start(c) { controller = c } })
+    let finished = false
+    const pending = inspectResponsesSsePrelude(new Response(body), { idleTimeoutMs: 1000, maxWaitMs: 5000 }).then(result => { finished = true; return result })
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(900)
+      controller.enqueue(encoder.encode(': heartbeat\n\n'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(finished).toBe(false)
+    }
+    await vi.advanceTimersByTimeAsync(1001)
+    const result = await pending
+    expect(result.decision).toMatchObject({ kind: 'failed', failure: { code: 'upstream_idle_timeout' } })
+    await result.response.body!.cancel()
+  })
+
   it('rebuilds the exact body from the inspected prefix and remaining reader without cloning', async () => {
     const source = [
       'event: response.created',

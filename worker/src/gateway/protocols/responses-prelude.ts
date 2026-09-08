@@ -13,11 +13,16 @@ export type ResponsesPreludeDecision =
 
 const MAX_PRELUDE_EVENT_CHARS = 256 * 1024
 const MAX_PRELUDE_BYTES = 16 * 1024 * 1024
-const MAX_PRELUDE_WAIT_MS = 15_000
+// Match the original gateway's default interval between upstream stream data.
+// Bound inspection itself using the Worker's existing stream-duration default.
+const MAX_PRELUDE_WAIT_MS = 15 * 60_000
+const DEFAULT_IDLE_TIMEOUT_MS = 180_000
+const RENEW_INTERVAL_MS = 20_000
 
 export interface ResponsesPreludeInspection {
   decision: ResponsesPreludeDecision
   response: Response
+  timedOut?: boolean
 }
 
 const deterministicFailureCodes = new Set([
@@ -43,7 +48,7 @@ const deterministicFailureCodes = new Set([
  */
 export async function inspectResponsesSsePrelude(
   response: Response,
-  options: { stopAtVisible?: boolean; maxWaitMs?: number; signal?: AbortSignal } = {},
+  options: { stopAtVisible?: boolean; maxWaitMs?: number; idleTimeoutMs?: number; signal?: AbortSignal; keepAlive?: () => Promise<void> } = {},
 ): Promise<ResponsesPreludeInspection> {
   if (response.body === null) {
     return { decision: { kind: 'unresolved' }, response }
@@ -52,50 +57,60 @@ export async function inspectResponsesSsePrelude(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const deadline = Date.now() + (options.maxWaitMs ?? MAX_PRELUDE_WAIT_MS)
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+  let lastDataAt = Date.now()
+  const renewal = { nextAt: Date.now() + RENEW_INTERVAL_MS, keepAlive: options.keepAlive }
   const prefix: Uint8Array[] = []
   let prefixBytes = 0
   let buffer = ''
-  while (true) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) {
-      return inspectedResponse(response, reader, prefix, preludeTimeoutFailure())
-    }
-    const timedRead = await readBefore(reader, remaining, options.signal)
-    if (timedRead.kind === 'timeout') {
-      return inspectedResponse(response, reader, prefix, preludeTimeoutFailure(), timedRead.pending)
-    }
-    const { result } = timedRead
-    if (result.done) {
-      buffer += decoder.decode()
-      return inspectedResponse(
-        response,
-        reader,
-        prefix,
-        inspectBufferedFrames(
-          buffer,
-          true,
-          options.stopAtVisible !== false,
-        ).decision ?? { kind: 'unresolved' },
+  try {
+    while (true) {
+      const remaining = Math.min(deadline - Date.now(), idleTimeoutMs - (Date.now() - lastDataAt))
+      if (remaining <= 0) {
+        return { ...inspectedResponse(response, reader, prefix, preludeTimeoutFailure()), timedOut: true }
+      }
+      const timedRead = await readBefore(reader, remaining, options.signal, renewal)
+      if (timedRead.kind === 'timeout') {
+        return { ...inspectedResponse(response, reader, prefix, preludeTimeoutFailure(), timedRead.pending), timedOut: true }
+      }
+      const { result } = timedRead
+      if (result.done) {
+        buffer += decoder.decode()
+        return inspectedResponse(
+          response,
+          reader,
+          prefix,
+          inspectBufferedFrames(
+            buffer,
+            true,
+            options.stopAtVisible !== false,
+          ).decision ?? { kind: 'unresolved' },
+        )
+      }
+      if (result.value.byteLength > 0) lastDataAt = Date.now()
+      prefix.push(result.value)
+      prefixBytes += result.value.byteLength
+      if (prefixBytes > MAX_PRELUDE_BYTES) {
+        return inspectedResponse(response, reader, prefix, { kind: 'unresolved' })
+      }
+      buffer += decoder.decode(result.value, { stream: true })
+      const inspected = inspectBufferedFrames(
+        buffer,
+        false,
+        options.stopAtVisible !== false,
       )
+      buffer = inspected.remainder
+      if (inspected.decision !== null) {
+        return inspectedResponse(response, reader, prefix, inspected.decision)
+      }
+      if (buffer.length > MAX_PRELUDE_EVENT_CHARS) {
+        return inspectedResponse(response, reader, prefix, { kind: 'unresolved' })
+      }
     }
-    prefix.push(result.value)
-    prefixBytes += result.value.byteLength
-    if (prefixBytes > MAX_PRELUDE_BYTES) {
-      return inspectedResponse(response, reader, prefix, { kind: 'unresolved' })
-    }
-    buffer += decoder.decode(result.value, { stream: true })
-    const inspected = inspectBufferedFrames(
-      buffer,
-      false,
-      options.stopAtVisible !== false,
-    )
-    buffer = inspected.remainder
-    if (inspected.decision !== null) {
-      return inspectedResponse(response, reader, prefix, inspected.decision)
-    }
-    if (buffer.length > MAX_PRELUDE_EVENT_CHARS) {
-      return inspectedResponse(response, reader, prefix, { kind: 'unresolved' })
-    }
+  } catch (error) {
+    void reader.cancel(error).catch(() => undefined)
+    reader.releaseLock()
+    throw error
   }
 }
 
@@ -122,19 +137,21 @@ function inspectedResponse(
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (prefixIndex < prefix.length) {
-        controller.enqueue(prefix[prefixIndex++])
+        const chunk = prefix[prefixIndex]
+        prefix[prefixIndex++] = new Uint8Array(0)
+        controller.enqueue(chunk)
         return
       }
-      const result = await (nextRead ?? reader.read())
-      nextRead = undefined
-      if (result.done) {
-        controller.close()
-      } else {
-        controller.enqueue(result.value)
-      }
+      try {
+        const result = await (nextRead ?? reader.read())
+        nextRead = undefined
+        if (result.done) { reader.releaseLock(); controller.close() }
+        else controller.enqueue(result.value)
+      } catch (error) { reader.releaseLock(); controller.error(error) }
     },
-    async cancel(reason) {
-      await reader.cancel(reason)
+    cancel(reason) {
+      void reader.cancel(reason).catch(() => undefined)
+      reader.releaseLock()
     },
   })
   return {
@@ -233,6 +250,7 @@ async function readBefore(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
   signal?: AbortSignal,
+  renewal?: { nextAt: number; keepAlive?: () => Promise<void> },
 ): Promise<
   | { kind: 'read'; result: ReadableStreamReadResult<Uint8Array> }
   | { kind: 'timeout'; pending: Promise<ReadableStreamReadResult<Uint8Array>> }
@@ -248,14 +266,28 @@ async function readBefore(
     signal?.addEventListener('abort',onAbort,{once:true})
     if(signal?.aborted)onAbort()
   })
+  const deadline = Date.now() + timeoutMs
+  // Observe abort even while a lease renewal is in flight.
+  void aborted.catch(() => undefined)
   try {
-    return await Promise.race([
-      aborted,
-      pending.then((result) => ({ kind: 'read' as const, result })),
-      new Promise<{ kind: 'timeout'; pending: typeof pending }>((resolve) => {
-        timer = setTimeout(() => resolve({ kind: 'timeout', pending }), timeoutMs)
-      }),
-    ])
+    while (true) {
+      if (renewal && Date.now() >= renewal.nextAt) {
+        await renewal.keepAlive?.()
+        renewal.nextAt = Date.now() + RENEW_INTERVAL_MS
+      }
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return { kind: 'timeout', pending }
+      const result = await Promise.race([
+        aborted,
+        pending.then((result) => ({ kind: 'read' as const, result })),
+        new Promise<{ kind: 'tick' }>((resolve) => {
+          timer = setTimeout(() => resolve({ kind: 'tick' }), Math.max(1,
+            Math.min(remaining, renewal ? renewal.nextAt - Date.now() : remaining)))
+        }),
+      ])
+      if (timer !== undefined) { clearTimeout(timer); timer = undefined }
+      if (result.kind === 'read') return result
+    }
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     if(onAbort)signal?.removeEventListener('abort',onAbort)

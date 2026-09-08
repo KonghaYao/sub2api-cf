@@ -2134,6 +2134,36 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it('ends a genuine Responses prelude timeout without a second body wait, debit or unconfigured cooldown', async () => {
+    vi.useFakeTimers()
+    try {
+      const { env, user, pool } = await harness()
+      const original = pool.fetch.bind(pool)
+      vi.spyOn(pool, 'fetch').mockImplementation(async request => {
+        if (new URL(request.url).pathname === '/reserve' &&
+            (await request.clone().json() as any).excluded_account_ids?.includes(accountId)) {
+          return Response.json({ error: { code: 'no_capacity', message: 'No remaining account' } }, { status: 503 })
+        }
+        return original(request)
+      })
+      const upstream = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'))
+      } }), { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', upstream)
+      const pending = createApp().request('/v1/responses', { method: 'POST',
+        headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-public', input: 'hello', stream: true }) }, env)
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce())
+      await vi.advanceTimersByTimeAsync(180001)
+      const response = await pending
+      expect(response.status).toBe(504)
+      expect(await response.json()).toMatchObject({ error: { code: 'upstream_idle_timeout' } })
+      expect(upstream).toHaveBeenCalledOnce()
+      expect(user.calls.some(call => call.path === '/settle')).toBe(false)
+      expect(pool.calls.some(call => call.path === '/failure')).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
   it('enforces saved stream-timeout threshold through the real handler and SQLite event counter', async () => {
     vi.useFakeTimers({ now: new Date('2026-09-04T00:00:00Z') })
     const sqlite = createSqliteD1()
@@ -2149,8 +2179,11 @@ describe('OpenAI-compatible gateway', () => {
       } as D1Database
       vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))}}),{headers:{'content-type':'text/event-stream'}})))
       const response = await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages:[{role:'user',content:'hello'}]})},env)
-      const text = response.text()
+      let finished = false
+      const text = response.text().then(value => { finished = true; return value })
       await vi.advanceTimersByTimeAsync(120_001)
+      expect(finished).toBe(false)
+      await vi.advanceTimersByTimeAsync(60_000)
       expect(await text).toContain('Upstream stream terminated unexpectedly')
       expect(sqlite.raw.prepare('SELECT COUNT(*) AS count FROM stream_timeout_events').get()).toEqual({count:1})
       expect(pool.calls.find(call=>call.path==='/failure')?.body).toMatchObject({cooldown_ms:420000})

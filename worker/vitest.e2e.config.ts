@@ -98,6 +98,19 @@ export default defineConfig(async () => {
                 if (!valid) return Response.json({error:'anthropic provider settings mismatch'},{status:422})
                 return Response.json({id:'provider',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'provider-settings-verified'}],stop_reason:'end_turn',usage:{input_tokens:10,output_tokens:5}})
               }
+              if (body.model === 'responses-slow-prelude-fixture') {
+                const fallback = request.headers.get('authorization') === 'Bearer unexpected-fallback-key'
+                return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+                  const emit = (event: unknown) => controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(event) + '\n\n'))
+                  emit({ type: 'response.created', response: { id: 'slow-prelude' } })
+                  const finish = () => {
+                    emit({ type: 'response.output_text.delta', delta: fallback ? 'Unexpected fallback' : 'Slow reasoning OK' })
+                    emit({ type: 'response.completed', response: { id: 'slow-prelude', status: 'completed', output: [], usage: { input_tokens: 10, output_tokens: 5 } } })
+                    controller.close()
+                  }
+                  if (fallback) finish(); else setTimeout(finish, 65_000)
+                } }), { headers: { 'content-type': 'text/event-stream' } })
+              }
               if (body.model === 'provider-forwarding-native') {
                 if(request.headers.get('user-agent')!=='codex-tui/0.200.0 (Linux)' || request.headers.get('version')!=='0.200.0' || request.headers.get('originator')!=='codex-tui')return Response.json({error:'codex provider settings mismatch'},{status:422})
                 return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'provider',object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'provider-settings-verified'}]}],usage:{input_tokens:10,output_tokens:5}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})

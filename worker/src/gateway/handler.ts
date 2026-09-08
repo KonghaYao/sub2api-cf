@@ -161,7 +161,7 @@ type TextGatewayEndpoint = Exclude<GatewayEndpoint, 'images'>
 
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const MAX_SSE_EVENT_CHARS = 256 * 1024
-const BODY_IDLE_TIMEOUT_MS = 120_000
+const BODY_IDLE_TIMEOUT_MS = 180_000
 const TOTAL_SYNC_TIMEOUT_MS = 120_000
 const TOTAL_STREAM_TIMEOUT_MS = 15 * 60_000
 const BILLING_RENEW_AFTER_MS = 8 * 60_000
@@ -1701,6 +1701,7 @@ async function acquireUpstream(
     renewals.pool = 0
     const leaseId = `${requestId}:${attempt}`
     let accountId: string | null = null
+    let handledAttemptFailure = false
     try {
       accountId = await reservePoolAccount(pool, leaseId, affinityKey, thresholdExcluded, scheduler, accountCostRates, previousAccount??undefined, !previousCanMove, clientSignal)
       if(scheduler.enabled && responseOwner!==undefined){
@@ -1868,10 +1869,22 @@ async function acquireUpstream(
         const inspected = await inspectResponsesSsePrelude(response, {
           stopAtVisible: clientStream,
           signal: clientSignal,
+          idleTimeoutMs: BODY_IDLE_TIMEOUT_MS,
+          keepAlive: responseOwner ? renewHeaders : undefined,
         })
         response = inspected.response
         const semantic = inspected.decision
         if (semantic.kind === 'failed') {
+          if (inspected.timedOut) {
+            void response.body?.cancel().catch(() => undefined)
+            const failure = new GatewayError(504, 'upstream_idle_timeout', 'Upstream stream timed out', 'server_error')
+            failure.upstreamAccountId = accountId
+            thresholdExcluded.push(accountId)
+            await bestEffort(async () => {
+              handledAttemptFailure = await applyStreamTimeoutPolicy(env, pool, accountId!, `${requestId}:prelude:${attempt}`, failure)
+            })
+            throw failure
+          }
           const semanticRetryable = isRetryableResponsesFailure(semantic.failure)
           if (semanticRetryable && attempt + 1 < Math.min(4, candidateCount)) {
             await bestEffort(() => recordPoolTelemetry(pool,leaseId,true))
@@ -1913,7 +1926,7 @@ async function acquireUpstream(
         if (currentError.code === 'credential_unavailable') {
           await bestEffort(() => disablePoolAccount(pool, accountId!))
         }
-        await bestEffort(() => recordPoolFailure(pool, accountId!, `${requestId}:failure:${attempt}`, FAILURE_COOLDOWN_MS))
+        if (!handledAttemptFailure) await bestEffort(() => recordPoolFailure(pool, accountId!, `${requestId}:failure:${attempt}`, FAILURE_COOLDOWN_MS))
       }
       await bestEffort(() => releasePoolLease(pool, leaseId))
     }
