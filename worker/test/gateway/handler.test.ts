@@ -2319,6 +2319,24 @@ describe('OpenAI-compatible gateway', () => {
     expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
   })
 
+  it('reports a Composer output token limit as an actionable 400 without billing', async () => {
+    const { env, user, pool, limit } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      choices: [{ message: { content: '', reasoning_content: 'partial' }, finish_reason: 'stop' }],
+      error: { code: '3', errorType: 'INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT' },
+    })))
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST', headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', messages: [], max_tokens: 16 }),
+    }, env)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: { code: 'max_output_tokens_exceeded' } })
+    expect(user.calls.some(call => call.path === '/settle')).toBe(false)
+    expect(user.calls.some(call => call.path === '/cancel')).toBe(true)
+    expect(limit.calls.some(call => call.path === '/monetary/cancel')).toBe(true)
+    expect(pool.calls.some(call => call.path === '/release')).toBe(true)
+  })
+
   it('rejects a quota error embedded in HTTP 200 without charging for a successful completion', async () => {
     const { env, user, pool, limit } = await harness()
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({

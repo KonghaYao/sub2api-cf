@@ -84,6 +84,25 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
+              if (body.model === 'composer-bridge-fixture' || body.model === 'composer-slow-fixture') {
+                if (!Array.isArray(body.messages) || 'input' in body) return Response.json({error:'expected chat bridge body'},{status:422})
+                const slow = body.model === 'composer-slow-fixture'
+                if (slow) await new Promise(resolve => setTimeout(resolve, 65_000))
+                const usage = {prompt_tokens:10,completion_tokens:5,total_tokens:15}
+                if (!body.stream) return Response.json({id:'composer-fixture',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:'Composer OK'},finish_reason:'stop'}],usage})
+                const frames = [
+                  {choices:[{index:0,delta:{role:'assistant',content:'Composer '}}]},
+                  {choices:[{index:0,delta:{content:'OK'},finish_reason:'stop'}]},
+                  {choices:[],usage},
+                ]
+                let sent = 0
+                return new Response(new ReadableStream({async pull(controller) {
+                  if (slow && sent === 1) await new Promise(resolve => setTimeout(resolve, 25_000))
+                  const frame = frames.shift(); sent++
+                  controller.enqueue(new TextEncoder().encode('data: '+(frame ? JSON.stringify(frame) : '[DONE]')+'\n\n'))
+                  if (!frame) controller.close()
+                }}), {headers:{'content-type':'text/event-stream'}})
+              }
               if (typeof body.model === 'string' && body.model.startsWith('fast-policy-')) {
                 const expectedTier = body.model === 'fast-policy-filter-upstream' ? undefined : 'priority'
                 if (body.model === 'fast-policy-block-upstream' || body.service_tier !== expectedTier) return Response.json({error:'policy body mismatch'}, {status:422})

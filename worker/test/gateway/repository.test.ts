@@ -292,6 +292,23 @@ describe('gateway repository embeddings routing', () => {
     } finally { raw.close() }
   })
 
+  it.each(['responses', 'chat_completions'] as const)('bridges a single-protocol OpenAI catalog through %s with pricing and final credential checks', async endpoint => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    const upstream = endpoint === 'responses' ? 'chat_completions' : 'responses'
+    try {
+      raw.prepare('UPDATE models SET endpoint=?').run(upstream)
+      raw.exec('DELETE FROM account_models')
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true, extra: { openai_responses_mode: `force_${upstream}` } }))
+      const route = await resolveGatewayRoute(env, 'group-1', 'embed-public', endpoint, 'user-1', upstream, true)
+      expect(route.candidates).toMatchObject([{ account_id: 'account-1', upstream_endpoint: upstream }])
+      expect(route.model).toMatchObject({ model_id: 'model-1' })
+      await expect(getAccountCredential(env, 'group-1', 'model-1', upstream, 'account-1')).resolves.toMatchObject({ account_id: 'account-1' })
+      raw.exec('UPDATE group_models SET enabled=0')
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', endpoint, 'user-1', upstream, true)).rejects.toMatchObject({ code: 'model_not_found' })
+    } finally { raw.close() }
+  })
+
   it.each(['responses', 'chat_completions'] as const)('combines mixed-protocol candidates by account priority for %s', async endpoint => {
     const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw); seedAlternateEmbeddingAccount(raw)
     const env = { DB: d1 } as Env

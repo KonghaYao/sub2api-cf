@@ -430,6 +430,14 @@ function subscriptionBilling(row: PrincipalRow): GatewayPrincipal['billing'] {
   }
 }
 
+// OpenAI-compatible text protocols are bridged by the gateway. A catalog's
+// upstream endpoint must not hide the model from the other public protocol.
+// Account capability/policy checks still decide which wire endpoint is usable.
+function textModelCapabilitySql(alias = 'm', endpoint = '?'): string {
+  return `(${alias}.endpoint = ${endpoint} OR ${alias}.endpoint = 'both' OR
+    (${alias}.platform = 'openai' AND ${alias}.endpoint IN ('responses', 'chat_completions')))`
+}
+
 export async function listModels(env: Env, groupId: string): Promise<ModelRoute[]> {
   const result = await env.DB.prepare(
     `${modelSelect()}
@@ -561,7 +569,7 @@ export async function resolveGatewayRoute(
     ? 'm.embeddings = 1'
     : endpoint === 'images'
       ? 'm.image_generation = 1'
-      : `(m.endpoint = ? OR m.endpoint = 'both')`
+      : textModelCapabilitySql()
   const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, publicName, compositePlatform, compositePlatform]
     : [groupId, publicName, compositePlatform, compositePlatform, endpoint]
@@ -1101,7 +1109,7 @@ function externalAliasCte(
     ? 'm.embeddings = 1'
     : endpoint === 'images'
       ? 'm.image_generation = 1'
-      : `(m.endpoint = ? OR m.endpoint = 'both')`
+      : textModelCapabilitySql()
   const bindings: unknown[] = [publicName, groupId, groupId]
   if (endpoint !== 'embeddings' && endpoint !== 'images') bindings.push(endpoint)
   return {
@@ -1379,7 +1387,7 @@ function platformQuotaStatement(
     ? 'm.embeddings = 1'
     : endpoint === 'images'
       ? 'm.image_generation = 1'
-      : `(m.endpoint = ? OR m.endpoint = 'both')`
+      : textModelCapabilitySql()
   const bindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, publicName, userId]
     : [groupId, publicName, endpoint, userId]
@@ -1461,12 +1469,12 @@ function channelModelPolicyStatement(
     ? 'resolved.embeddings = 1'
     : endpoint === 'images'
       ? 'resolved.image_generation = 1'
-      : `(resolved.endpoint = ? OR resolved.endpoint = 'both')`
+      : textModelCapabilitySql('resolved')
   const accountCostModelCapability = endpoint === 'embeddings'
     ? 'account_cost_model.embeddings = 1'
     : endpoint === 'images'
       ? 'account_cost_model.image_generation = 1'
-      : `(account_cost_model.endpoint = '${endpoint}' OR account_cost_model.endpoint = 'both')`
+      : textModelCapabilitySql('account_cost_model', `'${endpoint}'`)
   const routeBindings = endpoint === 'embeddings' || endpoint === 'images'
     ? [groupId, requestedModel]
     : [groupId, requestedModel, endpoint]
@@ -1728,7 +1736,7 @@ function accountCandidatesStatement(
     ? 'm.embeddings = 1'
     : modelEndpoint === 'images'
       ? 'm.image_generation = 1'
-      : `(m.endpoint = ? OR m.endpoint = 'both')`
+      : textModelCapabilitySql()
   const modelBindings = modelEndpoint === 'embeddings' || modelEndpoint === 'images'
     ? [groupId, publicName, compositePlatform ?? null, compositePlatform ?? null]
     : [groupId, publicName, compositePlatform ?? null, compositePlatform ?? null, modelEndpoint]

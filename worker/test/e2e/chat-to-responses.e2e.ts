@@ -79,7 +79,7 @@ describe('Chat Completions to Responses binding bridge', () => {
       models: [{
         public_name: 'gpt-bridge',
         upstream_name: 'gpt-bridge-upstream',
-        endpoint: 'both',
+        endpoint: 'responses',
         input_micros_per_million: 1_000_000,
         output_micros_per_million: 2_000_000,
         per_request_micros: 7,
@@ -220,7 +220,7 @@ describe('Chat Completions to Responses binding bridge', () => {
       models: [{
         public_name: 'gpt-bridge-stream',
         upstream_name: 'gpt-bridge-stream-upstream',
-        endpoint: 'both',
+        endpoint: 'responses',
         input_micros_per_million: 1_000_000,
         output_micros_per_million: 2_000_000,
         per_request_micros: 7,
@@ -380,7 +380,7 @@ describe('Chat Completions to Responses binding bridge', () => {
       models: [{
         public_name: 'gpt-bridge-failover',
         upstream_name: 'gpt-bridge-failover-upstream',
-        endpoint: 'both',
+        endpoint: 'responses',
         input_micros_per_million: 1_000_000,
         output_micros_per_million: 2_000_000,
         per_request_micros: 7,

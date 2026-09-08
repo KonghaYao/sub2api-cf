@@ -1,3 +1,4 @@
+import { fetchWithHeaderTimeout, responseHeaderTimeout } from './upstream-timeout'
 import { resolveAccountRequestAuthentication } from '../control/account-request-authentication'
 import { inspectAgentTaskResponse } from './agent-task-response'
 import { persistCodexUsageObservation } from './codex-usage-observation'
@@ -17,7 +18,7 @@ import type { ProviderForwardingSettings } from '../control/provider-forwarding-
 import { enforceCyberSession, observeCyberResponse, type CyberRequest } from './cyber-sessions'
 import type { securityDefaults } from '../control/gateway-security-settings'
 import { applyOpenAIFastPolicy, evaluateOpenAIFastPolicy, type OpenAIFastPolicy } from '../control/openai-fast-policy'
-import { accountFetcher, type AccountFetcher } from '../proxy/account-fetch'
+import { accountFetcher } from '../proxy/account-fetch'
 import { emulateWebSearch } from './web-search'
 import type { PoolSchedulerPolicy } from "../shared/state-machine/pool-scheduler"
 import { normalizeSchedulerSettings, schedulerPolicy } from "../control/advanced-scheduler-settings"
@@ -156,7 +157,6 @@ type TextGatewayEndpoint = Exclude<GatewayEndpoint, 'images'>
 
 const MAX_SYNC_RESPONSE_BYTES = 16 * 1024 * 1024
 const MAX_SSE_EVENT_CHARS = 256 * 1024
-const HEADER_TIMEOUT_MS = 30_000
 const BODY_IDLE_TIMEOUT_MS = 120_000
 const TOTAL_SYNC_TIMEOUT_MS = 120_000
 const TOTAL_STREAM_TIMEOUT_MS = 15 * 60_000
@@ -461,7 +461,8 @@ async function handleGeminiCountTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
-      { pool, leaseId: acquired.leaseId, admission, startedAt },
+      { pool, leaseId: acquired.leaseId,
+        renewals: acquired.renewals, admission, startedAt },
     )
     return geminiTokenCountResponse(readInputTokenCount(bytes, provider), requestId)
   } catch (error) {
@@ -631,7 +632,8 @@ export async function handleAnthropicCountTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
-      { pool, leaseId: acquired.leaseId, admission, startedAt },
+      { pool, leaseId: acquired.leaseId,
+        renewals: acquired.renewals, admission, startedAt },
     )
     let payload: unknown
     try {
@@ -752,7 +754,8 @@ export async function handleResponsesInputTokens(
       acquired.response,
       MAX_SYNC_RESPONSE_BYTES,
       context.req.raw.signal,
-      { pool, leaseId: acquired.leaseId, admission, startedAt },
+      { pool, leaseId: acquired.leaseId,
+        renewals: acquired.renewals, admission, startedAt },
     )
     let payload: unknown
     try {
@@ -1353,6 +1356,7 @@ async function dispatchGateway(
         const dispatch = prepared.resolveUpstream(model, selectedEndpoint, candidate.platform)
         return { endpoint: selectedEndpoint, dispatch: { ...dispatch, body: applyGatewayBodySettings(gatewaySettings, dispatch.body, candidate.platform) } }
       } : undefined,
+      admission,
     ).catch(async (error) => {
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
@@ -1402,6 +1406,7 @@ async function dispatchGateway(
         response: acquired.response,
         pool,
         leaseId: acquired.leaseId,
+        renewals: acquired.renewals,
         accountId: acquired.accountId,
         requestId,
         principal,
@@ -1442,6 +1447,7 @@ async function dispatchGateway(
         response: acquired.response,
         pool,
         leaseId: acquired.leaseId,
+        renewals: acquired.renewals,
         accountId: acquired.accountId,
         requestId,
         principal,
@@ -1476,6 +1482,7 @@ async function dispatchGateway(
       upstreamEndpoint: providerDispatch.operation === 'responses' ? 'responses' : providerDispatch.operation === 'chat_completions' ? 'chat_completions' : upstreamEndpoint,
       pool,
       leaseId: acquired.leaseId,
+      renewals: acquired.renewals,
       accountId: acquired.accountId,
       requestId,
       principal,
@@ -1625,7 +1632,10 @@ function geminiErrorResponse(error: GatewayError, requestId?: string): Response 
   }), { status: error.status, headers })
 }
 
+interface HeaderRenewals { pool: number; admission: number; billing: number; lastBillingRenewedAt: number }
+
 interface AcquiredUpstream {
+  renewals?: HeaderRenewals
   providerDispatch?: ProviderDispatch
   upstreamPath?: string
   chatFromResponses?: boolean
@@ -1665,7 +1675,9 @@ async function acquireUpstream(
   providerForwarding?: {settings:ProviderForwardingSettings;bodies:Record<string,Record<string,unknown>>},
   accountThresholds?: AccountSchedulingThresholds,
   resolveAttempt?: (accountId: string) => { endpoint: TextGatewayEndpoint; dispatch: ProviderDispatch },
+  headerAdmission: ApiKeyAdmissionLease | null = null,
 ): Promise<AcquiredUpstream> {
+  const renewals: HeaderRenewals = { pool: 0, admission: 0, billing: 0, lastBillingRenewedAt: Date.now() }
   let agentRecoveryTried = false
   let lastError: GatewayError | null = null
   const thresholdExcluded: string[] = []
@@ -1682,6 +1694,7 @@ async function acquireUpstream(
     ? Math.min(4, candidateCount)
     : Math.min(4, candidateCount + 1)
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    renewals.pool = 0
     const leaseId = `${requestId}:${attempt}`
     let accountId: string | null = null
     try {
@@ -1753,6 +1766,21 @@ async function acquireUpstream(
       if (wireOperation === 'responses' && plan.body && typeof plan.body === 'object' && 'model' in plan.body && typeof plan.body.model === 'string') {
         actualModel = plan.body.model
       }
+      const renewHeaders = async () => {
+        await Promise.all([
+          renewPoolLease(pool, leaseId, ++renewals.pool),
+          renewApiKeyAdmission(headerAdmission, ++renewals.admission),
+        ])
+        if (responseOwner && Date.now() - renewals.lastBillingRenewedAt >= BILLING_RENEW_AFTER_MS) {
+          renewals.billing += 1
+          await Promise.all([
+            renewBillingReservation(env, responseOwner, requestId, renewals.billing),
+            renewApiKeyMonetaryReservation(env, responseOwner, requestId, renewals.billing),
+          ])
+          renewals.lastBillingRenewedAt = Date.now()
+        }
+      }
+      const headerTimeout = responseOwner ? responseHeaderTimeout(account.platform) : plan.timeout_ms
       const send=async()=>{
         if (account.platform === 'anthropic') {
           const beta = applyBetaPolicy(await loadRuntimeSetting(env, 'beta-policy'), new Headers(inboundHeaders).get('anthropic-beta'), actualModel ?? '', account.credential_kind)
@@ -1764,9 +1792,9 @@ async function acquireUpstream(
         headers: plan.headers,
         body: plan.body === undefined ? undefined : stringifyJsonPreservingIntegers(plan.body),
         redirect: 'manual',
-      }, clientSignal, plan.timeout_ms, account.proxy_id
+      }, clientSignal, headerTimeout, account.proxy_id
         ? (url, init) => fetchAccountProxy(env, account.proxy_id!, new URL(url), init ?? {}, clientSignal)
-        : undefined)
+        : undefined, responseOwner ? renewHeaders : undefined)
       }
       let response=await send()
       if(authentication.authorization) {
@@ -1793,7 +1821,7 @@ async function acquireUpstream(
           response = await fetchWithHeaderTimeout(new URL(plan.url), {
             method: plan.method, headers: plan.headers,
             body: stringifyJsonPreservingIntegers(rectified), redirect: 'manual',
-          }, clientSignal, plan.timeout_ms, accountFetcher(env, account.proxy_id))
+          }, clientSignal, headerTimeout, accountFetcher(env, account.proxy_id), responseOwner ? renewHeaders : undefined)
         }
       }
       if(account.platform==='grok' && accountThresholds && accountThresholds.grok<100)await bestEffort(()=>observeGrokQuota(env,account,response.headers))
@@ -1853,12 +1881,12 @@ async function acquireUpstream(
             await bestEffort(() => releasePoolLease(pool, leaseId))
             continue
           }
-          return { response, accountId, leaseId, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+          return { response, accountId, leaseId, renewals, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
             upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
             chatFromResponses, retryableFailure: semanticRetryable, serviceTier }
         }
       }
-      return { response, accountId, leaseId, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+      return { response, accountId, leaseId, renewals, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
         upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
         chatFromResponses, retryableFailure, serviceTier }
     } catch (error) {
@@ -1884,6 +1912,7 @@ async function acquireUpstream(
 }
 
 interface FinalizeInput {
+  renewals?: HeaderRenewals
   env: Env
   response: Response
   endpoint: TextGatewayEndpoint
@@ -1927,10 +1956,11 @@ async function createBufferedResponsesStream(
   const accumulator = new BufferedResponsesToChatCompletions(input.requestedModel)
   const reader = input.response.body?.getReader()
   let totalBytes = 0
-  let renewalSequence = 0
+  let admissionRenewal = input.renewals?.admission ?? 0
+  let poolRenewal = input.renewals?.pool ?? 0
   let lastRenewedAt = input.startedAt
   let lastChunkAt = Date.now()
-  const deadlineAt = input.startedAt + TOTAL_SYNC_TIMEOUT_MS
+  const deadlineAt = Date.now() + TOTAL_SYNC_TIMEOUT_MS
   let settled = false
   let upstreamResponseValid = false
 
@@ -1962,10 +1992,9 @@ async function createBufferedResponsesStream(
           throw new GatewayError(504, 'upstream_timeout', 'Upstream response exceeded the maximum duration', 'server_error')
         }
         if (now - lastRenewedAt >= RENEW_AFTER_MS) {
-          renewalSequence += 1
           try {
-            await renewApiKeyAdmission(input.admission, renewalSequence)
-            await renewPoolLease(input.pool, input.leaseId, renewalSequence)
+            await renewApiKeyAdmission(input.admission, ++admissionRenewal)
+            await renewPoolLease(input.pool, input.leaseId, ++poolRenewal)
           } catch (error) {
             void bestEffort(() => reader.cancel('lease renewal failed'))
             throw error
@@ -2094,6 +2123,7 @@ async function createSynchronousResponse(
         {
           pool: input.pool,
           leaseId: input.leaseId,
+          renewals: input.renewals,
           admission: input.admission,
           startedAt: input.startedAt,
         },
@@ -2124,12 +2154,14 @@ async function createSynchronousResponse(
       // Some compatible gateways encode provider failures inside HTTP 200.
       // Never settle those empty/error replies as completed billable requests.
       await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
+      const outputLimit = embeddedError.errorType === 'INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT'
       const quota = embeddedError.code === 'resource_exhausted' || embeddedError.code === 'insufficient_quota'
       const failure = new GatewayError(
-        quota ? 429 : 502,
-        quota ? 'upstream_quota_exhausted' : 'upstream_error',
-        quota ? 'Upstream account quota is exhausted' : 'Upstream service failed',
-        quota ? 'rate_limit_error' : 'server_error',
+        outputLimit ? 400 : quota ? 429 : 502,
+        outputLimit ? 'max_output_tokens_exceeded' : quota ? 'upstream_quota_exhausted' : 'upstream_error',
+        outputLimit ? 'Upstream exceeded the requested output token limit; increase max_tokens or max_output_tokens' : quota ? 'Upstream account quota is exhausted' : 'Upstream service failed',
+        outputLimit ? 'invalid_request_error' : quota ? 'rate_limit_error' : 'server_error',
+        undefined, undefined, true,
       )
       failure.upstreamAccountId = input.accountId
       failure.upstreamDiagnostic = await captureUpstreamDiagnostic(new Response(bytes.buffer as ArrayBuffer), '')
@@ -2973,11 +3005,12 @@ function createStreamingResponse(input: FinalizeInput & {
             : new OpenAiStreamTransformer(input.model.upstream_name, input.requestedModel, input.endpoint)
   const firstTokenTimer = new FirstTokenTimer(input.startedAt, (input.providerPlatform === 'openai' || input.providerPlatform === 'codex') ? input.ttftMode : undefined)
   let finalized: Promise<void> | null = null
-  let userRenewal = 0
-  let poolRenewal = 0
-  let admissionRenewal = 0
+  let userRenewal = input.renewals?.billing ?? 0
+  let poolRenewal = input.renewals?.pool ?? 0
+  let admissionRenewal = input.renewals?.admission ?? 0
+  const streamDeadlineAt = Date.now() + TOTAL_STREAM_TIMEOUT_MS
   let lastLeaseRenewedAt = Date.now()
-  let lastBillingRenewedAt = Date.now()
+  let lastBillingRenewedAt = input.renewals?.lastBillingRenewedAt ?? Date.now()
   let lastChunkAt = Date.now()
   let emitted = false
   let downstreamCancelled = false
@@ -3068,6 +3101,7 @@ function createStreamingResponse(input: FinalizeInput & {
     }
   }
 
+  let forwardedChunks = 0
   const enqueue = (
     controller: ReadableStreamDefaultController<Uint8Array> | null,
     chunks: Uint8Array[],
@@ -3075,6 +3109,8 @@ function createStreamingResponse(input: FinalizeInput & {
     if (controller === null || downstreamCancelled) return
     for (const chunk of chunks) {
       emitted ||= chunk.byteLength > 0
+      if (chunk.byteLength === 0) continue
+      forwardedChunks += 1
       controller.enqueue(chunk)
     }
   }
@@ -3158,7 +3194,7 @@ function createStreamingResponse(input: FinalizeInput & {
     }
     lastChunkAt = Date.now()
     const deadline = Math.min(
-      input.startedAt + TOTAL_STREAM_TIMEOUT_MS,
+      streamDeadlineAt,
       (disconnectStartedAt ?? Date.now()) + DISCONNECT_DRAIN_TOTAL_TIMEOUT_MS,
     )
     try {
@@ -3178,10 +3214,16 @@ function createStreamingResponse(input: FinalizeInput & {
       return serialize(async () => {
         if (finished || downstreamCancelled) return
         try {
-          await processRead(
-            await readNext(BODY_IDLE_TIMEOUT_MS, input.startedAt + TOTAL_STREAM_TIMEOUT_MS),
-            controller,
-          )
+          // Metadata-only and partial SSE frames may produce no downstream
+          // bytes. Keep pulling until there is output or a terminal event;
+          // returning an empty pull can leave a waiting reader stuck forever.
+          const before = forwardedChunks
+          while (!finished && !downstreamCancelled && forwardedChunks === before) {
+            await processRead(
+              await readNext(BODY_IDLE_TIMEOUT_MS, streamDeadlineAt),
+              controller,
+            )
+          }
         } catch (error) {
           finished = true
           void bestEffort(() => reader.cancel(error))
@@ -3677,33 +3719,6 @@ function normalizeOpenAiServiceTier(body: Record<string, unknown>): Record<strin
   return normalized
 }
 
-async function fetchWithHeaderTimeout(
-  url: URL,
-  init: RequestInit,
-  clientSignal: AbortSignal,
-  timeoutMs = HEADER_TIMEOUT_MS,
-  upstreamFetch: AccountFetcher = fetch,
-): Promise<Response> {
-  const controller = new AbortController()
-  const onClientAbort = () => controller.abort()
-  if (clientSignal.aborted) controller.abort()
-  else clientSignal.addEventListener('abort', onClientAbort, { once: true })
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await upstreamFetch(url, { ...init, signal: controller.signal })
-  } catch (error) {
-    if (controller.signal.aborted) {
-      if (clientSignal.aborted) {
-        throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
-      }
-      throw new GatewayError(504, 'upstream_timeout', 'Upstream did not respond in time', 'server_error')
-    }
-    throw new GatewayError(502, 'upstream_connection_error', 'Unable to connect to upstream', 'server_error')
-  } finally {
-    clearTimeout(timer)
-    clientSignal.removeEventListener('abort', onClientAbort)
-  }
-}
 
 function mapUpstreamStatus(response: Response): GatewayError {
   const retryAfter = safeRetryAfter(response.headers.get('retry-after'))
@@ -4098,16 +4113,18 @@ async function readResponseLimited(
     leaseId: string
     admission: ApiKeyAdmissionLease | null
     startedAt: number
+    renewals?: HeaderRenewals
   },
 ): Promise<Uint8Array> {
   if (response.body === null) return new Uint8Array()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
-  let renewalSequence = 0
+  let admissionRenewal = lease.renewals?.admission ?? 0
+  let poolRenewal = lease.renewals?.pool ?? 0
   let lastRenewedAt = lease.startedAt
   let lastChunkAt = Date.now()
-  const deadlineAt = lease.startedAt + TOTAL_SYNC_TIMEOUT_MS
+  const deadlineAt = Date.now() + TOTAL_SYNC_TIMEOUT_MS
     if (clientSignal.aborted) {
       await bestEffort(() => reader.cancel('client cancelled'))
       throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request', 'invalid_request_error')
@@ -4122,10 +4139,9 @@ async function readResponseLimited(
           throw new GatewayError(504, 'upstream_timeout', 'Upstream response exceeded the maximum duration', 'server_error')
         }
         if (now - lastRenewedAt >= RENEW_AFTER_MS) {
-          renewalSequence += 1
           try {
-            await renewApiKeyAdmission(lease.admission, renewalSequence)
-            await renewPoolLease(lease.pool, lease.leaseId, renewalSequence)
+            await renewApiKeyAdmission(lease.admission, ++admissionRenewal)
+            await renewPoolLease(lease.pool, lease.leaseId, ++poolRenewal)
           } catch (error) {
             await bestEffort(() => reader.cancel('lease renewal failed'))
             throw error
