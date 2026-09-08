@@ -147,13 +147,13 @@ async function advanceAccount(
     env.DB.prepare(
       `INSERT INTO account_usage_15m_rollup (
          account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint,
-         requests, input_tokens, output_tokens, cache_read_tokens,
+         requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
          standard_cost_micros, account_cost_micros, user_cost_micros,
          duration_total_ms, duration_count
        )
        SELECT usage.account_id, usage.occurred_at_ms - (usage.occurred_at_ms % 900000),
               usage.model, COALESCE(usage.inbound_endpoint, ''), COALESCE(usage.upstream_endpoint, ''),
-              COUNT(*), SUM(usage.input_tokens), SUM(usage.output_tokens), SUM(usage.cache_read_tokens),
+              COUNT(*), SUM(usage.input_tokens), SUM(usage.output_tokens), SUM(usage.cache_read_tokens), SUM(usage.cache_write_tokens),
               SUM(COALESCE(usage.standard_cost_micros, usage.amount_micros)),
               SUM(COALESCE(usage.account_cost_micros, usage.account_stats_cost_micros,
                 usage.standard_cost_micros, usage.amount_micros)),
@@ -171,6 +171,7 @@ async function advanceAccount(
          input_tokens = account_usage_15m_rollup.input_tokens + excluded.input_tokens,
          output_tokens = account_usage_15m_rollup.output_tokens + excluded.output_tokens,
          cache_read_tokens = account_usage_15m_rollup.cache_read_tokens + excluded.cache_read_tokens,
+         cache_write_tokens = account_usage_15m_rollup.cache_write_tokens + excluded.cache_write_tokens,
          standard_cost_micros = account_usage_15m_rollup.standard_cost_micros + excluded.standard_cost_micros,
          account_cost_micros = account_usage_15m_rollup.account_cost_micros + excluded.account_cost_micros,
          user_cost_micros = account_usage_15m_rollup.user_cost_micros + excluded.user_cost_micros,

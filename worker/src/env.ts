@@ -70,6 +70,8 @@ export interface UsageSettledPayload {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
+  /** Absent only on events emitted before cache-write projection support. */
+  cache_write_tokens?: number
   input_amount_micros: number
   output_amount_micros: number
   cache_amount_micros: number

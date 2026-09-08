@@ -16,11 +16,13 @@ interface UsageSummaryRow {
   today_input_tokens: number
   today_output_tokens: number
   today_cache_read_tokens: number
+  today_cache_write_tokens?: number
   today_amount_micros: number
   total_requests: number
   total_input_tokens: number
   total_output_tokens: number
   total_cache_read_tokens: number
+  total_cache_write_tokens?: number
   total_amount_micros: number
   average_duration_ms: number | null
 }
@@ -31,6 +33,7 @@ interface UsageModelRow {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
+  cache_write_tokens?: number
   amount_micros: number
 }
 
@@ -40,6 +43,7 @@ interface UsageDayRow {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
+  cache_write_tokens?: number
   amount_micros: number
 }
 
@@ -119,6 +123,7 @@ export async function handleGatewayUsage(context: Context<GatewayBindings>): Pro
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
                 COALESCE(SUM(amount_micros), 0) AS amount_micros
            FROM usage_projection
           WHERE api_key_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?
@@ -138,16 +143,19 @@ export async function handleGatewayUsage(context: Context<GatewayBindings>): Pro
            COALESCE(SUM(CASE WHEN occurred_at_ms >= ? AND occurred_at_ms < ? THEN input_tokens ELSE 0 END), 0) AS today_input_tokens,
            COALESCE(SUM(CASE WHEN occurred_at_ms >= ? AND occurred_at_ms < ? THEN output_tokens ELSE 0 END), 0) AS today_output_tokens,
            COALESCE(SUM(CASE WHEN occurred_at_ms >= ? AND occurred_at_ms < ? THEN cache_read_tokens ELSE 0 END), 0) AS today_cache_read_tokens,
+           COALESCE(SUM(CASE WHEN occurred_at_ms >= ? AND occurred_at_ms < ? THEN cache_write_tokens ELSE 0 END), 0) AS today_cache_write_tokens,
            COALESCE(SUM(CASE WHEN occurred_at_ms >= ? AND occurred_at_ms < ? THEN amount_micros ELSE 0 END), 0) AS today_amount_micros,
            COUNT(*) AS total_requests,
            COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
            COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
            COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens,
+           COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens,
            COALESCE(SUM(amount_micros), 0) AS total_amount_micros,
            CAST(ROUND(AVG(duration_ms)) AS INTEGER) AS average_duration_ms
          FROM usage_projection
         WHERE api_key_id = ?`,
       ).bind(
+        range.today.start_ms, range.today.end_ms,
         range.today.start_ms, range.today.end_ms,
         range.today.start_ms, range.today.end_ms,
         range.today.start_ms, range.today.end_ms,
@@ -160,6 +168,7 @@ export async function handleGatewayUsage(context: Context<GatewayBindings>): Pro
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
                 COALESCE(SUM(amount_micros), 0) AS amount_micros
            FROM usage_projection
           WHERE api_key_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?
@@ -184,6 +193,7 @@ export async function handleGatewayUsage(context: Context<GatewayBindings>): Pro
         summary.today_cache_read_tokens,
         todayTokens,
         summary.today_amount_micros,
+        summary.today_cache_write_tokens ?? 0,
       ),
       total: usageBlock(
         summary.total_requests,
@@ -192,6 +202,7 @@ export async function handleGatewayUsage(context: Context<GatewayBindings>): Pro
         summary.total_cache_read_tokens,
         totalTokens,
         summary.total_amount_micros,
+        summary.total_cache_write_tokens ?? 0,
       ),
       average_duration_ms: summary.average_duration_ms ?? 0,
     }
@@ -473,12 +484,13 @@ function usageBlock(
   cacheReadTokens: number,
   totalTokens: number,
   amountMicros: number,
+  cacheWriteTokens = 0,
 ) {
   return {
     requests,
-    input_tokens: Math.max(0, inputTokens - cacheReadTokens),
+    input_tokens: Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens),
     output_tokens: outputTokens,
-    cache_creation_tokens: 0,
+    cache_creation_tokens: cacheWriteTokens,
     cache_read_tokens: cacheReadTokens,
     total_tokens: totalTokens,
     cost: microsToUsd(amountMicros),
@@ -491,9 +503,9 @@ function modelUsage(row: UsageModelRow) {
   return {
     model: row.model,
     requests: row.requests,
-    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens),
+    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens - (row.cache_write_tokens ?? 0)),
     output_tokens: row.output_tokens,
-    cache_creation_tokens: 0,
+    cache_creation_tokens: row.cache_write_tokens ?? 0,
     cache_read_tokens: row.cache_read_tokens,
     total_tokens: checkedSum(row.input_tokens, row.output_tokens),
     cost: microsToUsd(row.amount_micros),
@@ -506,10 +518,10 @@ function dailyUsage(row: UsageDayRow) {
   return {
     date: row.local_date,
     requests: row.requests,
-    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens),
+    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens - (row.cache_write_tokens ?? 0)),
     output_tokens: row.output_tokens,
     cache_read_tokens: row.cache_read_tokens,
-    cache_write_tokens: 0,
+    cache_write_tokens: row.cache_write_tokens ?? 0,
     total_tokens: checkedSum(row.input_tokens, row.output_tokens),
     cost: microsToUsd(row.amount_micros),
     actual_cost: microsToUsd(row.amount_micros),

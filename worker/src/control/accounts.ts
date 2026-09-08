@@ -363,6 +363,7 @@ interface AccountStatsRow {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
+  cache_write_tokens: number
   standard_cost_micros: number
   account_cost_micros: number
   user_cost_micros: number
@@ -429,6 +430,7 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
       COALESCE(SUM(input_tokens), 0) AS input_tokens,
       COALESCE(SUM(output_tokens), 0) AS output_tokens,
       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+      COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
       COALESCE(SUM(standard_cost_micros), 0) AS standard_cost_micros,
       COALESCE(SUM(account_cost_micros), 0) AS account_cost_micros,
       COALESCE(SUM(user_cost_micros), 0) AS user_cost_micros,
@@ -465,7 +467,7 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
        ),
        raw_rows AS MATERIALIZED (
          SELECT event_id, model, inbound_endpoint, upstream_endpoint, occurred_at_ms,
-                input_tokens, output_tokens, cache_read_tokens,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                 COALESCE(standard_cost_micros, amount_micros) AS standard_cost_micros,
                 COALESCE(account_cost_micros, account_stats_cost_micros,
                   standard_cost_micros, amount_micros) AS account_cost_micros,
@@ -478,7 +480,7 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
        ),
        source AS MATERIALIZED (
          SELECT bucket.local_date, raw.model, raw.inbound_endpoint, raw.upstream_endpoint,
-                1 AS requests, raw.input_tokens, raw.output_tokens, raw.cache_read_tokens,
+                1 AS requests, raw.input_tokens, raw.output_tokens, raw.cache_read_tokens, raw.cache_write_tokens,
                 raw.standard_cost_micros, raw.account_cost_micros, raw.user_cost_micros,
                 raw.duration_ms AS duration_total_ms, 1 AS duration_count
            FROM raw_rows raw
@@ -486,7 +488,7 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
              ON raw.occurred_at_ms >= bucket.start_ms AND raw.occurred_at_ms < bucket.end_ms
          UNION ALL
          SELECT bucket.local_date, rollup.model, rollup.inbound_endpoint, rollup.upstream_endpoint,
-                rollup.requests, rollup.input_tokens, rollup.output_tokens, rollup.cache_read_tokens,
+                rollup.requests, rollup.input_tokens, rollup.output_tokens, rollup.cache_read_tokens, rollup.cache_write_tokens,
                 rollup.standard_cost_micros, rollup.account_cost_micros, rollup.user_cost_micros,
                 rollup.duration_total_ms, rollup.duration_count
            FROM account_usage_15m_rollup rollup
@@ -508,10 +510,14 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
        SELECT 'upstream_endpoint', upstream_endpoint, ${aggregate}
          FROM source WHERE trim(upstream_endpoint) <> '' GROUP BY upstream_endpoint
        UNION ALL
-       SELECT 'summary', NULL, ${aggregate} FROM source
-       UNION ALL
-       SELECT 'overflow', NULL, COUNT(*), 0, 0, 0, 0, 0, 0, 0, 0
-         FROM raw_rows HAVING COUNT(*) > 10000`,
+       -- D1 permits at most five terms in one compound SELECT. Keep the
+       -- summary and overflow terms in their own compound instead of six peers.
+       SELECT * FROM (
+         SELECT 'summary', NULL, ${aggregate} FROM source
+         UNION ALL
+         SELECT 'overflow', NULL, COUNT(*), 0, 0, 0, 0, 0, 0, 0, 0, 0
+           FROM raw_rows HAVING COUNT(*) > 10000
+       )`,
     ).bind(
       JSON.stringify(buckets), account.id, start, end,
       ...rawPredicateValues,
@@ -616,9 +622,9 @@ export async function getAdminAccountStats(context: Context<ControlBindings>): P
       models: modelRows.map((row) => ({
         model: requireStatsString(row.model, 'model'),
         requests: row.requests,
-        input_tokens: row.input_tokens - row.cache_read_tokens,
+        input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens - row.cache_write_tokens),
         output_tokens: row.output_tokens,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: row.cache_write_tokens,
         cache_read_tokens: row.cache_read_tokens,
         total_tokens: row.input_tokens + row.output_tokens,
         cost: microsToUsd(row.standard_cost_micros),
@@ -720,7 +726,7 @@ function publicEndpointStats(row: AccountEndpointStatsRow) {
 
 function validateAccountStatsRow(row: AccountStatsRow): AccountStatsRow {
   for (const field of [
-    'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'standard_cost_micros',
+    'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'standard_cost_micros',
     'account_cost_micros', 'user_cost_micros',
   ] as const) requireStatsInteger(row[field], field)
   if (row.cache_read_tokens > row.input_tokens) {

@@ -207,10 +207,10 @@ export async function consumeEvents(
              inbound_endpoint, upstream_endpoint, billing_mode, native_compaction_v2,
              dimensions_version, image_count, image_size, image_input_size,
              image_output_size, image_size_source, image_size_breakdown,
-             account_stats_rollup_version
+             account_stats_rollup_version, cache_write_tokens
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -256,6 +256,7 @@ export async function consumeEvents(
           payload.image_output_size,
           payload.image_size_source,
           payload.image_size_breakdown === null ? null : JSON.stringify(payload.image_size_breakdown),
+          payload.cache_write_tokens ?? 0,
         ),
         env.DB.prepare(
           `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
@@ -274,10 +275,11 @@ export async function consumeEvents(
              account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint,
              requests, input_tokens, output_tokens, cache_read_tokens,
              standard_cost_micros, account_cost_micros, user_cost_micros,
-             duration_total_ms, duration_count
-           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+             duration_total_ms, duration_count, cache_write_tokens
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, ?)
            ON CONFLICT (account_id, bucket_start_ms, model, inbound_endpoint, upstream_endpoint)
            DO UPDATE SET
+             cache_write_tokens = account_usage_15m_rollup.cache_write_tokens + excluded.cache_write_tokens,
              requests = account_usage_15m_rollup.requests + excluded.requests,
              input_tokens = account_usage_15m_rollup.input_tokens + excluded.input_tokens,
              output_tokens = account_usage_15m_rollup.output_tokens + excluded.output_tokens,
@@ -300,6 +302,7 @@ export async function consumeEvents(
           payload.account_cost_micros,
           payload.amount_micros,
           payload.duration_ms,
+          payload.cache_write_tokens ?? 0,
         ),
       ])
       message.ack()
@@ -608,6 +611,9 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
       (typeof payload.subscription_id !== 'string' || payload.subscription_id === ''))
   ) {
     throw new Error('Invalid usage subscription reference')
+  }
+  if (payload.cache_write_tokens !== undefined && (!Number.isSafeInteger(payload.cache_write_tokens) || payload.cache_write_tokens < 0)) {
+    throw new Error('Invalid usage payload field cache_write_tokens')
   }
   for (const field of [
     'input_tokens',

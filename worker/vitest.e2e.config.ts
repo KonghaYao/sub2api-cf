@@ -130,7 +130,7 @@ export default defineConfig(async () => {
                 if (body.stream !== true || (body.model === 'chat-json-cache-fixture' && (body.stream_options as any)?.include_usage !== true)) return Response.json({ error: 'stream flag missing' }, { status: 422 })
                 return Response.json({ id: 'json-cache', object: 'chat.completion', model: body.model, created: 123,
                   choices: [{ index: 0, message: { role: 'assistant', content: 'Cache and streaming OK' }, finish_reason: 'stop' }],
-                  usage: { prompt_tokens: 100, completion_tokens: 2, cache_read_input_tokens: 80 } })
+                  usage: { prompt_tokens: 100, completion_tokens: 2, cache_read_input_tokens: 80, cache_creation_input_tokens: 10 } })
               }
               if (typeof body.model === 'string' && body.model.startsWith('chat-eof-')) {
                 const mode=body.model.slice('chat-eof-'.length)

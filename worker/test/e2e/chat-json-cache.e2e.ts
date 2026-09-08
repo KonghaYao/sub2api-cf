@@ -20,7 +20,7 @@ it('serves a JSON-only Chat upstream as SSE with consistent cached usage, billin
   expect(response.headers.get('content-type')).toContain('text/event-stream')
   // Parse actual SSE framing as a client would, retaining the delimiter.
   const reader = response.body!.getReader(), decoder = new TextDecoder()
-  let pending = '', answer = '', cached = -1, done = false
+  let pending = '', answer = '', cached = -1, written = -1, done = false
   while (true) {
     const chunk = await reader.read()
     if (chunk.done) break
@@ -33,15 +33,27 @@ it('serves a JSON-only Chat upstream as SSE with consistent cached usage, billin
       const event = JSON.parse(data)
       expect(event.object).toBe('chat.completion.chunk')
       answer += event.choices[0]?.delta?.content ?? ''
-      if (event.usage) cached = event.usage.prompt_tokens_details.cached_tokens
+      if (event.usage) { cached = event.usage.prompt_tokens_details.cached_tokens; written = event.usage.prompt_tokens_details.cache_write_tokens }
     }
   }
-  expect({ answer, cached, done, pending }).toEqual({ answer: 'Cache and streaming OK', cached: 80, done: true, pending: '' })
+  expect({ answer, cached, written, done, pending }).toEqual({ answer: 'Cache and streaming OK', cached: 80, written: 10, done: true, pending: '' })
   await expect.poll(async () => (await env.DB.prepare('SELECT cache_read_tokens FROM usage_projection WHERE user_id=?').bind(f.user_id).first<any>())?.cache_read_tokens).toBe(80)
   const dashboard = await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/dashboard/snapshot-v2?user_id=' + f.user_id,
     { headers: { authorization: 'Bearer ' + f.admin_session } }))
   expect(dashboard.status).toBe(200)
-  expect((await dashboard.json() as any).data.trend[0]).toMatchObject({ input_tokens: 20, cache_read_tokens: 80, total_tokens: 102 })
+  expect((await dashboard.json() as any).data.trend[0]).toMatchObject({ input_tokens: 10, cache_creation_tokens: 10, cache_read_tokens: 80, total_tokens: 102 })
+  const adminGet = async (path: string) => {
+    const res = await exports.default.fetch(new Request('https://worker.e2e.invalid' + path, { headers: { authorization: 'Bearer ' + f.admin_session } }))
+    expect(res.status, path).toBe(200)
+    return (await res.json() as any).data
+  }
+  expect(await adminGet('/api/v1/admin/usage/stats?user_id=' + f.user_id)).toMatchObject({ total_input_tokens: 10, total_cache_creation_tokens: 10, total_cache_read_tokens: 80, total_cache_tokens: 90, total_tokens: 102 })
+  expect((await adminGet('/api/v1/admin/usage?page=1&user_id=' + f.user_id)).items[0]).toMatchObject({ input_tokens: 10, cache_creation_tokens: 10, cache_read_tokens: 80 })
+  expect((await adminGet('/api/v1/admin/dashboard/models?user_id=' + f.user_id)).models[0]).toMatchObject({ input_tokens: 10, cache_creation_tokens: 10, cache_read_tokens: 80 })
+  expect((await adminGet('/api/v1/admin/accounts/' + f.account_id + '/stats')).models[0]).toMatchObject({ input_tokens: 10, cache_creation_tokens: 10, cache_read_tokens: 80 })
+  const keyUsage = await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/usage', { headers: { authorization: 'Bearer ' + f.api_key } }))
+  expect(keyUsage.status).toBe(200)
+  expect(await keyUsage.json()).toMatchObject({ usage: { total: { input_tokens: 10, cache_creation_tokens: 10, cache_read_tokens: 80, total_tokens: 102 }, today: { cache_creation_tokens: 10 } }, model_stats: [{ cache_creation_tokens: 10 }], daily_usage: [{ cache_write_tokens: 10 }] })
   const state = await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
   await env.DB.prepare('UPDATE accounts SET ui_config_json=? WHERE id=?').bind(
     JSON.stringify({ extra: { openai_responses_mode: 'force_chat_completions' } }), f.account_id).run()

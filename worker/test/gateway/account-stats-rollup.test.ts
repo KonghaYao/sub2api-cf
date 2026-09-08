@@ -62,6 +62,7 @@ describe('scheduled account-stat rollup recovery', () => {
     applyMigrations(raw)
     seedAccount(raw)
     seedPending(raw, 25)
+    raw.prepare("UPDATE usage_projection SET cache_write_tokens=1").run()
     raw.prepare(`
       INSERT INTO usage_projection (
         event_id, request_id, user_id, account_id, model, amount_micros,
@@ -82,6 +83,7 @@ describe('scheduled account-stat rollup recovery', () => {
     const settled = await recoverAccountStatsRollups({ DB: d1 } as Env, { nowMs: NOW_MS })
 
     expect([second.selected, settled.selected]).toEqual([5, 0])
+    expect(raw.prepare("SELECT SUM(cache_write_tokens) AS written FROM account_usage_15m_rollup").get()).toEqual({written:25})
     expect(raw.prepare(`
       SELECT SUM(requests) AS requests, SUM(input_tokens) AS input_tokens,
              SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens,

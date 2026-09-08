@@ -11,8 +11,8 @@ type Bindings = {
 type Kind = 'snapshot-v2' | 'stats' | 'trend' | 'groups' | 'users-trend' | 'users-ranking' | 'api-keys-trend' | 'user-breakdown';
 const DAY = 86400000;
 const startedAt = Date.now();
-const aggregate = `COUNT(*) requests, COALESCE(SUM(MAX(0,u.input_tokens-u.cache_read_tokens)),0) input_tokens,
-  COALESCE(SUM(u.output_tokens),0) output_tokens, COALESCE(SUM(u.cache_read_tokens),0) cache_read_tokens,
+const aggregate = `COUNT(*) requests, COALESCE(SUM(MAX(0,u.input_tokens-u.cache_read_tokens-u.cache_write_tokens)),0) input_tokens,
+  COALESCE(SUM(u.output_tokens),0) output_tokens, COALESCE(SUM(u.cache_write_tokens),0) cache_creation_tokens, COALESCE(SUM(u.cache_read_tokens),0) cache_read_tokens,
   COALESCE(SUM(u.input_tokens+u.output_tokens),0) total_tokens,
   COALESCE(SUM(COALESCE(u.standard_cost_micros,u.amount_micros)),0)/1000000.0 cost,
   COALESCE(SUM(u.amount_micros),0)/1000000.0 actual_cost,
@@ -62,7 +62,7 @@ export function adminDashboard(kind: Kind) {
             const bucket = bucketExpression(context, timezone, interval);
             const limit = queryInteger(context.req.query('limit') ?? context.req.query('users_trend_limit'), 'limit', 10, 1, 100);
             const metadata = { start_date: startDate, end_date: endDate, granularity };
-            const rows = async (select: string, join = '', suffix = '') => (await context.env.DB.prepare(`SELECT ${select}, ${aggregate} FROM usage_projection u ${join} WHERE ${where} ${suffix}`).bind(...filter.values).all<any>()).results.map(row => ({ ...row, cache_creation_tokens: 0 }));
+            const rows = async (select: string, join = '', suffix = '') => (await context.env.DB.prepare(`SELECT ${select}, ${aggregate} FROM usage_projection u ${join} WHERE ${where} ${suffix}`).bind(...filter.values).all<any>()).results;
             const trend = async () => (await rows(`${bucket} bucket`, '', `GROUP BY bucket ORDER BY bucket`)).map(row => ({ ...row, date: dateLabel(row.bucket, granularity, timezone) }));
             const models = () => rows(`${modelExpression} model`, '', `GROUP BY ${modelExpression} ORDER BY total_tokens DESC LIMIT 500`);
             const groups = () => rows(`u.group_id, COALESCE(g.name,'') group_name`, 'LEFT JOIN "groups" g ON g.id=u.group_id', 'GROUP BY u.group_id,g.name ORDER BY actual_cost DESC LIMIT 100');
@@ -89,7 +89,7 @@ export function adminDashboard(kind: Kind) {
             if (kind === 'users-ranking' || kind === 'user-breakdown') {
                 const allowed = ['total_tokens', 'input_tokens', 'output_tokens', 'cache_tokens', 'requests', 'cost', 'actual_cost'];
                 const sort = context.req.query('sort_by') ?? 'actual_cost';
-                const ranking = (await rows(`u.user_id,COALESCE(i.email,'') email,COALESCE(i.display_name,'') username,SUM(u.cache_read_tokens) cache_tokens`, 'LEFT JOIN users i ON i.id=u.user_id', `GROUP BY u.user_id ORDER BY ${allowed.includes(sort) ? sort : 'actual_cost'} DESC,u.user_id LIMIT ${limit}`)).map(row => ({ ...row, tokens: row.total_tokens }));
+                const ranking = (await rows(`u.user_id,COALESCE(i.email,'') email,COALESCE(i.display_name,'') username,SUM(u.cache_read_tokens+u.cache_write_tokens) cache_tokens`, 'LEFT JOIN users i ON i.id=u.user_id', `GROUP BY u.user_id ORDER BY ${allowed.includes(sort) ? sort : 'actual_cost'} DESC,u.user_id LIMIT ${limit}`)).map(row => ({ ...row, tokens: row.total_tokens }));
                 if (kind === 'user-breakdown')
                     return controlSuccess({ ...metadata, users: ranking });
                 const totals = await rows('1 marker');
@@ -152,7 +152,7 @@ async function stats(context: Context<Bindings>) {
     const [users, keys, accounts, total, daily, recent] = results.map(result => (result.results[0] ?? {}) as any);
     const usage = (row: any, prefix: string) => ({
         [`${prefix}_requests`]: row.requests, [`${prefix}_input_tokens`]: row.input_tokens, [`${prefix}_output_tokens`]: row.output_tokens,
-        [`${prefix}_cache_creation_tokens`]: 0, [`${prefix}_cache_read_tokens`]: row.cache_read_tokens,
+        [`${prefix}_cache_creation_tokens`]: row.cache_creation_tokens, [`${prefix}_cache_read_tokens`]: row.cache_read_tokens,
         [`${prefix}_tokens`]: row.total_tokens, [`${prefix}_cost`]: row.cost, [`${prefix}_actual_cost`]: row.actual_cost, [`${prefix}_account_cost`]: row.account_cost,
     });
     return { ...users, ...keys, ...accounts, ...usage(total, 'total'), ...usage(daily, 'today'), active_users: daily.active_users, hourly_active_users: daily.hourly_active_users,
