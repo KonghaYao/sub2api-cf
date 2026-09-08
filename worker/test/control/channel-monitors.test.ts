@@ -74,6 +74,47 @@ describe('original monitor UI and actual synthetic probe lifecycle',()=>{
    count=0;await runScheduledChannelMonitors(f.env,now+2000);expect(count).toBeLessThanOrEqual(50);expect(fetcher).toHaveBeenCalledTimes(11)
   }finally{vi.unstubAllGlobals();f.raw.close()}
  })
+ it.each([false,true])('runs eleven models concurrently and retains the lease (history failure=%s)',async(failHistory)=>{
+  const f=await clearHarness(false),app=createApp()
+  const call=(path:string,body:unknown,method='POST')=>app.request('/api/v1/admin'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json'},body:JSON.stringify(body)},f.env)
+  let release!:()=>void
+  const gate=new Promise<void>(resolve=>{release=resolve})
+  const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>{if(!failHistory||JSON.parse(init!.body as string).model!=='primary')await gate;return Response.json({choices:[]})});vi.stubGlobal('fetch',fetcher)
+  let running:Promise<Response>|undefined
+  try{
+   await call('/settings/channel-monitor',{expected_control_version:0,channel_monitor_enabled:true},'PUT')
+   const models=['primary',...Array.from({length:10},(_,i)=>`extra-${i}`)]
+   const created=await call('/channel-monitors',{name:'Concurrent monitor',provider:'openai',endpoint:'https://api.example.test',api_key:'test-secret',primary_model:models[0],extra_models:models.slice(1),interval_seconds:300})
+   const monitor=(await created.json() as any).data
+   if(failHistory)f.raw.exec("CREATE TRIGGER fail_primary_history BEFORE INSERT ON channel_monitor_history WHEN NEW.model='primary' BEGIN SELECT RAISE(FAIL,'fixture history failure'); END")
+   running=Promise.resolve(call(`/channel-monitors/${monitor.id}/run`,{}))
+   await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledTimes(11),{timeout:1000})
+   expect((await call(`/channel-monitors/${monitor.id}/run`,{})).status).toBe(409)
+   release()
+   const result=await running
+   if(failHistory)expect(result.status).toBe(500)
+   else expect((await result.json() as any).data.results.map((r:any)=>r.model)).toEqual(models)
+   expect(f.raw.prepare('SELECT lease_id FROM channel_monitors WHERE id=?').get(monitor.id).lease_id).toBeNull()
+   expect(f.raw.prepare('SELECT COUNT(*) AS n FROM channel_monitor_history').get().n).toBe(failHistory?10:11)
+  }finally{release();await running;vi.unstubAllGlobals();f.raw.close()}
+ })
+ it('records slow successful probes as degraded and available in both admin and user views',async()=>{
+  const f=await clearHarness(false),app=createApp(),now=Date.now()
+  const call=(path:string,body?:unknown,method=body===undefined?'GET':'POST')=>app.request('/api/v1'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})},f.env)
+  const clock=vi.spyOn(Date,'now').mockReturnValue(now)
+  vi.stubGlobal('fetch',vi.fn(async()=>{clock.mockReturnValue(now+10_000);return Response.json({choices:[{message:{content:'OK'}}]})}))
+  try{
+   await call('/admin/settings/channel-monitor',{expected_control_version:0,channel_monitor_enabled:true},'PUT')
+   const created=await call('/admin/channel-monitors',{name:'Slow valid monitor',provider:'openai',endpoint:'https://api.example.test',api_key:'test-secret',primary_model:'m',interval_seconds:300,body_override_mode:'replace',body_override:{model:'m',messages:[{role:'user',content:'OK'}]}})
+   const monitor=(await created.json() as any).data
+   const run=await call(`/admin/channel-monitors/${monitor.id}/run`,{})
+   expect((await run.json() as any).data.results[0]).toMatchObject({status:'degraded',latency_ms:10_000})
+   const admin=await call(`/admin/channel-monitors/${monitor.id}`)
+   expect((await admin.json() as any).data).toMatchObject({primary_status:'degraded',availability_7d:100})
+   const user=await call(`/channel-monitors/${monitor.id}/status`)
+   expect((await user.json() as any).data.models[0]).toMatchObject({latest_status:'degraded',availability_7d:100,availability_15d:100,availability_30d:100})
+  }finally{clock.mockRestore();vi.unstubAllGlobals();f.raw.close()}
+ })
  it.each([['openai','chat_completions'],['openai','responses'],['anthropic','chat_completions'],['gemini','chat_completions']] as const)('protects model and challenge fields in %s %s merge templates',async(provider,api_mode)=>{
   const f=await clearHarness(false),app=createApp()
   const call=(path:string,body:unknown,method='POST')=>app.request('/api/v1/admin'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json'},body:JSON.stringify(body)},f.env)
@@ -131,7 +172,7 @@ describe('original monitor UI and actual synthetic probe lifecycle',()=>{
    const run=await data(await call(`/admin/channel-monitors/${monitor.id}/run`,'POST'))
    expect(run.results).toHaveLength(2);expect(run.results[0].status).toBe('operational')
    expect(fetcher).toHaveBeenCalledTimes(2)
-   const init=fetcher.mock.calls[0][1]!;expect(new Headers(init.headers).get('authorization')).toBe('Bearer private-monitor-secret');expect(new Headers(init.headers).get('x-probe')).toBe('initial');expect(JSON.parse(init.body as string)).toMatchObject({model:'model-a',max_tokens:8,stream:false})
+   const init=fetcher.mock.calls.find(([,init])=>JSON.parse(init!.body as string).model==='model-a')![1]!;expect(new Headers(init.headers).get('authorization')).toBe('Bearer private-monitor-secret');expect(new Headers(init.headers).get('x-probe')).toBe('initial');expect(JSON.parse(init.body as string)).toMatchObject({model:'model-a',max_tokens:8,stream:false})
    expect((await data(await call(`/admin/channel-monitors/${monitor.id}/history?model=model-a`))).items).toHaveLength(1)
    const list=await data(await call('/admin/channel-monitors?search=Live&page_size=1'));expect(list).toMatchObject({total:1,page_size:1});expect(list.items[0]).toMatchObject({primary_status:'operational',availability_7d:100})
    await data(await call(`/admin/channel-monitor-templates/${template.id}`,'PUT',{extra_headers:{'x-probe':'changed'}}))

@@ -6,7 +6,7 @@ import { GatewayError, asGatewayError } from '../gateway/errors';
 import { encryptCredential, decryptCredential } from '../gateway/crypto';
 import { validateBaseUrl } from '../gateway/repository';
 import { buildProviderRequest, type ProviderPlatform } from '../gateway/providers';
-import { readBoundedProviderJson } from './account-synthetic-probes';
+import { requestMonitorJson, MONITOR_DEGRADED_MS } from './channel-monitor-request';
 import { createMonitorChallenge, monitorChallengeBody, monitorResponseText, validMonitorAnswer } from './channel-monitor-challenge';
 import { controlSuccess, controlError, readJsonObject, requireExpectedControlVersion } from './http';
 import { authenticateAdminSession } from './admin-auth';
@@ -183,7 +183,7 @@ else if (body.template_id !== undefined && body.template_id !== null) {
     patch = { ...patch, extra_headers: source.extra_headers, body_override_mode: source.body_override_mode, body_override: source.body_override };
 } const config = normalize(patch, previousConfig); await checkAccount(env, config); return { config, templateId }; }
 function historyDTO(h: History) { const { checked_at_ms, quota_json, ...rest } = h; return { ...rest, checked_at: new Date(checked_at_ms).toISOString(), ...(quota_json ? { quota: JSON.parse(quota_json) } : {}) }; }
-async function dto(env: Env, r: Row) { const config = JSON.parse(r.config_json) as Config; const rows = await env.DB.prepare('SELECT * FROM channel_monitor_history WHERE monitor_id=? AND checked_at_ms>=? ORDER BY checked_at_ms DESC,id DESC LIMIT 10000').bind(r.id, Date.now() - 7 * 86400000).all<History>(); const primary = rows.results.filter(h => h.model === config.primary_model), latest = primary[0]; return { ...config, id: r.id, api_key_masked: r.ciphertext_b64 ? '••••••••' : '', template_id: r.template_id, created_by: r.created_by, created_at: new Date(r.created_at_ms).toISOString(), updated_at: new Date(r.updated_at_ms).toISOString(), last_checked_at: r.last_checked_at_ms ? new Date(r.last_checked_at_ms).toISOString() : null, primary_status: latest?.status ?? '', primary_latency_ms: latest?.latency_ms ?? null, availability_7d: primary.length ? 100 * primary.filter(h => h.status === 'operational').length / primary.length : 0, extra_models_status: config.extra_models.map(model => { const h = rows.results.find(h => h.model === model); return { model, status: h?.status ?? '', latency_ms: h?.latency_ms ?? null }; }), latest_quota: latest?.quota_json ? JSON.parse(latest.quota_json) : null }; }
+async function dto(env: Env, r: Row) { const config = JSON.parse(r.config_json) as Config; const rows = await env.DB.prepare('SELECT * FROM channel_monitor_history WHERE monitor_id=? AND checked_at_ms>=? ORDER BY checked_at_ms DESC,id DESC LIMIT 10000').bind(r.id, Date.now() - 7 * 86400000).all<History>(); const primary = rows.results.filter(h => h.model === config.primary_model), latest = primary[0]; return { ...config, id: r.id, api_key_masked: r.ciphertext_b64 ? '••••••••' : '', template_id: r.template_id, created_by: r.created_by, created_at: new Date(r.created_at_ms).toISOString(), updated_at: new Date(r.updated_at_ms).toISOString(), last_checked_at: r.last_checked_at_ms ? new Date(r.last_checked_at_ms).toISOString() : null, primary_status: latest?.status ?? '', primary_latency_ms: latest?.latency_ms ?? null, availability_7d: primary.length ? 100 * primary.filter(h => (h.status === 'operational' || h.status === 'degraded')).length / primary.length : 0, extra_models_status: config.extra_models.map(model => { const h = rows.results.find(h => h.model === model); return { model, status: h?.status ?? '', latency_ms: h?.latency_ms ?? null }; }), latest_quota: latest?.quota_json ? JSON.parse(latest.quota_json) : null }; }
 export const listChannelMonitors = (c: C) => response(async () => { const page = Math.max(1, Number(c.req.query('page')) || 1), size = Math.max(1, Math.min(100, Number(c.req.query('page_size')) || 20)); const rows = await c.env.DB.prepare('SELECT * FROM channel_monitors ORDER BY id DESC').all<Row>(); const filtered = rows.results.filter(r => { const config = JSON.parse(r.config_json) as Config; return (!c.req.query('provider') || config.provider === c.req.query('provider')) && (!c.req.query('enabled') || config.enabled === (c.req.query('enabled') === 'true')) && (!c.req.query('search') || config.name.toLowerCase().includes(c.req.query('search')!.toLowerCase())); }); return { items: await Promise.all(filtered.slice((page - 1) * size, page * size).map(r => dto(c.env, r))), total: filtered.length, page, page_size: size, pages: Math.ceil(filtered.length / size) }; });
 export const getChannelMonitor = (c: C) => response(async () => dto(c.env, await row(c.env, id(c))));
 export const createChannelMonitor = (c: C) => response(async () => { const body = await readJsonObject(c.req.raw, 32768), { config, templateId } = await snapshot(c.env, body), key = body.api_key; if (config.check_mode !== 'quota' && (typeof key !== 'string' || !key))
@@ -238,44 +238,50 @@ async function probe(env: Env, r: Row, config: Config, model: string, signal?: A
     const plan = buildProviderRequest({ account: { platform, protocol: platform, auth_scheme: platform === 'anthropic' ? 'x-api-key' : platform === 'gemini' ? 'x-goog-api-key' : 'bearer', base_url: config.endpoint, provider_config: {} }, credential, operation: platform === 'anthropic' ? 'messages' : platform === 'gemini' ? 'generate_content' : config.api_mode, model, body });
     for (const [key, value] of Object.entries(config.extra_headers))
         plan.headers.set(key, value);
-    const abort = signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000);
-    const upstream = await accountFetcher(env,proxyId)(plan.url, { method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body), redirect: 'manual', signal: abort });
+    const upstream = await requestMonitorJson(accountFetcher(env,proxyId), plan.url, { method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body), redirect: 'manual' }, signal);
     let ok = false;
     let answer = '';
     if (upstream.ok) {
-        answer = monitorResponseText(platform, config.api_mode, await readBoundedProviderJson(upstream));
+        answer = monitorResponseText(platform, config.api_mode, upstream.body);
         ok = config.body_override_mode === 'replace' ? answer.trim() !== '' : validMonitorAnswer(answer, challenge.expected);
     }
-    else
-        await upstream.body?.cancel();
-    return { model, status: ok ? 'operational' : 'failed', latency_ms: Date.now() - started, ping_latency_ms: null, message: ok ? '' : upstream.ok ? answer ? 'challenge_mismatch' : 'upstream_invalid_response' : `upstream_http_${upstream.status}`, checked_at: new Date(started).toISOString() };
+    const latency = Date.now() - started;
+    const slow = ok && latency >= MONITOR_DEGRADED_MS;
+    return { model, status: ok ? slow ? 'degraded' : 'operational' : upstream.ok ? 'failed' : 'error', latency_ms: latency, ping_latency_ms: null, message: ok ? slow ? `slow response: ${latency}ms` : '' : upstream.ok ? answer ? 'challenge_mismatch' : 'upstream_invalid_response' : `upstream_http_${upstream.status}`, checked_at: new Date(started).toISOString() };
 }
-catch {
-    return { model, status: 'error', latency_ms: Date.now() - started, ping_latency_ms: null, message: signal?.aborted ? 'request_cancelled' : 'probe_transport_or_configuration_failed', checked_at: new Date(started).toISOString() };
+catch (error) {
+    return { model, status: 'error', latency_ms: Date.now() - started, ping_latency_ms: null, message: signal?.aborted ? 'request_cancelled' : error instanceof DOMException && error.name === 'TimeoutError' ? 'probe_timeout' : 'probe_transport_or_configuration_failed', checked_at: new Date(started).toISOString() };
 } }
 export async function executeChannelMonitor(env: Env, monitorId: number, signal?: AbortSignal) { const settings = await readChannelMonitorSettings(env); if (!settings.channel_monitor_enabled)
     throw new GatewayError(409, 'monitor_disabled', 'Channel monitoring is disabled'); const r = await row(env, monitorId), config = JSON.parse(r.config_json) as Config; if (!config.enabled)
     throw new GatewayError(409, 'monitor_disabled', 'Monitor is disabled'); const now = Date.now(), lease = crypto.randomUUID(); const claim = await env.DB.prepare('UPDATE channel_monitors SET lease_id=?,lease_expires_at_ms=? WHERE id=? AND lease_expires_at_ms<=?').bind(lease, now + 120000, monitorId, now).run(); if (!claim.meta.changes)
     throw new GatewayError(409, 'monitor_running', 'Monitor already running'); try {
-    const results: Array<Record<string, unknown>> = [];
     const proxyAccount = config.check_mode==='quota_probe' && config.account_id ? await env.DB.prepare('SELECT ui_config_json FROM accounts WHERE id=?').bind(config.account_id).first<{ui_config_json:string}>() : null;
     const proxyId = accountProxyId(proxyAccount?.ui_config_json);
     const quota = config.check_mode !== 'probe' ? await quotaCheck(env, config, now) : null;
     const models = config.check_mode === 'quota' ? [config.primary_model || 'quota'] : [...new Set([config.primary_model, ...config.extra_models])];
-    for (const model of models) {
+    // All requests share a concurrent 45s window, below the 120s lease.
+    // Preserve model order even when individual upstream requests finish out of order.
+    const settled = await Promise.allSettled(models.map(async (model): Promise<Record<string, unknown> | null> => {
         if (signal?.aborted)
-            break;
+            return null;
         const live = await env.DB.prepare('SELECT config_json,nonce_b64 FROM channel_monitors WHERE id=? AND lease_id=?').bind(monitorId, lease).first<{
             config_json: string;
             nonce_b64: string;
         }>();
         if (!live || live.config_json !== r.config_json || live.nonce_b64 !== r.nonce_b64 || !(await readChannelMonitorSettings(env)).channel_monitor_enabled)
-            break;
+            return null;
         const result: Record<string, unknown> = config.check_mode === 'quota' ? { model, status: quota!.success ? 'operational' : 'error', latency_ms: null, ping_latency_ms: null, message: quota!.success ? '' : quota!.error, checked_at: new Date(now).toISOString() } : await probe(env, r, config, model, signal, proxyId);
         if (quota && model === models[0])
             result.quota = quota;
-        results.push(result);
         await env.DB.prepare('INSERT INTO channel_monitor_history(monitor_id,model,status,latency_ms,ping_latency_ms,message,quota_json,checked_at_ms) SELECT ?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM channel_monitors WHERE id=? AND lease_id=?)').bind(monitorId, model, result.status, result.latency_ms, null, result.message ?? '', result.quota ? JSON.stringify(result.quota) : null, Date.parse(String(result.checked_at)), monitorId, lease).run();
+        return result;
+    }));
+    // A failed history write must not release the lease while sibling probes run.
+    const results: Record<string, unknown>[] = [];
+    for (const entry of settled) {
+        if (entry.status === 'rejected') throw entry.reason;
+        if (entry.value !== null) results.push(entry.value);
     }
     return { results };
 }
@@ -306,4 +312,4 @@ export const applyChannelMonitorTemplate = (c: C) => response(async () => { cons
 export const userChannelMonitors = (c: C) => response(async () => { await authenticateUserRequest(c.req.raw, c.env); const settings = await readChannelMonitorSettings(c.env); if (!settings.channel_monitor_enabled || settings.channel_monitor_mode !== 'v1')
     return { items: [] }; const rows = await c.env.DB.prepare("SELECT * FROM channel_monitors WHERE json_extract(config_json,'$.enabled')=1 ORDER BY id").all<Row>(); return { items: await Promise.all(rows.results.map(async (r) => { const monitor = await dto(c.env, r); const history = await c.env.DB.prepare('SELECT * FROM channel_monitor_history WHERE monitor_id=? AND model=? ORDER BY checked_at_ms DESC,id DESC LIMIT 60').bind(r.id, monitor.primary_model).all<History>(); return { id: r.id, name: monitor.name, provider: monitor.provider, group_name: monitor.group_name, primary_model: monitor.primary_model, primary_status: monitor.primary_status, primary_latency_ms: monitor.primary_latency_ms, primary_ping_latency_ms: null, availability_7d: monitor.availability_7d, extra_models: monitor.extra_models_status, timeline: history.results.map(h => ({ status: h.status, latency_ms: h.latency_ms, ping_latency_ms: h.ping_latency_ms, checked_at: new Date(h.checked_at_ms).toISOString() })), ...(settings.channel_monitor_show_quota ? { latest_quota: monitor.latest_quota } : {}) }; })) }; });
 export const userChannelMonitorStatus = (c: C) => response(async () => { await authenticateUserRequest(c.req.raw, c.env); const settings = await readChannelMonitorSettings(c.env), r = await row(c.env, id(c)), cfg = JSON.parse(r.config_json) as Config; if (!settings.channel_monitor_enabled || settings.channel_monitor_mode !== 'v1' || !cfg.enabled)
-    throw new GatewayError(404, 'monitor_not_found', 'Monitor not found'); const now = Date.now(), history = await c.env.DB.prepare('SELECT * FROM channel_monitor_history WHERE monitor_id=? AND checked_at_ms>=? ORDER BY checked_at_ms DESC,id DESC').bind(r.id, now - 30 * 86400000).all<History>(); return { id: r.id, name: cfg.name, provider: cfg.provider, group_name: cfg.group_name, models: [...new Set([cfg.primary_model, ...cfg.extra_models])].map(model => { const rows = history.results.filter(h => h.model === model); const availability = (days: number) => { const set = rows.filter(h => h.checked_at_ms >= now - days * 86400000); return set.length ? 100 * set.filter(h => h.status === 'operational').length / set.length : 0; }; const week = rows.filter(h => h.checked_at_ms >= now - 7 * 86400000 && h.latency_ms !== null); return { model, latest_status: rows[0]?.status ?? '', latest_latency_ms: rows[0]?.latency_ms ?? null, availability_7d: availability(7), availability_15d: availability(15), availability_30d: availability(30), avg_latency_7d_ms: week.length ? week.reduce((sum, h) => sum + h.latency_ms!, 0) / week.length : null }; }) }; });
+    throw new GatewayError(404, 'monitor_not_found', 'Monitor not found'); const now = Date.now(), history = await c.env.DB.prepare('SELECT * FROM channel_monitor_history WHERE monitor_id=? AND checked_at_ms>=? ORDER BY checked_at_ms DESC,id DESC').bind(r.id, now - 30 * 86400000).all<History>(); return { id: r.id, name: cfg.name, provider: cfg.provider, group_name: cfg.group_name, models: [...new Set([cfg.primary_model, ...cfg.extra_models])].map(model => { const rows = history.results.filter(h => h.model === model); const availability = (days: number) => { const set = rows.filter(h => h.checked_at_ms >= now - days * 86400000); return set.length ? 100 * set.filter(h => (h.status === 'operational' || h.status === 'degraded')).length / set.length : 0; }; const week = rows.filter(h => h.checked_at_ms >= now - 7 * 86400000 && h.latency_ms !== null); return { model, latest_status: rows[0]?.status ?? '', latest_latency_ms: rows[0]?.latency_ms ?? null, availability_7d: availability(7), availability_15d: availability(15), availability_30d: availability(30), avg_latency_7d_ms: week.length ? week.reduce((sum, h) => sum + h.latency_ms!, 0) / week.length : null }; }) }; });
