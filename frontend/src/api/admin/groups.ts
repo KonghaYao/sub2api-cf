@@ -862,9 +862,24 @@ export interface GroupModelCandidate {
 }
 
 export interface UpdateGroupModelConfig {
+  enabled?: boolean
+  catalog_visible?: boolean
   max_output_tokens: number
   default_max_output_tokens: number
 }
+
+export interface GroupModelPrice {
+  id: string
+  version: number
+  active: boolean
+  input_micros_per_million: number
+  output_micros_per_million: number
+  cache_read_micros_per_million: number
+  per_request_micros: number
+  minimum_reservation_micros: number
+}
+
+export type PublishGroupModelPriceInput = Omit<GroupModelPrice, 'id' | 'version' | 'active'>
 
 export async function listGroupModelCandidates(
   groupId: string | number,
@@ -930,6 +945,37 @@ export async function updateGroupModel(
   return adaptGroupModel(data)
 }
 
+export interface GroupModelDiagnosis {
+  routable: boolean
+  blockers: string[]
+  checks: null | {
+    group_enabled: number
+    model_enabled: number
+    group_model_enabled: number
+    active_price: number
+    group_accounts: number
+    capable_accounts: number
+  }
+}
+
+export async function diagnoseGroupModel(groupId: string | number, modelId: string): Promise<GroupModelDiagnosis> {
+  const { data } = await apiClient.get<GroupModelDiagnosis>(`/admin/groups/${groupId}/models/${modelId}/diagnosis`)
+  return data
+}
+
+export async function listGroupModelPrices(groupId: string | number, modelId: string): Promise<GroupModelPrice[]> {
+  const { data } = await apiClient.get<GroupModelPrice[]>(`/admin/groups/${groupId}/models/${modelId}/prices`)
+  return data || []
+}
+
+export async function publishGroupModelPrice(groupId: string | number, model: GroupModelConfig, input: PublishGroupModelPriceInput): Promise<GroupModelPrice> {
+  const { data } = await apiClient.post<GroupModelPrice>(`/admin/groups/${groupId}/models/${model.model_id}/prices`, {
+    ...input,
+    expected_control_version: model.control_version,
+  }, { headers: { 'Idempotency-Key': newControlOperationKey('admin-model-price') } })
+  return data
+}
+
 export const groupsAPI = {
   list,
   getAll,
@@ -962,7 +1008,10 @@ export const groupsAPI = {
   listGroupModels,
   listGroupModelCandidates,
   createGroupModel,
-  updateGroupModel
+  updateGroupModel,
+  diagnoseGroupModel,
+  listGroupModelPrices,
+  publishGroupModelPrice
 }
 
 export default groupsAPI

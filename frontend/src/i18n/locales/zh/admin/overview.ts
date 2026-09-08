@@ -782,6 +782,8 @@ export default {
       }
     },
 
+    models: { title: '模型目录', description: '管理网关全局模型定义与能力', create: '新增模型', loading: '加载中…', publicName: '公开名称', upstreamName: '上游名称', platform: '平台', endpoint: 'Endpoint', capabilities: '能力', status: '状态', actions: '操作', imageGeneration: '图像生成', enabled: '启用', disabled: '停用', edit: '编辑', disable: '停用', editTitle: '编辑模型', createTitle: '新增模型', cancel: '取消', save: '保存', saved: '模型已保存', loadFailed: '加载模型失败', saveFailed: '保存失败', disableFailed: '停用失败' },
+
     // Groups Management
     groups: {
       title: '分组管理',
@@ -809,7 +811,10 @@ export default {
         defaultExceedsMax: '默认最大输出 Token 数不能超过最大值',
         loadFailed: '加载分组模型失败',
         updateSuccess: '模型配置已更新',
-        updateFailed: '更新模型配置失败'
+        updateFailed: '更新模型配置失败',
+        enabled: '可路由', catalogVisible: '目录可见', pricing: '价格', priceHistory: '价格历史', active: '生效中', publishPrice: '发布新价格', pricePublished: '价格已发布', pricePublishFailed: '发布价格失败', refreshDiagnosis: '刷新诊断',
+        priceFields: { input_micros_per_million: '输入/百万 Token（微美元）', output_micros_per_million: '输出/百万 Token（微美元）', cache_read_micros_per_million: '缓存读取/百万 Token（微美元）', per_request_micros: '每请求（微美元）', minimum_reservation_micros: '最低预留（微美元）' },
+        diagnosis: { routable: '可路由', blocked: '已阻断', reasons: { group_model_missing: '未关联模型', group_disabled: '分组已停用', global_model_disabled: '全局模型已停用', group_model_disabled: '分组模型已停用', active_price_missing: '缺少生效价格', no_group_account: '分组无账号', no_healthy_capable_account: '无健康且能力匹配的可调度账号' } }
       },
       sortOrder: '排序',
       columnSettings: '列设置',

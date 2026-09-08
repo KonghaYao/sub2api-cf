@@ -5,6 +5,7 @@ export default {
       importedOAuthRequired: '请输入 Access Token；Antigravity 还需要项目 ID。',
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
+      modelCapabilities: { title: '模型能力', chat_completions: 'Chat Completions', responses: 'Responses', embeddings: 'Embeddings', image_generation: '图像生成', saved: '模型能力已保存', loadFailed: '加载模型能力失败', saveFailed: '保存模型能力失败' },
       createAccount: '添加账号',
       autoRefresh: '自动刷新',
       enableAutoRefresh: '启用自动刷新',

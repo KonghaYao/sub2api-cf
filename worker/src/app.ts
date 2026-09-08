@@ -162,6 +162,7 @@ import {
   deleteAdminGroup,
   deleteAdminGroupModel,
   deleteAdminModel,
+  diagnoseAdminGroupModel,
   getAdminGroup,
   getAdminModel,
   getAdminModelCandidates,
@@ -894,6 +895,7 @@ export function createApp() {
   app.get('/api/v1/admin/groups/:id/models', listAdminGroupModels)
   app.put('/api/v1/admin/groups/:id/models/:model_id', putAdminGroupModel)
   app.delete('/api/v1/admin/groups/:id/models/:model_id', deleteAdminGroupModel)
+  app.get('/api/v1/admin/groups/:id/models/:model_id/diagnosis', diagnoseAdminGroupModel)
   app.get('/api/v1/admin/groups/:id/models/:model_id/prices', listAdminModelPrices)
   app.post('/api/v1/admin/groups/:id/models/:model_id/prices', publishAdminModelPrice)
   app.get('/api/v1/admin/groups/:id', getAdminGroup)

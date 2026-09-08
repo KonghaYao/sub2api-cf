@@ -785,6 +785,8 @@ export default {
       }
     },
 
+    models: { title: 'Model Catalog', description: 'Manage global gateway model definitions and capabilities', create: 'Create model', loading: 'Loading…', publicName: 'Public name', upstreamName: 'Upstream name', platform: 'Platform', endpoint: 'Endpoint', capabilities: 'Capabilities', status: 'Status', actions: 'Actions', imageGeneration: 'Image generation', enabled: 'Enabled', disabled: 'Disabled', edit: 'Edit', disable: 'Disable', editTitle: 'Edit model', createTitle: 'Create model', cancel: 'Cancel', save: 'Save', saved: 'Model saved', loadFailed: 'Failed to load models', saveFailed: 'Failed to save model', disableFailed: 'Failed to disable model' },
+
     // Groups
     groups: {
       title: 'Group Management',
@@ -812,7 +814,10 @@ export default {
         defaultExceedsMax: 'Default maximum output tokens must not exceed the maximum',
         loadFailed: 'Failed to load group models',
         updateSuccess: 'Model configuration updated',
-        updateFailed: 'Failed to update model configuration'
+        updateFailed: 'Failed to update model configuration',
+        enabled: 'Routable', catalogVisible: 'Catalog visible', pricing: 'Pricing', priceHistory: 'Price history', active: 'Active', publishPrice: 'Publish new price', pricePublished: 'Price published', pricePublishFailed: 'Failed to publish price', refreshDiagnosis: 'Refresh diagnosis',
+        priceFields: { input_micros_per_million: 'Input / million tokens (micros)', output_micros_per_million: 'Output / million tokens (micros)', cache_read_micros_per_million: 'Cache read / million tokens (micros)', per_request_micros: 'Per request (micros)', minimum_reservation_micros: 'Minimum reservation (micros)' },
+        diagnosis: { routable: 'Routable', blocked: 'Blocked', reasons: { group_model_missing: 'Model is not linked', group_disabled: 'Group is disabled', global_model_disabled: 'Global model is disabled', group_model_disabled: 'Group model is disabled', active_price_missing: 'No active price', no_group_account: 'Group has no account', no_healthy_capable_account: 'No healthy schedulable account with matching capability' } }
       },
       sortOrder: 'Sort',
       columnSettings: 'Column Settings',
