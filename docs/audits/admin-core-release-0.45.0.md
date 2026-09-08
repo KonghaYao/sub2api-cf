@@ -223,4 +223,4 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 
 对照 account_stats_pricing.go calculateStatsCost 与 billing_service.go normalizeCacheCreationBreakdown，原生Anthropic JSON/SSE提取cache_creation的5m/1h计数，传入账号成本计算。流式明确的TTL零值可覆盖旧明细，缺失则保留，区别于aggregate delta正数更新。配置1h价格且存在明细时分开计算；1h价格缺失或全部明细为零时沿用总写入价格；显式零1h价格保留为免费。明细超过正数总量按比例缩减，BigInt整型计算避免JS边界溢出，5m就近取整且两桶和严格等于总量；部分明细不补造，零aggregate保持原版明细行为。
 
-新增账号成本5组回归先复现3组错价，再修复；26项成本/归一化专项通过。原生Worker/D1/DO同步和流式实测：普通8、输出2、写入5(5m2/1h3)、读取3，账号价格1/2/7/11/2下实际成本65micros写入projection，用户既有价格扣20micros一次且预留归零；原有Chat缓存链路仍通过，原生共3项。TTL原始明细此次在请求生命周期内用于账号成本，尚未扩展usage持久化列/历史展示；用户收费FrozenPricingPlan仍缺独立写入价格能力。不能把账号成本修复表述为全量TTL计费/展示完成。完整网关58文件889项及typecheck通过。部署结果待核验。
+新增账号成本5组回归先复现3组错价，再修复；26项成本/归一化专项通过。原生Worker/D1/DO同步和流式实测：普通8、输出2、写入5(5m2/1h3)、读取3，账号价格1/2/7/11/2下实际成本65micros写入projection，用户既有价格扣20micros一次且预留归零；原有Chat缓存链路仍通过，原生共3项。TTL原始明细此次在请求生命周期内用于账号成本，尚未扩展usage持久化列/历史展示；用户收费FrozenPricingPlan仍缺独立写入价格能力。不能把账号成本修复表述为全量TTL计费/展示完成。完整网关58文件889项及typecheck通过。代码 `e143ccc46` 已推送origin/main并部署0.45.24，Worker version `b8f16b71-49f4-4956-9456-45302c7b5b8a`，生产health确认status=ok/version=0.45.24。
