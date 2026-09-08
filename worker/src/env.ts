@@ -1,5 +1,7 @@
 export interface Env {
   APP_VERSION: string
+  CONTEXT_CACHE_DIAGNOSTICS_MODELS?: string
+  CONTEXT_CACHE_DIAGNOSTICS_UNTIL?: string
   /** Server calendar timezone for group usage statistics; defaults to Asia/Shanghai. */
   GROUP_USAGE_TIMEZONE?: string
   ENVIRONMENT: string

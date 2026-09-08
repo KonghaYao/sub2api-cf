@@ -1,3 +1,4 @@
+import { emitContextCacheFingerprint } from './context-cache-diagnostics'
 import { chatPromptCacheIdentity, openAIContentSessionSeed } from './chat-prompt-cache'
 import { inspectChatSilentRefusal } from './protocols/chat-silent-refusal'
 import { chatJsonStream } from './protocols/chat-json-stream'
@@ -1820,6 +1821,9 @@ async function acquireUpstream(
           if (beta) plan.headers.set('anthropic-beta', beta)
         }
         if (providerForwarding) await applyProviderIdentity(env, providerForwarding.settings, account, plan.headers, inboundHeaders)
+        if (responseOwner && accountId) await emitContextCacheFingerprint(env, { requestId, accountId, apiKeyId: responseOwner.api_key_id,
+          model: actualModel ?? '', operation: wireOperation, clientBody: originalBody, upstreamBody: plan.body,
+          clientHeaders: inboundHeaders, upstreamHeaders: plan.headers })
         return fetchWithHeaderTimeout(new URL(plan.url), {
         method: plan.method,
         headers: plan.headers,

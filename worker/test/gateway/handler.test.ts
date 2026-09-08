@@ -4851,6 +4851,38 @@ describe('OpenAI-compatible gateway', () => {
     expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
   })
 
+  it('preserves a long Chat context prefix, tool history and explicit cache controls across turns',async()=>{
+    const {env,database,pool}=await harness()
+    Object.assign(env,{CONTEXT_CACHE_DIAGNOSTICS_MODELS:'gpt-upstream',CONTEXT_CACHE_DIAGNOSTICS_UNTIL:'2999-01-01T00:00:00Z'})
+    const log=vi.spyOn(console,'info').mockImplementation(()=>undefined)
+    database.credential.ui_config_json=JSON.stringify({original_model_routing:true,extra:{openai_responses_mode:'force_chat_completions'}})
+    const sent:any[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(url:RequestInfo|URL,init?:RequestInit)=>{
+      expect(String(url)).toContain('/chat/completions')
+      sent.push(JSON.parse(String(init?.body)))
+      return Response.json({id:'prefix-test',object:'chat.completion',model:'gpt-upstream',choices:[{index:0,message:{role:'assistant',content:'OK'},finish_reason:'stop'}],usage:{prompt_tokens:100,completion_tokens:2,prompt_tokens_details:{cached_tokens:80}}})
+    }))
+    const prefix=[{role:'system',content:'Synthetic stable context. '.repeat(2000)},{role:'user',content:'Read the context.'},
+      {role:'assistant',content:null,tool_calls:[{id:'stable-tool-id',type:'function',function:{name:'read',arguments:'{"path":"fixture"}'}}]},
+      {role:'tool',tool_call_id:'stable-tool-id',content:'Synthetic tool result'}]
+    const tools=[{type:'function',function:{name:'read',parameters:{type:'object',properties:{path:{type:'string'}}}}}]
+    const histories=[prefix,[...prefix,{role:'assistant',content:'Prior answer'},{role:'user',content:'Continue using the same context.'}]]
+    for(const messages of histories){
+      const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages,tools,prompt_cache_key:'explicit-stable-key',prompt_cache_retention:'24h'})},env)
+      expect(response.status,await response.clone().text()).toBe(200);await response.text()
+    }
+    const fingerprints=log.mock.calls.filter(call=>typeof call[0]==='string'&&call[0].includes('context_cache_fingerprint_v1')).map(call=>JSON.parse(call[0]))
+    expect(fingerprints).toHaveLength(2)
+    for(const item of fingerprints)expect(item.client.context_hash).toBe(item.upstream.context_hash)
+    expect(fingerprints[1].upstream.message_hashes.slice(0,prefix.length)).toEqual(fingerprints[0].upstream.message_hashes)
+    log.mockRestore()
+    expect(sent).toHaveLength(2)
+    for(let i=0;i<2;i++)expect(sent[i]).toMatchObject({messages:histories[i],tools,prompt_cache_key:'explicit-stable-key',prompt_cache_retention:'24h'})
+    expect(JSON.stringify(sent[0].messages)).toBe(JSON.stringify(sent[1].messages.slice(0,prefix.length)))
+    const leases=pool.calls.filter(call=>call.path==='/reserve')
+    expect(leases[0].body.affinity_key).toBe(leases[1].body.affinity_key)
+  })
+
   it('keeps headerless Chat turns on a content-derived, tenant-scoped account affinity', async () => {
     const { env, pool } = await harness()
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ id:'chat-cache',object:'chat.completion',model:'gpt-upstream',choices:[{index:0,message:{role:'assistant',content:'OK'},finish_reason:'stop'}],usage:{prompt_tokens:6,completion_tokens:2} })))

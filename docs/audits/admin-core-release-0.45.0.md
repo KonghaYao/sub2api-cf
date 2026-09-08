@@ -224,3 +224,12 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 对照 account_stats_pricing.go calculateStatsCost 与 billing_service.go normalizeCacheCreationBreakdown，原生Anthropic JSON/SSE提取cache_creation的5m/1h计数，传入账号成本计算。流式明确的TTL零值可覆盖旧明细，缺失则保留，区别于aggregate delta正数更新。配置1h价格且存在明细时分开计算；1h价格缺失或全部明细为零时沿用总写入价格；显式零1h价格保留为免费。明细超过正数总量按比例缩减，BigInt整型计算避免JS边界溢出，5m就近取整且两桶和严格等于总量；部分明细不补造，零aggregate保持原版明细行为。
 
 新增账号成本5组回归先复现3组错价，再修复；26项成本/归一化专项通过。原生Worker/D1/DO同步和流式实测：普通8、输出2、写入5(5m2/1h3)、读取3，账号价格1/2/7/11/2下实际成本65micros写入projection，用户既有价格扣20micros一次且预留归零；原有Chat缓存链路仍通过，原生共3项。TTL原始明细此次在请求生命周期内用于账号成本，尚未扩展usage持久化列/历史展示；用户收费FrozenPricingPlan仍缺独立写入价格能力。不能把账号成本修复表述为全量TTL计费/展示完成。完整网关58文件889项及typecheck通过。代码 `e143ccc46` 已推送origin/main并部署0.45.24，Worker version `b8f16b71-49f4-4956-9456-45302c7b5b8a`，生产health确认status=ok/version=0.45.24。
+
+
+## 0.45.25：紧急上下文缓存诊断（独立发布）
+
+用户再次报告上下文缓存严重问题，因此暂停原TTL持久化发布，另建隔离分支，仅发布定位实际Chat缓存链路所需的指纹诊断，不包含0118迁移或TTL展示改动。生产已确认同账号同Key的Composer连续请求：45470/1、45929/1、48352/45928(input/cache)，缓存不稳定但没有成功请求正文证据，不能据此归咎于Worker或上游。
+
+在实际上游send前，对client originalBody与最终plan.body分别计算消息、完整context、tools及显式cache/session标识的HMAC-SHA256指纹。API Key身份加入HMAC域，日志不输出提示词、工具名、原始会话值或凭据；最多128条消息指纹并注明截断，记录request_id/account_id用于关联既有usage。仅production Composer两模型启用，强制截止2026-09-09T00:00:00Z后自动关闭。日志事件context_cache_fingerprint_v1，可用wrangler tail观察。此版本只采集可用于定位的证据，不生成缓存、不替换回答、不宣称上下文缓存根因已修复。
+
+893项全量网关、2项原生Worker测试及typecheck通过。新增真实handler长前缀/工具历史/cachekey/retention跨轮保持测试，诊断的client/upstream指纹一致；原生crypto处理长context不修改原对象且不泄露正文，ChatJSON→SSE缓存回归保留。原版rawChat明确不透传Codex session/conversation头、不自动注入prompt_cache_key，因此没有盲目向Composer注入这些字段。部署结果待确认。
