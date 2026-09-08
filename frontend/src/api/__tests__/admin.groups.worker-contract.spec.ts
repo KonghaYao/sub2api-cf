@@ -36,6 +36,35 @@ describe('admin groups Cloudflare Worker contract', () => {
     expect(put.mock.calls[0][1]).toMatchObject({ supported_model_scopes: [], model_routing: null })
   })
 
+  it.each(['openai', 'anthropic'] as const)('strips dispatch form fields while preserving nested config for %s create and update', async (platform) => {
+    const projection = { id: 'dispatch-group', name: 'Dispatch', control_version: 0 }
+    post.mockResolvedValue({ data: projection })
+    put.mockResolvedValue({ data: { ...projection, control_version: 1 } })
+    const { create, update } = await import('@/api/admin/groups')
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const config = {
+      opus_mapped_model: 'gpt-5.4',
+      sonnet_mapped_model: 'gpt-5.3-codex',
+      haiku_mapped_model: 'gpt-5.4-mini',
+      exact_model_mappings: { 'claude-opus-4-6': 'gpt-5.4' }
+    }
+    // GroupsView spreads these local form fields alongside the serialized config.
+    const form = {
+      name: 'Dispatch', platform,
+      ...config,
+      exact_model_mappings: [{ claude_model: 'claude-opus-4-6', target_model: 'gpt-5.4' }],
+      messages_dispatch_model_config: platform === 'openai' ? config : undefined
+    }
+    await create(form)
+    await update('dispatch-group', form)
+    for (const payload of [post.mock.calls[0][1], put.mock.calls[0][1]]) {
+      for (const field of Object.keys(config)) expect(payload).not.toHaveProperty(field)
+      expect(payload.messages_dispatch_model_config).toEqual(form.messages_dispatch_model_config)
+      expect(payload.name).toBe('Dispatch')
+    }
+  })
+
   it('omits empty legacy filters from the bounded Worker list request', async () => {
     get.mockResolvedValueOnce({
       data: { items: [], total: 0, page: 1, page_size: 20, pages: 0 }

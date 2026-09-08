@@ -179,10 +179,15 @@ function appendWorkerImagePolicy(
   }
 }
 
-// Preserve all original fields; only replace fields with explicit unit/name mappings.
+// Preserve API fields while replacing unit/name mappings and removing local form state.
 function groupPassthrough(group: CreateGroupRequest | UpdateGroupRequest): Record<string, unknown> {
   const payload: Record<string, unknown> = { ...group }
   for (const field of ["rate_multiplier", "subscription_type", "daily_limit_usd", "weekly_limit_usd", "monthly_limit_usd", "image_rate_multiplier", "batch_image_discount_multiplier", "batch_image_hold_multiplier", "image_price_1k", "image_price_2k", "image_price_4k", "status"]) delete payload[field]
+  // GroupsView serializes these into messages_dispatch_model_config. The
+  // top-level values are form state, including an array for exact mappings.
+  for (const field of ['opus_mapped_model', 'sonnet_mapped_model', 'haiku_mapped_model', 'exact_model_mappings']) {
+    delete payload[field]
+  }
   return payload
 }
 
