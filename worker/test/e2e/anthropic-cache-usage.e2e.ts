@@ -2,7 +2,7 @@ import { env, exports } from 'cloudflare:workers'
 import { expect, it } from 'vitest'
 let adminSession: string | undefined
 const post = (path: string, token: string, body: unknown, method='POST') => exports.default.fetch(new Request('https://worker.e2e.invalid'+path,{method,headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify(body)}))
-it.each([false,true])('keeps native Anthropic cache usage in client, ledger and dashboard (stream=%s)',async stream=>{
+it.each([[false,false],[true,false],[false,true],[true,true]])('keeps native Anthropic cache usage in client, ledger and dashboard (stream=%s, priced=%s)',async (stream,priced)=>{
   const model='anthropic-cache-'+crypto.randomUUID()
   const seed=await post('/api/v1/admin/bootstrap',env.ADMIN_TOKEN!,{
     user:{email:crypto.randomUUID()+'@cache.test',balance_micros:1000000},group:{name:crypto.randomUUID()},
@@ -30,6 +30,10 @@ it.each([false,true])('keeps native Anthropic cache usage in client, ledger and 
     env.DB.prepare("INSERT INTO channel_account_stats_model_pricing (id,rule_id,platform,billing_mode,input_micros_per_million,output_micros_per_million,cache_write_micros_per_million,cache_write_1h_micros_per_million,cache_read_micros_per_million,sort_order,created_at_ms,updated_at_ms) VALUES (?,?,'anthropic','token',1000000,2000000,7000000,11000000,2000000,0,1,1)").bind(price,rule),
     env.DB.prepare('INSERT INTO channel_account_stats_pricing_models (pricing_id,model_pattern,is_wildcard,sort_order,created_at_ms) VALUES (?,?,0,0,1)').bind(price,'anthropic-cache-alias-fixture'),
   ])
+  if (priced) await env.DB.batch([
+    env.DB.prepare("INSERT INTO channel_model_pricing (id,channel_id,platform,billing_mode,input_micros_per_million,output_micros_per_million,cache_write_micros_per_million,cache_write_1h_micros_per_million,cache_read_micros_per_million,created_at_ms,updated_at_ms) VALUES (?,?,'anthropic','token',1000000,2000000,7000000,11000000,1000000,1,1)").bind(price+'-customer',channel),
+    env.DB.prepare('INSERT INTO channel_pricing_models (pricing_id,model_pattern,is_wildcard,sort_order,created_at_ms) VALUES (?,?,0,0,1)').bind(price+'-customer',model),
+  ])
   const response=await post('/v1/messages',f.api_key,{model,messages:[{role:'user',content:'Hi'}],max_tokens:32,stream})
   expect(response.status,await response.clone().text()).toBe(200)
   const body=await response.text();expect(body).toContain('"cache_read_input_tokens":3');expect(body).toContain('Cache OK')
@@ -37,9 +41,9 @@ it.each([false,true])('keeps native Anthropic cache usage in client, ledger and 
   expect(await env.DB.prepare('SELECT account_stats_cost_micros,account_cost_micros FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({account_stats_cost_micros:65,account_cost_micros:65})
   expect(await env.DB.prepare('SELECT cache_write_5m_tokens,cache_write_1h_tokens FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({cache_write_5m_tokens:2,cache_write_1h_tokens:3})
   const state=await(await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
-  expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(20)
+  expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(priced ? 62 : 20)
   const detail=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage?page=1&user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
-  expect(detail.status).toBe(200);expect((await detail.json() as any).data.items[0]).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3})
+  expect(detail.status).toBe(200);expect((await detail.json() as any).data.items[0]).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3,cache_creation_cost:priced ? 47 / 1_000_000 : 0})
   const dashboard=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage/stats?user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
   expect(dashboard.status).toBe(200)
   expect((await dashboard.json() as any).data).toMatchObject({total_input_tokens:8,total_cache_creation_tokens:5,total_cache_read_tokens:3,total_tokens:18})

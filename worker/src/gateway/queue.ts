@@ -207,10 +207,10 @@ export async function consumeEvents(
              inbound_endpoint, upstream_endpoint, billing_mode, native_compaction_v2,
              dimensions_version, image_count, image_size, image_input_size,
              image_output_size, image_size_source, image_size_breakdown,
-             account_stats_rollup_version, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens
+             account_stats_rollup_version, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_write_amount_micros
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -259,6 +259,7 @@ export async function consumeEvents(
           payload.cache_write_tokens ?? 0,
           payload.cache_write_5m_tokens ?? 0,
           payload.cache_write_1h_tokens ?? 0,
+          payload.cache_write_amount_micros ?? 0,
         ),
         env.DB.prepare(
           `INSERT INTO inbox (consumer, event_id, processed_at_ms, result_digest)
@@ -618,7 +619,7 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
   ) {
     throw new Error('Invalid usage subscription reference')
   }
-  for (const field of ['cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens'] as const) {
+  for (const field of ['cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'cache_write_amount_micros'] as const) {
     const value = payload[field]
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new Error(`Invalid usage payload field ${field}`)
   }
@@ -685,6 +686,7 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
     payload.input_amount_micros! +
       payload.output_amount_micros! +
       payload.cache_amount_micros! +
+      (payload.cache_write_amount_micros ?? 0) +
       payload.base_amount_micros!
   ) {
     throw new Error('Usage amount does not match its cost components')

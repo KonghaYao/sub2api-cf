@@ -224,6 +224,7 @@ export interface TokenUsage {
 }
 
 export interface CostBreakdown {
+  cache_write_amount_micros?: number
   input_amount_micros: number
   output_amount_micros: number
   cache_amount_micros: number

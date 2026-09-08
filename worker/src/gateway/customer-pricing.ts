@@ -1,3 +1,4 @@
+import { normalizeCacheCreationBreakdown } from './cache-creation'
 import { GatewayError } from './errors'
 import type { CostBreakdown, TokenUsage } from './types'
 
@@ -15,9 +16,12 @@ export interface FrozenPricingInterval {
   input_micros_per_million: number | null
   output_micros_per_million: number | null
   cache_read_micros_per_million: number | null
+  cache_write_micros_per_million?: number | null
+  cache_write_1h_micros_per_million?: number | null
   input_multiplier_ppm: number | null
   output_multiplier_ppm: number | null
   cache_read_multiplier_ppm: number | null
+  cache_write_multiplier_ppm?: number | null
   per_request_micros: number | null
 }
 
@@ -49,6 +53,8 @@ export interface FrozenPricingPlan {
   input_micros_per_million: number | null
   output_micros_per_million: number | null
   cache_read_micros_per_million: number | null
+  cache_write_micros_per_million?: number | null
+  cache_write_1h_micros_per_million?: number | null
   per_request_micros: number | null
   fast_multiplier_ppm: number | null
   flex_multiplier_ppm: number | null
@@ -102,6 +108,7 @@ export interface CustomerTokenPricingSnapshot {
   customer_rate_multiplier_ppm: number
   selected_interval: FrozenPricingInterval | null
   effective_pricing: EffectiveCustomerPricing
+  cache_write_pricing?: CustomerCacheWritePricing
 }
 
 export type CustomerImageTier = '1K' | '2K' | '4K'
@@ -239,11 +246,13 @@ export function quoteCustomerCost(
   const timeMultiplier = timeMultiplierPpm(plan.time_pricing, selector.pricing_at_ms)
   const customerMultiplier = base.rate_multiplier_ppm
 
+  const writePricing = customerCacheWritePricing(plan, interval, base)
+  const cacheWriteTokens = writePricing === null ? 0 : Math.min(usage.cache_write_tokens ?? 0, usage.input_tokens - usage.cache_read_tokens)
   const basisMultipliers = [serviceMultiplier, timeMultiplier]
   const chargeMultipliers = [...basisMultipliers, customerMultiplier]
   const inputBasis = plan.billing_model === 'token'
     ? tokenCharge(
-        usage.input_tokens - usage.cache_read_tokens,
+        usage.input_tokens - usage.cache_read_tokens - cacheWriteTokens,
         componentPricing.input.rate,
         componentPricing.input.interval_multiplier_ppm,
         ...basisMultipliers,
@@ -271,7 +280,7 @@ export function quoteCustomerCost(
   // rounded basis amount. Every projected component is rounded up exactly once.
   const inputAmount = plan.billing_model === 'token'
     ? tokenCharge(
-        usage.input_tokens - usage.cache_read_tokens,
+        usage.input_tokens - usage.cache_read_tokens - cacheWriteTokens,
         componentPricing.input.rate,
         componentPricing.input.interval_multiplier_ppm,
         ...chargeMultipliers,
@@ -293,16 +302,19 @@ export function quoteCustomerCost(
         ...chargeMultipliers,
       )
     : 0
+  const cacheWriteBasis = writePricing === null ? 0 : cacheWriteCharge(cacheWriteTokens, usage, writePricing, basisMultipliers)
+  const cacheWriteAmount = writePricing === null ? 0 : cacheWriteCharge(cacheWriteTokens, usage, writePricing, chargeMultipliers)
   const baseAmount = fixedCharge(pricing.per_request_micros, ...chargeMultipliers)
   const amount = checkedNumber(
-    BigInt(inputAmount) + BigInt(outputAmount) + BigInt(cacheAmount) + BigInt(baseAmount),
+    BigInt(inputAmount) + BigInt(outputAmount) + BigInt(cacheAmount) + BigInt(cacheWriteAmount) + BigInt(baseAmount),
   )
   const basisAmount = checkedNumber(
-    BigInt(inputBasis) + BigInt(outputBasis) + BigInt(cacheBasis) + BigInt(baseBasis),
+    BigInt(inputBasis) + BigInt(outputBasis) + BigInt(cacheBasis) + BigInt(cacheWriteBasis) + BigInt(baseBasis),
   )
 
   return {
     cost: {
+      ...(writePricing === null ? {} : { cache_write_amount_micros: cacheWriteAmount }),
       input_amount_micros: inputAmount,
       output_amount_micros: outputAmount,
       cache_amount_micros: cacheAmount,
@@ -326,6 +338,7 @@ export function quoteCustomerCost(
       customer_rate_multiplier_ppm: customerMultiplier,
       selected_interval: interval === null ? null : { ...interval },
       effective_pricing: pricing,
+      ...(writePricing === null ? {} : { cache_write_pricing: writePricing }),
     },
   }
 }
@@ -358,6 +371,36 @@ export function serializeCustomerPricingSnapshot(snapshot: CustomerPricingSnapsh
   const value = JSON.stringify(snapshot)
   if (new TextEncoder().encode(value).byteLength > SNAPSHOT_MAX_BYTES) invalidPricing()
   return value
+}
+
+interface CustomerCacheWritePricing {
+  standard: EffectiveComponentPrice
+  hour: EffectiveComponentPrice | null
+}
+
+function customerCacheWritePricing(plan: FrozenPricingPlan, interval: FrozenPricingInterval | null, base: CustomerBasePricing): CustomerCacheWritePricing | null {
+  const rates = [interval?.cache_write_micros_per_million, interval?.cache_write_1h_micros_per_million,
+    interval?.cache_write_multiplier_ppm, plan.cache_write_micros_per_million, plan.cache_write_1h_micros_per_million]
+  if (!rates.some(value => value !== undefined && value !== null) || plan.billing_model !== 'token') return null
+  return {
+    standard: componentPrice(interval?.cache_write_micros_per_million, interval?.cache_write_multiplier_ppm,
+      plan.cache_write_micros_per_million ?? null, base.input_micros_per_million),
+    hour: interval?.cache_write_1h_micros_per_million == null && plan.cache_write_1h_micros_per_million == null ? null
+      : componentPrice(interval?.cache_write_1h_micros_per_million, interval?.cache_write_multiplier_ppm,
+        plan.cache_write_1h_micros_per_million ?? null, base.input_micros_per_million),
+  }
+}
+
+function cacheWriteCharge(tokens: number, usage: TokenUsage, pricing: CustomerCacheWritePricing, multipliers: number[]): number {
+  const [five, hour] = normalizeCacheCreationBreakdown(tokens, usage.cache_write_5m_tokens, usage.cache_write_1h_tokens)
+  if (pricing.hour !== null && (five > 0 || hour > 0)) {
+    let numerator = BigInt(five) * BigInt(pricing.standard.rate) * BigInt(pricing.standard.interval_multiplier_ppm) +
+      BigInt(hour) * BigInt(pricing.hour.rate) * BigInt(pricing.hour.interval_multiplier_ppm)
+    let denominator = PPM * PPM
+    for (const multiplier of multipliers) { numerator *= BigInt(multiplier); denominator *= PPM }
+    return checkedNumber(divideRoundUp(numerator, denominator))
+  }
+  return tokenCharge(tokens, pricing.standard.rate, pricing.standard.interval_multiplier_ppm, ...multipliers)
 }
 
 function effectivePricing(
@@ -563,6 +606,7 @@ function assertPlan(plan: FrozenPricingPlan): void {
     plan.input_micros_per_million, plan.output_micros_per_million,
     plan.cache_read_micros_per_million, plan.per_request_micros,
     plan.fast_multiplier_ppm, plan.flex_multiplier_ppm,
+    plan.cache_write_micros_per_million ?? null, plan.cache_write_1h_micros_per_million ?? null,
   ]) assertNullableNonnegative(value)
   for (const interval of plan.intervals) {
     if (!nonempty(interval.id) || typeof interval.tier_label !== 'string') invalidPricing()
@@ -574,6 +618,7 @@ function assertPlan(plan: FrozenPricingPlan): void {
       interval.cache_read_micros_per_million, interval.input_multiplier_ppm,
       interval.output_multiplier_ppm, interval.cache_read_multiplier_ppm,
       interval.per_request_micros,
+      interval.cache_write_micros_per_million ?? null, interval.cache_write_1h_micros_per_million ?? null, interval.cache_write_multiplier_ppm ?? null,
     ]) assertNullableNonnegative(value)
   }
   if (plan.time_pricing !== null) {
@@ -601,6 +646,7 @@ function assertUsage(usage: TokenUsage): void {
     assertSafeNonnegative(value)
   }
   if (usage.cache_read_tokens > usage.input_tokens) invalidPricing()
+  for (const value of [usage.cache_write_tokens, usage.cache_write_5m_tokens, usage.cache_write_1h_tokens]) if (value !== undefined) assertSafeNonnegative(value)
 }
 
 function assertNullableNonnegative(value: number | null): void {

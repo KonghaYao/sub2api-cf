@@ -660,6 +660,8 @@ interface PricingProjectionRow {
   pricing_model_pattern: string | null
   pricing_input_micros_per_million: number | null
   pricing_output_micros_per_million: number | null
+  pricing_cache_write_micros_per_million: number | null
+  pricing_cache_write_1h_micros_per_million: number | null
   pricing_cache_read_micros_per_million: number | null
   pricing_per_request_micros: number | null
   pricing_fast_multiplier_ppm: number | null
@@ -681,6 +683,7 @@ function externalAliasRouteModel(row: ExternalAliasModelRow): ModelRoute {
     'pricing_billing_mode', 'pricing_model_pattern',
     'pricing_input_micros_per_million', 'pricing_output_micros_per_million',
     'pricing_cache_read_micros_per_million', 'pricing_per_request_micros',
+    'pricing_cache_write_micros_per_million', 'pricing_cache_write_1h_micros_per_million',
     'pricing_fast_multiplier_ppm', 'pricing_flex_multiplier_ppm',
     'pricing_time_pricing_json', 'pricing_intervals_json',
   ]) delete copy[key]
@@ -720,6 +723,8 @@ function frozenPricingPlan(
     row.pricing_input_micros_per_million,
     row.pricing_output_micros_per_million,
     row.pricing_cache_read_micros_per_million,
+    row.pricing_cache_write_micros_per_million ?? null,
+    row.pricing_cache_write_1h_micros_per_million ?? null,
     row.pricing_per_request_micros,
     row.pricing_fast_multiplier_ppm,
     row.pricing_flex_multiplier_ppm,
@@ -739,6 +744,7 @@ function frozenPricingPlan(
     input_micros_per_million: row.pricing_input_micros_per_million,
     output_micros_per_million: row.pricing_output_micros_per_million,
     cache_read_micros_per_million: row.pricing_cache_read_micros_per_million,
+    ...cacheWritePricingFields(row, 'pricing_'),
     per_request_micros: row.pricing_per_request_micros,
     fast_multiplier_ppm: row.pricing_fast_multiplier_ppm,
     flex_multiplier_ppm: row.pricing_flex_multiplier_ppm,
@@ -773,6 +779,8 @@ export async function resolveResponseModelPricing(
               pricing.input_micros_per_million AS pricing_input_micros_per_million,
               pricing.output_micros_per_million AS pricing_output_micros_per_million,
               pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.cache_write_micros_per_million AS pricing_cache_write_micros_per_million,
+              pricing.cache_write_1h_micros_per_million AS pricing_cache_write_1h_micros_per_million,
               pricing.per_request_micros AS pricing_per_request_micros,
               pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
@@ -808,6 +816,8 @@ export async function resolveResponseModelPricing(
             pricing.pricing_input_micros_per_million,
             pricing.pricing_output_micros_per_million,
             pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_cache_write_micros_per_million,
+            pricing.pricing_cache_write_1h_micros_per_million,
             pricing.pricing_per_request_micros,
             pricing.pricing_fast_multiplier_ppm,
             pricing.pricing_flex_multiplier_ppm,
@@ -820,6 +830,9 @@ export async function resolveResponseModelPricing(
                 'input_micros_per_million', interval.input_micros_per_million,
                 'output_micros_per_million', interval.output_micros_per_million,
                 'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'cache_write_micros_per_million', interval.cache_write_micros_per_million,
+                'cache_write_1h_micros_per_million', interval.cache_write_1h_micros_per_million,
+                'cache_write_multiplier_ppm', interval.cache_write_multiplier_ppm,
                 'input_multiplier_ppm', interval.input_multiplier_ppm,
                 'output_multiplier_ppm', interval.output_multiplier_ppm,
                 'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,
@@ -887,11 +900,28 @@ function parseFrozenPricingInterval(value: unknown): FrozenPricingInterval {
     input_micros_per_million: row.input_micros_per_million as number | null,
     output_micros_per_million: row.output_micros_per_million as number | null,
     cache_read_micros_per_million: row.cache_read_micros_per_million as number | null,
+    ...cacheWritePricingFields(row),
     input_multiplier_ppm: row.input_multiplier_ppm as number | null,
     output_multiplier_ppm: row.output_multiplier_ppm as number | null,
     cache_read_multiplier_ppm: row.cache_read_multiplier_ppm as number | null,
     per_request_micros: row.per_request_micros as number | null,
   }
+}
+
+function cacheWritePricingFields(value: object, prefix = ''): {
+  cache_write_micros_per_million?: number
+  cache_write_1h_micros_per_million?: number
+  cache_write_multiplier_ppm?: number
+} {
+  const row = value as Record<string, unknown>
+  const result: Record<string, number> = {}
+  for (const name of ['cache_write_micros_per_million', 'cache_write_1h_micros_per_million', 'cache_write_multiplier_ppm']) {
+    const field = row[prefix + name]
+    if (field === undefined || field === null) continue
+    if (!safePricingInteger(field)) return invalidChannelPricing('Channel cache write pricing is invalid')
+    result[name] = field as number
+  }
+  return result
 }
 
 function parseFrozenTimePricing(value: string | null): FrozenTimePricing | null {
@@ -977,7 +1007,7 @@ function normalizedOpenAICodexPricingBaseSql(expression: string): string {
       OR ${value} LIKE '%gpt-5.6-low' OR ${value} LIKE '%gpt-5.6-medium'
       OR ${value} LIKE '%gpt-5.6-high' OR ${value} LIKE '%gpt-5.6-xhigh'
       OR ${value} LIKE '%gpt-5.6-max'
-      OR ${value} GLOB '*gpt-5.6-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      OR substr(${value}, -18) GLOB 'gpt-5.6-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
       THEN 'gpt-5.6-sol'
     WHEN ${value} LIKE '%gpt-5.5-pro%' THEN 'gpt-5.5-pro'
     WHEN ${value} LIKE '%gpt-5.5%' THEN 'gpt-5.5'
@@ -1198,6 +1228,8 @@ function externalAliasModelStatement(
               pricing.input_micros_per_million AS pricing_input_micros_per_million,
               pricing.output_micros_per_million AS pricing_output_micros_per_million,
               pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.cache_write_micros_per_million AS pricing_cache_write_micros_per_million,
+              pricing.cache_write_1h_micros_per_million AS pricing_cache_write_1h_micros_per_million,
               pricing.per_request_micros AS pricing_per_request_micros,
               pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
@@ -1247,6 +1279,8 @@ function externalAliasModelStatement(
             pricing.pricing_input_micros_per_million,
             pricing.pricing_output_micros_per_million,
             pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_cache_write_micros_per_million,
+            pricing.pricing_cache_write_1h_micros_per_million,
             pricing.pricing_per_request_micros,
             pricing.pricing_fast_multiplier_ppm,
             pricing.pricing_flex_multiplier_ppm,
@@ -1260,6 +1294,9 @@ function externalAliasModelStatement(
                 'input_micros_per_million', interval.input_micros_per_million,
                 'output_micros_per_million', interval.output_micros_per_million,
                 'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'cache_write_micros_per_million', interval.cache_write_micros_per_million,
+                'cache_write_1h_micros_per_million', interval.cache_write_1h_micros_per_million,
+                'cache_write_multiplier_ppm', interval.cache_write_multiplier_ppm,
                 'input_multiplier_ppm', interval.input_multiplier_ppm,
                 'output_multiplier_ppm', interval.output_multiplier_ppm,
                 'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,
@@ -1559,6 +1596,8 @@ function channelModelPolicyStatement(
               pricing.input_micros_per_million AS pricing_input_micros_per_million,
               pricing.output_micros_per_million AS pricing_output_micros_per_million,
               pricing.cache_read_micros_per_million AS pricing_cache_read_micros_per_million,
+              pricing.cache_write_micros_per_million AS pricing_cache_write_micros_per_million,
+              pricing.cache_write_1h_micros_per_million AS pricing_cache_write_1h_micros_per_million,
               pricing.per_request_micros AS pricing_per_request_micros,
               pricing.fast_multiplier_ppm AS pricing_fast_multiplier_ppm,
               pricing.flex_multiplier_ppm AS pricing_flex_multiplier_ppm,
@@ -1593,6 +1632,8 @@ function channelModelPolicyStatement(
             pricing.pricing_input_micros_per_million,
             pricing.pricing_output_micros_per_million,
             pricing.pricing_cache_read_micros_per_million,
+            pricing.pricing_cache_write_micros_per_million,
+            pricing.pricing_cache_write_1h_micros_per_million,
             pricing.pricing_per_request_micros,
             pricing.pricing_fast_multiplier_ppm,
             pricing.pricing_flex_multiplier_ppm,
@@ -1606,6 +1647,9 @@ function channelModelPolicyStatement(
                 'input_micros_per_million', interval.input_micros_per_million,
                 'output_micros_per_million', interval.output_micros_per_million,
                 'cache_read_micros_per_million', interval.cache_read_micros_per_million,
+                'cache_write_micros_per_million', interval.cache_write_micros_per_million,
+                'cache_write_1h_micros_per_million', interval.cache_write_1h_micros_per_million,
+                'cache_write_multiplier_ppm', interval.cache_write_multiplier_ppm,
                 'input_multiplier_ppm', interval.input_multiplier_ppm,
                 'output_multiplier_ppm', interval.output_multiplier_ppm,
                 'cache_read_multiplier_ppm', interval.cache_read_multiplier_ppm,

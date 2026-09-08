@@ -94,12 +94,26 @@ function env(database: QueueDatabase): Env {
 }
 
 describe('usage queue projection', () => {
+  it('includes cache creation money in projection and rejects an inconsistent total', async () => {
+    const database = new QueueDatabase()
+    const valid = message(createUsageEvent({ ...payload, cache_write_amount_micros: 7, amount_micros: 47 }, 1000))
+    const invalid = message(createUsageEvent({ ...payload, cache_write_amount_micros: 7 }, 1000))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await consumeEvents({ queue: 'events', messages: [valid, invalid] } as unknown as MessageBatch<unknown>, env(database))
+      expect(valid.ack).toHaveBeenCalledOnce()
+      expect(invalid.retry).toHaveBeenCalledOnce()
+      expect(database.batches).toHaveLength(1)
+      expect(database.batches[0][0].values.at(-1)).toBe(7)
+    } finally { error.mockRestore() }
+  })
+
   it('persists TTL evidence and rejects changed TTL under the same event ID',async()=>{
     const original=createUsageEvent({...payload,cache_write_tokens:3,cache_write_5m_tokens:1,cache_write_1h_tokens:2},1000)
     const database=new QueueDatabase(), first=message(original)
     await consumeEvents({queue:'events',messages:[first]} as unknown as MessageBatch<unknown>,env(database))
     expect(first.ack).toHaveBeenCalledOnce()
-    expect(database.batches[0][0].values.slice(-3)).toEqual([3,1,2])
+    expect(database.batches[0][0].values.slice(-4, -1)).toEqual([3,1,2])
     expect(database.batches[0][3].values.slice(-3)).toEqual([3,1,2])
     const replayDatabase=new QueueDatabase({result_digest:database.batches[0][1].values[3] as string})
     const same=message(original),changed=message(createUsageEvent({...payload,cache_write_tokens:3,cache_write_5m_tokens:2,cache_write_1h_tokens:1},1000))
@@ -114,7 +128,7 @@ describe('usage queue projection', () => {
     const database = new QueueDatabase(), item = message(event)
     await consumeEvents({ queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>, env(database))
     expect(item.ack).toHaveBeenCalledOnce()
-    expect(database.batches[0][0].values.at(-3)).toBe(3)
+    expect(database.batches[0][0].values.at(-4)).toBe(3)
     expect(database.batches[0][3].values.at(-3)).toBe(3)
     const replayDatabase = new QueueDatabase({ result_digest: database.batches[0][1].values[3] as string })
     const same = message(event), changed = message(createUsageEvent({ ...payload, cache_write_tokens: 4 }, 1_000))
@@ -142,7 +156,7 @@ describe('usage queue projection', () => {
     expect(database.batches[0][0].query).toContain('standard_cost_micros')
     expect(database.batches[0][0].query).toContain('inbound_endpoint')
     expect(database.batches[0][0].values.slice(9, 13)).toEqual([50, 32, 1_250_000, 40])
-    expect(database.batches[0][0].values.slice(-17, -9)).toEqual([
+    expect(database.batches[0][0].values.slice(-18, -10)).toEqual([
       'openai', 'group-1', 1, '/v1/chat/completions', '/v1/responses', 'token', 0, 1,
     ])
     expect(database.batches[0][1].query).toContain('INSERT INTO inbox')
@@ -171,7 +185,7 @@ describe('usage queue projection', () => {
 
     const projection = database.batches[0][0]
     expect(projection.query).toContain('image_size_breakdown')
-    expect(projection.values.slice(-9, -3)).toEqual([
+    expect(projection.values.slice(-10, -4)).toEqual([
       2, '4K', '2048x2048', '3840x2160', 'output', '{"1K":1,"4K":1}',
     ])
   })
@@ -303,7 +317,7 @@ describe('usage queue projection', () => {
     expect(item.ack).toHaveBeenCalledOnce()
     expect(item.retry).not.toHaveBeenCalled()
     expect(database.batches[0][0].values.slice(9, 13)).toEqual([40, null, 1_000_000, 40])
-    expect(database.batches[0][0].values.slice(-19, -9)).toEqual([
+    expect(database.batches[0][0].values.slice(-20, -10)).toEqual([
       'balance', null, '', 'group-1', 1, '', '', 'token', 0, 1,
     ])
     const wireDigest = database.batches[0][1].values[3]

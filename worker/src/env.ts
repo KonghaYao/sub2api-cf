@@ -80,6 +80,7 @@ export interface UsageSettledPayload {
   input_amount_micros: number
   output_amount_micros: number
   cache_amount_micros: number
+  cache_write_amount_micros?: number
   base_amount_micros: number
   amount_micros: number
   /** Added in v0.31; absent only on older queued events. */

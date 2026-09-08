@@ -1,6 +1,6 @@
 {
   "name": "sub2api-worker",
-  "version": "0.45.27",
+  "version": "0.45.28",
   "private": true,
   "type": "module",
   "scripts": {

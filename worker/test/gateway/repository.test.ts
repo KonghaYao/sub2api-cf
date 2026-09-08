@@ -1337,6 +1337,13 @@ describe('gateway repository channel model policy', () => {
       );
     `)
 
+    raw.exec(`
+      UPDATE channel_model_pricing SET cache_write_micros_per_million=0,
+        cache_write_1h_micros_per_million=60 WHERE id='customer-price';
+      UPDATE channel_pricing_intervals SET cache_write_micros_per_million=40,
+        cache_write_1h_micros_per_million=0, cache_write_multiplier_ppm=1500000
+        WHERE id='customer-interval';
+    `)
     const route = await resolveGatewayRoute(
       { DB: d1 } as Env, 'group-openai', 'openai-public', 'responses', 'user-1',
     )
@@ -1352,6 +1359,8 @@ describe('gateway repository channel model policy', () => {
       input_micros_per_million: 0,
       output_micros_per_million: null,
       cache_read_micros_per_million: 30,
+      cache_write_micros_per_million: 0,
+      cache_write_1h_micros_per_million: 60,
       per_request_micros: null,
       fast_multiplier_ppm: null,
       flex_multiplier_ppm: 0,
@@ -1361,6 +1370,9 @@ describe('gateway repository channel model policy', () => {
         cache_read_micros_per_million: null, input_multiplier_ppm: 1000000,
         output_multiplier_ppm: null, cache_read_multiplier_ppm: 0,
         per_request_micros: null,
+        cache_write_micros_per_million: 40,
+        cache_write_1h_micros_per_million: 0,
+        cache_write_multiplier_ppm: 1500000,
       }],
       time_pricing: { timezone: 'Asia/Shanghai', weekdays_only: false, periods: [] },
     })

@@ -1,3 +1,4 @@
+// @ts-expect-error Node typings are intentionally excluded from the Worker tsconfig.
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { diagnoseAdminGroupModel } from '../../src/control/catalog'

@@ -51,6 +51,32 @@ const plan: FrozenPricingPlan = {
 }
 
 describe('customer pricing', () => {
+  it('bills configured cache creation once, separately from normal input and reads', () => {
+    const prices = { ...plan, intervals: [], time_pricing: null, per_request_micros: 0,
+      cache_write_micros_per_million: 7_000_000, cache_write_1h_micros_per_million: 11_000_000 }
+    const quote = quoteCustomerCost(prices, { ...base, rate_multiplier_ppm: 1_000_000 }, {
+      input_tokens: 100, output_tokens: 0, cache_read_tokens: 20, cache_write_tokens: 30,
+      cache_write_5m_tokens: 10, cache_write_1h_tokens: 20, estimated: false,
+    }, { pricing_at_ms: 0 })
+    expect(quote.cost).toEqual({ input_amount_micros: 100, output_amount_micros: 0,
+      cache_amount_micros: 20, cache_write_amount_micros: 290, base_amount_micros: 0, amount_micros: 410 })
+    expect(quote.basis_amount_micros).toBe(410)
+    expect(quote.snapshot.cache_write_pricing).toMatchObject({ standard: { rate: 7_000_000 }, hour: { rate: 11_000_000 } })
+    const free = quoteCustomerCost({ ...prices, cache_write_micros_per_million: 0, cache_write_1h_micros_per_million: 0 },
+      base, { input_tokens: 30, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 30, estimated: false }, { pricing_at_ms: 0 })
+    expect(free.cost.cache_write_amount_micros).toBe(0)
+    expect(free.cost.input_amount_micros).toBe(0)
+  })
+
+  it('rounds the combined cache creation component only once', () => {
+    const quote = quoteCustomerCost({ ...plan, intervals: [], time_pricing: null, per_request_micros: 0,
+      cache_write_micros_per_million: 1, cache_write_1h_micros_per_million: 1 },
+      { ...base, rate_multiplier_ppm: 1_000_000 }, { input_tokens: 2, output_tokens: 0, cache_read_tokens: 0,
+        cache_write_tokens: 2, cache_write_5m_tokens: 1, cache_write_1h_tokens: 1, estimated: false }, { pricing_at_ms: 0 })
+    expect(quote.cost.amount_micros).toBe(1)
+    expect(quote.cost.cache_write_amount_micros).toBe(1)
+  })
+
   it('quotes frozen image tiers with exact integer customer and basis amounts', () => {
     const imagePlan: FrozenPricingPlan = {
       ...plan,
