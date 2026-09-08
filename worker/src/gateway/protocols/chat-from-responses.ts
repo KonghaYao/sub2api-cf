@@ -77,6 +77,7 @@ export interface ChatCompletionResponse extends JsonObject {
       role: 'assistant'
       content?: string
       reasoning_content?: string
+      refusal?: string
       tool_calls?: Array<{
         id: string
         type: 'function'
@@ -100,6 +101,7 @@ export interface ChatCompletionChunk extends JsonObject {
       role?: 'assistant'
       content?: string
       reasoning_content?: string
+      refusal?: string
       tool_calls?: Array<{
         index: number
         id?: string
@@ -110,6 +112,27 @@ export interface ChatCompletionChunk extends JsonObject {
     finish_reason: 'stop' | 'length' | 'tool_calls' | 'content_filter' | null
   }>
   usage?: ChatUsage
+}
+
+class RefusalParts {
+  private readonly parts = new Map<string, string>()
+  append(event: JsonObject): string {
+    const delta = typeof event.delta === 'string' ? event.delta : ''
+    const key = this.key(event.output_index, event.content_index)
+    this.parts.set(key, (this.parts.get(key) ?? '') + delta)
+    return delta
+  }
+  complete(outputIndex: unknown, contentIndex: unknown, value: unknown): string {
+    if (typeof value !== 'string') return ''
+    const key = this.key(outputIndex, contentIndex), prefix = this.parts.get(key) ?? ''
+    if (!value.startsWith(prefix)) throw new ResponsesToChatError('Upstream refusal differs from its streamed prefix')
+    this.parts.set(key, value)
+    return value.slice(prefix.length)
+  }
+  text(): string { return [...this.parts.values()].join('') }
+  private key(outputIndex: unknown, contentIndex: unknown): string {
+    return `${outputIndex ?? 0}:${contentIndex ?? 0}`
+  }
 }
 
 interface StreamTool {
@@ -133,6 +156,7 @@ export function responsesToChatCompletionsResponse(
   const output = optionalArray(root.output, 'response.output')
   let content = ''
   let reasoning = ''
+  let refusal = ''
   const toolCalls: Array<{
     id: string
     type: 'function'
@@ -146,6 +170,7 @@ export function responsesToChatCompletionsResponse(
       for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
         const part = objectAt(parts[partIndex], `response.output[${index}].content[${partIndex}]`)
         if (part.type === 'output_text' && typeof part.text === 'string') content += part.text
+        if (part.type === 'refusal' && typeof part.refusal === 'string') refusal += part.refusal
       }
       continue
     }
@@ -176,6 +201,7 @@ export function responsesToChatCompletionsResponse(
   const message: ChatCompletionResponse['choices'][number]['message'] = { role: 'assistant' }
   if (content !== '') message.content = content
   if (reasoning !== '') message.reasoning_content = reasoning
+  if (refusal !== '') message.refusal = refusal
   if (toolCalls.length > 0) message.tool_calls = toolCalls
   const serviceTier = optionalString(root.service_tier)
   const usage = chatUsage(root.usage)
@@ -206,6 +232,7 @@ export class ResponsesToChatCompletionsEventCodec {
   private sentRole = false
   private sentText = false
   private sentReasoning = false
+  private readonly refusals = new RefusalParts()
   private sawToolCall = false
   private finalized = false
   private nextToolIndex = 0
@@ -228,6 +255,15 @@ export class ResponsesToChatCompletionsEventCodec {
     if (type === 'response.created') {
       this.observeResponse(event.response)
       return this.ensureRole()
+    }
+    if (type === 'response.refusal.delta' || type === 'response.refusal.done') {
+      const refusal = type.endsWith('.delta') ? this.refusals.append(event)
+        : this.refusals.complete(event.output_index, event.content_index, event.refusal)
+      return refusal ? [...this.ensureRole(), this.delta({ refusal })] : []
+    }
+    if (type === 'response.content_part.done' && objectValue(event.part)?.type === 'refusal') {
+      const refusal = this.refusals.complete(event.output_index, event.content_index, objectValue(event.part)?.refusal)
+      return refusal ? [...this.ensureRole(), this.delta({ refusal })] : []
     }
     if (type === 'response.output_text.delta') {
       const delta = optionalString(event.delta)
@@ -285,7 +321,8 @@ export class ResponsesToChatCompletionsEventCodec {
       })]
     }
     if (type === 'response.output_item.done') {
-      return this.completeTool(event.item, nonNegativeInteger(event.output_index, 'event.output_index'))
+      return [...this.completeRefusalItem(event.item, event.output_index),
+        ...this.completeTool(event.item, nonNegativeInteger(event.output_index, 'event.output_index'))]
     }
     if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
       // Some compatible providers omit output_index on argument completion.
@@ -319,6 +356,19 @@ export class ResponsesToChatCompletionsEventCodec {
     this.finalized = true
     const chunks = [...this.ensureRole(), this.finishChunk(this.sawToolCall ? 'tool_calls' : 'stop')]
     if (this.includeUsage && this.usageValue !== undefined) chunks.push(this.usageChunk(this.usageValue))
+    return chunks
+  }
+
+  private completeRefusalItem(value: unknown, outputIndex: unknown): ChatCompletionChunk[] {
+    const item = objectValue(value)
+    if (item?.type !== 'message' || !Array.isArray(item.content)) return []
+    const chunks: ChatCompletionChunk[] = []
+    item.content.forEach((value, index) => {
+      const part = objectValue(value)
+      if (part?.type !== 'refusal') return
+      const refusal = this.refusals.complete(outputIndex, index, part.refusal)
+      if (refusal) chunks.push(...this.ensureRole(), this.delta({ refusal }))
+    })
     return chunks
   }
 
@@ -359,7 +409,8 @@ export class ResponsesToChatCompletionsEventCodec {
       if (!this.sentText && message.content) chunks.push(this.delta({ content: message.content }))
       if (!this.sentReasoning && message.reasoning_content) chunks.push(this.delta({ reasoning_content: message.reasoning_content }))
       for (let outputIndex = 0; outputIndex < response.output.length; outputIndex++) {
-        chunks.push(...this.completeTool(response.output[outputIndex], outputIndex))
+        chunks.push(...this.completeRefusalItem(response.output[outputIndex], outputIndex),
+          ...this.completeTool(response.output[outputIndex], outputIndex))
       }
     }
     const reason = response === null
@@ -425,6 +476,7 @@ export class BufferedResponsesToChatCompletions {
   private responseId: string | undefined
   private serviceTier: string | undefined
   private text = ''
+  private readonly refusals = new RefusalParts()
   private reasoning = ''
   private readonly tools = new Map<number, { callId: string; name: string; arguments: string }>()
 
@@ -455,7 +507,7 @@ export class BufferedResponsesToChatCompletions {
   }
 
   hasOutput(): boolean {
-    return this.text.length > 0 || this.reasoning.length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
+    return this.text.length > 0 || this.refusals.text().length > 0 || this.reasoning.length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
   }
 
   /** Return the authoritative Responses document, filling omitted output from streamed deltas. */
@@ -525,7 +577,13 @@ export class BufferedResponsesToChatCompletions {
       this.responseId = optionalString(observed.id) ?? this.responseId
       this.serviceTier = optionalString(observed.service_tier) ?? this.serviceTier
     }
-    if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
+    if (type === 'response.refusal.delta') {
+      this.refusals.append(event)
+    } else if (type === 'response.refusal.done') {
+      this.refusals.complete(event.output_index, event.content_index, event.refusal)
+    } else if (type === 'response.content_part.done' && objectValue(event.part)?.type === 'refusal') {
+      this.refusals.complete(event.output_index, event.content_index, objectValue(event.part)?.refusal)
+    } else if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
       this.text += event.delta
     } else if (
       (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') &&
@@ -594,6 +652,12 @@ export class BufferedResponsesToChatCompletions {
       })
       return
     }
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      item.content.forEach((value, index) => {
+        const part = objectValue(value)
+        if (part?.type === 'refusal') this.refusals.complete(outputIndex, index, part.refusal)
+      })
+    }
     if (item.type === 'message' && this.text === '') {
       for (const partValue of optionalArray(item.content, 'event.item.content')) {
         const part = objectAt(partValue, 'event.item.content[]')
@@ -620,6 +684,8 @@ export class BufferedResponsesToChatCompletions {
       role: 'assistant',
       content: [{ type: 'output_text', text: this.text }],
     })
+    if (this.refusals.text()) output.push({ type: 'message', role: 'assistant',
+      content: [{ type: 'refusal', refusal: this.refusals.text() }] })
     for (const tool of this.tools.values()) output.push({
       type: 'function_call',
       call_id: tool.callId,

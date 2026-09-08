@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ResponsesToChatCompletionsEventCodec,
+  BufferedResponsesToChatCompletions,
   responsesSseToChatCompletionsResponse,
   responsesToChatCompletionsResponse,
 } from '../../../src/gateway/protocols/chat-from-responses'
@@ -340,4 +341,39 @@ it('keeps interleaved tool IDs and argument suffixes separate in compact termina
   expect(calls.filter(c => c.id).map(c => [c.index, c.id])).toEqual([[0, 'a'], [1, 'b']])
   expect(calls.filter(c => c.index === 0).map(c => c.function.arguments).join('')).toBe(a.arguments)
   expect(calls.filter(c => c.index === 1).map(c => c.function.arguments).join('')).toBe(b.arguments)
+})
+
+
+it.each(['delta', 'refusal.done', 'part.done', 'item.done', 'terminal'] as const)('preserves refusal content through streaming and buffered bridges from %s', source => {
+  const refusal = '抱歉，无法帮助处理此请求。'
+  const item = { type: 'message', role: 'assistant', content: [{ type: 'refusal', refusal }] }
+  const events: Array<Record<string, unknown>> = []
+  if (source === 'delta') events.push({ type: 'response.refusal.delta', output_index: 0, content_index: 0, delta: refusal })
+  if (source === 'refusal.done') events.push({ type: 'response.refusal.done', output_index: 0, content_index: 0, refusal })
+  if (source === 'part.done') events.push({ type: 'response.content_part.done', output_index: 0, content_index: 0, part: item.content[0] })
+  if (source === 'item.done') events.push({ type: 'response.output_item.done', output_index: 0, item })
+  events.push({ type: 'response.completed', response: { status: 'completed', output: source === 'terminal' ? [item] : [] } })
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const chunks = events.flatMap(event => codec.push(event))
+  expect(chunks.flatMap(c => c.choices).map(c => c.delta.refusal ?? '').join('')).toBe(refusal)
+  expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe('stop')
+  const buffered = new BufferedResponsesToChatCompletions('model')
+  buffered.push(new TextEncoder().encode(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')))
+  buffered.finish()
+  expect(buffered.hasOutput()).toBe(true)
+  expect(buffered.response().choices[0].message).toEqual({ role: 'assistant', refusal })
+  expect(JSON.stringify(buffered.nativeResponse().output)).toContain(refusal)
+})
+
+it('does not duplicate refusal deltas when part, item and terminal snapshots repeat them', () => {
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const item = { type: 'message', content: [{ type: 'refusal', refusal: 'Cannot comply.' }] }
+  const events = [
+    { type: 'response.refusal.delta', output_index: 0, content_index: 0, delta: 'Cannot ' },
+    { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: 'Cannot comply.' },
+    { type: 'response.content_part.done', output_index: 0, content_index: 0, part: item.content[0] },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { status: 'completed', output: [item] } },
+  ]
+  expect(events.flatMap(e => codec.push(e)).flatMap(c => c.choices).map(c => c.delta.refusal ?? '').join('')).toBe('Cannot comply.')
 })

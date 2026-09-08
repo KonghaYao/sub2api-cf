@@ -43,3 +43,9 @@ HTTPS 代理传输仍明确失败，不能把可保存配置误报为可执行�
 修复已收到工具 added 事件但参数只在 done/terminal 中返回时，Chat 流遗漏完整参数的问题。arguments.done、custom input.done、output_item.done、终态输出补齐尚未发送的后缀，并按 call_id 保持并行工具身份与索引。省略 output_index 的兼容事件可按 call_id 恢复，不能安全关联时留给完整 item 事件；不重复发出参数。已输出前缀与完成参数不一致时显式失败，避免客户端执行损坏参数。
 
 协议与网关最终专项 169 项、真实 workerd 76 项通过，类型检查通过。覆盖中文参数、后缀补齐、重复完成事件、自定义工具、索引缺失、交错并行工具及压缩终态输出。提交 `f0dd8ac54` 已部署 0.45.3，Worker version `131aeb31-549b-4472-bf26-29c73941dd6f`。
+
+## 0.45.4：保留上游拒绝响应
+
+Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。现在保留 message.refusal、delta.refusal，处理 refusal delta/done、content_part.done、output_item.done 和终态完整输出；按内容片段补齐缺失后缀而不重复已发送内容。合法拒绝被视为实际输出，不被误判为空结果；保持正常 finish_reason 和实际用量。
+
+协议与网关 175 项、原生全量 76 项通过；新增原生拒绝链路连同失败/取消专项 4 项通过，确认 delta-only 拒绝返回完整、实际费用只扣一次、预留释放。类型检查通过。部署结果待追加。
