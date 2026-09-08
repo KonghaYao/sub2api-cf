@@ -37,3 +37,9 @@ HTTPS 代理传输仍明确失败，不能把可保存配置误报为可执行�
 ## 0.45.2：代理取消不等待故障上游
 
 用户将 LLM 转发兼容性、稳定性与可靠性设为最高优先级，Prompt Audit 暂停。代理 HTTP 清理不再串行等待 socket.close 和 reader.cancel；立即发起清理并释放读取锁，避免不完成的上游关闭承诺阻塞下游取消。增加永不完成关闭/取消的故障注入测试。代理专项 21 项、真实 workerd 29 文件/76 项、类型检查通过。提交 `14f3dc62c` 已部署，Worker version `ff1babf3-6116-4cfc-b9d0-78d6609c3ef3`，线上 /health 已确认 0.45.2。
+
+## 0.45.3：Responses 转 Chat 工具参数完成事件
+
+修复已收到工具 added 事件但参数只在 done/terminal 中返回时，Chat 流遗漏完整参数的问题。arguments.done、custom input.done、output_item.done、终态输出补齐尚未发送的后缀，并按 call_id 保持并行工具身份与索引。省略 output_index 的兼容事件可按 call_id 恢复，不能安全关联时留给完整 item 事件；不重复发出参数。已输出前缀与完成参数不一致时显式失败，避免客户端执行损坏参数。
+
+协议与网关最终专项 169 项、真实 workerd 76 项通过，类型检查通过。覆盖中文参数、后缀补齐、重复完成事件、自定义工具、索引缺失、交错并行工具及压缩终态输出。部署结果待追加。

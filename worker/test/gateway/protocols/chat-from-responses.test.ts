@@ -291,3 +291,53 @@ describe('Responses to Chat Completions output bridge', () => {
     }
   })
 })
+
+it.each(['arguments.done', 'item.done', 'terminal'] as const)('recovers missing tool argument suffix from %s without duplication', completion => {
+  const codec = new ResponsesToChatCompletionsEventCodec('public-model')
+  const item = { type: 'function_call', call_id: 'call-weather', name: 'weather', arguments: '{"city":"上海"}' }
+  const chunks = codec.push({ type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '' } })
+  chunks.push(...codec.push({ type: 'response.function_call_arguments.delta', output_index: 0, delta: '{"city":' }))
+  if (completion === 'arguments.done') chunks.push(...codec.push({ type: 'response.function_call_arguments.done', output_index: 0, arguments: item.arguments }))
+  if (completion === 'item.done') chunks.push(...codec.push({ type: 'response.output_item.done', output_index: 0, item }))
+  chunks.push(...codec.push({ type: 'response.completed', response: { status: 'completed', output: [item] } }))
+  const calls = chunks.flatMap(c => c.choices.flatMap(choice => choice.delta.tool_calls ?? []))
+  expect(calls.map(c => c.function.arguments).join('')).toBe(item.arguments)
+  expect(calls.filter(c => c.id)).toHaveLength(1)
+  expect(calls.every(c => c.index === 0)).toBe(true)
+  expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe('tool_calls')
+})
+
+it('rejects inconsistent final arguments instead of emitting a corrupted tool invocation', () => {
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  codec.push({ type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', call_id: 'c', name: 'f' } })
+  codec.push({ type: 'response.function_call_arguments.delta', output_index: 1, delta: '{"a":1' })
+  expect(() => codec.push({ type: 'response.output_item.done', output_index: 1,
+    item: { type: 'function_call', call_id: 'c', name: 'f', arguments: '{"a":2}' } })).toThrow('streamed prefix')
+})
+
+it('accepts argument completion without an output index and resolves custom tools by call ID', () => {
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const item = { type: 'custom_tool_call', call_id: 'patch-id', name: 'apply_patch', input: '*** Begin Patch\n*** End Patch' }
+  const chunks = codec.push({ type: 'response.output_item.added', output_index: 2, item })
+  expect(codec.push({ type: 'response.function_call_arguments.done', arguments: '{}' })).toEqual([])
+  chunks.push(...codec.push({ type: 'response.custom_tool_call_input.done', call_id: 'patch-id', input: item.input }))
+  chunks.push(...codec.push({ type: 'response.output_item.done', output_index: 2, item }))
+  const calls = chunks.flatMap(c => c.choices.flatMap(choice => choice.delta.tool_calls ?? []))
+  expect(calls.map(c => c.function.arguments).join('')).toBe(item.input)
+  expect(calls.filter(c => c.id).map(c => c.id)).toEqual(['patch-id'])
+})
+
+it('keeps interleaved tool IDs and argument suffixes separate in compact terminal output', () => {
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const a = { type: 'function_call', call_id: 'a', name: 'alpha', arguments: '{"a":1}' }
+  const b = { type: 'function_call', call_id: 'b', name: 'beta', arguments: '{"b":2}' }
+  const chunks = codec.push({ type: 'response.output_item.added', output_index: 2, item: a })
+  chunks.push(...codec.push({ type: 'response.output_item.added', output_index: 4, item: b }))
+  chunks.push(...codec.push({ type: 'response.function_call_arguments.delta', output_index: 4, delta: '{"b":' }))
+  chunks.push(...codec.push({ type: 'response.function_call_arguments.delta', output_index: 2, delta: '{"a":' }))
+  chunks.push(...codec.push({ type: 'response.completed', response: { status: 'completed', output: [a, b] } }))
+  const calls = chunks.flatMap(c => c.choices.flatMap(choice => choice.delta.tool_calls ?? []))
+  expect(calls.filter(c => c.id).map(c => [c.index, c.id])).toEqual([[0, 'a'], [1, 'b']])
+  expect(calls.filter(c => c.index === 0).map(c => c.function.arguments).join('')).toBe(a.arguments)
+  expect(calls.filter(c => c.index === 1).map(c => c.function.arguments).join('')).toBe(b.arguments)
+})

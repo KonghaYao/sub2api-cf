@@ -284,6 +284,21 @@ export class ResponsesToChatCompletionsEventCodec {
         tool_calls: [{ index: tool.index, function: { arguments: delta } }],
       })]
     }
+    if (type === 'response.output_item.done') {
+      return this.completeTool(event.item, nonNegativeInteger(event.output_index, 'event.output_index'))
+    }
+    if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
+      // Some compatible providers omit output_index on argument completion.
+      // Recover by call_id when available; output_item.done/terminal remains
+      // authoritative when this optional event cannot be associated safely.
+      const outputIndex = typeof event.output_index === 'number' && Number.isSafeInteger(event.output_index) && event.output_index >= 0
+        ? event.output_index : [...this.tools].find(([, tool]) => tool.callId === event.call_id)?.[0]
+      if (outputIndex === undefined) return []
+      const tool = this.tools.get(outputIndex)
+      if (!tool) return []
+      return this.completeTool({ type: 'function_call', call_id: tool.callId, name: tool.name,
+        arguments: event.arguments ?? event.input }, outputIndex)
+    }
     if (isResponsesFailedTerminal(event)) {
       const failure = responsesFailureDetails(event)
       throw new ResponsesToChatError(failure.message, failure.code)
@@ -307,6 +322,33 @@ export class ResponsesToChatCompletionsEventCodec {
     return chunks
   }
 
+  private completeTool(value: unknown, outputIndex: number): ChatCompletionChunk[] {
+    const item = objectValue(value)
+    if (!item || (item.type !== 'function_call' && item.type !== 'custom_tool_call')) return []
+    const callId = requiredString(item.call_id, 'event.item.call_id')
+    const name = requiredString(item.name, 'event.item.name')
+    let tool = [...this.tools.values()].find(candidate => candidate.callId === callId) ?? this.tools.get(outputIndex)
+    const chunks: ChatCompletionChunk[] = []
+    if (!tool) {
+      tool = { index: this.nextToolIndex++, callId, name, arguments: '' }
+      this.tools.set(outputIndex, tool)
+      this.sawToolCall = true
+      chunks.push(...this.ensureRole(), this.delta({ tool_calls: [{ index: tool.index, id: callId,
+        type: 'function', function: { name, arguments: '' } }] }))
+    } else if (tool.callId !== callId || tool.name !== name) {
+      throw new ResponsesToChatError('Upstream changed the identity of a streamed tool call')
+    }
+    const argumentsValue = item.arguments ?? item.input
+    if (typeof argumentsValue !== 'string') return chunks
+    if (!argumentsValue.startsWith(tool.arguments)) {
+      throw new ResponsesToChatError('Upstream completed tool arguments differ from the streamed prefix')
+    }
+    const suffix = argumentsValue.slice(tool.arguments.length)
+    tool.arguments = argumentsValue
+    if (suffix) chunks.push(this.delta({ tool_calls: [{ index: tool.index, function: { arguments: suffix } }] }))
+    return chunks
+  }
+
   private complete(event: JsonObject): ChatCompletionChunk[] {
     this.observeResponse(event.response)
     const response = objectValue(event.response)
@@ -316,9 +358,8 @@ export class ResponsesToChatCompletionsEventCodec {
       const message = responsesToChatCompletionsResponse(response, this.model, this.created).choices[0].message
       if (!this.sentText && message.content) chunks.push(this.delta({ content: message.content }))
       if (!this.sentReasoning && message.reasoning_content) chunks.push(this.delta({ reasoning_content: message.reasoning_content }))
-      if (!this.sawToolCall && message.tool_calls?.length) {
-        this.sawToolCall = true
-        chunks.push(this.delta({ tool_calls: message.tool_calls.map((tool, index) => ({ ...tool, index })) }))
+      for (let outputIndex = 0; outputIndex < response.output.length; outputIndex++) {
+        chunks.push(...this.completeTool(response.output[outputIndex], outputIndex))
       }
     }
     const reason = response === null
