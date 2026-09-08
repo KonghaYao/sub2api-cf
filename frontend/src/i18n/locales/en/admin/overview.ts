@@ -797,6 +797,17 @@ export default {
       duplicating: 'Duplicating',
       duplicateSuccess: 'Group duplicated as "{name}" and disabled. Review its configuration before enabling it.',
       duplicateFailed: 'Failed to duplicate group',
+      groupModels: {
+        action: 'Models',
+        title: 'Model configuration · {name}',
+        empty: 'No models are configured for this group',
+        maxOutputTokens: 'Maximum output tokens',
+        defaultMaxOutputTokens: 'Default maximum output tokens',
+        defaultExceedsMax: 'Default maximum output tokens must not exceed the maximum',
+        loadFailed: 'Failed to load group models',
+        updateSuccess: 'Model configuration updated',
+        updateFailed: 'Failed to update model configuration'
+      },
       sortOrder: 'Sort',
       columnSettings: 'Column Settings',
       sortOrderHint: 'Drag groups to adjust display order, groups at the top will be displayed first',

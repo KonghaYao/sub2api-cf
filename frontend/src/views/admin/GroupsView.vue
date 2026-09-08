@@ -413,6 +413,13 @@
                 }}</span>
               </button>
               <button
+                @click="handleGroupModels(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-cyan-600 dark:hover:bg-dark-700 dark:hover:text-cyan-400"
+              >
+                <Icon name="grid" size="sm" />
+                <span class="text-xs">{{ t("admin.groups.groupModels.action") }}</span>
+              </button>
+              <button
                 @click="handleRateMultipliers(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-purple-600 dark:hover:bg-dark-700 dark:hover:text-purple-400"
               >
@@ -4537,6 +4544,51 @@
       </template>
     </BaseDialog>
 
+    <BaseDialog
+      :show="showGroupModelsModal"
+      :title="t('admin.groups.groupModels.title', { name: groupModelsGroup?.name || '' })"
+      width="wide"
+      @close="closeGroupModelsModal"
+    >
+      <div v-if="groupModelsLoading" class="py-8 text-center text-gray-500">
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="groupModels.length === 0" class="py-8 text-center text-gray-500">
+        {{ t("admin.groups.groupModels.empty") }}
+      </div>
+      <div v-else class="space-y-3">
+        <div
+          v-for="model in groupModels"
+          :key="model.model_id"
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+        >
+          <div class="mb-3 font-medium text-gray-900 dark:text-gray-100">
+            {{ model.public_name }}
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="space-y-1 text-sm">
+              <span>{{ t("admin.groups.groupModels.maxOutputTokens") }}</span>
+              <input v-model.number="model.max_output_tokens" class="input" type="number" min="1" max="1000000" />
+            </label>
+            <label class="space-y-1 text-sm">
+              <span>{{ t("admin.groups.groupModels.defaultMaxOutputTokens") }}</span>
+              <input v-model.number="model.default_max_output_tokens" class="input" type="number" min="1" :max="model.max_output_tokens" />
+            </label>
+          </div>
+          <div class="mt-3 flex justify-end">
+            <button
+              type="button"
+              class="btn btn-primary"
+              :disabled="savingGroupModelId === model.model_id"
+              @click="saveGroupModel(model)"
+            >
+              {{ savingGroupModelId === model.model_id ? t("common.saving") : t("common.save") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </BaseDialog>
+
     <!-- Group Rate Multipliers Modal -->
     <GroupRateMultipliersModal
       :show="showRateMultipliersModal"
@@ -4601,6 +4653,7 @@ import {
   toNullableNumber,
 } from "@/components/admin/channel/types";
 import type { ChannelModelPricing } from "@/api/admin/channels";
+import type { GroupModelConfig } from "@/api/admin/groups";
 import { VueDraggable } from "vue-draggable-plus";
 import { createStableObjectKeyResolver } from "@/utils/stableObjectKey";
 import { extractApiErrorMessage } from "@/utils/apiError";
@@ -5130,6 +5183,11 @@ const showRateMultipliersModal = ref(false);
 const rateMultipliersGroup = ref<AdminGroup | null>(null);
 const showRPMOverridesModal = ref(false);
 const rpmOverridesGroup = ref<AdminGroup | null>(null);
+const showGroupModelsModal = ref(false);
+const groupModelsGroup = ref<AdminGroup | null>(null);
+const groupModels = ref<GroupModelConfig[]>([]);
+const groupModelsLoading = ref(false);
+const savingGroupModelId = ref<string | null>(null);
 const sortableGroups = ref<AdminGroup[]>([]);
 type ConcreteGroupPlatform = Exclude<GroupPlatform, "composite">;
 type CompositeRouteFormState = {
@@ -6568,6 +6626,47 @@ const removeEditMessagesDispatchMapping = (row: MessagesDispatchMappingRow) => {
   const index = editForm.exact_model_mappings.indexOf(row);
   if (index !== -1) {
     editForm.exact_model_mappings.splice(index, 1);
+  }
+};
+
+const handleGroupModels = async (group: AdminGroup) => {
+  groupModelsGroup.value = group;
+  groupModels.value = [];
+  showGroupModelsModal.value = true;
+  groupModelsLoading.value = true;
+  try {
+    groupModels.value = await adminAPI.groups.listGroupModels(group.id);
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.loadFailed")));
+  } finally {
+    groupModelsLoading.value = false;
+  }
+};
+
+const closeGroupModelsModal = () => {
+  showGroupModelsModal.value = false;
+  groupModelsGroup.value = null;
+  groupModels.value = [];
+};
+
+const saveGroupModel = async (model: GroupModelConfig) => {
+  if (!groupModelsGroup.value) return;
+  if (model.default_max_output_tokens > model.max_output_tokens) {
+    appStore.showError(t("admin.groups.groupModels.defaultExceedsMax"));
+    return;
+  }
+  savingGroupModelId.value = model.model_id;
+  try {
+    const updated = await adminAPI.groups.updateGroupModel(groupModelsGroup.value.id, model, {
+      max_output_tokens: model.max_output_tokens,
+      default_max_output_tokens: model.default_max_output_tokens,
+    });
+    Object.assign(model, updated);
+    appStore.showSuccess(t("admin.groups.groupModels.updateSuccess"));
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.updateFailed")));
+  } finally {
+    savingGroupModelId.value = null;
   }
 };
 

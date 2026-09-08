@@ -676,9 +676,16 @@ describe('admin catalog control plane', () => {
     expect((await json(mismatch)).code).toBe('platform_mismatch')
 
     const model = await createModel(database, 'link-token-model')
+    const defaultLink = await linkModel(database, group.id, model.id, 'link-defaults')
+    expect(defaultLink).toMatchObject({
+      max_output_tokens: 65_536,
+      default_max_output_tokens: 32_768,
+    })
+
+    const boundaryModel = await createModel(database, 'link-boundary-token-model')
     const zeroMax = await request(
       database,
-      `/api/v1/admin/groups/${group.id}/models/${model.id}`,
+      `/api/v1/admin/groups/${group.id}/models/${boundaryModel.id}`,
       'PUT',
       'link-zero-max',
       { expected_control_version: 0, max_output_tokens: 0 },
@@ -688,14 +695,14 @@ describe('admin catalog control plane', () => {
 
     const defaultOverMax = await request(
       database,
-      `/api/v1/admin/groups/${group.id}/models/${model.id}`,
+      `/api/v1/admin/groups/${group.id}/models/${boundaryModel.id}`,
       'PUT',
       'link-default-over-max',
       { expected_control_version: 0, max_output_tokens: 100, default_max_output_tokens: 101 },
     )
     expect(defaultOverMax.status).toBe(400)
     expect((await json(defaultOverMax)).code).toBe('invalid_default_max_output_tokens')
-    expect(database.groupModels).toHaveLength(0)
+    expect(database.groupModels).toHaveLength(1)
   })
 
   it('persists the group-model allowlist and routing fields independently', async () => {

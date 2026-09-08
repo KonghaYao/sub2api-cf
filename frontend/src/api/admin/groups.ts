@@ -842,6 +842,54 @@ export async function getCapacitySummary(): Promise<
   return data
 }
 
+export interface GroupModelConfig {
+  group_id: string
+  model_id: string
+  public_name: string
+  upstream_name: string
+  endpoint: string
+  enabled: boolean
+  catalog_visible: boolean
+  sort_order: number
+  max_output_tokens: number
+  default_max_output_tokens: number
+  control_version: number
+}
+
+export interface UpdateGroupModelConfig {
+  max_output_tokens: number
+  default_max_output_tokens: number
+}
+
+function adaptGroupModel(model: GroupModelConfig): GroupModelConfig {
+  return {
+    ...model,
+    group_id: String(model.group_id),
+    model_id: String(model.model_id),
+    max_output_tokens: Number(model.max_output_tokens),
+    default_max_output_tokens: Number(model.default_max_output_tokens),
+    control_version: Number(model.control_version)
+  }
+}
+
+export async function listGroupModels(id: string | number): Promise<GroupModelConfig[]> {
+  const { data } = await apiClient.get<GroupModelConfig[]>(`/admin/groups/${id}/models`)
+  return (data || []).map(adaptGroupModel)
+}
+
+export async function updateGroupModel(
+  groupId: string | number,
+  model: GroupModelConfig,
+  input: UpdateGroupModelConfig
+): Promise<GroupModelConfig> {
+  const { data } = await apiClient.put<GroupModelConfig>(
+    `/admin/groups/${groupId}/models/${model.model_id}`,
+    { ...input, expected_control_version: model.control_version },
+    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-put') } }
+  )
+  return adaptGroupModel(data)
+}
+
 export const groupsAPI = {
   list,
   getAll,
@@ -870,7 +918,9 @@ export const groupsAPI = {
   batchSetGroupRPMOverrides,
   updateSortOrder,
   getUsageSummary,
-  getCapacitySummary
+  getCapacitySummary,
+  listGroupModels,
+  updateGroupModel
 }
 
 export default groupsAPI

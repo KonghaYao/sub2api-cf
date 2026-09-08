@@ -1240,9 +1240,9 @@ function parseModelPatch(body: Record<string, unknown>) {
 
 function parseGroupModel(body: Record<string, unknown>, current: GroupModelRow | null) {
   const max = optionalSafeInteger(body, 'max_output_tokens', 1, 1_000_000)
-    ?? current?.max_output_tokens ?? 16_384
+    ?? current?.max_output_tokens ?? 65_536
   const defaultMax = optionalSafeInteger(body, 'default_max_output_tokens', 1, max)
-    ?? current?.default_max_output_tokens ?? Math.min(4_096, max)
+    ?? current?.default_max_output_tokens ?? Math.min(32_768, max)
   if (defaultMax > max) throw new GatewayError(400, 'invalid_output_tokens', 'default_max_output_tokens must not exceed max_output_tokens')
   return {
     upstream_name_override: optionalNullableString(body, 'upstream_name_override', 256)

@@ -23,6 +23,48 @@ describe('admin groups Cloudflare Worker contract', () => {
     )
   })
 
+  it('adapts and updates group model output-token fields with Worker concurrency headers', async () => {
+    get.mockResolvedValueOnce({
+      data: [{
+        group_id: 42,
+        model_id: 7,
+        public_name: 'gpt-test',
+        upstream_name: 'gpt-test',
+        endpoint: 'responses',
+        enabled: true,
+        catalog_visible: true,
+        sort_order: 0,
+        max_output_tokens: '65536',
+        default_max_output_tokens: '32768',
+        control_version: '3'
+      }]
+    })
+    put.mockResolvedValueOnce({
+      data: {
+        group_id: '42', model_id: '7', public_name: 'gpt-test', upstream_name: 'gpt-test',
+        endpoint: 'responses', enabled: true, catalog_visible: true, sort_order: 0,
+        max_output_tokens: 65536, default_max_output_tokens: 32768, control_version: 4
+      }
+    })
+    const { listGroupModels, updateGroupModel } = await import('@/api/admin/groups')
+
+    const [model] = await listGroupModels(42)
+    expect(model).toMatchObject({
+      group_id: '42', model_id: '7', max_output_tokens: 65536,
+      default_max_output_tokens: 32768, control_version: 3
+    })
+    await updateGroupModel(42, model, {
+      max_output_tokens: 65536,
+      default_max_output_tokens: 32768
+    })
+
+    expect(put).toHaveBeenCalledWith(
+      '/admin/groups/42/models/7',
+      { max_output_tokens: 65536, default_max_output_tokens: 32768, expected_control_version: 3 },
+      { headers: { 'Idempotency-Key': expect.stringContaining('admin-group-model-put-') } }
+    )
+  })
+
   it('preserves advanced fields and explicit clears in create and update payloads', async () => {
     const projection = { id: 'group-opaque', name: 'Full', control_version: 0 }
     post.mockResolvedValue({ data: projection })

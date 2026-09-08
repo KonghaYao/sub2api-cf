@@ -794,6 +794,17 @@ export default {
       duplicating: '复制中',
       duplicateSuccess: '分组已复制为「{name}」，已默认停用，请确认配置后再启用',
       duplicateFailed: '复制分组失败',
+      groupModels: {
+        action: '模型配置',
+        title: '模型配置 · {name}',
+        empty: '该分组尚未配置模型',
+        maxOutputTokens: '最大输出 Token 数',
+        defaultMaxOutputTokens: '默认最大输出 Token 数',
+        defaultExceedsMax: '默认最大输出 Token 数不能超过最大值',
+        loadFailed: '加载分组模型失败',
+        updateSuccess: '模型配置已更新',
+        updateFailed: '更新模型配置失败'
+      },
       sortOrder: '排序',
       columnSettings: '列设置',
       sortOrderHint: '拖拽分组调整显示顺序，排在前面的分组会优先显示',
