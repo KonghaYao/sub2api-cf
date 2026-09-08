@@ -37,6 +37,9 @@ export async function captureUpstreamDiagnostic(
     return { status: response.status, body: '[diagnostic unavailable]' }
   } finally {
     clearTimeout(timer)
+    // Initiate cancellation without waiting on an uncooperative upstream, then
+    // release ownership even when the diagnostic deadline raced a pending read.
     void reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
 }

@@ -1817,8 +1817,8 @@ async function acquireUpstream(
       if (retryableFailure && attempt + 1 < attempts) {
         lastError = mapUpstreamStatus(response)
         lastError.upstreamAccountId = accountId
+        // Diagnostic capture owns and closes this discarded response body.
         lastError.upstreamDiagnostic = await captureUpstreamDiagnostic(response, credential.api_key)
-        await bestEffort(async () => response.body?.cancel())
         await bestEffort(() => recordConfiguredUpstreamFailure(env, pool, accountId!, `${requestId}:failure:${attempt}`, response))
         await bestEffort(() => releasePoolLease(pool, leaseId))
         continue
