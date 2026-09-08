@@ -202,4 +202,4 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 
 对照原版 channel_monitor_challenge.go 和 channel_monitor_checker.go，恢复 1–50 操作数、随机加法/非负减法、原版 few-shot 提示及整数 token 匹配。默认生成额度从1恢复50，OpenAI Responses加入原版监控instructions，按提供方读取最终文本并排除错误/未完成响应。off/merge 模式不再把任意非空文本判断为operational；显式replace模式保留非空文本判断。新增helper不改变独立账号synthetic probe的行为。
 
-HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修复；原监控生命周期fixture改为实际解答动态题目。覆盖replace保留行为、整数边界/负数/子串、Responses顶层output_text和reasoning排除、Anthropic/Gemini文本提取。四文件50项相关测试与typecheck通过。部署结果待验证；45秒超时、多模型并发与取消、慢响应降级/ping继续待对齐。本轮仍无最新版生产Composer推理证明。
+HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修复；原监控生命周期fixture改为实际解答动态题目。覆盖replace保留行为、整数边界/负数/子串、Responses顶层output_text和reasoning排除、Anthropic/Gemini文本提取。四文件50项相关测试与typecheck通过。代码 `f2428bd52` 已推送 origin/main，部署 0.45.21 成功，Worker version `4092ba0f-6d4b-48bf-8eca-e46561d45f31`，生产health确认status=ok/version=0.45.21；45秒超时、多模型并发与取消、慢响应降级/ping继续待对齐。本轮仍无最新版生产Composer推理证明。
