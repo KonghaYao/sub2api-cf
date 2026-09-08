@@ -106,16 +106,5 @@ export function applyGatewayBodySettings(settings: GatewaySettings, body: Record
     inject(messages[messages.length - 1])
     if (messages.length >= 4) inject(messages.filter(message => message.role === 'user').at(-2))
   }
-  const rewrite = (value: unknown): void => {
-    if (Array.isArray(value)) { value.forEach(rewrite); return }
-    if (!value || typeof value !== 'object') return
-    const object = value as Record<string, unknown>
-    if (object.cache_control && typeof object.cache_control === 'object') {
-      const cache = object.cache_control as Record<string, unknown>
-      if (settings.enable_anthropic_cache_ttl_1h_injection && cache.type === 'ephemeral') cache.ttl = '1h'
-    }
-    for (const [key, child] of Object.entries(object)) if (key !== 'cache_control') rewrite(child)
-  }
-  rewrite(output.system); rewrite(output.messages); rewrite(output.tools)
   return output
 }

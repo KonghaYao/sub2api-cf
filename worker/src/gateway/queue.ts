@@ -207,10 +207,10 @@ export async function consumeEvents(
              inbound_endpoint, upstream_endpoint, billing_mode, native_compaction_v2,
              dimensions_version, image_count, image_size, image_input_size,
              image_output_size, image_size_source, image_size_breakdown,
-             account_stats_rollup_version, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_write_amount_micros
+             account_stats_rollup_version, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_ttl_overridden, cache_write_amount_micros
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              COALESCE(NULLIF(?, ''), (SELECT platform FROM "groups" WHERE id = ?), ''),
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
         ).bind(
           event.event_id,
           payload.request_id,
@@ -259,6 +259,7 @@ export async function consumeEvents(
           payload.cache_write_tokens ?? 0,
           payload.cache_write_5m_tokens ?? 0,
           payload.cache_write_1h_tokens ?? 0,
+          payload.cache_ttl_overridden ? 1 : 0,
           payload.cache_write_amount_micros ?? 0,
         ),
         env.DB.prepare(
@@ -619,6 +620,7 @@ function requireUsageEvent(value: unknown): PlatformEvent<UsageSettledPayload> {
   ) {
     throw new Error('Invalid usage subscription reference')
   }
+  if (payload.cache_ttl_overridden !== undefined && typeof payload.cache_ttl_overridden !== 'boolean') throw new Error('Invalid usage cache TTL flag')
   for (const field of ['cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'cache_write_amount_micros'] as const) {
     const value = payload[field]
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new Error(`Invalid usage payload field ${field}`)

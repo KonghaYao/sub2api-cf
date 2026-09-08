@@ -1,3 +1,4 @@
+import { injectCacheTtl, resolveCacheTtlTarget, overrideCacheTtlUsage, rewriteCacheTtlJson, type CacheTtlTarget } from './anthropic-cache-ttl'
 import { emitContextCacheFingerprint } from './context-cache-diagnostics'
 import { chatPromptCacheIdentity, openAIContentSessionSeed } from './chat-prompt-cache'
 import { inspectChatSilentRefusal } from './protocols/chat-silent-refusal'
@@ -930,13 +931,14 @@ function reconcileAnthropicCachedTokens(usage: Record<string, unknown> | null): 
   if (cached > 0) usage.cache_read_input_tokens = cached
 }
 
-function extractProviderUsage(value: unknown, platform: ProviderPlatform): TokenUsage | null {
+function extractProviderUsage(value: unknown, platform: ProviderPlatform, cacheTtlOverride?: CacheTtlTarget): TokenUsage | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const root = value as Record<string, unknown>
   if (platform === 'anthropic') {
     const usage = objectValue(root.usage)
     if (usage === null) return null
     reconcileAnthropicCachedTokens(usage)
+    rewriteCacheTtlJson(usage, cacheTtlOverride, true)
     const input = nonNegativeInteger(usage.input_tokens)
     const output = nonNegativeInteger(usage.output_tokens)
     if (input === null || output === null) return null
@@ -1432,6 +1434,7 @@ async function dispatchGateway(
         leaseId: acquired.leaseId,
         renewals: acquired.renewals,
         accountId: acquired.accountId,
+        cacheTtlOverride: acquired.cacheTtlOverride,
         requestId,
         principal,
         model,
@@ -1473,6 +1476,7 @@ async function dispatchGateway(
         leaseId: acquired.leaseId,
         renewals: acquired.renewals,
         accountId: acquired.accountId,
+        cacheTtlOverride: acquired.cacheTtlOverride,
         requestId,
         principal,
         model,
@@ -1508,6 +1512,7 @@ async function dispatchGateway(
       leaseId: acquired.leaseId,
       renewals: acquired.renewals,
       accountId: acquired.accountId,
+        cacheTtlOverride: acquired.cacheTtlOverride,
       requestId,
       principal,
       model,
@@ -1659,6 +1664,7 @@ function geminiErrorResponse(error: GatewayError, requestId?: string): Response 
 interface HeaderRenewals { pool: number; admission: number; billing: number; lastBillingRenewedAt: number }
 
 interface AcquiredUpstream {
+  cacheTtlOverride?: CacheTtlTarget
   renewals?: HeaderRenewals
   providerDispatch?: ProviderDispatch
   upstreamPath?: string
@@ -1696,7 +1702,7 @@ async function acquireUpstream(
   fastPolicy?: OpenAIFastPolicy,
   reservedTiers?: Array<string | undefined>,
   cyberContext?: { settings: typeof securityDefaults; request: CyberRequest },
-  providerForwarding?: {settings:ProviderForwardingSettings;bodies:Record<string,Record<string,unknown>>},
+  providerForwarding?: {settings:ProviderForwardingSettings & {enable_anthropic_cache_ttl_1h_injection?:boolean};bodies:Record<string,Record<string,unknown>>},
   accountThresholds?: AccountSchedulingThresholds,
   resolveAttempt?: (accountId: string) => { endpoint: TextGatewayEndpoint; dispatch: ProviderDispatch },
   headerAdmission: ApiKeyAdmissionLease | null = null,
@@ -1754,7 +1760,10 @@ async function acquireUpstream(
       if (!env.CREDENTIALS_MASTER_KEY) {
         throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
       }
-      const accountBody = providerForwarding ? (attemptPlan && selectedBody && typeof selectedBody === 'object' && !Array.isArray(selectedBody) ? await applyProviderBodySettings(providerForwarding.settings, account.platform, account.credential_kind, selectedBody as Record<string,unknown>) : providerForwarding.bodies[account.credential_kind]) : selectedBody
+      let accountBody = providerForwarding ? (attemptPlan && selectedBody && typeof selectedBody === 'object' && !Array.isArray(selectedBody) ? await applyProviderBodySettings(providerForwarding.settings, account.platform, account.credential_kind, selectedBody as Record<string,unknown>) : providerForwarding.bodies[account.credential_kind]) : selectedBody
+      const injectOneHour = providerForwarding?.settings.enable_anthropic_cache_ttl_1h_injection === true
+      const cacheTtlOverride = resolveCacheTtlTarget(account, injectOneHour)
+      if (accountBody && typeof accountBody === 'object' && !Array.isArray(accountBody)) accountBody = injectCacheTtl(account, accountBody as Record<string, unknown>, injectOneHour)
       if (providerForwarding && !accountBody) throw new GatewayError(409,'account_provider_configuration_changed','Account credential type changed while reserving funds; retry the request')
       const policyBody = fastPolicy && responseOwner && (account.platform === 'openai' || account.platform === 'codex') && accountBody && typeof accountBody === 'object' && !Array.isArray(accountBody)
         ? applyOpenAIFastPolicy(fastPolicy, responseOwner.user_id, account.credential_kind, upstreamModel ?? '', accountBody as Record<string,unknown>) : accountBody
@@ -1946,12 +1955,12 @@ async function acquireUpstream(
             await bestEffort(() => releasePoolLease(pool, leaseId))
             continue
           }
-          return { response, accountId, leaseId, renewals, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+          return { response, accountId, leaseId, renewals, cacheTtlOverride, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
             upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
             chatFromResponses, retryableFailure: semanticRetryable, serviceTier }
         }
       }
-      return { response, accountId, leaseId, renewals, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+      return { response, accountId, leaseId, renewals, cacheTtlOverride, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
         upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
         chatFromResponses, retryableFailure, serviceTier }
     } catch (error) {
@@ -1977,6 +1986,7 @@ async function acquireUpstream(
 }
 
 interface FinalizeInput {
+  cacheTtlOverride?: CacheTtlTarget
   renewals?: HeaderRenewals
   env: Env
   response: Response
@@ -2239,7 +2249,7 @@ async function createSynchronousResponse(
     }
     if (input.upstreamEndpoint === 'responses') parsed = normalizeResponsesToolArguments(parsed)
     if (input.upstreamEndpoint === 'responses' || input.upstreamEndpoint === 'chat_completions') parsed = normalizeOpenAIUsage(parsed)
-    const usage = extractProviderUsage(parsed, input.providerPlatform) ??
+    const usage = extractProviderUsage(parsed, input.providerPlatform, input.cacheTtlOverride) ??
       (input.providerPlatform==='antigravity' && !geminiHasOutput(parsed) ? {input_tokens:0,output_tokens:0,cache_read_tokens:0,estimated:false} : null) ??
       estimatedUsage(input.inputBytes, input.endpoint === 'embeddings' ? 0 : bytes.byteLength)
     let downstreamValue: unknown = parsed
@@ -2932,6 +2942,7 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
     private readonly platform: 'anthropic' | 'gemini',
     private readonly upstreamModel: string,
     private readonly publicModel: string,
+    private readonly cacheTtlOverride?: CacheTtlTarget,
   ) {}
 
   push(chunk: Uint8Array): Uint8Array[] {
@@ -2952,7 +2963,7 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
   usage(): TokenUsage | null {
     if (this.inputTokens === null || this.outputTokens === null) return null
     if (this.platform === 'anthropic') {
-      return normalizedAnthropicUsage(
+      const normalized = normalizedAnthropicUsage(
         this.inputTokens,
         this.outputTokens,
         this.cacheCreationTokens,
@@ -2960,6 +2971,7 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
         this.cacheCreation5mTokens,
         this.cacheCreation1hTokens,
       )
+      return normalized ? overrideCacheTtlUsage(normalized, this.cacheTtlOverride) : null
     }
     return {
       input_tokens: this.inputTokens,
@@ -3074,6 +3086,7 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
     const creation = objectValue(usage.cache_creation)
     this.cacheCreation5mTokens = nonNegativeInteger(creation?.ephemeral_5m_input_tokens) ?? this.cacheCreation5mTokens
     this.cacheCreation1hTokens = nonNegativeInteger(creation?.ephemeral_1h_input_tokens) ?? this.cacheCreation1hTokens
+    rewriteCacheTtlJson(usage, this.cacheTtlOverride)
   }
 
   private encode(value: string): Uint8Array {
@@ -3095,7 +3108,7 @@ function createStreamingResponse(input: FinalizeInput & {
   const tracker: GatewayStreamTransformer = ['chat_from_gemini','responses_from_gemini','anthropic_from_gemini'].includes(input.responseProtocol)
     ? new GeminiClientStreamTransformer(input.model.upstream_name,input.requestedModel,input.responseProtocol==='chat_from_gemini'?'chat':input.responseProtocol==='anthropic_from_gemini'?'anthropic':'responses')
     : input.responseProtocol === 'native_anthropic'
-    ? new NativeProviderStreamTransformer('anthropic', input.model.upstream_name, input.requestedModel)
+    ? new NativeProviderStreamTransformer('anthropic', input.model.upstream_name, input.requestedModel, input.cacheTtlOverride)
     : input.responseProtocol === 'native_gemini'
       ? new NativeProviderStreamTransformer('gemini', input.model.upstream_name, input.requestedModel)
       : input.responseProtocol === 'anthropic'
@@ -3389,6 +3402,7 @@ async function settleAndProject(
   zeroCost = false,
   responseModel?: string | null,
 ): Promise<void> {
+  usage = overrideCacheTtlUsage(usage, input.cacheTtlOverride)
   if (outcome !== 'cancelled') await bestEffort(() => recordPoolTelemetry(input.pool,input.leaseId,outcome==='failed',input.firstTokenMs??null))
   if(Number.isSafeInteger(input.firstTokenMs) && input.firstTokenMs!>=0 && input.firstTokenMs!<=86400000)await bestEffort(async()=>input.env.DB.prepare('UPDATE request_observations SET ttft_ms=? WHERE request_id=? AND ttft_ms IS NULL').bind(input.firstTokenMs!,input.requestId).run())
   if (outcome==='completed' && input.upstreamEndpoint==='responses' && input.upstreamResponseId && input.upstreamResponseId.length<=256) {
@@ -3465,6 +3479,7 @@ async function settleAndProject(
     cache_write_tokens: usage.cache_write_tokens ?? 0,
     cache_write_5m_tokens: usage.cache_write_5m_tokens ?? 0,
     cache_write_1h_tokens: usage.cache_write_1h_tokens ?? 0,
+    cache_ttl_overridden: usage.cache_ttl_overridden ?? false,
     ...cost,
     ...accountCost,
     outcome,

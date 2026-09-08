@@ -77,6 +77,7 @@ export interface UsageSettledPayload {
   /** Optional for backwards-compatible replay of events without TTL evidence. */
   cache_write_5m_tokens?: number
   cache_write_1h_tokens?: number
+  cache_ttl_overridden?: boolean
   input_amount_micros: number
   output_amount_micros: number
   cache_amount_micros: number

@@ -19,7 +19,7 @@ describe('gateway settings consumers', () => {
     const result = applyGatewayBodySettings(settings, source, 'anthropic')
     expect(result.metadata).toBeUndefined()
     expect(result.system).toBe('original system')
-    expect(JSON.stringify(result.messages)).toContain('"ttl":"1h"')
+    expect(JSON.stringify(result.messages)).toContain('"ttl":"5m"')
     expect(source.messages[0].content[0].cache_control.ttl).toBe('5m')
     expect(applyGatewayBodySettings(settings, source, 'openai').system).toBe('original system')
   })

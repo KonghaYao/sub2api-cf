@@ -414,7 +414,7 @@ async function listFor(
 
 const ADMIN_USAGE_COLUMNS = `u.event_id,u.request_id,u.user_id,u.api_key_id,u.account_id,
   COALESCE(u.requested_model,u.model) model,u.upstream_model,u.group_id,u.subscription_id,
-  u.input_tokens,u.output_tokens,u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,u.input_amount_micros,u.output_amount_micros,
+  u.input_tokens,u.output_tokens,u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,u.cache_ttl_overridden,u.input_amount_micros,u.output_amount_micros,
   u.cache_amount_micros,u.cache_write_amount_micros,u.customer_pricing_snapshot_json,u.base_amount_micros,u.amount_micros,u.billing_type,u.outcome,u.stream,
   u.duration_ms,u.occurred_at_ms,u.platform,u.request_type,u.inbound_endpoint,u.upstream_endpoint,
   u.billing_mode,u.native_compaction_v2,u.dimensions_version,u.image_count,u.image_size,
@@ -601,7 +601,7 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     image_output_cost: 0,
     user_agent: null,
     ip_address: null,
-    cache_ttl_overridden: false,
+    cache_ttl_overridden: row.cache_ttl_overridden === 1,
     billing_mode: row.billing_mode || 'token',
     inbound_endpoint: nullableText(row.inbound_endpoint),
     upstream_endpoint: nullableText(row.upstream_endpoint),
