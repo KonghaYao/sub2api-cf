@@ -195,4 +195,4 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 
 对照原版 channel_monitor_checker.go 的 bodyMergeKeyDenyList，修复 Worker 的 merge 模板可以覆盖模型名及检测输入、把错误模型的探测结果归到配置模型的问题。OpenAI Chat 保护 model/messages/stream，Responses 保护 model/instructions/input/stream，Anthropic 保护 model/messages，Gemini 保护 contents，其他 Chat 提供方沿用 Chat 规则。其余参数继续浅合并，replace 模式保持独立能力。
 
-新增 Chat/Responses HTTP 接口回归先复现实际发出 wrong-model，再通过修复；扩展 Anthropic/Gemini 覆盖。渠道监控、v2监控、账号探测、分组模型目录四文件46项通过；包含主分支既有分组模型候选修复。部署状态待核验。此次不宣称完成监控全量对齐：随机算术验证、45秒超时及多模型租约预算、慢响应降级、ping仍需继续修复；也不把监控测试作为生产 Composer 推理证据。
+新增 Chat/Responses HTTP 接口回归先复现实际发出 wrong-model，再通过修复；扩展 Anthropic/Gemini 覆盖。渠道监控、v2监控、账号探测、分组模型目录四文件46项通过；包含主分支既有分组模型候选修复。提交 `1df173bed` 已推送 origin/main 并部署 0.45.20；Worker version `326dbe35-b556-4337-a3ad-21cf4cc9098d`，线上 health 确认 status=ok、version=0.45.20。此次不宣称完成监控全量对齐：随机算术验证、45秒超时及多模型租约预算、慢响应降级、ping仍需继续修复；也不把监控测试作为生产 Composer 推理证据。
