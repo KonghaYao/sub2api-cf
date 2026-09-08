@@ -216,4 +216,4 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 
 对照原版 gateway_upstream_response.go parseSSEUsagePatch/mergeSSEUsagePatch/reconcileCachedTokens，修复 message_delta 的零值会清空已知 input/output/cache-read/cache-write 正数计数的问题；仅 message_start/message_delta 更新对应usage。Kimi cached_tokens 在标准 cache_read_input_tokens 缺失/零值时补入标准字段，标准正数优先，同步JSON和SSE都把补正字段返回客户端并用于结算。保留原始cached_tokens字段，不伪造命中。
 
-接口回归先复现零delta、别名及组合3种失败，再修复；额外检查正数标准字段优先于冲突别名。完整网关57文件874项通过，typecheck通过。原生workerd/D1/DO专项3项通过，包含原有Chat JSON→SSE缓存链路和新Anthropic同步/流式实际入口：ordinary8+write5+read3=totalinput16，output2，后台total18，客户端cache_read字段3，投影缓存读3写5，一次结算20micros且预留归零。该费用是测试配置下既有价格引擎结果，不能据此宣称5m/1h缓存写入独立定价已完成；后者及生产真实命中率仍待验证。部署结果待确认。
+接口回归先复现零delta、别名及组合3种失败，再修复；额外检查正数标准字段优先于冲突别名。完整网关57文件874项通过，typecheck通过。原生workerd/D1/DO专项3项通过，包含原有Chat JSON→SSE缓存链路和新Anthropic同步/流式实际入口：ordinary8+write5+read3=totalinput16，output2，后台total18，客户端cache_read字段3，投影缓存读3写5，一次结算20micros且预留归零。该费用是测试配置下既有价格引擎结果，不能据此宣称5m/1h缓存写入独立定价已完成；后者及生产真实命中率仍待验证。代码 `96735e89f` 已推送origin/main并部署0.45.23，Worker version `30470424-5994-49f0-8ebd-26eb5d1d9910`，生产health确认status=ok/version=0.45.23。
