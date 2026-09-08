@@ -848,8 +848,6 @@ export interface GroupModelConfig {
   public_name: string
   upstream_name: string
   endpoint: string
-  image_generation?: boolean
-  global_model_enabled?: boolean
   enabled: boolean
   catalog_visible: boolean
   sort_order: number
@@ -859,13 +857,8 @@ export interface GroupModelConfig {
 }
 
 export interface GroupModelCandidate {
-  model_id: string
+  id: string
   public_name: string
-  upstream_name: string
-  platform: string
-  endpoint: string
-  embeddings: boolean
-  image_generation: boolean
 }
 
 export interface UpdateGroupModelConfig {
@@ -888,26 +881,47 @@ export interface GroupModelPrice {
 
 export type PublishGroupModelPriceInput = Omit<GroupModelPrice, 'id' | 'version' | 'active'>
 
-export async function listGroupModelCandidates(groupId: string | number): Promise<GroupModelCandidate[]> {
-  const { data } = await apiClient.get<{ models: GroupModelCandidate[] }>(
-    `/admin/groups/${groupId}/group-model-candidates`
+export async function listGroupModelCandidates(
+  groupId: string | number,
+  linkedModelIds: ReadonlySet<string>
+): Promise<GroupModelCandidate[]> {
+  const [candidateNames, firstCatalogPage] = await Promise.all([
+    getModelsListCandidates(groupId),
+    apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }>; pages: number }>(
+      '/admin/models',
+      { params: { page: 1, page_size: 100 } }
+    )
+  ])
+  const remainingPages = await Promise.all(
+    Array.from({ length: Math.max(0, firstCatalogPage.data.pages - 1) }, (_, index) =>
+      apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }> }>(
+        '/admin/models',
+        { params: { page: index + 2, page_size: 100 } }
+      )
+    )
   )
-  return (data.models || []).map((model) => ({ ...model, model_id: String(model.model_id) }))
+  const catalogModels = [
+    ...(firstCatalogPage.data.items || []),
+    ...remainingPages.flatMap((response) => response.data.items || [])
+  ]
+  const names = new Set(candidateNames)
+  return catalogModels
+    .filter((model) => model.enabled && names.has(model.public_name) && !linkedModelIds.has(String(model.id)))
+    .map((model) => ({ id: String(model.id), public_name: model.public_name }))
 }
 
 export async function createGroupModel(
   groupId: string | number,
-  model: GroupModelCandidate,
-  current?: GroupModelConfig
+  model: GroupModelCandidate
 ): Promise<GroupModelConfig> {
   const { data } = await apiClient.put<GroupModelConfig>(
-    `/admin/groups/${groupId}/models/${model.model_id}`,
+    `/admin/groups/${groupId}/models/${model.id}`,
     {
       enabled: true,
-      catalog_visible: current?.catalog_visible ?? true,
-      max_output_tokens: current?.max_output_tokens ?? 65_536,
-      default_max_output_tokens: current?.default_max_output_tokens ?? 32_768,
-      expected_control_version: current?.control_version ?? 0
+      catalog_visible: true,
+      max_output_tokens: 65_536,
+      default_max_output_tokens: 32_768,
+      expected_control_version: 0
     },
     { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-put') } }
   )
@@ -943,20 +957,6 @@ export async function updateGroupModel(
   return adaptGroupModel(data)
 }
 
-export async function disableGroupModel(
-  groupId: string | number,
-  model: GroupModelConfig
-): Promise<GroupModelConfig> {
-  const { data } = await apiClient.delete<GroupModelConfig>(
-    `/admin/groups/${groupId}/models/${model.model_id}`,
-    {
-      data: { expected_control_version: model.control_version },
-      headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-disable') }
-    }
-  )
-  return adaptGroupModel(data)
-}
-
 export interface GroupModelDiagnosis {
   routable: boolean
   blockers: string[]
@@ -964,10 +964,6 @@ export interface GroupModelDiagnosis {
     group_enabled: number
     model_enabled: number
     group_model_enabled: number
-    catalog_mode: string
-    catalog_visible: number
-    group_platform: string
-    model_platform: string
     active_price: number
     group_accounts: number
     capable_accounts: number
@@ -1025,7 +1021,6 @@ export const groupsAPI = {
   listGroupModelCandidates,
   createGroupModel,
   updateGroupModel,
-  disableGroupModel,
   diagnoseGroupModel,
   listGroupModelPrices,
   publishGroupModelPrice

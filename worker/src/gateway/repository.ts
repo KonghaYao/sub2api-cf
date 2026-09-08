@@ -4,7 +4,7 @@ import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from './acc
 import { accountQuotaExceeded } from './account-quota-policy'
 import { accountNotExpiredSql } from './account-expiry'
 import { accountGroupPrivacyAllowedSql } from './account-group-policy'
-import { accountModelPolicy, accountModelAllowedSql, modelCapabilityCompatibleSql } from './account-model-policy'
+import { accountModelPolicy, accountModelAllowedSql } from './account-model-policy'
 import { effectiveProviderAccount } from '../control/provider-runtime'
 import { normalizeSecuritySettings, securityDefaults } from '../control/gateway-security-settings'
 import type { Env } from '../env'
@@ -454,7 +454,17 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
              AND ${accountModelAllowedSql()}
              AND (m.platform = g.platform OR g.platform = 'composite')
              AND (json_extract(a.ui_config_json, '$.original_model_routing') = 1 OR
-               ${modelCapabilityCompatibleSql()}
+               (m.endpoint = 'chat_completions' AND (
+                 am.chat_completions = 1 OR
+                 (a.platform IN ('openai', 'codex', 'grok', 'antigravity') AND am.responses = 1)
+               )) OR
+               (m.endpoint = 'responses' AND (
+                 am.responses = 1 OR
+                 (a.platform IN ('openai', 'grok', 'antigravity') AND am.chat_completions = 1)
+               )) OR
+               (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
+               (m.embeddings = 1 AND am.embeddings = 1) OR
+               (m.image_generation = 1 AND am.image_generation = 1)
              )
         )
       ORDER BY gm.sort_order ASC, m.public_name ASC`,
