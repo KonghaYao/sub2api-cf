@@ -1,3 +1,4 @@
+import { normalizeResponsesToolArguments } from './tool-arguments'
 type JsonObject = Record<string, unknown>
 
 export class ResponsesToChatError extends Error {
@@ -192,7 +193,7 @@ export function responsesToChatCompletionsResponse(
   publicModel: string,
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): ChatCompletionResponse {
-  const root = objectAt(value, 'response')
+  const root = objectAt(normalizeResponsesToolArguments(value), 'response')
   if (root.status !== 'completed' && root.status !== 'incomplete') {
     const failure = responsesFailureDetails(root)
     throw new ResponsesToChatError(failure.message, failure.code)
@@ -293,7 +294,7 @@ export class ResponsesToChatCompletionsEventCodec {
 
   push(value: unknown): ChatCompletionChunk[] {
     if (this.finalized) return []
-    const event = objectAt(value, 'event')
+    const event = objectAt(normalizeResponsesToolArguments(value), 'event')
     const type = requiredString(event.type, 'event.type')
     if (type === 'response.created') {
       this.observeResponse(event.response)
@@ -593,7 +594,7 @@ export class BufferedResponsesToChatCompletions {
     } catch {
       throw new ResponsesToChatError('Upstream returned an invalid Responses SSE event')
     }
-    const event = objectAt(parsed, 'event')
+    const event = objectAt(normalizeResponsesToolArguments(parsed, eventName), 'event')
     if (typeof event.type !== 'string' && eventName !== undefined) event.type = eventName
     this.processEvent(event)
   }

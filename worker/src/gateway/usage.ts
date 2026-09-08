@@ -1,3 +1,4 @@
+import { normalizeResponsesToolArguments } from './protocols/tool-arguments'
 import { GatewayError } from './errors'
 import {
   isResponsesFailedTerminal,
@@ -273,7 +274,7 @@ export class SseEventTransformer {
       this.sawChatDone = true
     } else if (data !== '') {
       try {
-        const parsed: unknown = JSON.parse(data)
+        const parsed: unknown = normalizeResponsesToolArguments(JSON.parse(data), eventName)
         this.observeResponseModel(extractTrustedResponseModel(parsed))
         const usage = extractUsage(parsed)
         if (usage !== null) this.latestUsage = usage

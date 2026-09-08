@@ -1,3 +1,4 @@
+import { toolRoundtrip } from './test/e2e/fixtures/tool-roundtrip.js'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
 import { defineConfig } from 'vitest/config'
 import { emailDeliveryFixture } from './test/e2e/fixtures/email-delivery.js'
@@ -24,6 +25,10 @@ export default defineConfig(async () => {
               url.origin !== 'https://upstream-fallback.e2e.invalid'
             ) {
               return Response.json({ error: 'unexpected outbound request' }, { status: 502 })
+            }
+            if (request.method === 'POST' && ['/v1/responses', '/v1/chat/completions'].includes(url.pathname)) {
+              const roundtrip = await toolRoundtrip(request)
+              if (roundtrip) return roundtrip
             }
             if (url.pathname.startsWith('/v1internal:')) {
               const body = await request.json() as any

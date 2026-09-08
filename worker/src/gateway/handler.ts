@@ -1,3 +1,4 @@
+import { normalizeResponsesToolArguments } from './protocols/tool-arguments'
 import { fetchWithHeaderTimeout, responseHeaderTimeout } from './upstream-timeout'
 import { resolveAccountRequestAuthentication } from '../control/account-request-authentication'
 import { inspectAgentTaskResponse } from './agent-task-response'
@@ -2167,6 +2168,7 @@ async function createSynchronousResponse(
       failure.upstreamDiagnostic = await captureUpstreamDiagnostic(new Response(bytes.buffer as ArrayBuffer), '')
       throw failure
     }
+    if (input.upstreamEndpoint === 'responses') parsed = normalizeResponsesToolArguments(parsed)
     const usage = extractProviderUsage(parsed, input.providerPlatform) ??
       (input.providerPlatform==='antigravity' && !geminiHasOutput(parsed) ? {input_tokens:0,output_tokens:0,cache_read_tokens:0,estimated:false} : null) ??
       estimatedUsage(input.inputBytes, input.endpoint === 'embeddings' ? 0 : bytes.byteLength)
