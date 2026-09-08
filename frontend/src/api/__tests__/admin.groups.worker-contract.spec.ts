@@ -29,10 +29,16 @@ describe('admin groups Cloudflare Worker contract', () => {
       .mockResolvedValueOnce({
         data: {
           items: [
-            { id: 'model-existing', public_name: 'gpt-existing', platform: 'openai', enabled: true },
-            { id: 'model-image', public_name: 'gpt-image-2', platform: 'openai', enabled: true }
+            { id: 'model-existing', public_name: 'gpt-existing', platform: 'openai', enabled: true }
           ],
-          pages: 1
+          pages: 2
+        }
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [
+            { id: 'model-image', public_name: 'gpt-image-2', platform: 'openai', enabled: true }
+          ]
         }
       })
     put.mockResolvedValueOnce({
@@ -46,6 +52,8 @@ describe('admin groups Cloudflare Worker contract', () => {
     const { listGroupModelCandidates, createGroupModel } = await import('@/api/admin/groups')
 
     const candidates = await listGroupModelCandidates('group-1', new Set(['model-existing']))
+    expect(get).toHaveBeenNthCalledWith(2, '/admin/models', { params: { page: 1, page_size: 100 } })
+    expect(get).toHaveBeenNthCalledWith(3, '/admin/models', { params: { page: 2, page_size: 100 } })
     expect(candidates).toEqual([{ id: 'model-image', public_name: 'gpt-image-2' }])
 
     await createGroupModel('group-1', candidates[0])

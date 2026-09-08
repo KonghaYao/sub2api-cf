@@ -885,15 +885,27 @@ export async function listGroupModelCandidates(
   groupId: string | number,
   linkedModelIds: ReadonlySet<string>
 ): Promise<GroupModelCandidate[]> {
-  const [candidateNames, catalogResponse] = await Promise.all([
+  const [candidateNames, firstCatalogPage] = await Promise.all([
     getModelsListCandidates(groupId),
     apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }>; pages: number }>(
       '/admin/models',
-      { params: { page: 1, page_size: 1000 } }
+      { params: { page: 1, page_size: 100 } }
     )
   ])
+  const remainingPages = await Promise.all(
+    Array.from({ length: Math.max(0, firstCatalogPage.data.pages - 1) }, (_, index) =>
+      apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }> }>(
+        '/admin/models',
+        { params: { page: index + 2, page_size: 100 } }
+      )
+    )
+  )
+  const catalogModels = [
+    ...(firstCatalogPage.data.items || []),
+    ...remainingPages.flatMap((response) => response.data.items || [])
+  ]
   const names = new Set(candidateNames)
-  return (catalogResponse.data.items || [])
+  return catalogModels
     .filter((model) => model.enabled && names.has(model.public_name) && !linkedModelIds.has(String(model.id)))
     .map((model) => ({ id: String(model.id), public_name: model.public_name }))
 }
