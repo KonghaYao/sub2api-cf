@@ -114,3 +114,34 @@ it('closes the Chat diagnostic after completion even if upstream cancellation st
  const response=accountTextDiagnostic({} as Env,account,{api_key:'private-key'},'composer-2.5',null,new AbortController().signal,{responses:false})
  expect(events(await response.text()).at(-1)).toMatchObject({type:'test_complete',success:true})
 }, 1000)
+
+it.each([false, true])('accepts complete JSON diagnostic replies while preserving modal events (responses=%s)', async responses => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json(responses
+    ? { object: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'JSON OK' }] }] }
+    : { object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'JSON OK' }, finish_reason: 'stop' }] })))
+  const result = accountTextDiagnostic({} as Env, account, { api_key: 'private-key' }, 'selected-model', null,
+    new AbortController().signal, { responses })
+  expect(events(await result.text())).toEqual([{ type: 'test_start', model: 'selected-model' },
+    { type: 'content', text: 'JSON OK' }, { type: 'test_complete', success: true }])
+})
+
+it.each([
+  { error: { message: 'private error' }, choices: [{ message: { role: 'assistant', content: 'partial' }, finish_reason: 'stop' }] },
+  { choices: [] }, { choices: [{ message: null }] }, { choices: [{ message: 'wrong' }] },
+])('rejects invalid or failed JSON Chat diagnostic: %j', async body => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json(body)))
+  const result = accountTextDiagnostic({} as Env, account, { api_key: 'private-key' }, 'selected-model', null,
+    new AbortController().signal, { responses: false })
+  const text = await result.text()
+  expect(events(text).at(-1)).toMatchObject({ type: 'test_complete', success: false })
+  expect(text).not.toContain('private error')
+})
+
+it.each([true, false])('rejects a completed Responses envelope containing an error (JSON=%s)', async json => {
+  const body = { object: 'response', status: 'completed', error: { message: 'private error' }, output: [] }
+  vi.stubGlobal('fetch', vi.fn(async () => json ? Response.json(body) : new Response(
+    'data: ' + JSON.stringify({ type: 'response.completed', response: body }) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })))
+  const text = await run().text()
+  expect(events(text).at(-1)).toMatchObject({ type: 'test_complete', success: false })
+  expect(text).not.toContain('private error')
+})

@@ -65,6 +65,8 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
             void response.body?.cancel().catch(() => undefined)
             throw new Error(`Upstream diagnostic returned HTTP ${response.status}`)
           }
+          const textJson = !anthropic && !gemini && !openaiImage &&
+            /(?:application\/json|\+json)(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')
           reader = response.body.getReader()
           const decoder = new TextDecoder()
           let buffer = '', completed = false, sawText = false, bytes = 0, seenFinish = false
@@ -97,7 +99,7 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
             }
             if (event.type === 'response.completed') {
               const result = event.response as Record<string, unknown> | undefined
-              if (!result || result.status !== 'completed') throw new Error('Invalid diagnostic completion')
+              if (!result || result.status !== 'completed' || result.error) throw new Error('Invalid diagnostic completion')
               if (!sawText && Array.isArray(result.output)) for (const item of result.output) {
                 if (Array.isArray(item?.content)) for (const part of item.content) {
                   if (part?.type === 'output_text' && typeof part.text === 'string') emit({ type: 'content', text: part.text })
@@ -112,7 +114,7 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
             if (next.done) break
             bytes += next.value.byteLength
             if (bytes > (gemini || openaiImage ? 16 : 4) * 1024 * 1024) throw new Error('Diagnostic response exceeded its limit')
-            if (imageJson) { buffer += decoder.decode(next.value, { stream: true }); continue }
+            if (imageJson || textJson) { buffer += decoder.decode(next.value, { stream: true }); continue }
             buffer = (buffer + decoder.decode(next.value, { stream: true })).replace(/\r\n/g, '\n')
             let end: number
             while ((end = buffer.indexOf('\n\n')) >= 0) {
@@ -123,9 +125,24 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
           }
           // Compatible Chat relays may close after the final data line without
           // an extra blank separator. Process the residual frame before judging EOF.
-          if (!imageJson && !completed) {
+          if (!imageJson && !textJson && !completed) {
             buffer += decoder.decode()
             if (buffer.trim()) acceptFrame(buffer)
+          }
+          if (textJson) {
+            const result = JSON.parse(buffer + decoder.decode()) as Record<string, unknown> | null
+            if (!result || Array.isArray(result) || result.error) throw new Error('Upstream diagnostic failed')
+            if (responses) {
+              if (!Array.isArray(result.output)) throw new Error('Upstream diagnostic returned invalid JSON completion')
+              accept(JSON.stringify({ type: 'response.completed', response: result }))
+            } else {
+              if (!Array.isArray(result.choices) || result.choices.length === 0 || result.choices.some(choice =>
+                !choice?.message || typeof choice.message !== 'object' || Array.isArray(choice.message))) {
+                throw new Error('Upstream diagnostic returned invalid JSON completion')
+              }
+              accept(JSON.stringify(result))
+              completed = true
+            }
           }
           if (imageJson) {
             acceptOpenAIImageDiagnosticResult(JSON.parse(buffer + decoder.decode()), emit)

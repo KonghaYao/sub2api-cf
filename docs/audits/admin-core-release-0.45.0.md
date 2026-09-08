@@ -120,3 +120,12 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 - Worker 投影 input_tokens 已包含缓存读取量。管理端、用户端、Key 信息、账号用量统一在原版前端契约中返回未缓存输入，汇总总量不重复加缓存；保留存储与计费语义，无历史账单重写。历史缺失的缓存量不会被凭空恢复。
 
 新增真实 SSE 客户端解析 + D1 + 余额账本 + 管理仪表盘原生测试：输入 100，缓存 80，输出 2；客户端 cached_tokens=80，后台未缓存输入=20、总量=102，账本仅扣 88 micros 一次，预留归零。网关、用户统计、管理统计、观测等 76 文件/1001 项通过，类型检查通过。最终全量原生 33 文件/95 项通过；收尾补充 DONE 尾帧不重复发送回归，网关/用量 182 项复测通过，类型检查通过。提交 `55114edc6` 已推送 origin/main 并部署 0.45.12，Worker version `4db124ca-2ae2-465e-987f-80078e399e5c`；线上 `/health` 重试后确认 status=ok、version=0.45.12。尚未使用生产 Key 完成真实 Composer 上游推理复测，不将原生 fixture 验证表述为生产上游成功。
+
+
+## 0.45.13：管理端诊断与实际 Chat 转发结果一致
+
+承接 0.45.12 JSON-only Chat 上游支持，修复管理端账号测试仍只按 SSE 读取导致的假失败。明确声明 JSON 的 OpenAI Chat/Responses 响应在既有大小限制和超时内读取，验证完成结构后发出原版 `test_start/content/test_complete` 事件；保留 SSE、代理、认证及原始前端能力。
+
+同步拒绝 `response.completed` 内的错误体，防止 SSE 上游 HTTP 200 被诊断为成功。自动探测同样拒绝错误对象和 failed/cancelled/incomplete 状态，避免部分文本覆盖故障事实或误解除告警。
+
+诊断新增回归先复现 3 项失败（两种 JSON 正常响应与 SSE 完成包夹带错误）；自动 Chat 探测先复现 HTTP 200 错误体/failed 状态两项误判。修复后 5 文件/83 项通过，类型检查通过；Cloudflare 原生 3 文件/7 项通过，包含真实管理员会话的账号测试、Chat EOF 和 provider 请求构建。部署结果待追加。

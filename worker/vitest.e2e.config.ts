@@ -105,8 +105,8 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
-              if (body.model === 'chat-json-cache-fixture') {
-                if (body.stream !== true || (body.stream_options as any)?.include_usage !== true) return Response.json({ error: 'stream flag missing' }, { status: 422 })
+              if (body.model === 'chat-json-cache-fixture' || body.model === 'chat-json-diagnostic-fixture') {
+                if (body.stream !== true || (body.model === 'chat-json-cache-fixture' && (body.stream_options as any)?.include_usage !== true)) return Response.json({ error: 'stream flag missing' }, { status: 422 })
                 return Response.json({ id: 'json-cache', object: 'chat.completion', model: body.model, created: 123,
                   choices: [{ index: 0, message: { role: 'assistant', content: 'Cache and streaming OK' }, finish_reason: 'stop' }],
                   usage: { prompt_tokens: 100, completion_tokens: 2, cache_read_input_tokens: 80 } })

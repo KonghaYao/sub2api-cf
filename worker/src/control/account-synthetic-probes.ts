@@ -750,6 +750,10 @@ export function validProviderResponse(
 ): boolean {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const body = value as Record<string, unknown>
+  // Compatible providers can return partial output alongside an HTTP 200 error.
+  // Such replies must not resolve the account's probe failure alert.
+  if (objectRecord(body.error) !== null || body.type === 'error' ||
+      ['failed', 'cancelled', 'canceled', 'incomplete'].includes(String(body.status))) return false
   if (capability === 'embeddings') {
     if (platform === 'gemini' || platform === 'antigravity') {
       return hasFiniteEmbeddingValue(objectRecord(body.embedding)?.values)

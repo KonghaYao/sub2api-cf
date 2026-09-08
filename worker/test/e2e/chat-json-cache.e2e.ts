@@ -43,6 +43,16 @@ it('serves a JSON-only Chat upstream as SSE with consistent cached usage, billin
   expect(dashboard.status).toBe(200)
   expect((await dashboard.json() as any).data.trend[0]).toMatchObject({ input_tokens: 20, cache_read_tokens: 80, total_tokens: 102 })
   const state = await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
+  await env.DB.prepare('UPDATE accounts SET ui_config_json=? WHERE id=?').bind(
+    JSON.stringify({ extra: { openai_responses_mode: 'force_chat_completions' } }), f.account_id).run()
+  const diagnostic = await exports.default.fetch(new Request(`https://worker.e2e.invalid/api/v1/admin/accounts/${f.account_id}/test`, {
+    method: 'POST', headers: { authorization: 'Bearer ' + f.admin_session, 'content-type': 'application/json' },
+    body: JSON.stringify({ model_id: 'chat-json-diagnostic-fixture', prompt: 'Hi' }),
+  }))
+  expect(diagnostic.status).toBe(200)
+  const diagnosticEvents = (await diagnostic.text()).trim().split('\n\n').map(frame => JSON.parse(frame.slice(6)))
+  expect(diagnosticEvents).toContainEqual({ type: 'content', text: 'Cache and streaming OK' })
+  expect(diagnosticEvents.at(-1)).toMatchObject({ type: 'test_complete', success: true })
   expect(state.profile.reserved_micros).toBe(0)
   expect(state.ledger.filter((row: any) => row.amount_delta_micros < 0)).toHaveLength(1)
   expect(state.ledger.find((row: any) => row.amount_delta_micros < 0).amount_delta_micros).toBe(-88)

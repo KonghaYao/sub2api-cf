@@ -243,12 +243,13 @@ describe('account model synthetic probes', () => {
     } finally { test.raw.close() }
   })
 
-  it('treats an empty successful upstream response as a failed probe', async () => {
+  it.each([null, { error: { message: 'private error' }, choices: [{ message: { content: 'partial' } }] },
+    { status: 'failed', choices: [{ message: { content: 'partial' } }] }])('rejects empty or failed HTTP 200 probe bodies: %j', async body => {
     const test = await fixture()
     try {
-      await seedTarget(test)
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })))
-      await post(test, [target()], 'invalid-upstream-response')
+      await seedTarget(test, 'one', 'chat_completions')
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(body === null ? new Response(null, { status: 200 }) : Response.json(body)))
+      await post(test, [target('one', 'chat_completions')], 'invalid-upstream-response')
       await consumeAccountSyntheticProbe(
         test.queue.messages.at(-1) as AccountSyntheticProbeEvent, test.env, NOW + 1,
       )
