@@ -128,4 +128,4 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 
 同步拒绝 `response.completed` 内的错误体，防止 SSE 上游 HTTP 200 被诊断为成功。自动探测同样拒绝错误对象和 failed/cancelled/incomplete 状态，避免部分文本覆盖故障事实或误解除告警。
 
-诊断新增回归先复现 3 项失败（两种 JSON 正常响应与 SSE 完成包夹带错误）；自动 Chat 探测先复现 HTTP 200 错误体/failed 状态两项误判。修复后 5 文件/83 项通过，类型检查通过；Cloudflare 原生 3 文件/7 项通过，包含真实管理员会话的账号测试、Chat EOF 和 provider 请求构建。部署结果待追加。
+诊断新增回归先复现 3 项失败（两种 JSON 正常响应与 SSE 完成包夹带错误）；自动 Chat 探测先复现 HTTP 200 错误体/failed 状态两项误判。修复后 5 文件/83 项通过，类型检查通过；Cloudflare 原生 3 文件/7 项通过，包含真实管理员会话的账号测试、Chat EOF 和 provider 请求构建。提交 `76751881d` 已推送 origin/main 并部署 0.45.13，Worker version `4fc72c49-bbe7-4397-bd16-110e7e03a955`；线上 `/health` 确认 status=ok、version=0.45.13。生产 Composer 实际推理仍需可用的生产测试 Key 验证。
