@@ -385,9 +385,11 @@ function customerCacheWritePricing(plan: FrozenPricingPlan, interval: FrozenPric
   return {
     standard: componentPrice(interval?.cache_write_micros_per_million, interval?.cache_write_multiplier_ppm,
       plan.cache_write_micros_per_million ?? null, base.input_micros_per_million),
-    hour: interval?.cache_write_1h_micros_per_million == null && plan.cache_write_1h_micros_per_million == null ? null
-      : componentPrice(interval?.cache_write_1h_micros_per_million, interval?.cache_write_multiplier_ppm,
-        plan.cache_write_1h_micros_per_million ?? null, base.input_micros_per_million),
+    // Original intervalToModelPricing: an explicit standard write override also
+    // overrides the 1h tier unless this interval supplies its own 1h price.
+    hour: interval?.cache_write_1h_micros_per_million == null && interval?.cache_write_micros_per_million == null && plan.cache_write_1h_micros_per_million == null ? null
+      : componentPrice(interval?.cache_write_1h_micros_per_million ?? interval?.cache_write_micros_per_million,
+        interval?.cache_write_multiplier_ppm, plan.cache_write_1h_micros_per_million ?? null, base.input_micros_per_million),
   }
 }
 

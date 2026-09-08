@@ -51,6 +51,22 @@ const plan: FrozenPricingPlan = {
 }
 
 describe('customer pricing', () => {
+  it.each([0, 4_000_000])('uses an interval write override for both TTLs, including zero (%s)', rate => {
+    const prices = { ...plan, time_pricing: null, per_request_micros: 0,
+      cache_write_micros_per_million: 7_000_000, cache_write_1h_micros_per_million: 11_000_000,
+      intervals: [{ ...plan.intervals[0], min_tokens: 0, cache_write_micros_per_million: rate,
+        cache_write_multiplier_ppm: 2_000_000 }] }
+    const usage = { input_tokens: 5, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 5,
+      cache_write_5m_tokens: 2, cache_write_1h_tokens: 3, estimated: false }
+    const quote = quoteCustomerCost(prices, { ...base, rate_multiplier_ppm: 1_000_000 }, usage, { pricing_at_ms: 0 })
+    expect(quote.cost.cache_write_amount_micros).toBe(rate === 0 ? 0 : 20)
+    expect(quote.cost.input_amount_micros).toBe(0)
+    expect(quote.snapshot.cache_write_pricing?.hour).toEqual({ rate, interval_multiplier_ppm: 1_000_000 })
+    const separateHour = quoteCustomerCost({ ...prices, intervals: [{ ...prices.intervals[0], cache_write_1h_micros_per_million: 3_000_000 }] },
+      { ...base, rate_multiplier_ppm: 1_000_000 }, usage, { pricing_at_ms: 0 })
+    expect(separateHour.cost.cache_write_amount_micros).toBe(rate === 0 ? 9 : 17)
+  })
+
   it('bills configured cache creation once, separately from normal input and reads', () => {
     const prices = { ...plan, intervals: [], time_pricing: null, per_request_micros: 0,
       cache_write_micros_per_million: 7_000_000, cache_write_1h_micros_per_million: 11_000_000 }
