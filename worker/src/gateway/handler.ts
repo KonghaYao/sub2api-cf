@@ -3417,13 +3417,14 @@ async function settleAndProject(
       amount_micros: 0,
     }
     : customerQuote?.cost ?? calculateCost(input.model, usage, input.serviceTier)
-  const standardCost = zeroCost
-    ? 0
+  const standardCostBasis = zeroCost
+    ? cost
     : calculateCost(
         { ...input.model, rate_multiplier_ppm: 1_000_000 },
         usage,
         input.serviceTier,
-      ).amount_micros
+      )
+  const standardCost = standardCostBasis.amount_micros
   const accountCost = await resolveAccountCostSnapshot(input.env, {
     accountId: input.accountId,
     groupId: input.principal.group_id,
@@ -3476,9 +3477,9 @@ async function settleAndProject(
     inbound_endpoint: input.inboundEndpointPath,
     upstream_endpoint: input.upstreamEndpointPath,
     billing_mode: pricingPlan?.billing_model ?? 'token',
-    customer_pricing_snapshot_json: customerQuote === null
-      ? null
-      : serializeCustomerPricingSnapshot(customerQuote.snapshot),
+    customer_pricing_snapshot_json: serializeCustomerPricingSnapshot(customerQuote === null
+      ? { version: 1, source: 'catalog', customer_rate_multiplier_ppm: input.model.rate_multiplier_ppm, basis_cost: standardCostBasis }
+      : { ...customerQuote.snapshot, ...(zeroCost ? { basis_cost: standardCostBasis } : {}) }),
     native_compaction_v2: input.nativeCompactionV2,
     duration_ms: Math.max(0, Date.now() - input.startedAt),
     estimated: usage.estimated,

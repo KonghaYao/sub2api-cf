@@ -70,6 +70,23 @@ describe('user usage HTTP contract',()=>{
   expect((await read('/api/v1/usage/dashboard/trend')).trend[0]).toMatchObject({input_tokens:10,cache_creation_tokens:10,total_tokens:102})
   expect((await read('/api/v1/user/api-keys/alice-key/usage/daily?days=1')).items[0]).toMatchObject({input_tokens:10,cache_write_tokens:10,total_tokens:102})
  })
+ it('shows the recorded billing basis while preserving the actual debit',async()=>{
+  const t=await fixture(),app=createApp()
+  const snapshot={version:1,source:'channel',customer_rate_multiplier_ppm:1500000,basis_cost:{input_amount_micros:400000,output_amount_micros:300000,cache_amount_micros:100000,cache_write_amount_micros:200000,base_amount_micros:0,amount_micros:1000000}}
+  await t.env.DB.prepare("INSERT INTO usage_projection(event_id,request_id,user_id,api_key_id,model,input_tokens,output_tokens,amount_micros,occurred_at_ms,projected_at_ms,customer_pricing_snapshot_json) SELECT 'basis-event','basis-request',user_id,api_key_id,model,input_tokens,output_tokens,amount_micros,occurred_at_ms,projected_at_ms,? FROM usage_projection WHERE event_id=?").bind(JSON.stringify(snapshot),'alice-event').run()
+  const response=await app.request('/api/v1/usage/basis-event',{headers:t.headers},t.env)
+  expect(response.status).toBe(200)
+  expect((await response.json() as any).data).toMatchObject({input_cost:0.4,output_cost:0.3,cache_read_cost:0.1,cache_creation_cost:0.2,total_cost:1,actual_cost:1.5,rate_multiplier:1.5})
+  for(const path of ['/api/v1/usage/stats','/api/v1/usage/dashboard/stats']) {
+    const result=await app.request(path,{headers:t.headers},t.env)
+    expect(result.status).toBe(200)
+    expect((await result.json() as any).data).toMatchObject({total_cost:2.5,total_actual_cost:3})
+  }
+  const models=await app.request('/api/v1/usage/dashboard/models',{headers:t.headers},t.env)
+  expect(models.status).toBe(200)
+  expect((await models.json() as any).data.models[0]).toMatchObject({cost:2.5,actual_cost:3})
+
+ })
  it('isolates logs/details and converts micros for dashboard aggregates',async()=>{const t=await fixture(),app=createApp(); const list=await app.request('/api/v1/usage?page=1&page_size=20&model=gpt-test',{headers:t.headers},t.env); expect((await list.json() as any).data).toMatchObject({total:1,items:[{id:'alice-event',actual_cost:1.5,input_tokens:10}]}); expect((await app.request('/api/v1/usage/bob-event',{headers:t.headers},t.env)).status).toBe(404); const stats=await app.request('/api/v1/usage/dashboard/stats',{headers:t.headers},t.env); await expect(stats.json()).resolves.toMatchObject({data:{total_requests:1,total_actual_cost:1.5,total_tokens:15,total_api_keys:1}}); expect((await app.request('/api/v1/usage/stats?period=quarter',{headers:t.headers},t.env)).status).toBe(400) })
  it('returns UTC snapshot flags, owner-scoped key data, and disabled error visibility by default',async()=>{const t=await fixture(),app=createApp(); await expect((await app.request('/api/v1/usage/dashboard/trend?start_date=2026-09-04&end_date=2026-09-04',{headers:t.headers},t.env)).json()).resolves.toMatchObject({data:{granularity:'day',trend:[{date:'2026-09-04',actual_cost:1.5}]}}); await expect((await app.request('/api/v1/usage/dashboard/models',{headers:t.headers},t.env)).json()).resolves.toMatchObject({data:{models:[{model:'gpt-test',actual_cost:1.5}]}}); const snapshot=await app.request('/api/v1/usage/dashboard/snapshot-v2?include_trend=false&include_model_stats=true&include_group_stats=true',{headers:t.headers},t.env); const snapshotJson=await snapshot.json() as any; expect(snapshotJson.data).toMatchObject({models:[{model:'gpt-test'}],groups:[{group_id:'group-a'}]}); expect(snapshotJson.data).not.toHaveProperty('trend'); const daily=await app.request('/api/v1/user/api-keys/alice-key/usage/daily?days=1',{headers:t.headers},t.env); await expect(daily.json()).resolves.toMatchObject({data:{days:1,items:[{actual_cost:1.5}]}}); expect((await app.request('/api/v1/user/api-keys/bob-key/usage/daily',{headers:t.headers},t.env)).status).toBe(404); const batch=await app.request('/api/v1/usage/dashboard/api-keys-usage',{method:'POST',headers:{...t.headers,'content-type':'application/json'},body:JSON.stringify({api_key_ids:['alice-key']})},t.env); await expect(batch.json()).resolves.toMatchObject({data:{stats:{'alice-key':{total_actual_cost:1.5}}}}); await expect((await app.request('/api/v1/usage/errors',{headers:t.headers},t.env)).json()).resolves.toMatchObject({code:'user_error_requests_disabled',data:null}) })
  it('offers stable bounded cursor pagination and rejects unbounded legacy pages',async()=>{

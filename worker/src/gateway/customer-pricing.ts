@@ -106,6 +106,7 @@ export interface CustomerTokenPricingSnapshot {
   service_tier_multiplier_ppm: number
   time_multiplier_ppm: number
   customer_rate_multiplier_ppm: number
+  basis_cost?: CostBreakdown
   selected_interval: FrozenPricingInterval | null
   effective_pricing: EffectiveCustomerPricing
   cache_write_pricing?: CustomerCacheWritePricing
@@ -124,6 +125,7 @@ export interface CustomerImagePricingSnapshot {
   billing_model: 'image'
   pricing_at_ms: number
   customer_rate_multiplier_ppm: number
+  basis_cost?: CostBreakdown
   tier_prices_micros: Record<CustomerImageTier, number>
   output_tier_counts: Record<CustomerImageTier, number>
 }
@@ -206,6 +208,7 @@ export function quoteCustomerImageCost(
       customer_rate_multiplier_ppm: customerRateMultiplierPpm,
       tier_prices_micros: prices,
       output_tier_counts: counts,
+      basis_cost: { input_amount_micros: 0, output_amount_micros: 0, cache_amount_micros: 0, base_amount_micros: basisAmount, amount_micros: basisAmount },
     },
   }
 }
@@ -336,6 +339,7 @@ export function quoteCustomerCost(
       service_tier_multiplier_ppm: serviceMultiplier,
       time_multiplier_ppm: timeMultiplier,
       customer_rate_multiplier_ppm: customerMultiplier,
+      basis_cost: { input_amount_micros: inputBasis, output_amount_micros: outputBasis, cache_amount_micros: cacheBasis, cache_write_amount_micros: cacheWriteBasis, base_amount_micros: baseBasis, amount_micros: basisAmount },
       selected_interval: interval === null ? null : { ...interval },
       effective_pricing: pricing,
       ...(writePricing === null ? {} : { cache_write_pricing: writePricing }),
@@ -367,7 +371,7 @@ export function quoteCustomerReservation(
 }
 
 /** Produces a D1-safe value for usage_projection.customer_pricing_snapshot_json. */
-export function serializeCustomerPricingSnapshot(snapshot: CustomerPricingSnapshot): string {
+export function serializeCustomerPricingSnapshot(snapshot: CustomerPricingSnapshot | { version: 1; source: 'catalog'; customer_rate_multiplier_ppm: number; basis_cost: CostBreakdown }): string {
   const value = JSON.stringify(snapshot)
   if (new TextEncoder().encode(value).byteLength > SNAPSHOT_MAX_BYTES) invalidPricing()
   return value

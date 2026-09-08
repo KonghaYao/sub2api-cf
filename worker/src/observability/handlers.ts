@@ -1,3 +1,4 @@
+import { usageCostDisplay, usageBasisAmountSql } from '../gateway/usage-cost-display'
 import type { Context } from 'hono'
 import { authenticateUserRequest } from '../auth/handler'
 import { authenticateAdminSession } from '../control/admin-auth'
@@ -119,14 +120,14 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
       context.env.DB.prepare(`SELECT COUNT(*) total_requests,
         COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
         COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens,
-        COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
+        COALESCE(SUM(${usageBasisAmountSql('COALESCE(standard_cost_micros,amount_micros)')}),0) standard_micros,
         COALESCE(SUM(amount_micros),0) amount_micros,
         COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros,
         CAST(ROUND(AVG(duration_ms)) AS INTEGER) average_duration_ms
         FROM usage_projection u ${where}`).bind(...values),
       context.env.DB.prepare(`SELECT inbound_endpoint endpoint,COUNT(*) requests,
         COALESCE(SUM(input_tokens+output_tokens),0) tokens,
-        COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
+        COALESCE(SUM(${usageBasisAmountSql('COALESCE(standard_cost_micros,amount_micros)')}),0) standard_micros,
         COALESCE(SUM(amount_micros),0) amount_micros
         FROM usage_projection u ${where}${where === '' ? 'WHERE' : ' AND'} inbound_endpoint <> ''
         GROUP BY inbound_endpoint ORDER BY amount_micros DESC,inbound_endpoint ASC LIMIT 100`).bind(...values),
@@ -177,7 +178,7 @@ export async function getAdminUsageModels(context: Context<Bindings>): Promise<R
       COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
       COALESCE(SUM(cache_write_tokens),0) cache_creation_tokens,COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens,
       COALESCE(SUM(input_tokens+output_tokens),0) total_tokens,
-      COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
+      COALESCE(SUM(${usageBasisAmountSql('COALESCE(standard_cost_micros,amount_micros)')}),0) standard_micros,
       COALESCE(SUM(amount_micros),0) amount_micros,
       COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros
       FROM usage_projection u ${where}
@@ -414,7 +415,7 @@ async function listFor(
 const ADMIN_USAGE_COLUMNS = `u.event_id,u.request_id,u.user_id,u.api_key_id,u.account_id,
   COALESCE(u.requested_model,u.model) model,u.upstream_model,u.group_id,u.subscription_id,
   u.input_tokens,u.output_tokens,u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,u.input_amount_micros,u.output_amount_micros,
-  u.cache_amount_micros,u.cache_write_amount_micros,u.base_amount_micros,u.amount_micros,u.billing_type,u.outcome,u.stream,
+  u.cache_amount_micros,u.cache_write_amount_micros,u.customer_pricing_snapshot_json,u.base_amount_micros,u.amount_micros,u.billing_type,u.outcome,u.stream,
   u.duration_ms,u.occurred_at_ms,u.platform,u.request_type,u.inbound_endpoint,u.upstream_endpoint,
   u.billing_mode,u.native_compaction_v2,u.dimensions_version,u.image_count,u.image_size,
   u.image_input_size,u.image_output_size,u.image_size_source,u.image_size_breakdown,
@@ -578,6 +579,7 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     total_cost: standardMicros / 1_000_000,
     actual_cost: amountMicros / 1_000_000,
     rate_multiplier: standardMicros === 0 ? 1 : amountMicros / standardMicros,
+    ...usageCostDisplay(row.customer_pricing_snapshot_json),
     account_rate_multiplier: row.account_rate_multiplier_ppm == null ? null : safeInteger(row.account_rate_multiplier_ppm) / 1_000_000,
     account_stats_cost: row.account_stats_cost_micros == null ? null : usdValue(row.account_stats_cost_micros),
     long_context_billing_applied: false,

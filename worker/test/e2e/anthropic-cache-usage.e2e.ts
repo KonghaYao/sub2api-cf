@@ -16,6 +16,7 @@ it.each([[false,false,false],[true,false,false],[false,true,false],[true,true,fa
     expect([200,201],await res.clone().text()).toContain(res.status);return(await res.json() as any).data
   }
   const group=await admin('/groups',{name:crypto.randomUUID(),platform:'anthropic'})
+  await env.DB.prepare('UPDATE "groups" SET rate_multiplier_ppm=2000000 WHERE id=?').bind(group.id).run()
   const route=await admin('/models',{public_name:model,upstream_name:'anthropic-cache-alias-fixture',platform:'anthropic',endpoint:'responses'})
   await admin(`/groups/${group.id}/models/${route.id}`,{expected_control_version:0},'PUT')
   await admin(`/groups/${group.id}/models/${route.id}/prices`,{expected_control_version:0,input_micros_per_million:1000000,output_micros_per_million:2000000,cache_read_micros_per_million:1000000,per_request_micros:0,minimum_reservation_micros:100})
@@ -42,10 +43,10 @@ it.each([[false,false,false],[true,false,false],[false,true,false],[true,true,fa
   expect(await env.DB.prepare('SELECT account_stats_cost_micros,account_cost_micros FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({account_stats_cost_micros:65,account_cost_micros:65})
   expect(await env.DB.prepare('SELECT cache_write_5m_tokens,cache_write_1h_tokens FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({cache_write_5m_tokens:2,cache_write_1h_tokens:3})
   const state=await(await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
-  expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(freeInterval ? 15 : priced ? 62 : 20)
+  expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(freeInterval ? 30 : priced ? 124 : 40)
   const detail=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage?page=1&user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
-  expect(detail.status).toBe(200);expect((await detail.json() as any).data.items[0]).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3,cache_creation_cost:priced && !freeInterval ? 47 / 1_000_000 : 0})
+  expect(detail.status).toBe(200);expect((await detail.json() as any).data.items[0]).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3,cache_creation_cost:priced && !freeInterval ? 47 / 1_000_000 : 0,total_cost:(freeInterval ? 15 : priced ? 62 : 20)/1_000_000,actual_cost:(freeInterval ? 30 : priced ? 124 : 40)/1_000_000,rate_multiplier:2})
   const dashboard=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage/stats?user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
   expect(dashboard.status).toBe(200)
-  expect((await dashboard.json() as any).data).toMatchObject({total_input_tokens:8,total_cache_creation_tokens:5,total_cache_read_tokens:3,total_tokens:18})
+  expect((await dashboard.json() as any).data).toMatchObject({total_input_tokens:8,total_cache_creation_tokens:5,total_cache_read_tokens:3,total_tokens:18,total_cost:(freeInterval ? 15 : priced ? 62 : 20)/1_000_000,total_actual_cost:(freeInterval ? 30 : priced ? 124 : 40)/1_000_000})
 })
