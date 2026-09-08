@@ -1,3 +1,4 @@
+import { encryptCredential } from '../../src/gateway/crypto'
 import { claimAccountOAuthRefresh } from '../../src/control/account-oauth-refresh-lock'
 import { renewDueAccountTokens } from '../../src/control/account-token-renewal'
 import { dispatchAccountInitializations, consumeAccountInitialization, isAccountInitializationEvent } from '../../src/control/account-initialization'
@@ -32,7 +33,8 @@ import {
 import type { Env } from '../../src/env'
 import { decryptCredential } from '../../src/gateway/crypto'
 import { credentialAad, getAccountCredential } from '../../src/gateway/repository'
-import type { ProviderPlatform } from '../../src/gateway/providers'
+import type { ProviderPlatform as AllProviderPlatforms } from '../../src/gateway/providers'
+type ProviderPlatform = Exclude<AllProviderPlatforms, 'antigravity'>
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const MASTER_KEY = 'm'.repeat(32)
@@ -107,6 +109,7 @@ const providerInputs = {
     auth_scheme: 'x-goog-api-key',
     base_url: 'https://generativelanguage.test',
   },
+  grok: { protocol:'openai', auth_scheme:'bearer', base_url:'https://grok.provider.test/v1' },
   codex: {
     protocol: 'codex',
     auth_scheme: 'bearer',
@@ -571,10 +574,10 @@ describe('admin provider account control plane on D1', () => {
     const test = fixture()
     try {
       const account = await createProvider(test, 'openai')
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('manual-proxy','Manual','https','proxy.test',443,'active','','',1,1)")
-      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','manual-proxy') WHERE id=?").run(account.id)
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11001,'Manual',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'manual-proxy-key','','',1,1)")
+      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',11001) WHERE id=?").run(account.id)
       if (outcome !== 'proxy_failure') vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async (_env,id,url,init) => {
-        expect(id).toBe('manual-proxy')
+        expect(id).toBe('11001')
         expect(url.pathname).toBe('/v1/models')
         expect(new Headers(init.headers).get('authorization')).toBe('Bearer openai-secret-value')
         if (outcome === 'changed') test.raw.prepare('UPDATE accounts SET config_version=config_version+1 WHERE id=?').run(account.id)
@@ -591,12 +594,14 @@ describe('admin provider account control plane on D1', () => {
     } finally { test.raw.close() }
   })
 
-  it.each([{ base_url: 'https://new-relay.example.test/v1' }, { api_key: 'replacement-key' }, { proxy_id: 'replacement-proxy' }])(
+  it.each([{ base_url: 'https://new-relay.example.test/v1' }, { api_key: 'replacement-key' }, { proxy_id: 11002 }])(
     'clears the old upstream billing observation when identity changes: %j', async patch => {
       const test = fixture()
       try {
         const account = await createProvider(test, 'openai')
-        test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('replacement-proxy','Replacement','http','proxy.test',8080,'active','','',1,1)")
+        test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11002,'Replacement',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'replacement-proxy-key','','',1,1)")
+        const proxySecret = await encryptCredential({ api_key: JSON.stringify({ schema_version: 1, password: '' }) }, MASTER_KEY, 'proxy:v1:replacement-proxy-key')
+        test.raw.prepare('UPDATE proxies SET nonce_b64=?,ciphertext_b64=? WHERE id=11002').run(proxySecret.nonce_b64,proxySecret.ciphertext_b64)
         test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.extra',json(?)) WHERE id=?")
           .run(JSON.stringify({ upstream_billing_probe: { status: 'ok' }, upstream_billing_probe_enabled: true, keep: 'safe' }),account.id)
         const response = await test.app.request(`/accounts/${account.id}`, {
@@ -622,7 +627,7 @@ describe('admin provider account control plane on D1', () => {
   })
 
   it('migrates existing refresh cooldowns without clearing them and rejects stale claims without mutation', async () => {
-    const test = fixture(93)
+    const test = fixture(110)
     try {
       const created = await test.app.request('/accounts', { method: 'POST',
         headers: { 'content-type': 'application/json', 'idempotency-key': 'migration-refresh' },
@@ -633,7 +638,7 @@ describe('admin provider account control plane on D1', () => {
       const until = Date.now()+300000
       test.raw.prepare('INSERT INTO account_oauth_refresh_state(account_id,next_attempt_at_ms,last_attempt_at_ms,last_error_code) VALUES (?,?,?,?)')
         .run(account.id,until,123,'oauth_refresh_rejected')
-      applyMigrations(test.raw,94)
+      applyMigrations(test.raw,111)
       const state = () => test.raw.prepare('SELECT * FROM account_oauth_refresh_state WHERE account_id=?').get(account.id)
       const before = state()
       expect(before).toMatchObject({ next_attempt_at_ms: until, last_attempt_at_ms: 123, last_error_code: 'oauth_refresh_rejected',
@@ -754,8 +759,8 @@ describe('admin provider account control plane on D1', () => {
       expect(created.status).toBe(201)
       const account = (await created.json() as any).data
       if (scenario === 'proxy') {
-        test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('bad-claude-proxy','Refresh','https','proxy.test',443,'active','','',1,1)")
-        test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','bad-claude-proxy') WHERE id=?").run(account.id)
+        test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11003,'Refresh',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'bad-claude-proxy-key','','',1,1)")
+        test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',11003) WHERE id=?").run(account.id)
       }
       const state = () => ({ account: test.raw.prepare('SELECT * FROM accounts WHERE id=?').get(account.id),
         secret: test.raw.prepare('SELECT * FROM account_secrets WHERE account_id=?').get(account.id) })
@@ -827,8 +832,8 @@ describe('admin provider account control plane on D1', () => {
       }, test.env)
       expect(created.status).toBe(201)
       const account = (await created.json() as any).data
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('bad-refresh-proxy','Refresh','https','proxy.test',443,'active','','',1,1)")
-      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','bad-refresh-proxy') WHERE id=?").run(account.id)
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11004,'Refresh',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'bad-refresh-proxy-key','','',1,1)")
+      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',11004) WHERE id=?").run(account.id)
       const state = () => ({ account: test.raw.prepare('SELECT * FROM accounts WHERE id=?').get(account.id),
         secret: test.raw.prepare('SELECT * FROM account_secrets WHERE account_id=?').get(account.id) })
       const before = state()
@@ -848,25 +853,25 @@ describe('admin provider account control plane on D1', () => {
     const test = fixture()
     try {
       const account = await createProvider(test, 'openai')
-      for (const id of ['origin-proxy', 'current-proxy']) test.raw.prepare(`INSERT INTO proxies
-        (id,name,protocol,host,port,status,expires_at,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms)
-        VALUES (?,?,'socks5h','proxy.test',1080,'active',1900000000,'private-nonce','private-ciphertext',1,1)`).run(id, id)
-      test.raw.prepare(`UPDATE accounts SET ui_config_json=json_set(ui_config_json, '$.proxy_id', 'current-proxy',
-        '$.proxy_fallback_origin_id', 'origin-proxy') WHERE id=?`).run(account.id)
+      for (const [id,name] of [[12001,'origin-proxy'], [12002,'current-proxy']] as const) test.raw.prepare(`INSERT INTO proxies
+        (id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms)
+        VALUES (?,?,json_object('protocol','socks5h','host','proxy.test','port',1080,'status','active','expires_at',1900000000),?,'private-nonce','private-ciphertext',1,1)`).run(id, name, name+'-key')
+      test.raw.prepare(`UPDATE accounts SET ui_config_json=json_set(ui_config_json, '$.proxy_id', 12002,
+        '$.proxy_fallback_origin_id', 12001) WHERE id=?`).run(account.id)
       for (const path of [`/accounts/${account.id}`, '/accounts']) {
         const response = await test.app.request(path, {}, test.env)
         expect(response.status).toBe(200)
         const payload = await response.json() as any
         const value = path === '/accounts' ? payload.data.items[0] : payload.data
         expect(value).toMatchObject({ proxy_fallback_origin_name: 'origin-proxy', proxy: {
-          id: 'current-proxy', name: 'current-proxy', protocol: 'socks5h', host: 'proxy.test', port: 1080,
+          id: 12002, name: 'current-proxy', protocol: 'socks5h', host: 'proxy.test', port: 1080,
           expires_at: new Date(1900000000000).toISOString(),
         } })
         expect(JSON.stringify(value)).not.toContain('private-nonce')
         expect(JSON.stringify(value)).not.toContain('private-ciphertext')
         expect(value.proxy).not.toHaveProperty('password')
       }
-      test.raw.prepare("UPDATE proxies SET name='Renamed' WHERE id='current-proxy'").run()
+      test.raw.prepare("UPDATE proxies SET name='Renamed' WHERE id=12002").run()
       expect((await (await test.app.request(`/accounts/${account.id}`, {}, test.env)).json() as any).data.proxy.name).toBe('Renamed')
     } finally { test.raw.close() }
   })
@@ -959,6 +964,31 @@ describe('admin provider account control plane on D1', () => {
       expect(await resumed.json()).toMatchObject({ data: { enabled: false, status: 'inactive', schedulable: true, control_version: 3 } })
       expect(test.raw.prepare("SELECT json_extract(ui_config_json, '$.schedulable') AS schedulable FROM accounts WHERE id = ?").get(account.id)).toEqual({ schedulable: 1 })
     } finally { test.raw.close() }
+  })
+
+  it('pauses scheduling independently of enabled and preserves the control version', async () => {
+    const test = fixture(); const created = await createProvider(test, 'openai')
+    test.raw.exec(`INSERT INTO "groups"(id,name,platform,created_at_ms,updated_at_ms) VALUES('schedule-group','Scheduling','openai',1,1);
+      INSERT INTO models(id,platform,public_name,upstream_name,endpoint,created_at_ms,updated_at_ms) VALUES('schedule-model','openai','gpt-test','gpt-test','both',1,1);`)
+    test.raw.prepare('INSERT INTO account_groups(account_id,group_id,created_at_ms,updated_at_ms) VALUES(?,?,1,1)').run(created.id,'schedule-group')
+    test.raw.prepare('INSERT INTO account_models(account_id,model_id,created_at_ms,updated_at_ms) VALUES(?,?,1,1)').run(created.id,'schedule-model')
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).resolves.toMatchObject({account_id:created.id})
+    const paused = await test.app.request(`/accounts/${created.id}`, {
+      method:'PUT', headers:{'content-type':'application/json','idempotency-key':'schedule-off','if-match':`"${created.control_version}"`},
+      body:JSON.stringify({schedulable:false}),
+    },test.env)
+    expect(paused.status).toBe(200)
+    expect(await paused.json()).toMatchObject({data:{enabled:true,schedulable:false,control_version:created.control_version+1}})
+    expect(test.raw.prepare('SELECT enabled FROM accounts WHERE id=?').get(created.id)).toEqual({enabled:1})
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).rejects.toMatchObject({code:'credential_unavailable'})
+    const resumed = await test.app.request(`/accounts/${created.id}`, {
+      method:'PUT', headers:{'content-type':'application/json','idempotency-key':'schedule-on','if-match':`"${created.control_version+1}"`},
+      body:JSON.stringify({schedulable:true}),
+    },test.env)
+    expect(resumed.status).toBe(200)
+    await expect(getAccountCredential(test.env,'schedule-group','schedule-model','chat_completions',created.id)).resolves.toMatchObject({account_id:created.id})
+    test.raw.close()
+
   })
 
   it('creates, reads and updates the persisted image adapter and credential kind', async () => {
@@ -1160,7 +1190,7 @@ describe('admin provider account control plane on D1', () => {
       data: { total: 1, items: [{ platform: 'anthropic' }] },
     })
     const all = await test.app.request('/accounts', {}, test.env)
-    await expect(all.json()).resolves.toMatchObject({ data: { total: 4 } })
+    await expect(all.json()).resolves.toMatchObject({ data: { total: Object.keys(providerInputs).length } })
     expect(created.find((account) => account.platform === 'codex')).toMatchObject({
       provider_config: { account_id: 'workspace_123' },
     })
@@ -1664,12 +1694,12 @@ describe('admin provider account control plane on D1', () => {
       expires_in: 3600,
     }), { status: 200, headers: { 'content-type': 'application/json' } }) })
     const proxy = vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async (_env, id, url, init) => {
-      expect(id).toBe('refresh-proxy')
+      expect(id).toBe('11005')
       return fetchMock(url.href, init)
     })
     if (useProxy) {
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('refresh-proxy','Refresh','http','proxy.test',8080,'active','','',1,1)")
-      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','refresh-proxy') WHERE id=?").run(account.id)
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11005,'Refresh',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'refresh-proxy-key','','',1,1)")
+      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',11005) WHERE id=?").run(account.id)
     }
     const direct = useProxy ? vi.fn(() => { throw new Error('Unexpected direct refresh') }) : fetchMock
     vi.stubGlobal('fetch', direct)
@@ -1896,8 +1926,8 @@ describe('admin provider account control plane on D1', () => {
     const id = (await created.json() as any).data.results[0].id
     expect(events).toHaveLength(1)
     if (scenario === 'proxy') {
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('probe-proxy','Probe','http','proxy.test',8080,'active','','',1,1)")
-      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','probe-proxy') WHERE id=?").run(id)
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11006,'Probe',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'probe-proxy-key','','',1,1)")
+      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',11006) WHERE id=?").run(id)
     }
     test.raw.prepare("UPDATE accounts SET health_status='unhealthy',last_health_error='preserve' WHERE id=?").run(id)
     const before = test.raw.prepare('SELECT * FROM account_secrets WHERE account_id=?').get(id)
@@ -1915,7 +1945,7 @@ describe('admin provider account control plane on D1', () => {
     })
     const direct = vi.fn((url: unknown, init: RequestInit) => upstream(url, init)); vi.stubGlobal('fetch', direct)
     if (scenario === 'proxy') vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async (_env, proxyId, url, init) => {
-      expect(proxyId).toBe('probe-proxy'); return upstream(url, init!)
+      expect(proxyId).toBe('11006'); return upstream(url, init!)
     })
     if (scenario === 'race') await expect(consumeAccountInitialization(test.env, events[0])).rejects.toMatchObject({ status: 412 })
     else await consumeAccountInitialization(test.env, events[0])
@@ -2142,8 +2172,8 @@ describe('admin provider account control plane on D1', () => {
     }, test.env)
     expect(created.status).toBe(201)
     const account = (await created.json() as any).data
-    if (scenario === 'proxy') test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('bound-proxy','Manual','http','proxy.test',8080,'active','','',1,1)")
-    if (scenario === 'proxy') test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json, '$.proxy_id', 'bound-proxy') WHERE id=?").run(account.id)
+    if (scenario === 'proxy') test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(11007,'Manual',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'bound-proxy-key','','',1,1)")
+    if (scenario === 'proxy') test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json, '$.proxy_id', 11007) WHERE id=?").run(account.id)
     test.raw.prepare("UPDATE accounts SET enabled=0, ui_config_json=json_set(ui_config_json,'$.schedulable',json('false')), health_status='unhealthy', last_health_error='keep health' WHERE id=?").run(account.id)
     const before = test.raw.prepare('SELECT * FROM accounts WHERE id=?').get(account.id)
     const secret = test.raw.prepare('SELECT * FROM account_secrets WHERE account_id=?').get(account.id)
@@ -2159,7 +2189,7 @@ describe('admin provider account control plane on D1', () => {
     const direct = vi.fn((url: string, init: RequestInit) => upstream(url, init))
     vi.stubGlobal('fetch', direct)
     if (scenario === 'proxy') vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async (_env, proxyId, url, init) => {
-      expect(proxyId).toBe('bound-proxy')
+      expect(proxyId).toBe('11007')
       return upstream(String(url), init!)
     })
     const response = await test.app.request(`/accounts/${account.id}/set-privacy`, { method: 'POST' }, test.env)
@@ -2394,4 +2424,21 @@ describe('admin provider account control plane on D1', () => {
       },
     })
   })
+})
+
+it('uses the saved Grok default endpoint for real health calls and preserves explicit endpoint overrides',async()=>{
+ const test=fixture()
+ const create=await test.app.request('/accounts',{method:'POST',headers:{'content-type':'application/json','idempotency-key':'grok-default'},body:JSON.stringify({name:'Grok default',platform:'grok',api_key:'grok-private-key',base_url:''})},test.env)
+ expect(create.status,await create.clone().text()).toBe(201);const account=(await create.json() as any).data
+ expect(account.provider_config).toMatchObject({use_default_base_url:true})
+ const upstream=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{expect(new Headers(init?.headers).get('authorization')).toBe('Bearer grok-private-key');return Response.json({data:[{id:'grok-4.6'}]})})
+ const probe=()=>test.app.request('/accounts/'+account.id+'/test',{method:'POST'},test.env)
+ test.raw.prepare("UPDATE system_settings SET gateway_json=? WHERE id='global'").run(JSON.stringify({grok_default_base_url_mode:'eu-west-1'}))
+ expect((await probe()).status).toBe(200);expect(String(upstream.mock.calls.at(-1)![0])).toBe('https://eu-west-1.api.x.ai/v1/models')
+ const version=test.raw.prepare('SELECT control_version FROM accounts WHERE id=?').get(account.id).control_version
+ const change=await test.app.request('/accounts/'+account.id,{method:'PUT',headers:{'content-type':'application/json','if-match':'"'+version+'"','idempotency-key':'grok-explicit'},body:JSON.stringify({base_url:'https://custom-grok.test/v1'})},test.env)
+ expect(change.status,await change.clone().text()).toBe(200)
+ test.raw.prepare("UPDATE system_settings SET gateway_json=? WHERE id='global'").run(JSON.stringify({grok_default_base_url_mode:'cli'}))
+ expect((await probe()).status).toBe(200);expect(String(upstream.mock.calls.at(-1)![0])).toBe('https://custom-grok.test/v1/models')
+ test.raw.close()
 })

@@ -6,6 +6,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, readonly } from 'vue'
 import { authAPI, isTotp2FARequired, passkeyAPI, type LoginResponse } from '@/api'
+import { getStoredAuthUserID } from '@/api/tokenRefresh'
 import type {
   User,
   LoginRequest,
@@ -440,8 +441,13 @@ export const useAuthStore = defineStore('auth', () => {
       throw new Error('Not authenticated')
     }
 
+    const requestedUserID = getStoredAuthUserID()
     try {
       const response = await authAPI.getCurrentUser()
+      if (!token.value || getStoredAuthUserID() !== requestedUserID ||
+          (requestedUserID !== null && String(response.data.id) !== requestedUserID)) {
+        throw { status: 401, code: 'AUTH_SESSION_CHANGED', message: 'Authentication session changed while loading the profile.' }
+      }
       if (response.data.run_mode) {
         runMode.value = response.data.run_mode
       }
@@ -454,7 +460,8 @@ export const useAuthStore = defineStore('auth', () => {
       return userData
     } catch (error) {
       // If refresh fails with 401, clear auth state
-      if ((error as { status?: number }).status === 401) {
+      const authError = error as { status?: number; code?: string }
+      if (authError.status === 401 && authError.code !== 'AUTH_SESSION_CHANGED') {
         clearAuth({ preservePendingAuthSession: pendingAuthSession.value !== null })
       }
       throw error

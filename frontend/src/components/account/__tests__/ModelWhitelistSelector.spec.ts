@@ -24,7 +24,7 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => (key === 'common.copy' ? '复制' : key)
+      t: (key: string, params?: { message?: string }) => (key === 'common.copy' ? '复制' : params?.message ? `${key}: ${params.message}` : key)
     })
   }
 })
@@ -89,6 +89,15 @@ describe('ModelWhitelistSelector', () => {
     showWarning.mockReset()
     syncUpstreamModels.mockReset()
     syncUpstreamModelsPreview.mockReset()
+  })
+
+  it('shows the structured API error message returned by the interceptor', async () => {
+    syncUpstreamModels.mockRejectedValue({ status: 502, message: 'Upstream model sync returned HTTP 401' })
+    const wrapper = mountSelector({ accountId: 42 })
+    const button = wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsError: Upstream model sync returned HTTP 401')
   })
 
   it('copies a model ID without selecting the model', async () => {

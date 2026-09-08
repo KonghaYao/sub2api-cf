@@ -4,14 +4,14 @@ import { GatewayError } from '../gateway/errors'
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 
 export async function readJsonObject(
-  request: Request,
+  request: Pick<Request, 'headers' | 'body'>,
   maximumBytes = MAX_JSON_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   return parseJsonObject(await readBoundedText(request, maximumBytes))
 }
 
 export async function readOptionalJsonObject(
-  request: Request,
+  request: Pick<Request, 'headers' | 'body'>,
   maximumBytes = MAX_JSON_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   const text = await readBoundedText(request, maximumBytes)
@@ -29,7 +29,7 @@ function parseJsonObject(text: string): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-async function readBoundedText(request: Request, maximumBytes: number): Promise<string> {
+async function readBoundedText(request: Pick<Request, 'headers' | 'body'>, maximumBytes: number): Promise<string> {
   const declaredLength = request.headers.get('content-length')
   if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > maximumBytes) {
     throw requestTooLarge(maximumBytes)
@@ -145,7 +145,7 @@ export function optionalNullableString(
 }
 
 export function requireExpectedControlVersion(
-  request: Request,
+  request: Pick<Request, 'headers' | 'body'>,
   body: Record<string, unknown>,
 ): number {
   const bodyValue = optionalSafeInteger(body, 'expected_control_version')

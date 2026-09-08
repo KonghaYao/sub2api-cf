@@ -89,6 +89,7 @@ describe('worker app', () => {
         oidc_oauth_enabled: false,
         oidc_oauth_provider_name: 'OIDC',
         payment_enabled: false,
+        risk_control_enabled: false,
       },
     })
   })
@@ -148,6 +149,7 @@ describe('worker app', () => {
         oidc_oauth_enabled: false,
         oidc_oauth_provider_name: 'OIDC',
         payment_enabled: false,
+        risk_control_enabled: false,
       },
     })
   })

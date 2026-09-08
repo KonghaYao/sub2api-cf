@@ -1,6 +1,7 @@
 import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
-import { fetchAccountProxy } from '../gateway/proxy-fetch'
 import { accountNotExpiredSql } from '../gateway/account-expiry'
+import { effectiveProviderAccount } from './provider-runtime'
+import { accountFetcher } from '../proxy/account-fetch'
 import type { Env, PlatformEvent } from '../env'
 import { decryptCredential, sha256Hex } from '../gateway/crypto'
 import {
@@ -84,7 +85,8 @@ interface ProbeJobRow {
 }
 
 interface ProbeAccountRow {
-  proxy_id: string | null
+  proxy_id?: number | null
+  credential_kind?: string
   id: string
   platform: ProviderPlatform
   protocol: ProviderProtocol
@@ -512,7 +514,7 @@ async function dispatchJob(env: Env, job: DispatchJobRow | ProbeJobRow, nowMs: n
 async function loadProbeAccount(env: Env, jobId: string, runToken: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT a.id, a.platform, a.protocol, a.auth_scheme, a.base_url,
-            a.provider_config_json, CAST(json_extract(a.ui_config_json, '$.proxy_id') AS TEXT) AS proxy_id, a.config_version, a.credential_ref,
+            a.provider_config_json, a.credential_kind, a.config_version, a.credential_ref, json_extract(a.ui_config_json, '$.proxy_id') AS proxy_id,
             a.health_probe_generation, a.consecutive_health_failures,
             secret.id AS secret_id, secret.key_version,
             secret.nonce_b64, secret.ciphertext_b64
@@ -538,13 +540,13 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
       credentialAad(env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
     )
     plan = buildProviderHealthRequest({
-      account: {
+      account: await effectiveProviderAccount(env, {
         platform: account.platform,
         protocol: account.protocol,
         auth_scheme: account.auth_scheme,
         base_url: account.base_url,
         provider_config: config,
-      },
+      }),
       credential,
     })
   } catch {
@@ -565,13 +567,12 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
     const init: RequestInit = {
       method: plan.method,
       headers: plan.headers,
+      body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual',
       cache: 'no-store',
       signal: controller.signal,
     }
-    const response = account.proxy_id && account.proxy_id !== '0'
-      ? await fetchAccountProxy(env, account.proxy_id, new URL(plan.url), init, controller.signal)
-      : await fetch(plan.url, init)
+    const response = await accountFetcher(env, account.proxy_id, account)(plan.url, init)
     if (response.ok) healthStatus = 'healthy'
     else healthError = `Upstream returned HTTP ${response.status}`
     try {

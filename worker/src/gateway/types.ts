@@ -165,6 +165,8 @@ export interface ModelRoute {
 export interface AccountCandidate {
   upstream_endpoint?: GatewayEndpoint
   account_id: string
+  upstream_billing_probe_json?: string | null
+  billing_rate_multiplier_ppm?: number
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind
   platform: ProviderPlatform
@@ -189,7 +191,9 @@ export interface AccountCredential {
   runtime_snapshot?: { config_version: number; control_version: number; ui_config_json: string }
   anthropic_auth_scheme?: 'authorization_bearer'
   upstream_model_name?: string
-  proxy_id?: string
+  codex_cli_only?: number | boolean
+  codex_cli_only_allow_app_server?: number | boolean
+  proxy_id?: string | number | null
   account_id: string
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind

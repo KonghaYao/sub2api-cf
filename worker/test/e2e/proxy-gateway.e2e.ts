@@ -25,8 +25,8 @@ it('does not send a bound account directly when its proxy transport is unavailab
   // The ordinary outbound fixture succeeds. A proxy-bound request must instead
   // enter proxy transport and fail closed while nested TLS is unavailable.
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('nested-proxy','Nested TLS','https','proxy.invalid',443,'active','','',1,1)"),
-    env.DB.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','nested-proxy'),config_version=config_version+1 WHERE id=?").bind(data.account_id),
+    env.DB.prepare("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(10001,'Nested TLS',json_object('protocol','https','host','proxy.invalid','port',443,'status','active'),'nested-proxy','','',1,1)"),
+    env.DB.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',10001),config_version=config_version+1 WHERE id=?").bind(data.account_id),
   ])
   const bound = await request()
   expect(bound.status).toBeGreaterThanOrEqual(500)

@@ -224,6 +224,14 @@ describe('Worker-native TOTP HTTP contract', () => {
     },
   })
 
+  it('disables new TOTP setup through the saved feature flag', async () => {
+    const test = await fixture()
+    test.env.CONFIG_KV.get = (async () => ({ totp_enabled: false })) as unknown as KVNamespace['get']
+    expect((await data(await api(test, '/api/v1/user/totp/status', { user: 'alice' }))).feature_enabled).toBe(false)
+    const setup = await api(test, '/api/v1/user/totp/setup', { user: 'alice', body: { password: PASSWORD } })
+    expect(setup.status).toBe(403)
+  })
+
   it('completes setup, two-stage login, session-bound step-up, and disable', async () => {
     const test = await fixture()
     const initialStatus = await api(test, '/api/v1/user/totp/status', { user: 'alice' })
@@ -453,7 +461,10 @@ describe('Worker-native TOTP HTTP contract', () => {
     for (const message of failures) {
       test.env.DB = new Proxy(database, {
         get(target, property) {
-          if (property === 'batch') return async () => { throw new Error(message) }
+          if (property === 'batch') return async (statements: D1PreparedStatement[]) => {
+            if (statements.some(statement => (statement as unknown as { sql: string }).sql.includes('user_totp_recovery_code_sets'))) throw new Error(message)
+            return target.batch(statements)
+          }
           const value = Reflect.get(target, property, target)
           return typeof value === 'function' ? value.bind(target) : value
         },
@@ -468,8 +479,9 @@ describe('Worker-native TOTP HTTP contract', () => {
     test.env.DB = new Proxy(database, {
       get(target, property) {
         if (property === 'batch') {
-          return async () => {
-            throw new Error('UNIQUE constraint failed: user_totp_recovery_code_sets.user_id')
+          return async (statements: D1PreparedStatement[]) => {
+            if (statements.some(statement => (statement as unknown as { sql: string }).sql.includes('user_totp_recovery_code_sets'))) throw new Error('UNIQUE constraint failed: user_totp_recovery_code_sets.user_id')
+            return target.batch(statements)
           }
         }
         const value = Reflect.get(target, property, target)

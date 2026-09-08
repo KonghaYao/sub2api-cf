@@ -1117,6 +1117,7 @@
 </template>
 
 <script setup lang="ts">
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 	import { ref, reactive, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 	import { useI18n } from 'vue-i18n'
 	import { useAppStore } from '@/stores/app'
@@ -1724,15 +1725,22 @@ const handleSubmit = async () => {
   let expiresInDays: number | undefined
   let expiresAt: string | null | undefined
   if (formData.value.enable_expiration && formData.value.expiration_date) {
-    if (!showEditModal.value) {
-      // Create mode: calculate days from date
+    if (!showEditModal.value && isCloudflareWorkerContractActive()) {
+      // The Worker accepts an exact timestamp; do not extend it to a whole day.
+      expiresAt = new Date(formData.value.expiration_date).toISOString()
+    } else if (!showEditModal.value) {
+      // Legacy create mode accepts a number of days.
       const expDate = new Date(formData.value.expiration_date)
       const now = new Date()
       const diffDays = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
       expiresInDays = diffDays > 0 ? diffDays : 1
     } else {
-      // Edit mode: use custom date directly
-      expiresAt = new Date(formData.value.expiration_date).toISOString()
+      // Preserve an unchanged timestamp (including seconds) and allow unrelated
+      // edits after expiry. Sending its past value again is rejected by Worker.
+      const unchangedExpiry = isCloudflareWorkerContractActive()
+        && selectedKey.value?.expires_at
+        && formData.value.expiration_date === formatDateTimeLocal(selectedKey.value.expires_at)
+      if (!unchangedExpiry) expiresAt = new Date(formData.value.expiration_date).toISOString()
     }
   } else if (showEditModal.value) {
     // Edit mode: if expiration disabled or date cleared, send empty string to clear
@@ -1777,6 +1785,7 @@ const handleSubmit = async () => {
         quota,
         expiresInDays,
         rateLimitData,
+        ...(isCloudflareWorkerContractActive() && expiresAt ? [{ expiresAt }] : []),
       )
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded

@@ -1,3 +1,10 @@
+import { readWechatVariants, WECHAT_MODES, type WechatMode } from './wechat-variants'
+import { normalizeOAuthAdvanced, type DingTalkAdvancedSettings } from './oauth-advanced'
+import { verifyCaptcha } from './captcha'
+import type { CaptchaPublicSettings } from '../control/captcha-settings'
+import { hashPassword, validateNewPassword } from './password'
+import { prepareRegistrationEmailChallengeConsumption, requestPendingOAuthEmailVerification, isRegistrationEmailChallengeClaimFailure } from './email-challenges'
+import { checkRegistrationEmailPolicy, registrationDomainGuard, registrationDomainQuotaError, type RegistrationEmailPolicy } from './email-policy'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
 
@@ -79,6 +86,7 @@ export async function cleanupExpiredOAuthState(
            LIMIT ?
         )`,
     ).bind(now, batchSize).run()
+  await env.DB.prepare('DELETE FROM oauth_pending_registrations WHERE id IN (SELECT id FROM oauth_pending_registrations WHERE expires_at_ms <= ? ORDER BY expires_at_ms LIMIT ?)').bind(now, batchSize).run()
   return {
     flowsDeleted: flows.meta.changes,
     bindTicketsDeleted: bindTickets.meta.changes,
@@ -86,6 +94,7 @@ export async function cleanupExpiredOAuthState(
 }
 
 interface OAuthProviderRow {
+  advanced_json?: string
   provider: OAuthIdentityProvider
   adapter: OAuthAdapter
   enabled: number
@@ -106,6 +115,10 @@ interface OAuthProviderRow {
 }
 
 interface OAuthProviderConfig extends Omit<OAuthProviderRow, 'enabled' | 'scopes_json' | 'allowed_hosts_json' | 'pkce_enabled'> {
+  variantSecret?: string
+  variant?: WechatMode
+  requireUnionId?: boolean
+  advanced?: Record<string, unknown>
   scopes: string[]
   allowedHosts: Set<string>
   pkceEnabled: boolean
@@ -117,6 +130,7 @@ interface CreatedFlow {
 }
 
 interface ClaimedFlowRow {
+  provider_variant?: WechatMode
   id: string
   provider: OAuthIdentityProvider
   intent: 'login' | 'link'
@@ -137,6 +151,7 @@ interface ProviderToken {
   accessToken: string
   tokenType: string
   idToken: string | null
+  unionId?: string | null
   openId: string | null
 }
 
@@ -164,6 +179,9 @@ interface AuthIdentityRow {
 
 /** Mounts the complete identity surface without coupling it to the root app. */
 export function registerOAuthIdentityRoutes(app: Hono<OAuthBindings>): void {
+  app.post('/api/v1/auth/oauth/pending/exchange', pendingOAuthDetails)
+  app.post('/api/v1/auth/oauth/pending/send-verify-code', pendingOAuthSendCode)
+  app.post('/api/v1/auth/oauth/pending/create-account', pendingOAuthCreateAccount)
   app.post('/api/v1/auth/oauth/bind-token', prepareOAuthBindTicket)
   app.get('/api/v1/auth/oauth/:provider/bind/start', startOAuthLink)
   app.post('/api/v1/auth/oauth/:provider/bind/start', startOAuthLink)
@@ -177,7 +195,9 @@ export function registerOAuthIdentityRoutes(app: Hono<OAuthBindings>): void {
 
 async function startOAuthLogin(context: OAuthContext): Promise<Response> {
   try {
-    const config = await requireProvider(context.env, context.req.param('provider'))
+    const config = await selectWechatVariant(context.env, await requireProvider(context.env, context.req.param('provider')), context.req.query('mode'))
+    const captchaBody = context.req.method === 'POST' && context.req.raw.body !== null ? await readJsonObject(context.req.raw.clone() as unknown as Request) : {}
+    await verifyCaptcha(context.req.raw, context.env, await oauthRegistrationSettings(context.env), captchaBody)
     const redirectTo = safeRedirect(context.req.query('redirect'), '/dashboard')
     const flow = await createOAuthFlow(context, config, 'login', redirectTo, null)
     return oauthStartResponse(context, flow)
@@ -215,7 +235,7 @@ async function prepareOAuthBindTicket(context: OAuthContext): Promise<Response> 
 
 async function startOAuthLink(context: OAuthContext): Promise<Response> {
   try {
-    const config = await requireProvider(context.env, context.req.param('provider'))
+    const config = await selectWechatVariant(context.env, await requireProvider(context.env, context.req.param('provider')), context.req.query('mode'))
     const target = await claimBindTarget(context)
     const redirectTo = safeRedirect(context.req.query('redirect'), '/profile')
     const flow = await createOAuthFlow(context, config, 'link', redirectTo, target)
@@ -231,7 +251,7 @@ async function startOAuthLinkFromJson(context: OAuthContext): Promise<Response> 
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const body = await readJsonObject(context.req.raw)
-    const config = await requireProvider(context.env, body.provider)
+    const config = await selectWechatVariant(context.env, await requireProvider(context.env, body.provider), typeof body.mode === 'string' ? body.mode : undefined)
     const redirectTo = safeRedirect(
       typeof body.redirect_to === 'string' ? body.redirect_to : undefined,
       '/profile',
@@ -266,6 +286,7 @@ async function finishOAuthCallback(context: OAuthContext): Promise<Response> {
     const browserToken = readCookie(context.req.raw, BROWSER_COOKIE)
     if (browserToken === null) throw invalidState()
     const flow = await claimOAuthFlow(context.env, config.provider, state, browserToken)
+    config = await selectWechatVariant(context.env, config, flow.provider_variant)
     if (flow.intent === 'link') await requireLiveLinkTarget(context.env, flow)
 
     const providerError = context.req.query('error')?.trim()
@@ -526,6 +547,7 @@ async function createOAuthFlow(
     )
   }
 
+  if (config.provider === 'wechat') await context.env.DB.prepare('UPDATE oauth_flows SET provider_variant=? WHERE id=?').bind(config.variant ?? 'open',id).run()
   const authorize = new URL(config.authorization_endpoint)
   authorize.searchParams.set('response_type', 'code')
   if (config.adapter === 'wechat') authorize.searchParams.set('appid', config.client_id)
@@ -598,7 +620,7 @@ async function claimOAuthFlow(
         SET consumed_at_ms = ?
       WHERE provider = ? AND state_hash = ? AND browser_token_hash = ?
         AND consumed_at_ms IS NULL AND expires_at_ms > ?
-      RETURNING id, provider, intent, target_user_id, target_session_id,
+      RETURNING id, provider, provider_variant, intent, target_user_id, target_session_id,
                 target_auth_version, verifier_key_version, verifier_nonce_b64,
                 verifier_ciphertext_b64, nonce_hash, commercial_key_version,
                 commercial_nonce_b64, commercial_ciphertext_b64, redirect_to`,
@@ -717,13 +739,18 @@ async function exchangeCode(
     code,
     redirect_uri: redirectUri,
   })
-  if (clientSecret !== null) form.set('client_secret', clientSecret)
+  const authMethod = config.provider === 'oidc' ? config.advanced?.oidc_connect_token_auth_method ?? 'client_secret_post' : 'client_secret_post'
+  if (clientSecret !== null && authMethod === 'client_secret_post') form.set('client_secret', clientSecret)
+  const authorization = authMethod === 'client_secret_basic' && clientSecret !== null
+    ? `Basic ${btoa(`${encodeURIComponent(config.client_id)}:${encodeURIComponent(clientSecret)}`)}` : undefined
+  if (authMethod === 'client_secret_basic') form.delete('client_id')
   if (verifier !== null) form.set('code_verifier', verifier)
   const response = await providerFetch(env, config.token_endpoint, config, {
     method: 'POST',
     headers: {
       accept: 'application/json',
       'content-type': 'application/x-www-form-urlencoded',
+      ...(authorization ? { authorization } : {}),
     },
     body: form.toString(),
   })
@@ -740,6 +767,7 @@ function tokenFromPayload(parsed: Record<string, unknown>): ProviderToken {
     tokenType: optionalStringField(parsed, 'token_type', 'tokenType') ?? 'Bearer',
     idToken,
     openId: optionalStringField(parsed, 'openid', 'openId'),
+    unionId: optionalStringField(parsed, 'unionid', 'unionId'),
   }
 }
 
@@ -758,7 +786,7 @@ async function fetchProviderProfile(
       headers: { accept: 'application/json', 'x-acs-dingtalk-access-token': token.accessToken },
     })
     if (!response.ok) throw providerUnavailable('oauth_userinfo_failed')
-    return dingtalkProfile(config, await readProviderPayload(response))
+    return enrichDingTalkProfile(env, config, dingtalkProfile(config, await readProviderPayload(response)))
   }
   if (config.adapter === 'wechat') {
     if (token.openId === null) throw providerUnavailable('oauth_userinfo_invalid')
@@ -854,11 +882,13 @@ function dingtalkProfile(config: OAuthProviderConfig, user: Record<string, unkno
 }
 
 function wechatProfile(
-  _config: OAuthProviderConfig,
+  config: OAuthProviderConfig,
   token: ProviderToken,
   user: Record<string, unknown>,
 ): ProviderProfile {
-  const subject = stringField(user, 'unionid', 'unionId') || token.openId || stringField(user, 'openid')
+  const union = stringField(user, 'unionid', 'unionId') || token.unionId
+  if (config.requireUnionId && !union) throw providerUnavailable('wechat_unionid_required')
+  const subject = union || token.openId || stringField(user, 'openid')
   if (subject === '') throw providerUnavailable('oauth_userinfo_invalid')
   const displayName = optionalStringField(user, 'nickname') ?? ''
   return {
@@ -872,6 +902,7 @@ function wechatProfile(
       display_name: displayName,
       avatar_url: optionalStringField(user, 'headimgurl'),
       openid: token.openId,
+      has_unionid: !!union,
     },
   }
 }
@@ -882,11 +913,15 @@ async function fetchOidcProfile(
   token: ProviderToken,
   flow: ClaimedFlowRow,
 ): Promise<ProviderProfile> {
+  let claims: Record<string, unknown> = {}
+  if (config.advanced?.oidc_connect_validate_id_token !== false) {
   if (token.idToken === null || config.jwks_endpoint === null || flow.nonce_hash === null) {
     throw invalidOidcToken()
   }
   const parsed = parseJwt(token.idToken)
-  if (parsed.header.alg !== 'RS256' || typeof parsed.header.kid !== 'string' || parsed.header.kid === '') {
+  const alg = String(parsed.header.alg)
+  const algorithms = String(config.advanced?.oidc_connect_allowed_signing_algs ?? 'RS256,ES256,PS256').split(',')
+  if (!algorithms.includes(alg) || typeof parsed.header.kid !== 'string' || parsed.header.kid === '') {
     throw invalidOidcToken()
   }
   const jwksResponse = await providerFetch(env, config.jwks_endpoint, config, {
@@ -898,15 +933,18 @@ async function fetchOidcProfile(
   const jwk = jwks.keys
     .filter(isObject)
     .find((key) => key.kid === parsed.header.kid &&
-      (key.alg === undefined || key.alg === 'RS256') &&
+      (key.alg === undefined || key.alg === alg) &&
       (key.use === undefined || key.use === 'sig'))
-  if (jwk === undefined || jwk.kty !== 'RSA') throw invalidOidcToken()
+  if (jwk === undefined || jwk.kty !== (alg.startsWith('ES') ? 'EC' : 'RSA')) throw invalidOidcToken()
+  const bits = Number(alg.slice(2))
+  const keyAlgorithm = alg.startsWith('ES') ? { name: 'ECDSA', namedCurve: bits === 512 ? 'P-521' : `P-${bits}` } : { name: alg.startsWith('PS') ? 'RSA-PSS' : 'RSASSA-PKCS1-v1_5', hash: `SHA-${bits}` }
+  const verifyAlgorithm = alg.startsWith('ES') ? { name: 'ECDSA', hash: `SHA-${bits}` } : alg.startsWith('PS') ? { name: 'RSA-PSS', saltLength: bits / 8 } : { name: 'RSASSA-PKCS1-v1_5' }
   let publicKey: CryptoKey
   try {
     publicKey = await crypto.subtle.importKey(
       'jwk',
       jwk,
-      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      keyAlgorithm,
       false,
       ['verify'],
     )
@@ -914,14 +952,15 @@ async function fetchOidcProfile(
     throw invalidOidcToken()
   }
   const signatureValid = await crypto.subtle.verify(
-    'RSASSA-PKCS1-v1_5',
+    verifyAlgorithm,
     publicKey,
     parsed.signature as Uint8Array<ArrayBuffer>,
     new TextEncoder().encode(parsed.signingInput),
   ).catch(() => false)
   if (!signatureValid) throw invalidOidcToken()
 
-  const claims = parsed.payload
+  claims = parsed.payload
+  const skew = Number(config.advanced?.oidc_connect_clock_skew_seconds ?? 120)
   const nowSeconds = Math.floor(Date.now() / 1_000)
   const audience = claims.aud
   const audienceValid = audience === config.client_id ||
@@ -930,12 +969,14 @@ async function fetchOidcProfile(
     claims.azp === config.client_id
   if (
     claims.iss !== config.issuer || !audienceValid || !authorizedPartyValid ||
-    typeof claims.exp !== 'number' || !Number.isSafeInteger(claims.exp) || claims.exp <= nowSeconds ||
-    typeof claims.nbf === 'number' && claims.nbf > nowSeconds + 60 ||
-    typeof claims.iat === 'number' && claims.iat > nowSeconds + 60 ||
+    typeof claims.exp !== 'number' || !Number.isSafeInteger(claims.exp) || claims.exp <= nowSeconds - skew ||
+    typeof claims.nbf === 'number' && claims.nbf > nowSeconds + skew ||
+    typeof claims.iat === 'number' && claims.iat > nowSeconds + skew ||
     typeof claims.nonce !== 'string' || await sha256Hex(claims.nonce) !== flow.nonce_hash ||
     stringField(claims, 'sub') === ''
   ) throw invalidOidcToken()
+
+  }
 
   if (token.accessToken === '') throw providerUnavailable('oauth_userinfo_failed')
   const userResponse = await providerFetch(env, config.userinfo_endpoint, config, {
@@ -943,11 +984,13 @@ async function fetchOidcProfile(
   })
   if (!userResponse.ok) throw providerUnavailable('oauth_userinfo_failed')
   const userinfo = await readProviderPayload(userResponse)
-  const subject = stringField(claims, 'sub')
-  if (stringField(userinfo, 'sub') !== subject) throw invalidOidcToken()
+  const idPath = String(config.advanced?.oidc_connect_userinfo_id_path || 'sub')
+  const subject = oidcClaimString(userinfo, idPath)
+  if (!subject || (claims.sub !== undefined && (stringField(userinfo, 'sub') !== claims.sub || subject !== claims.sub))) throw invalidOidcToken()
   const merged = { ...claims, ...userinfo }
-  const email = optionalStringField(merged, 'email')
-  const displayName = optionalStringField(merged, 'name', 'preferred_username') ?? ''
+  const email = oidcClaimString(merged, String(config.advanced?.oidc_connect_userinfo_email_path || 'email')) || null
+  const displayName = oidcClaimString(merged, String(config.advanced?.oidc_connect_userinfo_username_path || 'name')) || optionalStringField(merged, 'preferred_username') || ''
+  if (config.advanced?.oidc_connect_require_email_verified === true && merged.email_verified !== true) throw new GatewayError(403, 'oidc_email_unverified', 'The identity provider must verify your email')
   return {
     subject,
     email: email === null ? null : normalizeEmail(email),
@@ -960,6 +1003,12 @@ async function fetchOidcProfile(
       avatar_url: optionalStringField(merged, 'picture'),
     },
   }
+}
+
+function oidcClaimString(source: Record<string, unknown>, path: string): string {
+  let value: unknown = source
+  for (const part of path.split('.')) value = isObject(value) && Object.hasOwn(value, part) ? value[part] : undefined
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 async function completeIdentityLogin(
@@ -997,6 +1046,8 @@ async function completeIdentityLogin(
     identity.id,
     user.id,
   ).run()
+  await syncDingTalkProfile(context.env, config, user.id, profile)
+  user = await findUser(context.env, user.id) ?? user
   const payload = await issueOAuthUserSession(
     context.env,
     user,
@@ -1011,15 +1062,18 @@ async function registerIdentityLogin(
   flow: ClaimedFlowRow,
   profile: ProviderProfile,
   providerKey: string,
+  completion?: { pendingId: string; email: string; password: string; verifyCode: unknown; commercialBody: Record<string, unknown> },
 ): Promise<Response> {
-  if (!profile.emailVerified || profile.email === null) {
-    throw new GatewayError(
-      409,
-      'oauth_registration_requires_verified_email',
-      'A verified provider email is required to create an account',
-    )
+  const registrationSettings = await oauthRegistrationSettings(context.env)
+  if (registrationSettings.registration_enabled !== true && !(config.provider === 'dingtalk' && config.advanced?.dingtalk_connect_bypass_registration === true && profile.metadata.internal_staff === true)) throw new GatewayError(403, 'registration_disabled', 'Registration is disabled', 'permission_error')
+  if (!completion && (registrationSettings.force_email_on_third_party_signup === true || registrationSettings.email_verification_enabled === true)) {
+    return createPendingOAuthRegistration(context, config, flow, profile, providerKey)
   }
-  const existingEmail = await findUserByEmail(context.env, profile.email)
+  if (completion) profile = { ...profile, email: completion.email, emailVerified: true }
+  const syntheticEmail = !profile.emailVerified || profile.email === null
+  if (syntheticEmail) profile = { ...profile, email: `${config.provider}-${(await sha256Hex(`${providerKey}:${profile.subject}`)).slice(0, 32)}@oauth.invalid`, emailVerified: false }
+  const email = profile.email!
+  const existingEmail = await findUserByEmail(context.env, email)
   if (existingEmail !== null) {
     throw new GatewayError(
       409,
@@ -1027,16 +1081,13 @@ async function registerIdentityLogin(
       'Sign in to the existing account before binding this identity',
     )
   }
-  if (!await oauthRegistrationEnabled(context.env)) {
-    throw new GatewayError(403, 'registration_disabled', 'Registration is disabled', 'permission_error')
-  }
-
+  const registrationDomain = syntheticEmail ? null : await checkRegistrationEmailPolicy(context.env, email, registrationSettings)
   const now = Date.now()
-  const commercialBody = await readFlowCommercialRegistration(context.env, flow)
+  const commercialBody = { ...await readFlowCommercialRegistration(context.env, flow), ...completion?.commercialBody }
   const user: UserRow = {
     id: crypto.randomUUID(),
-    email: profile.email,
-    display_name: (profile.displayName || profile.email.slice(0, profile.email.indexOf('@'))).slice(0, 128),
+    email,
+    display_name: (profile.displayName || email.slice(0, email.indexOf('@'))).slice(0, 128),
     role: 'user',
     status: 'active',
     balance_micros: 0,
@@ -1045,7 +1096,7 @@ async function registerIdentityLogin(
     state_version: 0,
     auth_version: 1,
     password_credential: null,
-    email_verified_at_ms: now,
+    email_verified_at_ms: profile.emailVerified ? now : null,
     password_changed_at_ms: null,
     last_login_at_ms: null,
     avatar_object_key: null,
@@ -1061,6 +1112,8 @@ async function registerIdentityLogin(
     now,
   )
   user.balance_micros = commercial.bonusMicros
+  const emailChallenge = completion ? await prepareRegistrationEmailChallengeConsumption(context.env, email, completion.verifyCode, user.id, now) : null
+  if (completion) { validateNewPassword(completion.password); user.password_credential = await hashPassword(completion.password); user.password_changed_at_ms = now }
   const prepared = await prepareOAuthUserSession(
     context.env,
     user,
@@ -1076,6 +1129,9 @@ async function registerIdentityLogin(
   )
   try {
     await context.env.DB.batch([
+      ...(completion ? [context.env.DB.prepare('UPDATE oauth_pending_registrations SET consumed = CASE WHEN consumed = 0 AND expires_at_ms > ? THEN 1 ELSE -1 END WHERE id = ?').bind(now, completion.pendingId)] : []),
+      ...(emailChallenge ? [emailChallenge.consumeStatement] : []),
+      ...registrationDomainGuard(context.env, registrationDomain),
       ...(commercial.claimStatement === undefined ? [] : [commercial.claimStatement]),
       context.env.DB.prepare(commercialRegistrationInsertSql(commercial.active)).bind(
         user.id,
@@ -1084,10 +1140,10 @@ async function registerIdentityLogin(
         ...(commercial.active ? [user.balance_micros] : []),
         now,
         now,
-        null,
-        null,
-        null,
+        user.password_credential,
+        user.password_changed_at_ms,
         now,
+        user.email_verified_at_ms,
         ...(commercial.active ? [user.id] : []),
       ),
       context.env.DB.prepare(
@@ -1108,6 +1164,8 @@ async function registerIdentityLogin(
         now,
         now,
       ),
+      ...(emailChallenge ? [emailChallenge.claimStatement] : []),
+      ...(completion ? [context.env.DB.prepare('INSERT INTO oauth_pending_registration_claims(pending_id,user_id) VALUES (?,?)').bind(completion.pendingId,user.id)] : []),
       ...initialPlatformQuotaStatements(context.env, user.id, now),
       ...sourceGrant.statements,
       ...commercial.afterUserStatements,
@@ -1115,6 +1173,9 @@ async function registerIdentityLogin(
       auditInsert(context.env, user.id, prepared.sessionId, 'auth.identity.register', config.provider, now),
     ])
   } catch (error) {
+    if (completion && /CHECK constraint failed:.*consumed/i.test(errorMessage(error))) throw new GatewayError(409, 'oauth_pending_consumed', 'OAuth registration has already completed or expired')
+    if (emailChallenge && isRegistrationEmailChallengeClaimFailure(error)) throw new GatewayError(400, 'INVALID_VERIFY_CODE', 'Invalid or expired verification code')
+    if (errorMessage(error).includes('EMAIL_DOMAIN_QUOTA_EXCEEDED')) throw registrationDomainQuotaError()
     if (/UNIQUE constraint failed: (?:users\.(?:email|canonical_email_inbox)|auth_identities|index 'uq_users_canonical_email_inbox')/i.test(errorMessage(error))) {
       throw new GatewayError(
         409,
@@ -1127,6 +1188,14 @@ async function registerIdentityLogin(
     throw error
   }
   await settleAuthSourceGrant(context.env, sourceGrant.grantId)
+  await syncDingTalkProfile(context.env, config, user.id, profile)
+  const createdUser = await findUser(context.env, user.id)
+  if (createdUser) prepared.payload.user = publicUser(createdUser)
+  if (completion) {
+    const response = controlSuccess({ ...prepared.payload, auth_result: 'login', redirect: flow.redirect_to })
+    clearCookie(response, 'sub2api_oauth_pending', context.req.url)
+    return response
+  }
   return oauthLoginRedirect(config.frontend_callback_path, flow.redirect_to, prepared.payload)
 }
 
@@ -1337,17 +1406,17 @@ async function findUserByEmail(env: Env, email: string): Promise<UserRow | null>
   ).bind(email).first<UserRow>()
 }
 
-async function oauthRegistrationEnabled(env: Env): Promise<boolean> {
+async function oauthRegistrationSettings(env: Env): Promise<RegistrationEmailPolicy & Partial<CaptchaPublicSettings> & { turnstile_enabled?: boolean; registration_enabled?: boolean; force_email_on_third_party_signup?: boolean; email_verification_enabled?: boolean }> {
   const row = await env.DB.prepare(
     `SELECT public_json FROM system_settings WHERE id = 'global' LIMIT 1`,
   ).first<{ public_json: string }>()
-  return row !== null && parseJsonObject(row.public_json).registration_enabled === true
+  return row === null ? {} : parseJsonObject(row.public_json)
 }
 
 async function requireProvider(env: Env, value: unknown): Promise<OAuthProviderConfig> {
   const provider = parseProvider(value)
   const row = await env.DB.prepare(
-    `SELECT provider, adapter, enabled, issuer, authorization_endpoint,
+    `SELECT provider, advanced_json, adapter, enabled, issuer, authorization_endpoint,
             token_endpoint, userinfo_endpoint, emails_endpoint, jwks_endpoint,
             client_id, secret_key_version, secret_nonce_b64, secret_ciphertext_b64,
             scopes_json, allowed_hosts_json, frontend_callback_path, pkce_enabled
@@ -1380,6 +1449,7 @@ function validateProvider(env: Env, row: OAuthProviderRow): OAuthProviderConfig 
   if (safeRedirect(row.frontend_callback_path, '') === '') throw invalidProvider()
   return {
     ...row,
+    advanced: normalizeOAuthAdvanced(row.provider, JSON.parse(row.advanced_json ?? '{}')),
     scopes: parseStringArray(row.scopes_json, 'oauth_provider_invalid'),
     allowedHosts,
     pkceEnabled: row.pkce_enabled === 1,
@@ -1415,6 +1485,7 @@ function validConfiguredHost(host: string, env: Env): boolean {
 }
 
 async function readProviderSecret(env: Env, config: OAuthProviderConfig): Promise<string | null> {
+  if (config.variantSecret !== undefined) return config.variantSecret
   if (config.secret_key_version === null) return null
   if (config.secret_nonce_b64 === null || config.secret_ciphertext_b64 === null) throw invalidProvider()
   const credential = await decryptCredential(
@@ -1587,6 +1658,7 @@ function parseProvider(value: unknown): OAuthIdentityProvider {
 }
 
 function providerKeyFor(config: OAuthProviderConfig, profile: ProviderProfile): string {
+  if (config.provider === 'wechat' && config.variant && config.variant !== 'open' && profile.metadata.has_unionid !== true) return `${config.issuer}:app:${config.client_id}`
   return config.adapter === 'oidc' ? profile.issuer ?? config.issuer : config.issuer
 }
 
@@ -1803,4 +1875,112 @@ function invalidOidcToken(): GatewayError {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+interface PendingOAuthPayload { provider: OAuthIdentityProvider; flow: ClaimedFlowRow; profile: ProviderProfile; providerKey: string }
+async function createPendingOAuthRegistration(context: OAuthContext, config: OAuthProviderConfig, flow: ClaimedFlowRow, profile: ProviderProfile, providerKey: string): Promise<Response> {
+  const browser = readCookie(context.req.raw, BROWSER_COOKIE)
+  if (!browser) throw new GatewayError(400, 'oauth_browser_required', 'Restart OAuth sign in')
+  const token = randomToken(32), id = await sha256Hex(token), now = Date.now()
+  const encrypted = await encryptCredential({ api_key: JSON.stringify({ provider: config.provider, flow, profile, providerKey }) }, context.env.CREDENTIALS_MASTER_KEY!, `oauth-pending:v1:${id}`)
+  await context.env.DB.batch([
+    context.env.DB.prepare('DELETE FROM oauth_pending_registrations WHERE expires_at_ms <= ? OR browser_hash = ?').bind(now, await sha256Hex(browser)),
+    context.env.DB.prepare('INSERT INTO oauth_pending_registrations (id,browser_hash,nonce_b64,ciphertext_b64,expires_at_ms,created_at_ms) VALUES (?,?,?,?,?,?)').bind(id,await sha256Hex(browser),encrypted.nonce_b64,encrypted.ciphertext_b64,now+FLOW_TTL_MS,now),
+  ])
+  const response = new Response(null, { status: 302, headers: { location: '/auth/oauth/complete' } })
+  setCookie(response, 'sub2api_oauth_pending', token, context.req.url, FLOW_TTL_MS)
+  return response
+}
+async function requirePendingOAuth(context: OAuthContext): Promise<{ id: string; payload: PendingOAuthPayload }> {
+  const token = readCookie(context.req.raw, 'sub2api_oauth_pending'), browser = readCookie(context.req.raw, BROWSER_COOKIE)
+  if (!token || !browser) throw new GatewayError(401, 'oauth_pending_required', 'Restart OAuth sign in')
+  const id = await sha256Hex(token)
+  const row = await context.env.DB.prepare('SELECT nonce_b64,ciphertext_b64 FROM oauth_pending_registrations WHERE id = ? AND browser_hash = ? AND consumed = 0 AND expires_at_ms > ?').bind(id,await sha256Hex(browser),Date.now()).first<{ nonce_b64: string; ciphertext_b64: string }>()
+  if (!row) throw new GatewayError(401, 'oauth_pending_expired', 'OAuth registration expired; sign in again')
+  const decoded = await decryptCredential(row.nonce_b64,row.ciphertext_b64,context.env.CREDENTIALS_MASTER_KEY!,`oauth-pending:v1:${id}`)
+  return { id, payload: JSON.parse(decoded.api_key) as PendingOAuthPayload }
+}
+async function pendingOAuthDetails(context: OAuthContext): Promise<Response> {
+  try { const { payload } = await requirePendingOAuth(context); await requireProvider(context.env,payload.provider); return controlSuccess({ auth_result: 'pending_session', provider: payload.provider, email: payload.profile.emailVerified ? payload.profile.email : '', email_verification_required: true, redirect: payload.flow.redirect_to }) } catch (error) { return controlError(asGatewayError(error)) }
+}
+async function pendingOAuthSendCode(context: OAuthContext): Promise<Response> {
+  try { const { payload } = await requirePendingOAuth(context); const provider = await requireProvider(context.env,payload.provider); const settings=await oauthRegistrationSettings(context.env); if (!settings.registration_enabled && !(provider.provider === 'dingtalk' && provider.advanced?.dingtalk_connect_bypass_registration === true && payload.profile.metadata.internal_staff === true)) throw new GatewayError(403,'registration_disabled','Registration is disabled'); return requestPendingOAuthEmailVerification(context) } catch (error) { return controlError(asGatewayError(error)) }
+}
+async function pendingOAuthCreateAccount(context: OAuthContext): Promise<Response> {
+  try {
+    const { id,payload } = await requirePendingOAuth(context)
+    const body = await readJsonObject(context.req.raw)
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
+    if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) || email.length > 320 || typeof body.password !== 'string') throw new GatewayError(400,'invalid_registration','Valid email and password are required')
+    const config = await selectWechatVariant(context.env,await requireProvider(context.env,payload.provider),payload.flow.provider_variant)
+    return await registerIdentityLogin(context,config,payload.flow,payload.profile,payload.providerKey,{pendingId:id,email,password:body.password,verifyCode:body.verify_code,commercialBody:body})
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+async function enrichDingTalkProfile(env: Env, config: OAuthProviderConfig, profile: ProviderProfile): Promise<ProviderProfile> {
+  const settings = config.advanced as DingTalkAdvancedSettings | undefined
+  if (settings?.dingtalk_connect_corp_restriction_policy !== 'internal_only') return profile
+  const secret = await readProviderSecret(env,config)
+  if (!secret) throw invalidProvider()
+  const appURL = config.token_endpoint.replace('/oauth2/userAccessToken','/oauth2/accessToken')
+  const appResponse = await providerFetch(env,appURL,config,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({appKey:config.client_id,appSecret:secret})})
+  const token = await readProviderPayload(appResponse)
+  if (!appResponse.ok || typeof token.accessToken !== 'string') throw providerUnavailable('dingtalk_app_token_failed')
+  const oapi = new URL(config.userinfo_endpoint)
+  if (oapi.hostname === 'api.dingtalk.com') oapi.hostname='oapi.dingtalk.com'
+  oapi.pathname='/';oapi.search=''
+  const scoped = {...config,allowedHosts:new Set([...config.allowedHosts,oapi.hostname])}
+  const call = async (path:string,body:Record<string,unknown>):Promise<Record<string,unknown>> => {
+    const url=new URL(path,oapi);url.searchParams.set('access_token',token.accessToken as string)
+    const response=await providerFetch(env,url.toString(),scoped,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
+    const result=await readProviderPayload(response)
+    if(!response.ok || result.errcode !== 0 || !result.result || typeof result.result!=='object') throw new GatewayError(403,'dingtalk_corp_rejected','DingTalk corporate membership could not be verified','permission_error')
+    return result.result as Record<string,unknown>
+  }
+  const identity=await call('/topapi/user/getbyunionid',{unionid:profile.subject})
+  if(typeof identity.userid!=='string'||!identity.userid) throw new GatewayError(403,'dingtalk_corp_rejected','DingTalk corporate membership is required')
+  const staff=await call('/topapi/v2/user/get',{userid:identity.userid})
+  if (staff.active === false) throw new GatewayError(403,'dingtalk_corp_rejected','DingTalk employee is inactive')
+  const departmentNames:string[]=[]
+  if(settings.dingtalk_connect_sync_dept && Array.isArray(staff.dept_id_list)) {
+    for(const raw of staff.dept_id_list.slice(0,20)) {
+      if(!Number.isSafeInteger(raw)) continue
+      const visited=new Set<number>();const names:string[]=[];let id=Number(raw)
+      while(id>0&&visited.size<20&&!visited.has(id)) { visited.add(id);const dept=await call('/topapi/v2/department/get',{dept_id:id}); if(typeof dept.name==='string') names.unshift(dept.name);id=Number(dept.parent_id)||0 }
+      if(names.length)departmentNames.push(names.join(' / '))
+    }
+  }
+  return {...profile,metadata:{...profile.metadata,internal_staff:true,staff_name:typeof staff.name==='string'?staff.name:'',staff_email:typeof staff.email==='string'?staff.email:'',staff_departments:departmentNames.join('; ')}}
+}
+async function syncDingTalkProfile(env:Env,config:OAuthProviderConfig,userId:string,profile:ProviderProfile):Promise<void> {
+ if(config.provider!=='dingtalk'||profile.metadata.internal_staff!==true)return
+ const settings=config.advanced as DingTalkAdvancedSettings;const now=Date.now();const statements:D1PreparedStatement[]=[]
+ for(const [flag,keyField,nameField,valueField] of [
+  ['dingtalk_connect_sync_corp_email','dingtalk_connect_sync_corp_email_attr_key','dingtalk_connect_sync_corp_email_attr_name','staff_email'],
+  ['dingtalk_connect_sync_display_name','dingtalk_connect_sync_display_name_attr_key','dingtalk_connect_sync_display_name_attr_name','staff_name'],
+  ['dingtalk_connect_sync_dept','dingtalk_connect_sync_dept_attr_key','dingtalk_connect_sync_dept_attr_name','staff_departments'],
+ ] as const){
+  const value=profile.metadata[valueField];if(!settings[flag]||typeof value!=='string'||!value)continue
+  statements.push(env.DB.prepare("INSERT OR IGNORE INTO user_attribute_definitions(key,name,type,created_at_ms,updated_at_ms) VALUES (?,?,'text',?,?)").bind(settings[keyField],settings[nameField],now,now))
+  statements.push(env.DB.prepare(`INSERT INTO user_attribute_values(user_id,attribute_id,value,created_at_ms,updated_at_ms)
+   SELECT ?,id,?,?,? FROM user_attribute_definitions WHERE key=? AND type='text' AND enabled=1 AND deleted_at_ms IS NULL
+   ON CONFLICT(user_id,attribute_id) DO UPDATE SET value=excluded.value,control_version=user_attribute_values.control_version+1,updated_at_ms=excluded.updated_at_ms`).bind(userId,value.slice(0,10000),now,now,settings[keyField]))
+ }
+ if(settings.dingtalk_connect_sync_display_name&&typeof profile.metadata.staff_name==='string'&&profile.metadata.staff_name)statements.push(env.DB.prepare('UPDATE users SET display_name=?,control_version=control_version+1,updated_at_ms=? WHERE id=?').bind(profile.metadata.staff_name.slice(0,128),now,userId))
+ if(statements.length) await env.DB.batch(statements)
+}
+
+async function selectWechatVariant(env:Env,config:OAuthProviderConfig,rawMode?:string):Promise<OAuthProviderConfig>{
+ if(config.provider!=='wechat')return config
+ const mode=(rawMode||'open') as WechatMode
+ if(!WECHAT_MODES.includes(mode))throw new GatewayError(400,'invalid_wechat_mode','WeChat mode must be open, mp or mobile')
+ const variants=await readWechatVariants(env,true)
+ if(Object.keys(variants).length===0){if(mode!=='open')throw new GatewayError(404,'oauth_disabled','This WeChat app is disabled');return config}
+ const variant=variants[mode]
+ if(!variant?.enabled||!variant.client_secret)throw new GatewayError(404,'oauth_disabled','This WeChat app is disabled')
+ const authorization=mode==='mp'?'https://open.weixin.qq.com/connect/oauth2/authorize':'https://open.weixin.qq.com/connect/qrconnect'
+ return {...config,variant:mode,variantSecret:variant.client_secret,client_id:variant.client_id,authorization_endpoint:authorization,
+  token_endpoint:'https://api.weixin.qq.com/sns/oauth2/access_token',userinfo_endpoint:'https://api.weixin.qq.com/sns/userinfo',
+  scopes:[mode==='mp'?'snsapi_userinfo':'snsapi_login'],pkceEnabled:false,
+  allowedHosts:new Set([...config.allowedHosts,'open.weixin.qq.com','api.weixin.qq.com']),requireUnionId:Object.values(variants).filter(value=>value.enabled).length>1}
 }

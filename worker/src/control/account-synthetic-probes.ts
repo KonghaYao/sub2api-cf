@@ -1,4 +1,6 @@
-import { fetchAccountProxy } from '../gateway/proxy-fetch'
+import { normalizeProviderResponse } from '../gateway/providers'
+import { effectiveProviderAccount } from './provider-runtime'
+import { accountFetcher } from '../proxy/account-fetch'
 import type { Context } from 'hono'
 
 import type { Env, PlatformEvent } from '../env'
@@ -102,7 +104,8 @@ interface DispatchJobRow extends AccountSyntheticProbePayload {
 }
 
 interface ProbeAccountRow extends JobRow {
-  proxy_id: string | null
+  proxy_id?: number | null
+  credential_kind?: string
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
@@ -614,7 +617,7 @@ function createEvent(
 async function loadProbeAccount(env: Env, id: string, token: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT job.*, account.platform, account.protocol, account.auth_scheme,
-            account.base_url, account.provider_config_json, CAST(json_extract(account.ui_config_json, '$.proxy_id') AS TEXT) AS proxy_id,
+            account.base_url, account.provider_config_json, account.credential_kind, json_extract(account.ui_config_json, '$.proxy_id') AS proxy_id,
             secret.id AS secret_id, secret.key_version, secret.nonce_b64, secret.ciphertext_b64,
             monitor.consecutive_failures, monitor.alert_state
        FROM account_synthetic_probe_jobs job
@@ -638,11 +641,11 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
     )
     const operation = providerOperation(account.platform, account.capability)
     plan = buildProviderRequest({
-      account: {
+      account: await effectiveProviderAccount(env, {
         platform: account.platform, protocol: account.protocol,
         auth_scheme: account.auth_scheme, base_url: account.base_url,
         provider_config: providerConfig,
-      },
+      }),
       credential,
       operation,
       model: account.upstream_model,
@@ -654,14 +657,12 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.min(plan.timeout_ms, 8_000))
   try {
-    const init: RequestInit = {
+    let response = await accountFetcher(env, account.proxy_id, account)(plan.url, {
       method: plan.method, headers: plan.headers,
       body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual', cache: 'no-store', signal: controller.signal,
-    }
-    const response = account.proxy_id && account.proxy_id !== '0'
-      ? await fetchAccountProxy(env, account.proxy_id, new URL(plan.url), init, controller.signal)
-      : await fetch(plan.url, init)
+    })
+    response = await normalizeProviderResponse(plan, response, controller.signal)
     if (response.ok) {
       const body = await readBoundedProviderJson(response)
       if (!validProviderResponse(account.platform, account.capability, body)) {
@@ -690,12 +691,12 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
 function providerOperation(platform: ProviderPlatform, capability: SyntheticProbeCapability): ProviderOperation {
   if (capability === 'embeddings') return 'embeddings'
   if (platform === 'anthropic') return 'messages'
-  if (platform === 'gemini') return 'generate_content'
+  if (platform === 'gemini' || platform === 'antigravity') return 'generate_content'
   if (platform === 'codex') return 'responses'
   return capability
 }
 
-function minimalProbeBody(
+export function minimalProbeBody(
   platform: ProviderPlatform,
   capability: SyntheticProbeCapability,
   model: string,
@@ -704,7 +705,7 @@ function minimalProbeBody(
   if (platform === 'anthropic') {
     return { model, max_tokens: 1, stream: false, messages: [{ role: 'user', content: prompt }] }
   }
-  if (platform === 'gemini') {
+  if (platform === 'gemini' || platform === 'antigravity') {
     return capability === 'embeddings'
       ? { content: { parts: [{ text: prompt }] } }
       : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1 } }
@@ -715,7 +716,7 @@ function minimalProbeBody(
   return { model, messages: [{ role: 'user', content: prompt }], max_tokens: 1, stream: false }
 }
 
-async function readBoundedProviderJson(response: Response): Promise<unknown> {
+export async function readBoundedProviderJson(response: Response): Promise<unknown> {
   if (response.body === null) return null
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -742,7 +743,7 @@ async function readBoundedProviderJson(response: Response): Promise<unknown> {
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown } catch { return null }
 }
 
-function validProviderResponse(
+export function validProviderResponse(
   platform: ProviderPlatform,
   capability: SyntheticProbeCapability,
   value: unknown,
@@ -750,7 +751,7 @@ function validProviderResponse(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const body = value as Record<string, unknown>
   if (capability === 'embeddings') {
-    if (platform === 'gemini') {
+    if (platform === 'gemini' || platform === 'antigravity') {
       return hasFiniteEmbeddingValue(objectRecord(body.embedding)?.values)
     }
     return Array.isArray(body.data) && body.data.some((item) =>
@@ -762,7 +763,7 @@ function validProviderResponse(
       return part?.type === 'text' && nonEmptyText(part.text)
     })
   }
-  if (platform === 'gemini') {
+  if (platform === 'gemini' || platform === 'antigravity') {
     return Array.isArray(body.candidates) && body.candidates.some((candidate) => {
       const parts = objectRecord(objectRecord(candidate)?.content)?.parts
       return Array.isArray(parts) && parts.some((part) => nonEmptyText(objectRecord(part)?.text))

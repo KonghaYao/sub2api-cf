@@ -105,6 +105,43 @@ describe('admin request audit view', () => {
     expect(wrapper.find('.btn-danger').exists()).toBe(true)
   })
 
+  it('keeps the latest search result when an earlier response arrives last', async () => {
+    let resolveFirst!: (value: unknown) => void
+    list.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+    list.mockResolvedValueOnce({ items: [{ ...auditLog, id: 99 }], total: 21, page: 2, page_size: 20, pages: 2 })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('input[type="text"]').setValue('latest')
+    await wrapper.get('input[type="text"]').trigger('keyup.enter')
+    await flushPromises()
+    resolveFirst({ items: [auditLog], total: 21, page: 1, page_size: 20, pages: 2 })
+    await flushPromises()
+    const detailButton = wrapper.findAll('button').find((button) => button.text().includes('admin.audit.columns.detail'))!
+    await detailButton.trigger('click')
+    await flushPromises()
+    expect(get).toHaveBeenCalledWith(99)
+    wrapper.unmount()
+  })
+
+  it('does not replace a newly opened detail with a previously closed request', async () => {
+    list.mockResolvedValueOnce({ items: [auditLog, { ...auditLog, id: 99 }], total: 2, page: 1, page_size: 20, pages: 1 })
+    let resolveFirst!: (value: unknown) => void
+    get.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+    get.mockResolvedValueOnce({ ...auditLog, id: 99, request_body: 'latest detail' })
+    const wrapper = mountView()
+    await flushPromises()
+    const buttons = wrapper.findAll('button').filter((button) => button.text().includes('admin.audit.columns.detail'))
+    await buttons[0].trigger('click')
+    wrapper.findComponent(BaseDialogStub).vm.$emit('close')
+    await buttons[1].trigger('click')
+    await flushPromises()
+    resolveFirst({ ...auditLog, request_body: 'stale detail' })
+    await flushPromises()
+    expect(wrapper.text()).toContain('latest detail')
+    expect(wrapper.text()).not.toContain('stale detail')
+    wrapper.unmount()
+  })
+
   it('runs the original confirm and fresh-TOTP clear flow', async () => {
     const wrapper = mountView()
     await flushPromises()

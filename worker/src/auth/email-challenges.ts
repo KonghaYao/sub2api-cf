@@ -1,12 +1,13 @@
+import { verifyCaptcha } from './captcha'
+import type { CaptchaPublicSettings } from '../control/captcha-settings'
 import type { Context } from 'hono'
 import type { Env, PlatformEvent } from '../env'
 import { controlError, controlSuccess, readJsonObject } from '../control/http'
-import { readSystemSettingSecret } from '../control/settings'
 import { sha256Hex } from '../gateway/crypto'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   deliverPlatformEmail,
-  hasEmailDeliveryBinding,
+  hasEmailDeliveryConfigured,
 } from '../email/delivery'
 import {
   executeLeasedEmailDelivery,
@@ -15,7 +16,7 @@ import {
 import { authenticateUserRequest, findUserById, publicUser, type UserRow } from './handler'
 import { hashPassword, PasswordValidationError, validateNewPassword, verifyPassword } from './password'
 import { checkAuthRateLimit, commitAuthRateLimitAttempt } from './rate-limit'
-import { requireRegistrationEmailSuffixAllowed } from './email-policy'
+import { checkRegistrationEmailPolicy, requireRegistrationEmailSuffixAllowed } from './email-policy'
 import {
   prepareAuthSourceGrant,
   settleAuthSourceGrant,
@@ -58,9 +59,12 @@ interface EmailChallengeRow {
   expires_at_ms: number
 }
 
-interface EmailChallengePublicSettings {
+interface EmailChallengePublicSettings extends Partial<CaptchaPublicSettings> {
+  password_reset_enabled?: boolean
+  frontend_url?: string
   email_verification_enabled?: boolean
   registration_email_suffix_whitelist?: string[]
+  registration_email_domain_quota_enabled?: boolean
   turnstile_enabled?: boolean
   site_name?: string
 }
@@ -104,20 +108,22 @@ export function isRegistrationEmailChallengeClaimFailure(error: unknown): boolea
 }
 
 /** Compatible with the original POST /api/v1/auth/send-verify-code contract. */
-export async function requestRegistrationEmailVerification(
-  context: Context<AuthBindings>,
-): Promise<Response> {
+export function requestRegistrationEmailVerification(context: Context<AuthBindings>): Promise<Response> {
+  return issueRegistrationCode(context, false)
+}
+/** Only call after authenticating an unexpired browser-bound pending OAuth registration. */
+export function requestPendingOAuthEmailVerification(context: Context<AuthBindings>): Promise<Response> {
+  return issueRegistrationCode(context, true)
+}
+async function issueRegistrationCode(context: Context<AuthBindings>, pendingOAuth: boolean): Promise<Response> {
   try {
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
-    const settings = await requireEmailChallengeSettings(
-      context.env,
-      'registration_email_verification',
-    )
-    requireEmailDeliveryBinding(context.env)
-    requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
+    const settings = pendingOAuth ? await readEmailChallengeSettings(context.env) : await requireEmailChallengeSettings(context.env, 'registration_email_verification')
+    await requireEmailDeliveryBinding(context.env)
+    await checkRegistrationEmailPolicy(context.env, email, settings)
     const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'register')
-    await verifyTurnstile(context, settings, body.turnstile_token)
+    await verifyCaptcha(context.req.raw, context.env, settings, body)
     await commitAuthRateLimitAttempt(context.env, rateLimit)
     const existingUser = await findUserByEmail(context.env, email)
     if (existingUser === null) {
@@ -224,9 +230,9 @@ export async function requestPasswordReset(context: Context<AuthBindings>): Prom
     const body = await readJsonObject(context.req.raw)
     const email = requireEmail(body.email)
     const settings = await requireEmailChallengeSettings(context.env, 'password_reset')
-    requireEmailDeliveryBinding(context.env)
+    await requireEmailDeliveryBinding(context.env)
     const rateLimit = await checkAuthRateLimit(context.env, context.req.raw, email, 'login')
-    await verifyTurnstile(context, settings, body.turnstile_token)
+    await verifyCaptcha(context.req.raw, context.env, settings, body)
     await commitAuthRateLimitAttempt(context.env, rateLimit)
 
     const user = await findActiveUserByEmail(context.env, email)
@@ -321,7 +327,7 @@ export async function requestEmailVerification(context: Context<AuthBindings>): 
   try {
     const user = await authenticateUserRequest(context.req.raw, context.env)
     const settings = await requireEmailChallengeSettings(context.env, 'email_verification')
-    requireEmailDeliveryBinding(context.env)
+    await requireEmailDeliveryBinding(context.env)
     const rateLimit = await checkAuthRateLimit(
       context.env,
       context.req.raw,
@@ -347,7 +353,7 @@ export async function requestEmailIdentityBindingCode(
     const body = await readJsonObject(context.req.raw)
     const email = requireBindableEmail(body.email)
     const settings = await readEmailChallengeSettings(context.env)
-    requireEmailDeliveryBinding(context.env)
+    await requireEmailDeliveryBinding(context.env)
     requireRegistrationEmailSuffixAllowed(email, settings.registration_email_suffix_whitelist)
     const rateLimit = await checkAuthRateLimit(
       context.env,
@@ -844,8 +850,8 @@ function requireEmailActionUrl(value: string): string {
   return url.toString()
 }
 
-function requireEmailDeliveryBinding(env: Env): void {
-  if (hasEmailDeliveryBinding(env)) return
+async function requireEmailDeliveryBinding(env: Env): Promise<void> {
+  if (await hasEmailDeliveryConfigured(env)) return
   throw new GatewayError(
     503,
     'email_delivery_unavailable',
@@ -914,7 +920,7 @@ async function issueChallenge(
     purpose,
     recipient_email: user.email,
     token,
-    action_url: challengeActionUrl(request, user.email, token, purpose),
+    action_url: challengeActionUrl(request, user.email, token, purpose, settings.frontend_url),
     site_name: normalizedSiteName(settings.site_name),
     locale: request.headers.get('accept-language')?.slice(0, 128) ?? '',
     expires_at_ms: expiresAtMs,
@@ -1248,7 +1254,10 @@ async function requireEmailChallengeSettings(
   purpose: EmailChallengePurpose,
 ): Promise<EmailChallengePublicSettings> {
   const settings = await readEmailChallengeSettings(env)
-  if (settings.email_verification_enabled !== true) {
+  const enabled = purpose === 'password_reset'
+    ? settings.password_reset_enabled ?? settings.email_verification_enabled
+    : settings.email_verification_enabled
+  if (enabled !== true) {
     throw new GatewayError(
       403,
       purpose === 'password_reset' ? 'PASSWORD_RESET_DISABLED' : 'EMAIL_VERIFICATION_DISABLED',
@@ -1275,38 +1284,6 @@ async function readEmailChallengeSettings(env: Env): Promise<EmailChallengePubli
   return settings
 }
 
-async function verifyTurnstile(
-  context: Context<AuthBindings>,
-  settings: EmailChallengePublicSettings,
-  token: unknown,
-): Promise<void> {
-  if (settings.turnstile_enabled !== true) return
-  if (typeof token !== 'string' || token.trim() === '' || token.length > 2_048) {
-    throw new GatewayError(400, 'captcha_required', 'Turnstile verification is required')
-  }
-  const secret = context.env.TURNSTILE_SECRET_KEY ??
-    await readSystemSettingSecret(context.env, 'turnstile_secret_key')
-  if (!secret) {
-    throw new GatewayError(503, 'turnstile_not_configured', 'Turnstile is not configured', 'server_error')
-  }
-  const form = new URLSearchParams({ secret, response: token })
-  const address = context.req.header('cf-connecting-ip')
-  if (address) form.set('remoteip', address)
-  let response: Response
-  try {
-    response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-    })
-  } catch {
-    throw new GatewayError(503, 'turnstile_unavailable', 'Turnstile verification is unavailable', 'server_error')
-  }
-  const value = await response.json().catch(() => null) as { success?: unknown } | null
-  if (!response.ok || value?.success !== true) {
-    throw new GatewayError(400, 'captcha_invalid', 'Turnstile verification failed')
-  }
-}
 
 function createChallengeToken(purpose: EmailChallengePurpose): string {
   if (purpose === 'registration_email_verification' || purpose === 'email_binding') {
@@ -1365,13 +1342,14 @@ function challengeActionUrl(
   email: string,
   token: string,
   purpose: EmailChallengePurpose,
+  frontendUrl?: string,
 ): string {
   const pathname = purpose === 'password_reset'
     ? '/reset-password'
     : purpose === 'email_binding'
     ? '/profile'
     : '/email-verify'
-  const target = new URL(pathname, request.url)
+  const target = new URL(pathname, frontendUrl || request.url)
   target.searchParams.set('email', email)
   target.searchParams.set('token', token)
   return target.toString()

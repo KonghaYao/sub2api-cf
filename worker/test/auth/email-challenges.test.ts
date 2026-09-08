@@ -50,6 +50,22 @@ describe('Worker-native email challenges', () => {
     },
   })
 
+  it('honors the independent password reset toggle before queueing email', async () => {
+    const test = await fixture()
+    test.env.CONFIG_KV.get = (async () => ({ email_verification_enabled: true, password_reset_enabled: false })) as unknown as KVNamespace['get']
+    const response = await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+    expect(response.status).toBe(403)
+    expect(test.events).toHaveLength(0)
+  })
+
+  it('allows password reset independently and builds links from the configured frontend URL', async () => {
+    const test = await fixture()
+    test.env.CONFIG_KV.get = (async () => ({ email_verification_enabled: false, password_reset_enabled: true, frontend_url: 'https://portal.example.test' })) as unknown as KVNamespace['get']
+    const response = await post(test, '/api/v1/auth/forgot-password', { email: 'alice@example.com' })
+    expect(response.status).toBe(200)
+    expect(test.events[0].payload.action_url).toMatch(/^https:\/\/portal\.example\.test\/reset-password\?/)
+  })
+
   it('preserves the six-digit pre-registration contract with cooldown and an enumeration-safe response', async () => {
     const available = await fixture()
     const existing = await fixture()
@@ -303,11 +319,17 @@ describe('Worker-native email challenges', () => {
       password: 'registered-correct-horse-password',
       verify_code: test.events[0].payload.token,
     })
-    expect(interrupted.status).toBe(503)
+    expect(interrupted.status).toBe(201)
+    expect(stateCalls).toBe(0)
+    expect(test.raw.prepare(
+      `SELECT status, attempts FROM subscription_state_sync`,
+    ).get()).toEqual({ status: 'pending', attempts: 0 })
+
+    // A subscription DO outage is retried without failing an already committed signup.
+    expect(await recoverPendingSubscriptionState(test.env)).toBe(0)
     expect(test.raw.prepare(
       `SELECT status, attempts FROM subscription_state_sync`,
     ).get()).toEqual({ status: 'pending', attempts: 1 })
-
     await recoverPendingSubscriptionState(test.env)
     expect(test.raw.prepare(
       `SELECT status, attempts FROM subscription_state_sync`,

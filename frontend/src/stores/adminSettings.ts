@@ -67,14 +67,10 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
       ])
       cloudflareWorkerContract.value = settings.cloudflare_worker_contract === true
       setCloudflareWorkerContractActive(cloudflareWorkerContract.value)
-      opsMonitoringEnabled.value = cloudflareWorkerContract.value
-        ? false
-        : (settings.ops_monitoring_enabled ?? true)
+      opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
 
-      opsRealtimeMonitoringEnabled.value = cloudflareWorkerContract.value
-        ? false
-        : (settings.ops_realtime_monitoring_enabled ?? true)
+      opsRealtimeMonitoringEnabled.value = settings.ops_realtime_monitoring_enabled ?? true
       writeCachedBool('ops_realtime_monitoring_enabled_cached', opsRealtimeMonitoringEnabled.value)
 
       opsQueryModeDefault.value = settings.ops_query_mode_default || 'auto'

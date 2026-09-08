@@ -292,7 +292,7 @@
             </div>
           </template>
           <template #cell-schedulable="{ row }">
-            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button role="switch" :aria-checked="row.schedulable" :aria-label="t('admin.accounts.columns.schedulable')" @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -486,6 +486,7 @@
 </template>
 
 <script setup lang="ts">
+import { requiresImportedOAuthToken } from '@/utils/adminCapabilities'
 import { ref, reactive, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
@@ -1930,7 +1931,7 @@ const handleBulkRefreshToken = async () => {
   if (!confirm(t('common.confirm'))) return
   try {
     const result = await adminAPI.accounts.batchRefresh(
-      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts() : selIds.value,
+      cloudflareWorkerContract.value ? await selectedWorkerRefreshAccounts(true) : selIds.value,
     )
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', { success: result.success, failed: result.failed }))
@@ -2084,7 +2085,7 @@ const selectedWorkerDeleteAccounts = async () => {
   return targets as Array<{ id: number | string; control_version: number }>
 }
 
-const selectedWorkerRefreshAccounts = async () => {
+const selectedWorkerRefreshAccounts = async (requireRefreshSupport = false) => {
   if (selIds.value.length === 0 || selIds.value.length > 25) {
     throw new Error(t('admin.accounts.workerBatchLimit'))
   }
@@ -2097,6 +2098,7 @@ const selectedWorkerRefreshAccounts = async () => {
   }
   const targets = selected.map((id) => {
     const account = loaded.get(id)
+    if (requireRefreshSupport && requiresImportedOAuthToken(account?.platform)) throw new Error(t('admin.accounts.importedOAuthHint'))
     return { id, control_version: (account as unknown as { control_version?: number })?.control_version }
   })
   if (targets.some(target => !Number.isSafeInteger(target.control_version) || (target.control_version ?? -1) < 0)) {

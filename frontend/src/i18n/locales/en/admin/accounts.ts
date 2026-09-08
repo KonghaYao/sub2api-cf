@@ -1,5 +1,8 @@
 export default {
     accounts: {
+      importedOAuthHint: 'Import an existing access token. OAuth authorization and automatic refresh are not available for this provider in this deployment; import a new token when it expires.',
+      importedOAuthToken: 'Import access token',
+      importedOAuthRequired: 'Enter an access token; Antigravity also requires a project ID.',
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',

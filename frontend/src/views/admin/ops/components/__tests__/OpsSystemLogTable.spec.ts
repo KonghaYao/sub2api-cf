@@ -9,6 +9,7 @@ const mockListSystemLogs = vi.fn()
 const mockCleanupSystemLogs = vi.fn()
 const mockGetSystemLogSinkHealth = vi.fn()
 const mockGetRuntimeLogConfig = vi.fn()
+const mockUpdateRuntimeLogConfig = vi.fn()
 
 vi.mock('@/api/admin/ops', () => ({
   opsAPI: {
@@ -16,6 +17,7 @@ vi.mock('@/api/admin/ops', () => ({
     cleanupSystemLogs: (...args: any[]) => mockCleanupSystemLogs(...args),
     getSystemLogSinkHealth: (...args: any[]) => mockGetSystemLogSinkHealth(...args),
     getRuntimeLogConfig: (...args: any[]) => mockGetRuntimeLogConfig(...args),
+    updateRuntimeLogConfig: (...args: any[]) => mockUpdateRuntimeLogConfig(...args),
   },
 }))
 
@@ -124,6 +126,18 @@ describe('OpsSystemLogTable host support', () => {
     await flushPromises()
 
     expect(mockCleanupSystemLogs).toHaveBeenCalledWith(expect.objectContaining({ host: 'api-node-2' }))
+  })
+
+  it('preserves the independent logging version through load and repeated saves', async () => {
+    mockGetRuntimeLogConfig.mockResolvedValue({ ...runtimeConfig, control_version: 7 })
+    mockUpdateRuntimeLogConfig.mockResolvedValueOnce({ ...runtimeConfig, control_version: 8 }).mockResolvedValueOnce({ ...runtimeConfig, control_version: 9 })
+    const wrapper = mount(OpsSystemLogTable, { global: { stubs: { Select: SelectStub, Pagination: PaginationStub } } })
+    await flushPromises()
+    const save = wrapper.findAll('button').find(button => button.text() === 'admin.ops.systemLogs.saveAndApply')!
+    await save.trigger('click'); await flushPromises()
+    expect(mockUpdateRuntimeLogConfig).toHaveBeenLastCalledWith(expect.objectContaining({control_version:7}))
+    await save.trigger('click'); await flushPromises()
+    expect(mockUpdateRuntimeLogConfig).toHaveBeenLastCalledWith(expect.objectContaining({control_version:8}))
   })
 
   it.each([

@@ -28,20 +28,23 @@ interface AuthSnapshot {
   accessToken: string | null
   refreshToken: string
   expiresAt: number
-  userID: number | null
+  userID: string | null
 }
 
 let inFlightRefresh: Promise<RefreshTokenResponse> | null = null
 
-function getStoredUserID(): number | null {
+export function getStoredAuthUserID(): string | null {
   const rawUser = localStorage.getItem(AUTH_USER_KEY)
   if (!rawUser) {
     return null
   }
 
   try {
-    const id = Number((JSON.parse(rawUser) as { id?: unknown }).id)
-    return Number.isFinite(id) && id > 0 ? id : null
+    const id = (JSON.parse(rawUser) as { id?: unknown }).id
+    // Workers use UUID strings; coercing these to Number makes all users null
+    // and allows a pending request to adopt another signed-in user's tokens.
+    if (typeof id === 'string' && id.trim() !== '') return id
+    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? String(id) : null
   } catch {
     return null
   }
@@ -57,7 +60,7 @@ function readAuthSnapshot(): AuthSnapshot {
     accessToken: localStorage.getItem(AUTH_TOKEN_KEY),
     refreshToken,
     expiresAt: Number(localStorage.getItem(TOKEN_EXPIRES_AT_KEY)),
-    userID: getStoredUserID()
+    userID: getStoredAuthUserID()
   }
 }
 
@@ -71,7 +74,8 @@ function readStoredTokenPair(snapshot: AuthSnapshot): RefreshTokenResponse | nul
     !refreshToken ||
     !Number.isFinite(expiresAt) ||
     expiresAt <= Date.now() ||
-    getStoredUserID() !== snapshot.userID
+    snapshot.userID === null ||
+    getStoredAuthUserID() !== snapshot.userID
   ) {
     return null
   }
@@ -154,7 +158,7 @@ async function requestTokenPair(
 
     if (
       localStorage.getItem(REFRESH_TOKEN_KEY) !== snapshot.refreshToken ||
-      getStoredUserID() !== snapshot.userID
+      getStoredAuthUserID() !== snapshot.userID
     ) {
       const peerResult = readPeerRefreshResult(snapshot, failedAccessToken)
       if (peerResult) {

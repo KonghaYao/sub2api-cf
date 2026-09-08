@@ -11,17 +11,19 @@ const PEPPER = 'p'.repeat(32)
 class UserStateStub {
   readonly calls: Array<Record<string, unknown>> = []
   onDisable: (() => void) | undefined
+  userId = 'user-1'
 
   async fetch(request: Request): Promise<Response> {
     const body = await request.json() as Record<string, unknown>
     this.calls.push(body)
+    if (typeof body.user_id === 'string') this.userId = body.user_id
     if (body.enabled === false) this.onDisable?.()
     return Response.json({
       schema_version: 1,
       idempotent: false,
       applied: true,
       profile: {
-        user_id: body.user_id ?? 'user-1',
+        user_id: this.userId,
         enabled: body.enabled,
         balance_micros: body.balance_micros ?? 0,
         reserved_micros: 0,
@@ -87,6 +89,36 @@ async function fixture(): Promise<{
 }
 
 describe('admin user deletion contract', () => {
+  it('deletes multiple users without colliding after canonical mailbox normalization', async () => {
+    const test = await fixture()
+    test.raw.prepare(`INSERT INTO users (id, email, created_at_ms, updated_at_ms)
+      VALUES ('user-2', 'second@example.test', ?, ?)`).run(Date.now(), Date.now())
+    for (const id of ['user-1', 'user-2']) {
+      const response = await test.app.request(`/users/${id}`, {
+        method: 'DELETE', headers: { authorization: test.authorization },
+      }, test.env)
+      expect(response.status, await response.clone().text()).toBe(200)
+    }
+    const rows = test.raw.prepare(`SELECT canonical_email_inbox FROM users WHERE role = 'user'`).all()
+    expect(new Set(rows.map((row: any) => row.canonical_email_inbox)).size).toBe(2)
+  })
+
+  it('keeps legacy tombstones hidden and idempotent while deleting another user', async () => {
+    const test = await fixture()
+    test.raw.prepare(`UPDATE users SET email = 'deleted+user-1@users.invalid',
+      display_name = '[deleted]', status = 'disabled' WHERE id = 'user-1'`).run()
+    test.raw.prepare(`INSERT INTO users (id, email, created_at_ms, updated_at_ms)
+      VALUES ('user-2', 'second@example.test', ?, ?)`).run(Date.now(), Date.now())
+    const headers = { authorization: test.authorization }
+    expect((await test.app.request('/users/user-1', { headers }, test.env)).status).toBe(404)
+    const listing = await test.app.request('/users', { headers }, test.env)
+    expect((await listing.json() as any).data.items.map((row: any) => row.id)).not.toContain('user-1')
+    expect((await test.app.request('/users/user-1', { method: 'DELETE', headers }, test.env)).status).toBe(200)
+    expect(test.state.calls).toHaveLength(0)
+    const response = await test.app.request('/users/user-2', { method: 'DELETE', headers }, test.env)
+    expect(response.status, await response.clone().text()).toBe(200)
+  })
+
   it('deletes a regular user through the public HTTP handler', async () => {
     const test = await fixture()
 
@@ -219,7 +251,7 @@ describe('admin user deletion contract', () => {
       `SELECT email, display_name, status, password_credential, auth_version
          FROM users WHERE id = 'user-1'`,
     ).get()).toEqual({
-      email: 'deleted+user-1@users.invalid',
+      email: 'deleted-user-1@users.invalid',
       display_name: '[deleted]',
       status: 'disabled',
       password_credential: null,

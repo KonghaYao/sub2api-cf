@@ -2522,6 +2522,7 @@
                     </label>
                     <input
                       v-model="form.linuxdo_connect_redirect_url"
+                      :readonly="cloudflareWorkerSettings"
                       type="url"
                       class="input font-mono text-sm"
                       :placeholder="
@@ -2648,6 +2649,7 @@
                       </label>
                       <input
                         v-model="form.github_oauth_redirect_url"
+                        :readonly="cloudflareWorkerSettings"
                         type="url"
                         class="input font-mono text-sm"
                         placeholder="https://your-domain.com/api/v1/auth/oauth/github/callback"
@@ -2742,6 +2744,7 @@
                       </label>
                       <input
                         v-model="form.google_oauth_redirect_url"
+                        :readonly="cloudflareWorkerSettings"
                         type="url"
                         class="input font-mono text-sm"
                         placeholder="https://your-domain.com/api/v1/auth/oauth/google/callback"
@@ -3069,6 +3072,7 @@
                     <input
                       data-testid="wechat-connect-redirect-url"
                       v-model="form.wechat_connect_redirect_url"
+                      :readonly="cloudflareWorkerSettings"
                       type="url"
                       class="input font-mono text-sm"
                       :placeholder="t('admin.settings.wechatConnect.redirectUrlPlaceholder')"
@@ -3208,6 +3212,7 @@
                     </label>
                     <input
                       v-model="form.dingtalk_connect_redirect_url"
+                      :readonly="cloudflareWorkerSettings"
                       type="url"
                       class="input font-mono text-sm"
                       :placeholder="
@@ -3622,6 +3627,7 @@
                     </label>
                     <input
                       v-model="form.oidc_connect_redirect_url"
+                      :readonly="cloudflareWorkerSettings"
                       type="url"
                       class="input font-mono text-sm"
                       :placeholder="
@@ -4933,7 +4939,7 @@
                     {{ t("admin.settings.scheduling.allowUngroupedKeyHint") }}
                   </p>
                 </div>
-                <Toggle v-model="form.allow_ungrouped_key_scheduling" />
+                <Toggle v-model="form.allow_ungrouped_key_scheduling" :title="cloudflareWorkerSettings ? localText('开启后使用独立的未分组目录，需在专用组配置模型与价格；仅调度未分配普通组的账号。', 'Uses a separate ungrouped catalog with explicitly configured models and prices. Only accounts without ordinary group assignments are eligible.') : undefined" />
               </div>
 
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
@@ -5350,7 +5356,7 @@
                     {{ t("admin.settings.gatewayForwarding.cchSigningHint") }}
                   </p>
                 </div>
-                <Toggle v-model="form.enable_cch_signing" />
+                <Toggle v-model="form.enable_cch_signing" :disabled="cloudflareWorkerSettings" :title="cloudflareWorkerSettings ? localText('原功能已废弃', 'This feature has been deprecated') : undefined" />
               </div>
 
               <!-- Claude OAuth System Prompt Injection -->
@@ -10186,10 +10192,12 @@ async function saveWebSearchConfig(): Promise<boolean> {
         quota_limit: Number(p.quota_limit) > 0 ? Number(p.quota_limit) : null,
       }),
     );
-    await adminAPI.settings.updateWebSearchEmulationConfig({
+    const updated = await adminAPI.settings.updateWebSearchEmulationConfig({
       enabled: webSearchConfig.enabled,
       providers,
     });
+    webSearchConfig.enabled = updated.enabled;
+    webSearchConfig.providers = updated.providers;
     return true;
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t("common.error")));
@@ -10454,7 +10462,7 @@ const linuxdoRedirectUrlSuggestion = computed(() => {
 });
 
 async function setAndCopyLinuxdoRedirectUrl() {
-  const url = linuxdoRedirectUrlSuggestion.value;
+  const url = cloudflareWorkerSettings.value ? form.linuxdo_connect_redirect_url : linuxdoRedirectUrlSuggestion.value;
   if (!url) return;
 
   form.linuxdo_connect_redirect_url = url;
@@ -10475,7 +10483,7 @@ const googleOAuthRedirectUrlSuggestion = computed(() => {
 });
 
 async function setAndCopyEmailOAuthRedirectUrl(provider: EmailOAuthProvider) {
-  const url =
+  const url = cloudflareWorkerSettings.value ? (provider === "github" ? form.github_oauth_redirect_url : form.google_oauth_redirect_url) :
     provider === "github"
       ? githubOAuthRedirectUrlSuggestion.value
       : googleOAuthRedirectUrlSuggestion.value;
@@ -10547,7 +10555,7 @@ function handleWeChatMobileEnabledChange(value: boolean) {
 }
 
 async function setAndCopyWeChatRedirectUrl() {
-  const url = wechatRedirectUrlSuggestion.value;
+  const url = cloudflareWorkerSettings.value ? form.wechat_connect_redirect_url : wechatRedirectUrlSuggestion.value;
   if (!url) return;
 
   form.wechat_connect_redirect_url = url;
@@ -10562,7 +10570,7 @@ const oidcRedirectUrlSuggestion = computed(() => {
 });
 
 async function setAndCopyOIDCRedirectUrl() {
-  const url = oidcRedirectUrlSuggestion.value;
+  const url = cloudflareWorkerSettings.value ? form.oidc_connect_redirect_url : oidcRedirectUrlSuggestion.value;
   if (!url) return;
 
   form.oidc_connect_redirect_url = url;
@@ -10770,6 +10778,7 @@ async function loadSettings() {
     const settings = await adminAPI.settings.getSettings();
     cloudflareWorkerSettings.value = settings.cloudflare_worker_contract === true;
     if (cloudflareWorkerSettings.value) {
+      Object.assign(settings, await adminAPI.settings.getWorkerProviderSettings());
       for (const key of [
         "site_name",
         "registration_enabled",
@@ -10973,6 +10982,12 @@ async function loadWorkerPaymentSettings() {
     const response = await adminAPI.payment.getConfig();
     const payment = response.data;
     form.payment_enabled = payment.enabled;
+    form.payment_load_balance_strategy = (payment.load_balance_strategy || 'round_robin').replace(/_/g, '-');
+    form.payment_cancel_rate_limit_enabled = payment.cancel_rate_limit_enabled ?? false;
+    form.payment_cancel_rate_limit_max = payment.cancel_rate_limit_max ?? 10;
+    form.payment_cancel_rate_limit_window = payment.cancel_rate_limit_window ?? 1;
+    form.payment_cancel_rate_limit_unit = payment.cancel_rate_limit_unit ?? 'day';
+    form.payment_cancel_rate_limit_window_mode = payment.cancel_rate_limit_window_mode ?? 'rolling';
     form.payment_min_amount = payment.min_amount;
     form.payment_max_amount = payment.max_amount;
     form.payment_daily_limit = payment.daily_limit;
@@ -11083,17 +11098,33 @@ async function saveSettings() {
   saving.value = true;
   try {
     if (cloudflareWorkerSettings.value) {
-      const unsupportedGeneral = JSON.stringify({
-        table_default_page_size: form.table_default_page_size,
-        table_page_size_options: tablePageSizeOptionsInput.value,
-      });
-      if (unsupportedGeneral !== workerUnsupportedGeneralBaseline.value) {
-        throw Object.assign(
-          new Error("The changed General fields are not implemented by the Cloudflare Worker yet"),
-          { code: "worker_settings_field_not_supported" },
-        );
-      }
+      const pageOptions = parseTablePageSizeOptionsInput(tablePageSizeOptionsInput.value);
+      if (!pageOptions) throw new Error("Invalid page size options");
+      if (!await saveWebSearchConfig()) return;
+      form.codex_cli_only_blacklist = serializeCodexRowsToJSON(codexBlacklistRows.value);
+      form.codex_cli_only_whitelist = serializeCodexRowsToJSON(codexWhitelistRows.value);
+      form.codex_cli_only_engine_fingerprint_signals = serializeFingerprintRowsToJSON(codexFingerprintRows.value);
+      form.claude_oauth_system_prompt_blocks = serializeClaudeOAuthSystemPromptBlocksToJSON(claudeOAuthSystemPromptBlocks.value);
+      form.forwarded_client_ip_headers = normalizeForwardedClientIpHeaders(form.forwarded_client_ip_headers);
       const updated = await adminAPI.settings.updateSettings({
+        gateway: { ...adminAPI.settings.buildWorkerGatewaySettings(form as unknown as Record<string, unknown>), ...(openaiFastPolicyLoaded.value ? { openai_fast_policy_settings: { rules: openaiFastPolicyForm.rules.map(rule => ({ ...rule, ...(rule.user_ids ? { user_ids: rule.user_ids.map(String) } : {}) })) } } : {}) },
+        table_default_page_size: form.table_default_page_size,
+        table_page_size_options: pageOptions,
+        password_reset_enabled: form.password_reset_enabled,
+        frontend_url: form.frontend_url,
+        totp_enabled: form.totp_enabled,
+        session_binding_enabled: form.session_binding_enabled,
+        step_up_enabled: form.step_up_enabled,
+        login_agreement_enabled: form.login_agreement_enabled,
+        login_agreement_mode: form.login_agreement_mode,
+        login_agreement_updated_at: form.login_agreement_updated_at,
+        login_agreement_documents: normalizeLoginAgreementDocumentsForSave(),
+        default_balance: form.default_balance,
+        default_concurrency: form.default_concurrency,
+        plugin_management_enabled: form.plugin_management_enabled,
+        allow_user_view_error_requests: form.allow_user_view_error_requests,
+        default_user_rpm_limit: form.default_user_rpm_limit,
+        available_channels_enabled: form.available_channels_enabled,
         site_name: form.site_name,
         backend_mode_enabled: form.backend_mode_enabled,
         site_subtitle: form.site_subtitle,
@@ -11108,6 +11139,8 @@ async function saveSettings() {
         custom_endpoints: form.custom_endpoints,
         registration_enabled: form.registration_enabled,
         email_verify_enabled: form.email_verify_enabled,
+        force_email_on_third_party_signup: form.force_email_on_third_party_signup,
+        registration_email_domain_quota_enabled: form.registration_email_domain_quota_enabled,
         registration_email_suffix_whitelist: registrationEmailSuffixWhitelistTags.value.map((suffix) =>
           suffix.startsWith("*.") ? suffix : `@${suffix}`,
         ),
@@ -11120,6 +11153,18 @@ async function saveSettings() {
             })),
           }]),
         ) as never,
+        tencent_captcha_enabled: form.tencent_captcha_enabled,
+        tencent_captcha_app_id: form.tencent_captcha_app_id,
+        tencent_captcha_region: form.tencent_captcha_region,
+        aliyun_captcha_enabled: form.aliyun_captcha_enabled,
+        aliyun_captcha_access_key_id: form.aliyun_captcha_access_key_id,
+        aliyun_captcha_scene_id: form.aliyun_captcha_scene_id,
+        aliyun_captcha_prefix: form.aliyun_captcha_prefix,
+        aliyun_captcha_region: form.aliyun_captcha_region,
+        tencent_captcha_app_secret_key: form.tencent_captcha_app_secret_key || undefined,
+        tencent_captcha_cloud_secret_id: form.tencent_captcha_cloud_secret_id || undefined,
+        tencent_captcha_cloud_secret_key: form.tencent_captcha_cloud_secret_key || undefined,
+        aliyun_captcha_access_key_secret: form.aliyun_captcha_access_key_secret || undefined,
         turnstile_enabled: form.turnstile_enabled,
         turnstile_site_key: form.turnstile_site_key,
         turnstile_secret_key: form.turnstile_secret_key || undefined,
@@ -11146,8 +11191,16 @@ async function saveSettings() {
       form.promo_code_enabled = updated.promo_code_enabled;
       form.invitation_code_enabled = updated.invitation_code_enabled;
       form.affiliate_enabled = updated.affiliate_enabled;
+      await adminAPI.settings.saveWorkerProviderSettings(form as unknown as Record<string, unknown>);
+      form.smtp_password = '';
       await adminAPI.payment.updateConfig({
         enabled: form.payment_enabled,
+        load_balance_strategy: form.payment_load_balance_strategy,
+        cancel_rate_limit_enabled: form.payment_cancel_rate_limit_enabled,
+        cancel_rate_limit_max: form.payment_cancel_rate_limit_max,
+        cancel_rate_limit_window: form.payment_cancel_rate_limit_window,
+        cancel_rate_limit_unit: form.payment_cancel_rate_limit_unit,
+        cancel_rate_limit_window_mode: form.payment_cancel_rate_limit_window_mode,
         min_amount: Number(form.payment_min_amount) || 0,
         max_amount: Number(form.payment_max_amount) || 0,
         daily_limit: Number(form.payment_daily_limit) || 0,

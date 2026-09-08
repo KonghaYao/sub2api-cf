@@ -23,11 +23,11 @@ describe('real D1 upstream billing observation', () => {
   it.each([false, true])('uses the proxy and rejects a changed proxy identity (changed=%s)', async changed => {
     const t = await fixture()
     try {
-      t.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('billing-proxy','Billing','http','proxy.test',8080,'active','','',1,1)")
-      t.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','billing-proxy')")
+      t.raw.exec("INSERT INTO proxies(id,name,config_json,nonce_b64,ciphertext_b64,creation_key,created_at_ms,updated_at_ms) VALUES(1,'Billing',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'','','billing-proxy',1,1)")
+      t.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',1)")
       const direct = vi.fn(); vi.stubGlobal('fetch', direct)
       const transport = vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async () => {
-        if (changed) t.raw.exec("UPDATE proxies SET control_version=control_version+1,host='other-proxy.test'")
+        if (changed) t.raw.exec("UPDATE proxies SET control_version=control_version+1,config_json=json_set(config_json,'$.host','other-proxy.test')")
         return Response.json(declaration)
       })
       const pending = probeUpstreamBilling(t.env, 'account')
@@ -35,7 +35,7 @@ describe('real D1 upstream billing observation', () => {
         await expect(pending).rejects.toMatchObject({ code: 'UPSTREAM_BILLING_PROBE_IDENTITY_CHANGED' })
         expect(t.state().billing_rate_multiplier_ppm).toBe(1000000)
       } else expect(await pending).toMatchObject({ status: 'ok' })
-      expect(transport.mock.calls[0][1]).toBe('billing-proxy')
+      expect(transport.mock.calls[0][1]).toBe('1')
       expect(direct).not.toHaveBeenCalled()
     } finally { t.raw.close() }
   })
@@ -57,6 +57,19 @@ describe('real D1 upstream billing observation', () => {
       expect(row.control_version).toBe(1)
       expect(JSON.parse(row.ui_config_json).extra).toMatchObject({ keep: 'safe', upstream_billing_probe: result })
       expect(Date.parse(result.fresh_until!) - Date.parse(result.received_at!)).toBe(3600000)
+    } finally { t.raw.close() }
+  })
+
+  it('keeps the edit version stable when a repeated observation does not change the rate', async () => {
+    const t = await fixture()
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json(declaration)))
+      await probeUpstreamBilling(t.env, 'account')
+      const before = t.state()
+      await probeUpstreamBilling(t.env, 'account')
+      const after = t.state()
+      expect(after.control_version).toBe(before.control_version)
+      expect(after.config_version).toBe(before.config_version)
     } finally { t.raw.close() }
   })
 
@@ -84,6 +97,19 @@ describe('real D1 upstream billing observation', () => {
       expect(result.status).toBe(mode === 'zero' ? 'ok' : 'failed')
       expect(result.synced_rate_multiplier).toBeUndefined()
       expect(t.state().billing_rate_multiplier_ppm).toBe(1000000)
+    } finally { t.raw.close() }
+  })
+
+  it('preserves concurrent capability observations without rejecting an unchanged billing identity', async () => {
+    const t = await fixture()
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        t.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.extra.openai_responses_supported',json('true')),config_version=config_version+1")
+        return Response.json(declaration)
+      }))
+      const result=await probeUpstreamBilling(t.env,'account')
+      expect(result.status).toBe('ok')
+      expect(JSON.parse(t.state().ui_config_json).extra).toMatchObject({openai_responses_supported:true,upstream_billing_probe:{status:'ok'}})
     } finally { t.raw.close() }
   })
 

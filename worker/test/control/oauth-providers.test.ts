@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { requireAdminSession } from '../../src/control/admin-auth'
 import {
@@ -98,10 +98,62 @@ function githubInput(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 describe('admin OAuth provider control plane', () => {
+  it('migrates existing provider credentials and in-flight OAuth references without loss', () => {
+    const { raw } = createSqliteD1()
+    applyMigrations(raw, 81)
+    raw.exec(`INSERT INTO oauth_providers (provider,adapter,issuer,authorization_endpoint,token_endpoint,userinfo_endpoint,jwks_endpoint,client_id,allowed_hosts_json,frontend_callback_path,created_at_ms,updated_at_ms,secret_key_version,secret_nonce_b64,secret_ciphertext_b64) VALUES ('oidc','oidc','https://id.example.test','https://id.example.test/auth','https://id.example.test/token','https://id.example.test/user','https://id.example.test/jwks','client','["id.example.test"]','/auth/oidc/callback',1,1,1,'nonce','ciphertext')`)
+    raw.prepare(`INSERT INTO oauth_flows (id,provider,intent,state_hash,browser_token_hash,redirect_to,expires_at_ms,created_at_ms) VALUES ('flow','oidc','login',?,?,'/dashboard',2,1)`).run('a'.repeat(64), 'b'.repeat(64))
+    raw.exec('BEGIN')
+    applyMigrations(raw, 82)
+    raw.exec('COMMIT')
+    expect(raw.prepare('SELECT id, provider FROM oauth_flows').get()).toEqual({ id: 'flow', provider: 'oidc' })
+    expect(raw.prepare('SELECT secret_ciphertext_b64 FROM oauth_providers').get()).toEqual({ secret_ciphertext_b64: 'ciphertext' })
+    expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    raw.exec(`UPDATE oauth_providers SET jwks_endpoint = NULL`)
+  })
+
+  it('allows an OIDC public client with UserInfo only and no client secret', async () => {
+    const test = await harness()
+    const response = await test.app.request('/providers/oidc', { method: 'PUT', headers: adminHeaders('oidc-public-client', 0), body: JSON.stringify(githubInput({ adapter: 'oidc', issuer: 'https://github.example.test', client_secret: null, advanced: { oidc_connect_token_auth_method: 'none', oidc_connect_validate_id_token: false } })) }, test.env)
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({ data: { enabled: true, client_secret_configured: false, jwks_endpoint: null } })
+  })
+
+  it('resolves OIDC discovery into validated live endpoints and rejects issuer mismatch', async () => {
+    const test = await harness()
+    const mock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ issuer: 'https://identity.example.test', authorization_endpoint: 'https://identity.example.test/authorize', token_endpoint: 'https://identity.example.test/token', userinfo_endpoint: 'https://identity.example.test/user', jwks_uri: 'https://identity.example.test/jwks' }))
+    try {
+      const input = githubInput({ adapter: 'oidc', issuer: 'https://identity.example.test', authorization_endpoint: '', token_endpoint: '', userinfo_endpoint: '', emails_endpoint: null, jwks_endpoint: null, allowed_hosts: ['identity.example.test'], advanced: { oidc_connect_discovery_url: 'https://identity.example.test/.well-known/openid-configuration', oidc_connect_provider_name: 'Company login' } })
+      const response = await test.app.request('/providers/oidc', { method: 'PUT', headers: adminHeaders('discovery-create', 0), body: JSON.stringify(input) }, test.env)
+      expect(response.status).toBe(201)
+      const result = await response.json() as { data: { token_endpoint: string; advanced: Record<string, unknown> } }
+      expect(result.data.token_endpoint).toBe('https://identity.example.test/token')
+      expect(result.data.advanced.oidc_connect_provider_name).toBe('Company login')
+      mock.mockResolvedValue(Response.json({ issuer: 'https://attacker.example.test' }))
+      const bad = await test.app.request('/providers/oidc', { method: 'PUT', headers: adminHeaders('discovery-mismatch', 1), body: JSON.stringify(input) }, test.env)
+      expect(bad.status).toBe(400)
+    } finally { mock.mockRestore() }
+  })
+
   let subject: Harness
 
   beforeEach(async () => {
     subject = await harness()
+  })
+
+  it('atomically saves separate WeChat app credentials and redacts them on read', async () => {
+    const body = githubInput({ adapter: 'wechat', issuer: 'wechat', client_id: 'open-app', client_secret: 'base-secret', wechat_variants: { open: { enabled: true, client_id: 'open-app', client_secret: 'open-secret' }, mp: { enabled: true, client_id: 'mp-app', client_secret: 'mp-secret' } } })
+    const created = await subject.app.request('/providers/wechat', { method: 'PUT', headers: adminHeaders('wechat-create-variants', 0), body: JSON.stringify(body) }, subject.env)
+    expect(created.status, await created.clone().text()).toBe(201)
+    const data = (await created.json() as any).data
+    expect(data.wechat_variants.mp).toEqual({ enabled: true, client_id: 'mp-app', client_secret_configured: true })
+    expect(JSON.stringify(data)).not.toContain('mp-secret')
+    const kept = await subject.app.request('/providers/wechat', { method: 'PUT', headers: adminHeaders('wechat-keep-variants', data.control_version), body: JSON.stringify({ ...body, client_secret: undefined, wechat_variants: { mp: { enabled: true, client_id: 'mp-app', client_secret: '' } } }) }, subject.env)
+    expect(kept.status).toBe(200)
+    const row = subject.raw.prepare("SELECT nonce_b64,ciphertext_b64 FROM oauth_wechat_variants WHERE mode='mp'").get()
+    expect(await decryptCredential(row.nonce_b64,row.ciphertext_b64,MASTER_KEY,'wechat-variant:v1:test:mp')).toEqual({ api_key: 'mp-secret' })
+    const fetched = await subject.app.request('/providers/wechat', { headers: adminHeaders() }, subject.env)
+    expect((await fetched.json() as any).data.wechat_variants).toMatchObject({ open: { client_secret_configured: true }, mp: { client_secret_configured: true } })
   })
 
   it('creates, gets, and lists a provider without exposing its encrypted client secret', async () => {

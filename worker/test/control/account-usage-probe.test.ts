@@ -36,8 +36,8 @@ describe('OpenAI OAuth usage probe', () => {
     const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
     const master = 'm'.repeat(32)
     const secret = await encryptCredential({ api_key: 'usage-access', access_token: 'usage-access', chatgpt_account_id: 'usage-workspace' } as never, master, 'test/account/secret/1')
-    if (scenario === 'proxy') raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('proxy-1','Usage proxy','http','proxy.test',8080,'active','','',1,1)")
-    const ui = JSON.stringify({ extra: { keep: true, codex_5h_used_percent: 9 }, ...(scenario === 'proxy' ? { proxy_id: 'proxy-1' } : {}) })
+    if (scenario === 'proxy') raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(10001,'Usage proxy',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'proxy-1','','',1,1)")
+    const ui = JSON.stringify({ extra: { keep: true, codex_5h_used_percent: 9 }, ...(scenario === 'proxy' ? { proxy_id: 10001 } : {}) })
     raw.prepare(`INSERT INTO accounts(id,platform,name,credential_ref,credential_kind,protocol,base_url,auth_scheme,ui_config_json,created_at_ms,updated_at_ms)
       VALUES('account','openai','Usage','secret','oauth','openai','https://api.openai.com','bearer',?,1,1)`).run(ui)
     raw.prepare('INSERT INTO account_secrets(id,account_id,key_version,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(?,?,1,?,?,1,1)')
@@ -57,7 +57,7 @@ describe('OpenAI OAuth usage probe', () => {
         headers: ['empty','failure'].includes(scenario) ? {} : { 'x-codex-secondary-used-percent': '42', 'x-codex-secondary-reset-after-seconds': '120' } })
     }
     vi.stubGlobal('fetch', vi.fn(receive))
-    if (scenario === 'proxy') vi.spyOn(proxy, 'fetchAccountProxy').mockImplementation(async (_env, id, url, init) => { expect(id).toBe('proxy-1'); return receive(url,init) })
+    if (scenario === 'proxy') vi.spyOn(proxy, 'fetchAccountProxy').mockImplementation(async (_env, id, url, init) => { expect(id).toBe('10001'); return receive(url,init) })
     try {
       const result = probeOpenAIAccountUsage(env, account)
       if (scenario === 'race' || scenario === 'failure') await expect(result).rejects.toMatchObject({ status: scenario === 'race' ? 412 : 502 })

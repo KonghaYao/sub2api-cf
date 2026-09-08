@@ -2,7 +2,7 @@ import { apiClient } from '../client'
 
 export interface WorkerAdminModel {
   id: string
-  platform: 'openai' | 'anthropic' | 'gemini' | 'codex'
+  platform: 'openai' | 'anthropic' | 'gemini' | 'codex' | 'grok'
   public_name: string
   upstream_name: string
   endpoint: 'chat_completions' | 'responses' | 'both'

@@ -1,6 +1,7 @@
 import { apiClient } from '../client'
 
 export interface BackupS3Config {
+  control_version?: number
   endpoint: string
   region: string
   bucket: string
@@ -11,6 +12,7 @@ export interface BackupS3Config {
 }
 
 export interface BackupScheduleConfig {
+  control_version?: number
   enabled: boolean
   cron_expr: string
   retain_days: number
@@ -70,7 +72,7 @@ export async function getS3Config(): Promise<BackupS3Config> {
 }
 
 export async function updateS3Config(config: BackupS3Config): Promise<BackupS3Config> {
-  const { data } = await apiClient.put<BackupS3Config>('/admin/backups/s3-config', config)
+  const { data } = await apiClient.put<BackupS3Config>('/admin/backups/s3-config', { ...config, expected_control_version: config.control_version })
   return data
 }
 
@@ -84,6 +86,7 @@ export async function testS3Connection(config: BackupS3Config): Promise<TestS3Re
 // Shares the S3 client with backups, so `reuse_backup_s3` borrows the endpoint and
 // credentials configured above and only keeps its own bucket/prefix.
 export interface ImageStorageConfig {
+  control_version?: number
   enabled: boolean
   reuse_backup_s3: boolean
   bucket: string
@@ -111,7 +114,7 @@ export async function getImageStorageConfig(): Promise<ImageStorageConfigRespons
 export async function updateImageStorageConfig(
   config: ImageStorageConfig,
 ): Promise<ImageStorageConfig> {
-  const { data } = await apiClient.put<ImageStorageConfig>('/admin/backups/image-storage', config)
+  const { data } = await apiClient.put<ImageStorageConfig>('/admin/backups/image-storage', { ...config, expected_control_version: config.control_version })
   return data
 }
 
@@ -132,7 +135,7 @@ export async function getSchedule(): Promise<BackupScheduleConfig> {
 }
 
 export async function updateSchedule(config: BackupScheduleConfig): Promise<BackupScheduleConfig> {
-  const { data } = await apiClient.put<BackupScheduleConfig>('/admin/backups/schedule', config)
+  const { data } = await apiClient.put<BackupScheduleConfig>('/admin/backups/schedule', { ...config, expected_control_version: config.control_version })
   return data
 }
 
@@ -142,8 +145,8 @@ export async function createBackup(req?: CreateBackupRequest): Promise<BackupRec
   return data
 }
 
-export async function listBackups(): Promise<{ items: BackupRecord[] }> {
-  const { data } = await apiClient.get<{ items: BackupRecord[] }>('/admin/backups')
+export async function listBackups(): Promise<{ items: BackupRecord[]; capabilities?: { full_backup: boolean; restore: boolean; reason: string } }> {
+  const { data } = await apiClient.get<{ items: BackupRecord[]; capabilities?: { full_backup: boolean; restore: boolean; reason: string } }>('/admin/backups')
   return data
 }
 

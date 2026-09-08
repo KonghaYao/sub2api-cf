@@ -16,7 +16,8 @@ const MASTER = 'm'.repeat(32)
 const META = { id: 'model-a', display_name: 'Model A', reasoning: true, supported_reasoning_levels: [{ effort: 'LOW' }, { effort: 'extra-high' }], input_modalities: ['text', 'image'], context_window: 128000 }
 async function fixture(platform: ProviderPlatform = 'openai', config: Record<string, unknown> = {}, credential: Record<string, unknown> = { api_key: 'private-upstream-secret' }, kind = 'api_key') {
   const { raw, d1 } = createSqliteD1()
-  applyMigrations(raw)
+  const legacyProxy = config.proxy_id === 0 || config.proxy_id === '0'
+  applyMigrations(raw, legacyProxy ? 89 : Number.POSITIVE_INFINITY)
   const contract = providerContract(platform)
   const baseUrl = platform === 'gemini' ? 'https://models.example.test/v1beta' : 'https://models.example.test/v1'
   const encrypted = await encryptCredential(credential, MASTER, credentialAad('test', 'opaque-account', 'vault-key', 1))
@@ -26,6 +27,7 @@ async function fixture(platform: ProviderPlatform = 'openai', config: Record<str
     .run(platform, contract.protocol, baseUrl, contract.auth_scheme, kind, JSON.stringify(config))
   raw.prepare(`INSERT INTO account_secrets (id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms)
     VALUES ('vault-key', 'opaque-account', 1, ?, ?, 1, 1)`).run(encrypted.nonce_b64, encrypted.ciphertext_b64)
+  if (legacyProxy) applyMigrations(raw)
   const cache = new Map<string, string>()
   const env = { DB: d1, ENVIRONMENT: 'test', CREDENTIALS_MASTER_KEY: MASTER,
     CONFIG_KV: { get: async (key: string) => cache.has(key) ? JSON.parse(cache.get(key)!) : null,
@@ -56,8 +58,8 @@ describe('original account model directory and live sync', () => {
   it('syncs a saved account through its proxy and preserves upstream authorization inside the transport', async () => {
     const f = await fixture()
     try {
-      f.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('proxy-sync','Sync','http','proxy.test',8080,'active','','',1,1)")
-      f.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','proxy-sync')")
+      f.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(10001,'Sync',json_object('protocol','http','host','proxy.test','port',8080,'status','active'),'sync-key','','',1,1)")
+      f.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',10001)")
       const transport = vi.spyOn(proxyTransport, 'fetchAccountProxy').mockResolvedValue(Response.json({ data: [META] }))
       const direct = vi.fn().mockRejectedValue(new Error('No direct upstream access'))
       vi.stubGlobal('fetch', direct)
@@ -67,7 +69,7 @@ describe('original account model directory and live sync', () => {
       expect(transport).toHaveBeenCalledOnce()
       const [env, id, url, init] = transport.mock.calls[0]
       expect(env).toBe(f.env)
-      expect(id).toBe('proxy-sync')
+      expect(id).toBe('10001')
       expect(url.href).toBe('https://models.example.test/v1/models')
       expect(new Headers(init.headers).get('authorization')).toBe('Bearer private-upstream-secret')
       expect(direct.mock.calls.every(([url]) => url === 'https://models.dev/api.json')).toBe(true)
@@ -77,8 +79,8 @@ describe('original account model directory and live sync', () => {
   it('does not disguise an unavailable bound proxy as model-mapping fallback or direct success', async () => {
     const f = await fixture('openai', {}, { api_key: 'private-upstream-secret', model_mapping: { public: 'fallback' } })
     try {
-      f.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('proxy-sync','Sync','https','proxy.test',443,'active','','',1,1)")
-      f.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','proxy-sync')")
+      f.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(10001,'Sync',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'sync-key','','',1,1)")
+      f.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',10001)")
       const direct = vi.fn().mockResolvedValue(Response.json({ data: [META] }))
       vi.stubGlobal('fetch', direct)
       const before = f.state()

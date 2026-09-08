@@ -1,3 +1,4 @@
+import { uploadConfiguredImage, readImageStorage, deleteConfiguredImage } from '../control/backup-storage'
 import type { Context } from 'hono'
 import type { Env, PlatformEvent } from '../env'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/errors'
@@ -291,7 +292,7 @@ export async function recoverImageTasks(
   for (const task of expired.results) {
     if (await claimExpiredTask(env, task.id, now) === false) continue
     try {
-      await deleteImageTaskObjects(env, task.id)
+      if (!await deleteImageTaskObjects(env, task.id)) continue
       const result = await env.DB.prepare(
         "DELETE FROM image_tasks WHERE id=? AND expires_at_ms <= ? AND status='deleting'",
       ).bind(task.id, now).run()
@@ -303,18 +304,34 @@ export async function recoverImageTasks(
   return { enqueued, failed, deleted }
 }
 
-async function deleteImageTaskObjects(env: Env, taskId: string): Promise<void> {
-  const prefix = imageTaskPrefix(env, taskId)
-  let cursor: string | undefined
-  do {
-    const page = await env.OBJECTS.list({ prefix, ...(cursor === undefined ? {} : { cursor }) })
-    for (const object of page.objects) await env.OBJECTS.delete(object.key)
-    cursor = page.truncated ? page.cursor : undefined
-  } while (cursor !== undefined)
+async function deleteImageTaskObjects(env: Env, taskId: string): Promise<boolean> {
+  // Clear references only after successful deletion. A crash leaves the same
+  // reference retryable; already deleted objects are safe to delete again.
+  const external = await env.DB.prepare(
+    'SELECT external_storage_ref FROM image_task_outputs WHERE task_id=? AND external_storage_ref IS NOT NULL LIMIT 4',
+  ).bind(taskId).all<{ external_storage_ref: string }>()
+  for (const output of external.results.slice(0, 3)) {
+    await deleteConfiguredImage(env, output.external_storage_ref)
+    await env.DB.prepare('UPDATE image_task_outputs SET external_storage_ref=NULL WHERE task_id=? AND external_storage_ref=?')
+      .bind(taskId, output.external_storage_ref).run()
+  }
+  if (external.results.length > 3) return false
+
+  // Always restart at the first remaining key. Deletions advance the prefix
+  // naturally, avoiding a cursor that skips objects after a partial failure.
+  const page = await env.OBJECTS.list({ prefix: imageTaskPrefix(env, taskId), limit: 10 })
+  for (const object of page.objects.slice(0, 10)) await env.OBJECTS.delete(object.key)
+  return !page.truncated && page.objects.length <= 10
+}
+
+async function deleteExternalImageOutputs(env: Env, taskId: string): Promise<void> {
+  const outputs = await env.DB.prepare('SELECT external_storage_ref FROM image_task_outputs WHERE task_id=? AND external_storage_ref IS NOT NULL').bind(taskId).all<{external_storage_ref:string}>()
+  for (const output of outputs.results) await deleteConfiguredImage(env, output.external_storage_ref)
 }
 
 async function cleanupGeneratedResult(env: Env, taskId: string): Promise<void> {
   await bestEffort(async () => {
+    await deleteExternalImageOutputs(env, taskId)
     await env.DB.prepare('DELETE FROM image_task_outputs WHERE task_id=?').bind(taskId).run()
   })
   const prefix = `${imageTaskPrefix(env, taskId)}outputs/`
@@ -377,31 +394,32 @@ async function offloadResult(env: Env, task: ImageTaskRow, bytes: Uint8Array): P
   const data: unknown[] = []
   const statements: D1PreparedStatement[] = []
   const uploadedKeys: string[] = []
+  const externalCleanups: Array<() => Promise<void>> = []
   let imageIndex = 0
+  const imageStorage = (await readImageStorage(env)).config
   try {
     for (const candidate of root.data) {
       const item = record(candidate)
       if (item === null) throw new Error('invalid image output')
-      const image = await resolveImageAsset(item, env)
+      const image = await resolveImageAsset(item, env, imageStorage.enabled ? imageStorage.max_download_bytes : undefined)
       const mime = image.mime
       const objectKey = imageTaskOutputKey(env, task.id, imageIndex, mime)
       await env.OBJECTS.put(objectKey, image.bytes, {
         httpMetadata: { contentType: mime }, customMetadata: { taskId: task.id, imageIndex: String(imageIndex) },
       })
       uploadedKeys.push(objectKey)
-      statements.push(env.DB.prepare(
-        `INSERT OR IGNORE INTO image_task_outputs(task_id,image_index,object_key,mime_type,byte_length,created_at_ms)
-         VALUES(?,?,?,?,?,?)`,
-      ).bind(task.id, imageIndex, objectKey, mime, image.bytes.byteLength, Date.now()))
       const { b64_json: _removed, ...rest } = item
-      data.push({ ...rest, url: `/v1/images/tasks/${task.id}/content/${imageIndex}` })
+      const external = await uploadConfiguredImage(env, task.id, imageIndex, image.bytes, mime)
+      if (external) externalCleanups.push(external.cleanup)
+      statements.push(env.DB.prepare(`INSERT OR IGNORE INTO image_task_outputs(task_id,image_index,object_key,mime_type,byte_length,created_at_ms,external_storage_ref) VALUES(?,?,?,?,?,?,?)`).bind(task.id,imageIndex,objectKey,mime,image.bytes.byteLength,Date.now(),external?.storageRef??null))
+      data.push({ ...rest, url: external?.url ?? `/v1/images/tasks/${task.id}/content/${imageIndex}` })
       imageIndex += 1
     }
     if (imageIndex === 0) throw new Error('image output missing')
     if (statements.length > 0) await env.DB.batch(statements)
     return { ...root, data }
   } catch (error) {
-    await Promise.all(uploadedKeys.map((key) => bestEffort(() => env.OBJECTS.delete(key))))
+    await Promise.all([...uploadedKeys.map((key) => bestEffort(() => env.OBJECTS.delete(key))), ...externalCleanups.map(cleanup => bestEffort(cleanup))])
     throw error
   }
 }

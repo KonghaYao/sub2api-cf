@@ -665,7 +665,7 @@ export async function putAdminGroupModel(context: Context<ControlBindings>): Pro
     if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group_model'))
     const group = await requireGroup(context.env, groupId)
     const model = await requireModel(context.env, modelId)
-    if (group.platform !== model.platform) {
+    if (group.platform !== 'composite' && group.platform !== model.platform) {
       throw new GatewayError(409, 'platform_mismatch', 'Group and model platforms must match')
     }
     const current = await findGroupModel(context.env, groupId, modelId)
@@ -1369,7 +1369,7 @@ function publicPrice(row: PriceRow) {
 }
 
 function ensureSupportedPlatform(platform: string, enabled: boolean): void {
-  if (enabled && !['openai', 'anthropic', 'gemini', 'codex'].includes(platform)) {
+  if (enabled && !['openai', 'anthropic', 'gemini', 'codex', 'grok', 'antigravity'].includes(platform)) {
     throw new GatewayError(
       409,
       'platform_not_supported',
@@ -1398,6 +1398,7 @@ function validCount(value: unknown, resource: string): number {
 function mapCatalogWriteError(error: unknown): unknown {
   if (error instanceof GatewayError) return error
   const message = error instanceof Error ? error.message : ''
+  if (message.includes('virtual_default_')) return new GatewayError(409,'virtual_default_group_managed','Ungrouped scheduling group identity is managed by system settings')
   if (message.includes('UNIQUE constraint')) {
     return new GatewayError(409, 'catalog_conflict', 'Catalog resource already exists')
   }

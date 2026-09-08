@@ -83,15 +83,17 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { adminAPI } from "@/api/admin";
-import type { SimpleUser } from "@/api/admin/usage";
+import type { SimpleUser as NumericSimpleUser } from "@/api/admin/usage";
 import Icon from "@/components/icons/Icon.vue";
 
+type SimpleUser = Omit<NumericSimpleUser, 'id'> & { id: number | string };
+type UserID = number | string;
 const props = defineProps<{
-  modelValue: number[];
+  modelValue: UserID[];
 }>();
 
 const emit = defineEmits<{
-  "update:modelValue": [value: number[]];
+  "update:modelValue": [value: UserID[]];
 }>();
 
 const { t } = useI18n();
@@ -100,12 +102,12 @@ const searchQuery = ref("");
 const searchResults = ref<SimpleUser[]>([]);
 const searchLoading = ref(false);
 const showDropdown = ref(false);
-const selectedUsers = ref<Record<number, SimpleUser>>({});
+const selectedUsers = ref<Record<string, SimpleUser>>({});
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchSequence = 0;
 
 const selectedUserIds = computed(() =>
-  Array.from(new Set(props.modelValue.filter((id) => Number.isInteger(id) && id > 0))),
+  Array.from(new Set(props.modelValue.filter((id) => typeof id === 'number' ? Number.isInteger(id) && id > 0 : /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id)))),
 );
 
 const availableResults = computed(() => {
@@ -115,7 +117,7 @@ const availableResults = computed(() => {
     .sort((a, b) => Number(a.deleted) - Number(b.deleted));
 });
 
-function selectedUserLabel(userId: number): string {
+function selectedUserLabel(userId: UserID): string {
   return selectedUsers.value[userId]?.email ||
     t("admin.settings.openaiFastPolicy.userIdFallback", { id: userId });
 }
@@ -168,14 +170,14 @@ function selectUser(user: SimpleUser): void {
   showDropdown.value = false;
 }
 
-function removeUser(userId: number): void {
+function removeUser(userId: UserID): void {
   emit(
     "update:modelValue",
     selectedUserIds.value.filter((id) => id !== userId),
   );
 }
 
-async function hydrateSelectedUsers(userIds: number[]): Promise<void> {
+async function hydrateSelectedUsers(userIds: UserID[]): Promise<void> {
   const missing = userIds.filter((id) => !selectedUsers.value[id]);
   if (missing.length === 0) return;
 

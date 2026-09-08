@@ -66,11 +66,10 @@ const groupMetricTypes = new Set<MetricType>([
   'group_rate_limit_ratio'
 ])
 
-function parsePositiveInt(value: unknown): number | null {
-  if (value == null) return null
-  if (typeof value === 'boolean') return null
-  const n = typeof value === 'number' ? value : Number.parseInt(String(value), 10)
-  return Number.isFinite(n) && n > 0 ? n : null
+function parsePositiveInt(value: unknown): number | string | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? value : null
+  if (typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value)) return value
+  return null
 }
 
 const groupOptionsBase = ref<SelectOption[]>([])
@@ -90,7 +89,7 @@ const isGroupMetricSelected = computed(() => {
   return metricType ? groupMetricTypes.has(metricType) : false
 })
 
-const draftGroupId = computed<number | null>({
+const draftGroupId = computed<number | string | null>({
   get() {
     return parsePositiveInt(draft.value?.filters?.group_id)
   },

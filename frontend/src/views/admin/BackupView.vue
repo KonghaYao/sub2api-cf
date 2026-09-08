@@ -141,7 +141,7 @@
         </div>
         <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
           <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 md:col-span-2">
-            <input v-model="scheduleForm.enabled" type="checkbox" />
+            <input v-model="scheduleForm.enabled" type="checkbox" :disabled="!backupExecutorAvailable" />
             <span>{{ t('admin.backup.schedule.enabled') }}</span>
           </label>
           <div>
@@ -183,7 +183,7 @@
               <label class="text-xs text-gray-600 dark:text-gray-400">{{ t('admin.backup.operations.expireDays') }}</label>
               <input v-model.number="manualExpireDays" type="number" min="0" class="input w-20 text-xs" />
             </div>
-            <button type="button" class="btn btn-primary btn-sm" :disabled="creatingBackup" @click="createBackup">
+            <button type="button" class="btn btn-primary btn-sm" :disabled="creatingBackup || !backupExecutorAvailable" @click="createBackup">
               {{ creatingBackup ? t('admin.backup.operations.backing') : t('admin.backup.operations.createBackup') }}
             </button>
             <button type="button" class="btn btn-secondary btn-sm" :disabled="loadingBackups" @click="loadBackups">
@@ -192,6 +192,7 @@
           </div>
         </div>
 
+        <p v-if="!backupExecutorAvailable" role="status" class="mb-4 text-sm text-amber-700 dark:text-amber-400">{{ backupExecutorReason }}</p>
         <div class="overflow-x-auto">
           <table class="w-full min-w-[800px] text-sm">
             <thead>
@@ -244,7 +245,7 @@
                       v-if="record.status === 'completed'"
                       type="button"
                       class="btn btn-secondary btn-xs"
-                      :disabled="restoringId === record.id"
+                      :disabled="restoringId === record.id || !backupExecutorAvailable"
                       @click="restoreBackup(record.id)"
                     >
                       {{ restoringId === record.id ? t('common.loading') : t('admin.backup.actions.restore') }}
@@ -474,6 +475,8 @@ const savingSchedule = ref(false)
 
 // Backups
 const backups = ref<BackupRecord[]>([])
+const backupExecutorAvailable = ref(true)
+const backupExecutorReason = ref('')
 const loadingBackups = ref(false)
 const creatingBackup = ref(false)
 const restoringId = ref('')
@@ -602,6 +605,7 @@ async function loadS3Config() {
   try {
     const cfg = await adminAPI.backup.getS3Config()
     s3Form.value = {
+      control_version: cfg.control_version,
       endpoint: cfg.endpoint || '',
       region: cfg.region || 'auto',
       bucket: cfg.bucket || '',
@@ -701,6 +705,7 @@ async function loadSchedule() {
   try {
     const cfg = await adminAPI.backup.getSchedule()
     scheduleForm.value = {
+      control_version: cfg.control_version,
       enabled: cfg.enabled,
       cron_expr: cfg.cron_expr || '0 2 * * *',
       retain_days: cfg.retain_days || 14,
@@ -714,7 +719,8 @@ async function loadSchedule() {
 async function saveSchedule() {
   savingSchedule.value = true
   try {
-    await adminAPI.backup.updateSchedule(scheduleForm.value)
+    const saved = await adminAPI.backup.updateSchedule(scheduleForm.value)
+    scheduleForm.value.control_version = saved.control_version
     appStore.showSuccess(t('admin.backup.schedule.saved'))
   } catch (error) {
     appStore.showError((error as { message?: string })?.message || t('errors.networkError'))
@@ -728,6 +734,8 @@ async function loadBackups() {
   try {
     const result = await adminAPI.backup.listBackups()
     backups.value = result.items || []
+    backupExecutorAvailable.value = result.capabilities?.full_backup !== false
+    backupExecutorReason.value = result.capabilities?.reason || ''
   } catch (error) {
     appStore.showError((error as { message?: string })?.message || t('errors.networkError'))
   } finally {

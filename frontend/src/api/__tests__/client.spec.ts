@@ -481,6 +481,35 @@ describe('API Client', () => {
       expect(adapter.mock.calls[1][0].headers.get('Authorization')).toBe('Bearer new-token')
     })
 
+    it('请求发出后换号且旧请求才返回401时不以新用户身份重试', async () => {
+      localStorage.setItem('auth_token', 'user-a-access')
+      localStorage.setItem('refresh_token', 'user-a-refresh')
+      localStorage.setItem('auth_user', JSON.stringify({ id: '4d5f1031-a954-434e-9631-862b3dbb5531' }))
+      let rejectOriginal!: () => void
+      const adapter = vi.fn().mockImplementationOnce((config) => new Promise((_resolve, reject) => {
+        rejectOriginal = () => reject({
+          response: { status: 401, data: { code: 'invalid_access_token' } },
+          config,
+          code: 'ERR_BAD_REQUEST',
+        })
+      })).mockResolvedValue({
+        status: 200, data: { code: 0, data: { deleted: true } }, headers: {}, config: {}, statusText: 'OK',
+      })
+      apiClient.defaults.adapter = adapter
+      const refresh = vi.spyOn(axios, 'post')
+      const pending = apiClient.delete('/user/resource')
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledTimes(1))
+      localStorage.setItem('auth_token', 'user-b-access')
+      localStorage.setItem('refresh_token', 'user-b-refresh')
+      localStorage.setItem('auth_user', JSON.stringify({ id: '05ff44e5-0e0c-4d15-ae85-a6fa839fd1f4' }))
+      localStorage.setItem('token_expires_at', String(Date.now() + 3600_000))
+      rejectOriginal()
+      await expect(pending).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(adapter).toHaveBeenCalledTimes(1)
+      expect(refresh).not.toHaveBeenCalled()
+      expect(localStorage.getItem('auth_token')).toBe('user-b-access')
+    })
+
     it('刷新期间换号时旧请求不会清除新会话', async () => {
       localStorage.setItem('auth_token', 'user-a-access')
       localStorage.setItem('refresh_token', 'user-a-refresh')

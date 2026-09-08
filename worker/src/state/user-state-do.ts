@@ -136,6 +136,7 @@ export interface SetUserEnabledCommand {
   mutation_id: string;
   enabled: boolean;
   expected_state_version?: number;
+  expected_enabled_mutation_id?: string | null;
   rollback_mutation_id?: string;
 }
 
@@ -252,6 +253,7 @@ export class UserStateDO {
       return json({
         schema_version: STATE_SCHEMA_VERSION,
         state_version: this.loadStateVersion(),
+        last_enabled_mutation_id: this.lastEnabledMutationId(),
         profile,
         available_micros: profile.balance_micros - profile.reserved_micros,
         requests,
@@ -542,6 +544,10 @@ export class UserStateDO {
 
       const mutationKey = `enabled:${command.mutation_id}`;
       const existingMutation = this.loadLedgerEntry(mutationKey);
+      const enabledOwner = this.lastEnabledMutationId();
+      if (command.expected_enabled_mutation_id !== undefined && enabledOwner !== (existingMutation === null ? command.expected_enabled_mutation_id : command.mutation_id)) {
+        throw new StateApiError(409, "enabled_mutation_conflict", "Enabled state has another mutation owner");
+      }
       if (existingMutation !== null) {
         if (
           existingMutation.entry_type !== "enabled_change" ||
@@ -568,6 +574,7 @@ export class UserStateDO {
           schema_version: STATE_SCHEMA_VERSION,
           idempotent: true,
           state_version: this.loadStateVersion(),
+          last_enabled_mutation_id: enabledOwner,
           profile,
         });
       }
@@ -582,6 +589,7 @@ export class UserStateDO {
           idempotent: false,
           applied: false,
           state_version: currentStateVersion,
+          last_enabled_mutation_id: enabledOwner,
           profile,
         });
       }
@@ -641,6 +649,7 @@ export class UserStateDO {
         schema_version: STATE_SCHEMA_VERSION,
         idempotent: false,
         state_version: stateVersion,
+        last_enabled_mutation_id: command.mutation_id,
         profile: nextProfile,
       });
     });
@@ -761,7 +770,7 @@ export class UserStateDO {
     if (result === null) {
       throw new StateApiError(401, "invalid_api_key", "API key authorization is no longer valid");
     }
-    if (result.group_enabled !== 1 || !isProviderPlatform(result.platform)) {
+    if (result.group_enabled !== 1 || (!isProviderPlatform(result.platform) && result.platform !== "composite")) {
       throw new StateApiError(403, "group_unavailable", "API key group is unavailable");
     }
     if (result.group_accessible !== 1) {
@@ -1012,6 +1021,16 @@ export class UserStateDO {
       profile.spend_debt_micros,
       profile.updated_at_ms,
     );
+  }
+
+  private lastEnabledMutationId(): string | null {
+    const rows = Array.from(this.state.storage.sql.exec(
+      `SELECT mutation_id FROM (
+        SELECT mutation_id, rowid AS sequence FROM user_ledger WHERE entry_type = 'enabled_change'
+        UNION ALL SELECT mutation_id, ledger_sequence AS sequence FROM user_ledger_tombstones
+      ) ORDER BY sequence DESC LIMIT 1`,
+    )) as unknown as Array<{mutation_id:string}>;
+    return rows[0]?.mutation_id ?? null;
   }
 
   private loadStateVersion(): number {
@@ -1504,6 +1523,9 @@ export function parseSetUserEnabledCommand(body: Record<string, unknown>): SetUs
     expected_state_version: body.expected_state_version === undefined
       ? undefined
       : requireSafeInteger(body, "expected_state_version"),
+    expected_enabled_mutation_id: body.expected_enabled_mutation_id === undefined || body.expected_enabled_mutation_id === null
+      ? body.expected_enabled_mutation_id as undefined | null
+      : requireString(body, "expected_enabled_mutation_id"),
     rollback_mutation_id: body.rollback_mutation_id === undefined
       ? undefined
       : requireString(body, "rollback_mutation_id"),

@@ -1,0 +1,10 @@
+CREATE TABLE channel_monitor_settings(id TEXT PRIMARY KEY CHECK(id='global'), config_json TEXT NOT NULL CHECK(json_valid(config_json)),control_version INTEGER NOT NULL DEFAULT 0,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE channel_monitor_templates(id INTEGER PRIMARY KEY AUTOINCREMENT,config_json TEXT NOT NULL CHECK(json_valid(config_json)),created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE channel_monitors(id INTEGER PRIMARY KEY AUTOINCREMENT,config_json TEXT NOT NULL CHECK(json_valid(config_json)),nonce_b64 TEXT NOT NULL,ciphertext_b64 TEXT NOT NULL,template_id INTEGER REFERENCES channel_monitor_templates(id) ON DELETE SET NULL,created_by TEXT NOT NULL,created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,last_checked_at_ms INTEGER,next_check_at_ms INTEGER NOT NULL DEFAULT 0,lease_id TEXT,lease_expires_at_ms INTEGER NOT NULL DEFAULT 0,duplicate_scope TEXT UNIQUE) STRICT;
+CREATE TABLE channel_monitor_history(id INTEGER PRIMARY KEY AUTOINCREMENT,monitor_id INTEGER NOT NULL REFERENCES channel_monitors(id) ON DELETE CASCADE,model TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN('operational','degraded','failed','error')),latency_ms INTEGER,ping_latency_ms INTEGER,message TEXT NOT NULL,quota_json TEXT,checked_at_ms INTEGER NOT NULL) STRICT;
+CREATE INDEX channel_monitor_history_time ON channel_monitor_history(monitor_id,checked_at_ms DESC,id DESC);
+CREATE TABLE channel_monitor_duplicates(source_id INTEGER NOT NULL,idempotency_key TEXT NOT NULL,actor_id TEXT NOT NULL,target_id INTEGER NOT NULL REFERENCES channel_monitors(id) ON DELETE CASCADE,PRIMARY KEY(source_id,idempotency_key,actor_id)) STRICT;
+INSERT INTO schema_migrations(version,name,applied_at_ms)
+VALUES (87,'channel_monitors',CAST(unixepoch('subsec')*1000 AS INTEGER));
+ALTER TABLE request_observations ADD COLUMN ttft_ms INTEGER CHECK(ttft_ms IS NULL OR ttft_ms BETWEEN 0 AND 86400000);
+CREATE TABLE channel_monitor_v2_config(id TEXT PRIMARY KEY CHECK(id='global'),config_json TEXT NOT NULL CHECK(json_valid(config_json)),version INTEGER NOT NULL DEFAULT 1,updated_at_ms INTEGER NOT NULL) STRICT;

@@ -40,6 +40,7 @@ const health = ref<OpsSystemLogSinkHealth>({
 const runtimeLoading = ref(false)
 const runtimeSaving = ref(false)
 const runtimeConfig = reactive<OpsRuntimeLogConfig>({
+  control_version: 0,
   level: 'info',
   enable_sampling: false,
   sampling_initial: 100,
@@ -230,6 +231,8 @@ const loadRuntimeConfig = async () => {
   runtimeLoading.value = true
   try {
     const cfg = await opsAPI.getRuntimeLogConfig()
+    runtimeConfig.source = cfg.source
+    runtimeConfig.control_version = cfg.control_version
     runtimeConfig.level = cfg.level
     runtimeConfig.enable_sampling = cfg.enable_sampling
     runtimeConfig.sampling_initial = cfg.sampling_initial
@@ -248,6 +251,7 @@ const saveRuntimeConfig = async () => {
   runtimeSaving.value = true
   try {
     const saved = await opsAPI.updateRuntimeLogConfig({ ...runtimeConfig })
+    runtimeConfig.control_version = saved.control_version
     runtimeConfig.level = saved.level
     runtimeConfig.enable_sampling = saved.enable_sampling
     runtimeConfig.sampling_initial = saved.sampling_initial
@@ -271,6 +275,7 @@ const resetRuntimeConfig = async () => {
   runtimeSaving.value = true
   try {
     const saved = await opsAPI.resetRuntimeLogConfig()
+    runtimeConfig.control_version = saved.control_version
     runtimeConfig.level = saved.level
     runtimeConfig.enable_sampling = saved.enable_sampling
     runtimeConfig.sampling_initial = saved.sampling_initial
@@ -387,10 +392,10 @@ onMounted(async () => {
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.description') }}</p>
       </div>
       <div class="flex flex-wrap items-center gap-2 text-xs">
-        <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.queue') }} {{ health.queue_depth }}/{{ health.queue_capacity }}</span>
+        <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.queue') }} {{ health.queue_depth ?? '—' }}/{{ health.queue_capacity ?? '—' }}</span>
         <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.written') }} {{ health.written_count }}</span>
         <span class="rounded-md bg-amber-100 px-2 py-1 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">{{ t('admin.ops.systemLogs.dropped') }} {{ health.dropped_count }}</span>
-        <span class="rounded-md bg-red-100 px-2 py-1 text-red-700 dark:bg-red-900/30 dark:text-red-300">{{ t('admin.ops.systemLogs.failed') }} {{ health.write_failed_count }}</span>
+        <span class="rounded-md bg-red-100 px-2 py-1 text-red-700 dark:bg-red-900/30 dark:text-red-300">{{ t('admin.ops.systemLogs.failed') }} {{ health.write_failed_count ?? '—' }}</span>
       </div>
     </div>
 

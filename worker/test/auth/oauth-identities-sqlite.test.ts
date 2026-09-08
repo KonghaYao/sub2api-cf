@@ -1,3 +1,4 @@
+import { prepareWechatVariants } from '../../src/auth/wechat-variants'
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -444,17 +445,44 @@ describe('OAuth identities SQLite HTTP contract', () => {
     ).get()).toEqual({ user_id: 'alice' })
   })
 
-  it('accepts OIDC only after RS256 signature, issuer, audience, nonce, and userinfo subject validation', async () => {
+  it.each(['client_secret_basic', 'none'])('consumes OIDC %s, claim paths, and verified-email policy without ID-token validation', async (method) => {
+    const test = await fixture()
+    await seedProvider(test, 'oidc')
+    seedIdentity(test, 'mapped-subject', 'oidc', 'https://oidc.test')
+    test.raw.prepare(`UPDATE oauth_providers SET advanced_json = ? WHERE provider = 'oidc'`).run(JSON.stringify({ oidc_connect_validate_id_token: false, oidc_connect_token_auth_method: method, oidc_connect_userinfo_id_path: 'account.id', oidc_connect_userinfo_email_path: 'account.email', oidc_connect_userinfo_username_path: 'account.name', oidc_connect_require_email_verified: true }))
+    let verified = false
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/token')) {
+        const form = new URLSearchParams(String(init?.body))
+        expect(form.has('client_secret')).toBe(false)
+        expect(new Headers(init?.headers).get('authorization')?.startsWith('Basic ') ?? false).toBe(method === 'client_secret_basic')
+        return Response.json({ access_token: 'access' })
+      }
+      return Response.json({ account: { id: 'mapped-subject', email: 'alice@example.test', name: 'Mapped name' }, email_verified: verified })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    for (const expected of ['error=oidc_email_unverified', '#access_token=sat_v1_']) {
+      const started = await test.app.request('/api/v1/auth/oauth/oidc/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, test.env)
+      const authorize = new URL((await started.json() as { data: { authorize_url: string } }).data.authorize_url)
+      const result = await test.app.request(`/api/v1/auth/oauth/oidc/callback?code=code&state=${encodeURIComponent(authorize.searchParams.get('state')!)}`, { headers: { cookie: responseCookie(started, 'sub2api_oauth_browser') } }, test.env)
+      expect(result.headers.get('location')).toContain(expected)
+      verified = true
+    }
+    expect(fetcher.mock.calls.every(([url]) => !String(url).endsWith('/jwks'))).toBe(true)
+  })
+
+  it.each(['RS256', 'PS256', 'ES256'])('accepts OIDC only after %s signature, issuer, audience, nonce, and userinfo subject validation', async (alg) => {
     const test = await fixture()
     await seedProvider(test, 'oidc')
     seedIdentity(test, 'oidc-subject', 'oidc', 'https://oidc.test')
     const keyPair = await crypto.subtle.generateKey(
-      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      alg === 'ES256' ? { name: 'ECDSA', namedCurve: 'P-256' } : { name: alg === 'PS256' ? 'RSA-PSS' : 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
       true,
       ['sign', 'verify'],
     )
     const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey)
-    Object.assign(publicJwk, { kid: 'signing-key', alg: 'RS256', use: 'sig' })
+    Object.assign(publicJwk, { kid: 'signing-key', alg, use: 'sig' })
     const started = await test.app.request('/api/v1/auth/oauth/oidc/start', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }, test.env)
@@ -518,6 +546,39 @@ describe('OAuth identities SQLite HTTP contract', () => {
     )
     expect(rejected.headers.get('location')).toContain('error=oidc_token_invalid')
     expect(upstream).toHaveBeenCalledTimes(5)
+  })
+
+  it('requires local email verification for forced third-party signup and consumes pending state once', async () => {
+    const test = await fixture()
+    await seedProvider(test, 'github')
+    const settings = { registration_enabled: true, force_email_on_third_party_signup: true, email_verification_enabled: false }
+    test.raw.prepare("UPDATE system_settings SET public_json = ? WHERE id='global'").run(JSON.stringify(settings))
+    test.env.CONFIG_KV = { get: async () => settings } as unknown as KVNamespace
+    test.env.AUTH_RATE_LIMIT = { idFromName: (name: string) => name, get: () => ({ fetch: async () => Response.json({ schema_version: 1, allowed: true, recorded: true }) }) } as unknown as DurableObjectNamespace
+    test.env.EMAIL_DELIVERY = { fetch: async () => new Response(null, { status: 202 }) } as unknown as Fetcher
+    const events: any[] = []
+    test.env.EVENTS_QUEUE = { send: async (event: unknown) => { events.push(event) } } as unknown as Queue
+    const started = await test.app.request('/api/v1/auth/oauth/github/start', { method: 'POST' }, test.env)
+    const authorize = new URL((await started.json() as any).data.authorize_url)
+    const browser = responseCookie(started, 'sub2api_oauth_browser')
+    vi.stubGlobal('fetch', githubUpstream('pending-subject', 'Pending Person', 'provider@example.test'))
+    const callback = await test.app.request(`/api/v1/auth/oauth/github/callback?code=register&state=${encodeURIComponent(authorize.searchParams.get('state')!)}`, { headers: { cookie: browser } }, test.env)
+    expect(callback.headers.get('location')).toBe('/auth/oauth/complete')
+    expect(test.raw.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='github'").get().n).toBe(0)
+    const cookie = `${browser}; ${responseCookie(callback, 'sub2api_oauth_pending')}`
+    const post = (path: string, body: unknown, session = cookie) => test.app.request(`/api/v1/auth/oauth/pending/${path}`, { method: 'POST', headers: { cookie: session, 'content-type': 'application/json' }, body: JSON.stringify(body) }, test.env)
+    expect((await post('exchange', {}, responseCookie(callback, 'sub2api_oauth_pending'))).status).toBe(401)
+    expect((await post('exchange', {})).status).toBe(200)
+    const sent = await post('send-verify-code', { email: 'local@example.test' })
+    expect(sent.status, await sent.clone().text()).toBe(200)
+    expect(events).toHaveLength(1)
+    const body = { email: 'local@example.test', password: 'Strong-local-password-789', verify_code: events[0].payload.token }
+    expect((await post('create-account', { ...body, verify_code: '000000' })).status).toBe(400)
+    const created = await post('create-account', body)
+    expect(created.status, await created.clone().text()).toBe(200)
+    expect((await created.json() as any).data.access_token).toMatch(/^sat_v1_/)
+    expect(test.raw.prepare("SELECT email_verified_at_ms,password_credential FROM users WHERE email='local@example.test'").get()).toMatchObject({ email_verified_at_ms: expect.any(Number), password_credential: expect.any(String) })
+    expect((await post('create-account', body)).status).toBe(401)
   })
 
   it('atomically registers a new verified provider identity when public registration is enabled', async () => {
@@ -728,13 +789,14 @@ describe('OAuth identities SQLite HTTP contract', () => {
       test.env,
     )
 
-    expect(callback.headers.get('location')).toContain('error=oauth_registration_requires_verified_email')
+    expect(callback.headers.get('location')).toContain('#access_token=')
     expect(test.raw.prepare(
       `SELECT COUNT(*) AS total FROM users WHERE email = 'new-linuxdo@example.test'`,
     ).get()).toEqual({ total: 0 })
     expect(test.raw.prepare(
       `SELECT COUNT(*) AS total FROM auth_identities WHERE provider = 'linuxdo'`,
-    ).get()).toEqual({ total: 0 })
+    ).get()).toEqual({ total: 1 })
+    expect(test.raw.prepare("SELECT email_verified_at_ms FROM users WHERE email LIKE 'linuxdo-%@oauth.invalid'").get()).toEqual({ email_verified_at_ms: null })
   })
 
   it.each(['google', 'linuxdo'] as const)('logs in a linked %s standard OAuth identity', async (provider) => {
@@ -764,6 +826,36 @@ describe('OAuth identities SQLite HTTP contract', () => {
     expect(callback.headers.get('location')).toMatch(/^\/auth\/.+#access_token=sat_v1_/)
   })
 
+  it('checks real DingTalk app membership before registration bypass and syncs corporate attributes', async () => {
+    const test = await fixture()
+    await seedProvider(test, 'dingtalk')
+    test.raw.prepare("UPDATE oauth_providers SET advanced_json=? WHERE provider='dingtalk'").run(JSON.stringify({ dingtalk_connect_corp_restriction_policy: 'internal_only', dingtalk_connect_bypass_registration: true, dingtalk_connect_sync_corp_email: true, dingtalk_connect_sync_display_name: true, dingtalk_connect_sync_dept: true }))
+    let member = false
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(request))
+      if (url.pathname === '/token') return Response.json({ accessToken: JSON.parse(String(init?.body)).appKey ? 'app-token' : 'user-token' })
+      if (url.pathname === '/user') return Response.json({ unionId: 'staff-union', nick: 'Personal Nickname' })
+      expect(url.searchParams.get('access_token')).toBe('app-token')
+      if (url.pathname.endsWith('/getbyunionid')) return Response.json(member ? { errcode: 0, result: { userid: 'employee' } } : { errcode: 60011 })
+      if (url.pathname.endsWith('/user/get')) return Response.json({ errcode: 0, result: { active: true, name: 'Corporate Name', email: 'staff@corp.test', dept_id_list: [7] } })
+      return Response.json({ errcode: 0, result: { name: 'Engineering', parent_id: 0 } })
+    }))
+    const login = async () => {
+      const started = await test.app.request('/api/v1/auth/oauth/dingtalk/start', { method: 'POST' }, test.env)
+      const authorize = new URL((await started.json() as any).data.authorize_url)
+      return test.app.request(`/api/v1/auth/oauth/dingtalk/callback?code=staff&state=${encodeURIComponent(authorize.searchParams.get('state')!)}`, { headers: { cookie: responseCookie(started, 'sub2api_oauth_browser') } }, test.env)
+    }
+    expect((await login()).headers.get('location')).toContain('error=dingtalk_corp_rejected')
+    expect(test.raw.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='dingtalk'").get().n).toBe(0)
+    member = true
+    expect((await login()).headers.get('location')).toContain('#access_token=')
+    const user = test.raw.prepare("SELECT u.id,u.display_name FROM users u JOIN auth_identities i ON i.user_id=u.id WHERE i.provider='dingtalk'").get()
+    expect(user.display_name).toBe('Corporate Name')
+    expect(test.raw.prepare('SELECT d.key,v.value FROM user_attribute_values v JOIN user_attribute_definitions d ON d.id=v.attribute_id WHERE user_id=? ORDER BY d.key').all(user.id)).toEqual([
+      { key: 'dingtalk_dept', value: 'Engineering' }, { key: 'dingtalk_email', value: 'staff@corp.test' }, { key: 'dingtalk_name', value: 'Corporate Name' },
+    ])
+  })
+
   it('uses DingTalk JSON token exchange and its access-token userinfo header', async () => {
     const test = await fixture()
     await seedProvider(test, 'dingtalk')
@@ -790,6 +882,31 @@ describe('OAuth identities SQLite HTTP contract', () => {
     )
 
     expect(callback.headers.get('location')).toMatch(/^\/auth\/dingtalk\/callback#access_token=sat_v1_/)
+  })
+
+  it.each(['mp', 'mobile'] as const)('binds the %s WeChat app to OAuth state and uses its own credential', async mode => {
+    const test = await fixture()
+    await seedProvider(test, 'wechat')
+    seedIdentity(test, 'shared-union', 'wechat')
+    const variants = await prepareWechatVariants(test.env, { open: { enabled: true, client_id: 'web-app', client_secret: 'web-secret' }, [mode]: { enabled: true, client_id: `${mode}-app`, client_secret: `${mode}-secret` } })
+    await test.env.DB.batch(variants.statements)
+    const started = await test.app.request(`/api/v1/auth/oauth/wechat/start?mode=${mode}`, { method: 'POST' }, test.env)
+    const authorize = new URL((await started.json() as any).data.authorize_url)
+    expect(authorize.searchParams.get('appid')).toBe(`${mode}-app`)
+    expect(authorize.searchParams.get('scope')).toBe(mode === 'mp' ? 'snsapi_userinfo' : 'snsapi_login')
+    expect(authorize.pathname).toBe(mode === 'mp' ? '/connect/oauth2/authorize' : '/connect/qrconnect')
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = new URL(String(request))
+      if (url.pathname.endsWith('/access_token')) {
+        expect(url.searchParams.get('appid')).toBe(`${mode}-app`)
+        expect(url.searchParams.get('secret')).toBe(`${mode}-secret`)
+        return Response.json({ access_token: 'wechat-access', openid: 'mode-openid', unionid: 'shared-union' })
+      }
+      return Response.json({ openid: 'mode-openid', nickname: 'WeChat Person' })
+    }))
+    const callback = await test.app.request(`/api/v1/auth/oauth/wechat/callback?mode=open&code=variant&state=${encodeURIComponent(authorize.searchParams.get('state')!)}`, { headers: { cookie: responseCookie(started, 'sub2api_oauth_browser') } }, test.env)
+    expect(callback.headers.get('location')).toContain('#access_token=')
+    expect(test.raw.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='wechat'").get().n).toBe(1)
   })
 
   it('uses WeChat appid query exchange and unionid/openid identity semantics', async () => {
@@ -1253,11 +1370,12 @@ async function pkceChallenge(verifier: string): Promise<string> {
 }
 
 async function signJwt(key: CryptoKey, claims: Record<string, unknown>): Promise<string> {
-  const header = base64UrlJson({ alg: 'RS256', typ: 'JWT', kid: 'signing-key' })
+  const alg = key.algorithm.name === 'ECDSA' ? 'ES256' : key.algorithm.name === 'RSA-PSS' ? 'PS256' : 'RS256'
+  const header = base64UrlJson({ alg, typ: 'JWT', kid: 'signing-key' })
   const payload = base64UrlJson(claims)
   const input = `${header}.${payload}`
   const signature = new Uint8Array(await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
+    alg === 'ES256' ? { name: 'ECDSA', hash: 'SHA-256' } : alg === 'PS256' ? { name: 'RSA-PSS', saltLength: 32 } : 'RSASSA-PKCS1-v1_5',
     key,
     new TextEncoder().encode(input),
   ))

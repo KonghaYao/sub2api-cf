@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from './client'
+import { getBrowserTimeZone } from '../utils/format'
 import type {
   UsageLog,
   UsageQueryParams,
@@ -366,7 +367,8 @@ export async function getDashboardApiKeysUsage(
       api_key_ids: apiKeyIds
     },
     {
-      signal: options?.signal
+      signal: options?.signal,
+      params: { timezone: getBrowserTimeZone() }
     }
   )
   return data

@@ -15,7 +15,7 @@ export interface AdminActor {
   auth_method: 'jwt' | 'admin_api_key'
   credential_masked: string
   session_id: string
-  session_type: 'user_access' | 'admin_recovery'
+  session_type: 'user_access' | 'admin_recovery' | 'admin_api_key'
   step_up_expires_at_ms: number | null
 }
 
@@ -151,7 +151,8 @@ export async function getAuthenticatedAdminActor(request: Request): Promise<Admi
 }
 
 async function authenticateAdminSessionUncached(request: Request, env: Env): Promise<AdminActor> {
-  const authorization = request.headers.get('authorization')?.trim() ?? ''
+  const suppliedApiKey = request.headers.get('x-api-key')?.trim() ?? ''
+  const authorization = request.headers.get('authorization')?.trim() || (suppliedApiKey.startsWith('admin-api-') ? `Bearer ${suppliedApiKey}` : '')
   const match = /^Bearer\s+([^\s]+)$/i.exec(authorization)
   if (match === null) {
     throw new GatewayError(
@@ -195,6 +196,17 @@ async function authenticateAdminSessionUncached(request: Request, env: Env): Pro
       session_type: 'user_access',
       step_up_expires_at_ms: user.step_up_expires_at_ms,
     }
+  }
+  if (String(match[1]).startsWith('admin-api-')) {
+    const digest = await apiKeyDigest(`admin-api-key:v1:${match[1]}`, pepper)
+    const row = await env.DB.prepare(`SELECT k.user_id, u.email AS actor_email
+      FROM admin_automation_keys k JOIN users u ON u.id=k.user_id
+      WHERE k.id='global' AND k.key_hash=? AND u.status='active' AND u.role='admin'`)
+      .bind(digest).first<{ user_id: string; actor_email: string }>()
+    if (row === null) throw new GatewayError(401, 'invalid_admin_api_key', 'Invalid administrator API key', 'authentication_error')
+    return { ...row, actor_role: 'admin', auth_method: 'admin_api_key',
+      credential_masked: maskAdminCredential(match[1]), session_id: 'admin-api-key',
+      session_type: 'admin_api_key', step_up_expires_at_ms: null }
   }
   const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
   const session = await env.DB.prepare(

@@ -1,4 +1,7 @@
 export class GatewayError extends Error {
+  upstreamDiagnostic?: { status: number; body: unknown }
+  upstreamAccountId?: string
+
   constructor(
     readonly status: number,
     readonly code: string,

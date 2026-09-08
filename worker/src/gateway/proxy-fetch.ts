@@ -1,8 +1,9 @@
+import { resolveRequestProxy } from '../proxy/request-selection'
 import type { Env } from '../env'
 import { decryptCredential } from './crypto'
 import { GatewayError } from './errors'
 import { proxyHttpRequest } from './proxy-http'
-import { negotiateProxyTunnel, type ProxyTunnelConfig, type TunnelStreams } from './proxy-tunnel'
+import { negotiateProxyTunnel, type TunnelStreams } from './proxy-tunnel'
 
 export interface ProxySocket extends TunnelStreams {
   opened: Promise<unknown>
@@ -15,20 +16,28 @@ const nativeDial: ProxyDialer = async (hostname, port) => {
   const { connect } = await import('cloudflare:sockets')
   return connect({ hostname, port }, { secureTransport: 'starttls', allowHalfOpen: false })
 }
-interface ProxyRow { id: string; host: string; port: number; protocol: ProxyTunnelConfig['protocol']; nonce_b64: string; ciphertext_b64: string }
 
-export async function fetchAccountProxy(env: Env, id: string, url: URL, init: RequestInit, clientSignal: AbortSignal, dial = nativeDial): Promise<Response> {
+
+export async function fetchAccountProxy(env: Env, id: string | number, url: URL, init: RequestInit, clientSignal: AbortSignal, dial = nativeDial): Promise<Response> {
   if (url.protocol !== 'https:' || url.username || url.password) throw new GatewayError(400, 'invalid_proxy_target', 'Proxy forwarding requires an HTTPS upstream')
-  const row = await env.DB.prepare('SELECT id, host, port, protocol, nonce_b64, ciphertext_b64 FROM proxies WHERE id=?').bind(id).first<ProxyRow>()
-  if (!row) throw new GatewayError(503, 'account_proxy_unavailable', 'The configured account proxy is unavailable')
+  const signal = init.signal ? AbortSignal.any([init.signal, clientSignal]) : clientSignal
+  if (signal.aborted) throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request')
+  const row = await resolveRequestProxy(env, id)
+  if (signal.aborted) throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request')
+  if (row === null) return fetch(url, { ...init, signal })
   if (!env.CREDENTIALS_MASTER_KEY) throw new GatewayError(503, 'credential_secret_not_configured', 'Credential encryption secret is not configured')
   // HTTPS proxy transport needs nested TLS, which native startTls cannot provide
   // by upgrading an already-TLS socket. Never silently substitute direct access.
   if (row.protocol === 'https') throw new GatewayError(503, 'proxy_nested_tls_unavailable', 'HTTPS proxy transport is not yet available')
-  const secret = await decryptCredential(row.nonce_b64, row.ciphertext_b64, env.CREDENTIALS_MASTER_KEY, `${env.ENVIRONMENT}/proxy/${row.id}/1`)
-  const auth = JSON.parse(secret.api_key) as { username: string; password: string }
-  const signal = init.signal ? AbortSignal.any([init.signal, clientSignal]) : clientSignal
-  if (signal.aborted) throw new GatewayError(499, 'client_cancelled', 'Client cancelled the request')
+  const secret = await decryptCredential(row.nonce_b64, row.ciphertext_b64, env.CREDENTIALS_MASTER_KEY, `proxy:v1:${row.creation_key}`)
+  // Existing production vaults include both the original raw password and the
+  // later versioned JSON envelope. The username remains in public config_json.
+  let password = secret.api_key
+  try {
+    const payload = JSON.parse(secret.api_key)
+    if (payload?.schema_version === 1 && typeof payload.password === 'string') password = payload.password
+  } catch { /* Legacy raw password. */ }
+  const auth = { username: row.username ?? '', password }
   // Let the runtime serialize multipart boundaries and binary bodies, then stream
   // those bytes through the tunnel instead of buffering an entire image upload.
   const serialized = init.body != null && typeof init.body !== 'string'

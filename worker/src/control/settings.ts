@@ -1,11 +1,14 @@
+import { CAPTCHA_SECRET_KEYS } from './captcha-settings'
+import { schedulerEffectiveSettings } from './advanced-scheduler-settings'
+import { normalizeGatewaySettings, parseGatewaySettingsPatch, type GatewaySettings } from './gateway-settings'
+import { MAIN_PUBLIC_FIELDS, normalizeMainPublicSettings, parseMainPublicSettings, type MainPublicSettings } from './main-public-settings'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import {
-  apiKeyDigest,
   decryptCredential,
   encryptCredential,
 } from '../gateway/crypto'
-import { isOpaqueToken, tokenDigest } from '../auth/tokens'
+import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   controlIdempotency,
@@ -19,6 +22,7 @@ import {
   readJsonObject,
   requireIdempotencyKey,
 } from './http'
+import { totpFeatureAvailable } from '../auth/totp'
 import { passkeyDeploymentConfiguration } from '../auth/passkey-config'
 import { normalizeRegistrationEmailSuffixWhitelist } from '../auth/email-policy'
 
@@ -46,7 +50,7 @@ export interface AuthSourceDefaultSettings {
 
 export type AuthSourceDefaults = Record<AuthSource, AuthSourceDefaultSettings>
 
-export interface PublicSystemSettings {
+export interface PublicSystemSettings extends MainPublicSettings {
   site_name: string
   backend_mode_enabled: boolean
   site_subtitle: string
@@ -80,18 +84,20 @@ export interface AdminSystemSettings {
   control_version: number
   audit_log_retention_days: number
   public: PublicSystemSettings
+  gateway: GatewaySettings
   security: {
     step_up_enabled: boolean
+    totp_encryption_key_configured?: boolean
     passkey_configured: boolean
     passkey_rp_id: string
     passkey_rp_origins: string[]
   }
-  secrets: { turnstile_secret_key_configured: boolean }
+  secrets: { turnstile_secret_key_configured: boolean } & Partial<Record<`${SystemSettingSecretKey}_configured`, boolean>>
   auth_source_defaults: AuthSourceDefaults
   updated_at_ms: number
 }
 
-interface PublicSettingsPatch {
+interface PublicSettingsPatch extends MainPublicSettings {
   site_name?: string
   backend_mode_enabled?: boolean
   site_subtitle?: string
@@ -120,9 +126,7 @@ interface PublicSettingsPatch {
   openai_advanced_scheduler_subscription_priority_enabled?: boolean
 }
 
-interface SecretSettingsPatch {
-  turnstile_secret_key?: string | null
-}
+type SecretSettingsPatch = Partial<Record<SystemSettingSecretKey, string | null>>
 
 interface SecuritySettingsPatch {
   step_up_enabled?: boolean
@@ -131,6 +135,7 @@ interface SecuritySettingsPatch {
 interface SettingsPatch {
   audit_log_retention_days?: number
   public?: PublicSettingsPatch
+  gateway?: Partial<GatewaySettings>
   security?: SecuritySettingsPatch
   secrets?: SecretSettingsPatch
   auth_source_defaults?: Partial<Record<AuthSource, AuthSourceDefaultSettings>>
@@ -152,6 +157,7 @@ interface SettingsRow {
   control_version: number
   audit_log_retention_days: number
   public_json: string
+  gateway_json: string
   step_up_enabled: number
   updated_at_ms: number
   turnstile_secret_key_configured: number
@@ -182,7 +188,8 @@ interface AuthSourceQuotaRow {
 
 type AdminSettingsCore = Omit<AdminSystemSettings, 'auth_source_defaults'>
 
-export type SystemSettingSecretKey = 'turnstile_secret_key'
+const SETTINGS_SECRET_KEYS = ['turnstile_secret_key', ...CAPTCHA_SECRET_KEYS] as const
+export type SystemSettingSecretKey = typeof SETTINGS_SECRET_KEYS[number]
 
 export function publicSettingsKey(environment: string): string {
   return `${environment}:public-settings:v1`
@@ -226,6 +233,20 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
     const actor = await requireAdminActor(context)
     const nextVersion = current.control_version + 1
     const nextPublic = applyPublicPatch(current.public, patch.public)
+    if ([nextPublic.turnstile_enabled, nextPublic.tencent_captcha_enabled, nextPublic.aliyun_captcha_enabled].filter(value => value === true).length > 1) throw new GatewayError(400, 'CAPTCHA_PROVIDER_CONFLICT', 'Only one CAPTCHA provider can be enabled')
+    for (const [enabled, publicKeys, secretKeys] of [
+      [nextPublic.tencent_captcha_enabled, ['tencent_captcha_app_id'], ['tencent_captcha_app_secret_key', 'tencent_captcha_cloud_secret_id', 'tencent_captcha_cloud_secret_key']],
+      [nextPublic.aliyun_captcha_enabled, ['aliyun_captcha_access_key_id', 'aliyun_captcha_scene_id', 'aliyun_captcha_prefix'], ['aliyun_captcha_access_key_secret']],
+    ] as const) {
+      if (!enabled) continue
+      if (publicKeys.some(key => !nextPublic[key])) throw new GatewayError(400, 'captcha_not_configured', 'Complete CAPTCHA public settings before enabling')
+      for (const key of secretKeys) {
+        if (!(patch.secrets?.[key] === undefined ? current.secrets[`${key}_configured`] : patch.secrets[key])) throw new GatewayError(400, 'captcha_not_configured', 'Complete CAPTCHA credentials before enabling')
+      }
+    }
+    if (nextPublic.login_agreement_enabled && !nextPublic.login_agreement_documents?.length) {
+      throw new GatewayError(400, 'login_agreement_documents_required', 'Add a login agreement before enabling it')
+    }
     const nextStepUpEnabled = patch.security?.step_up_enabled ?? current.security.step_up_enabled
     const requiresTotpForEnable = !current.security.step_up_enabled && nextStepUpEnabled
     const now = Date.now()
@@ -248,13 +269,16 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
       audit_log_retention_days:
         patch.audit_log_retention_days ?? current.audit_log_retention_days,
       public: nextPublic,
+      gateway: normalizeGatewaySettings({ ...current.gateway, ...patch.gateway }),
       security: {
         step_up_enabled: nextStepUpEnabled,
+        totp_encryption_key_configured: totpFeatureAvailable(context.env),
         passkey_configured: current.security.passkey_configured,
         passkey_rp_id: current.security.passkey_rp_id,
         passkey_rp_origins: current.security.passkey_rp_origins,
       },
       secrets: {
+        ...current.secrets,
         turnstile_secret_key_configured:
           patch.secrets?.turnstile_secret_key === undefined
             ? current.secrets.turnstile_secret_key_configured
@@ -270,7 +294,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
       context.env.DB.prepare(
         `UPDATE system_settings
             SET control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
-                public_json = ?,
+                public_json = ?, gateway_json = ?,
                 audit_log_retention_days = ?,
                 step_up_enabled = CASE
                   WHEN ? = 1 AND NOT EXISTS (
@@ -284,6 +308,7 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
         current.control_version,
         nextVersion,
         JSON.stringify(nextPublic),
+        JSON.stringify(next.gateway),
         next.audit_log_retention_days,
         requiresTotpForEnable ? 1 : 0,
         actor.user_id,
@@ -292,30 +317,19 @@ export async function updateAdminSettings(context: Context<ControlBindings>): Pr
       ),
     ]
     statements.push(...authSourceDefaultWriteStatements(context.env, patch.auth_source_defaults, now))
-    const secretPatch = patch.secrets?.turnstile_secret_key
-    if (secretPatch === null) {
-      statements.push(context.env.DB.prepare(
-        `DELETE FROM system_setting_secrets
-          WHERE settings_id = 'global' AND key = 'turnstile_secret_key'`,
-      ))
-    } else if (secretPatch !== undefined) {
-      const keyVersion = (currentRow.turnstile_secret_key_version ?? 0) + 1
-      const encrypted = await encryptCredential(
-        { api_key: secretPatch },
-        requireSettingsMasterKey(context.env),
-        settingSecretAad(context.env.ENVIRONMENT, 'turnstile_secret_key', keyVersion),
-      )
-      statements.push(context.env.DB.prepare(
-        `INSERT INTO system_setting_secrets (
-           settings_id, key, schema_version, key_version,
-           nonce_b64, ciphertext_b64, updated_at_ms
-         ) VALUES ('global', 'turnstile_secret_key', 1, ?, ?, ?, ?)
-         ON CONFLICT(settings_id, key) DO UPDATE SET
-           key_version = excluded.key_version,
-           nonce_b64 = excluded.nonce_b64,
-           ciphertext_b64 = excluded.ciphertext_b64,
-           updated_at_ms = excluded.updated_at_ms`,
-      ).bind(keyVersion, encrypted.nonce_b64, encrypted.ciphertext_b64, now))
+    for (const key of SETTINGS_SECRET_KEYS) {
+      const secretPatch = patch.secrets?.[key]
+      if (secretPatch === undefined) continue
+      if (secretPatch === null) {
+        statements.push(context.env.DB.prepare("DELETE FROM system_setting_secrets WHERE settings_id = 'global' AND key = ?").bind(key))
+      } else {
+        const previous = await context.env.DB.prepare("SELECT key_version FROM system_setting_secrets WHERE settings_id = 'global' AND key = ?").bind(key).first<{ key_version: number }>()
+        const version = (previous?.key_version ?? 0) + 1
+        const encrypted = await encryptCredential({ api_key: secretPatch }, requireSettingsMasterKey(context.env), settingSecretAad(context.env.ENVIRONMENT, key, version))
+        statements.push(context.env.DB.prepare(`INSERT INTO system_setting_secrets (settings_id, key, schema_version, key_version, nonce_b64, ciphertext_b64, updated_at_ms)
+          VALUES ('global', ?, 1, ?, ?, ?, ?) ON CONFLICT(settings_id,key) DO UPDATE SET key_version=excluded.key_version,nonce_b64=excluded.nonce_b64,ciphertext_b64=excluded.ciphertext_b64,updated_at_ms=excluded.updated_at_ms`).bind(key, version, encrypted.nonce_b64, encrypted.ciphertext_b64, now))
+      }
+      next.secrets[`${key}_configured`] = secretPatch !== null
     }
     statements.push(
       context.env.DB.prepare(
@@ -389,7 +403,7 @@ export async function readSystemSettingSecret(
 async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   const row = await env.DB.prepare(
     `SELECT s.schema_version, s.control_version, s.audit_log_retention_days,
-            s.public_json, s.step_up_enabled, s.updated_at_ms,
+            s.public_json, s.gateway_json, s.step_up_enabled, s.updated_at_ms,
             CASE WHEN secret.key IS NULL THEN 0 ELSE 1 END AS turnstile_secret_key_configured,
             secret.key_version AS turnstile_secret_key_version
        FROM system_settings s
@@ -403,7 +417,7 @@ async function requireSettingsRow(env: Env): Promise<SettingsRow> {
   return row
 }
 
-function publicAdminSettings(row: SettingsRow, env: Env): AdminSettingsCore {
+async function publicAdminSettings(row: SettingsRow, env: Env): Promise<AdminSettingsCore> {
   if (
     row.schema_version !== PUBLIC_SETTINGS_SCHEMA_VERSION ||
     !Number.isSafeInteger(row.control_version) ||
@@ -433,20 +447,24 @@ function publicAdminSettings(row: SettingsRow, env: Env): AdminSettingsCore {
     control_version: row.control_version,
     audit_log_retention_days: row.audit_log_retention_days,
     public: normalizedPublicSettings,
+    gateway: normalizeGatewaySettings(JSON.parse(row.gateway_json ?? '{}')),
     security: {
       step_up_enabled: row.step_up_enabled === 1,
+      totp_encryption_key_configured: totpFeatureAvailable(env),
       passkey_configured: passkey.configured,
       passkey_rp_id: passkey.rpId,
       passkey_rp_origins: passkey.rpOrigins,
     },
-    secrets: { turnstile_secret_key_configured: row.turnstile_secret_key_configured === 1 },
+    secrets: { turnstile_secret_key_configured: row.turnstile_secret_key_configured === 1,
+      ...Object.fromEntries((await env.DB.prepare("SELECT key FROM system_setting_secrets WHERE settings_id = 'global'").all<{ key: string }>()).results.map(secret => [`${secret.key}_configured`, true])),
+    },
     updated_at_ms: row.updated_at_ms,
   }
 }
 
 async function adminSettings(row: SettingsRow, env: Env): Promise<AdminSystemSettings> {
   return {
-    ...publicAdminSettings(row, env),
+    ...await publicAdminSettings(row, env),
     auth_source_defaults: await readAuthSourceDefaults(env),
   }
 }
@@ -578,6 +596,7 @@ function normalizePublicSystemSettings(value: unknown): PublicSystemSettings | n
     return null
   }
   return {
+    ...normalizeMainPublicSettings(settings),
     site_name: settings.site_name,
     backend_mode_enabled: settings.backend_mode_enabled === true,
     site_subtitle: typeof settings.site_subtitle === 'string' ? settings.site_subtitle : '',
@@ -614,7 +633,7 @@ function isPublicSystemSettings(value: unknown): value is PublicSystemSettings {
 }
 
 function settingsResponse(settings: AdminSystemSettings): Response {
-  const response = controlSuccess(settings)
+  const response = controlSuccess({ ...settings, gateway: { ...settings.gateway, ...schedulerEffectiveSettings(settings.gateway) } })
   response.headers.set('etag', `"${settings.control_version}"`)
   return response
 }
@@ -637,9 +656,10 @@ function requireSettingsVersion(request: Request): number {
 
 function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
   rejectUnknownKeys(body, [
-    'audit_log_retention_days', 'public', 'security', 'secrets', 'auth_source_defaults',
+    'audit_log_retention_days', 'public', 'gateway', 'security', 'secrets', 'auth_source_defaults',
   ])
   const patch: SettingsPatch = {}
+  if (body.gateway !== undefined) patch.gateway = parseGatewaySettingsPatch(body.gateway)
   if (body.audit_log_retention_days !== undefined) {
     const value = body.audit_log_retention_days
     if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 3650) {
@@ -654,6 +674,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
   if (body.public !== undefined) {
     const value = requireObject(body.public, 'public')
     rejectUnknownKeys(value, [
+      ...MAIN_PUBLIC_FIELDS,
       'site_name',
       'backend_mode_enabled', 'site_subtitle', 'api_base_url', 'contact_info', 'doc_url',
       'site_logo', 'home_content', 'compact_home_enabled', 'hide_ccs_import_button',
@@ -673,7 +694,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
       'affiliate_enabled',
       'openai_advanced_scheduler_subscription_priority_enabled',
     ])
-    const publicPatch: PublicSettingsPatch = {}
+    const publicPatch: PublicSettingsPatch = parseMainPublicSettings(value)
     if (value.site_name !== undefined) {
       publicPatch.site_name = settingString(value.site_name, 'site_name', 128, false)
     }
@@ -762,17 +783,11 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
   }
   if (body.secrets !== undefined) {
     const value = requireObject(body.secrets, 'secrets')
-    rejectUnknownKeys(value, ['turnstile_secret_key'])
+    rejectUnknownKeys(value, SETTINGS_SECRET_KEYS)
     const secretsPatch: SecretSettingsPatch = {}
-    if (value.turnstile_secret_key === null) {
-      secretsPatch.turnstile_secret_key = null
-    } else if (value.turnstile_secret_key !== undefined) {
-      secretsPatch.turnstile_secret_key = settingString(
-        value.turnstile_secret_key,
-        'turnstile_secret_key',
-        4_096,
-        false,
-      )
+    for (const key of SETTINGS_SECRET_KEYS) {
+      if (value[key] === null) secretsPatch[key] = null
+      else if (value[key] !== undefined) secretsPatch[key] = settingString(value[key], key, 4096, false)
     }
     if (Object.keys(secretsPatch).length > 0) patch.secrets = secretsPatch
   }
@@ -788,6 +803,7 @@ function parseSettingsPatch(body: Record<string, unknown>): SettingsPatch {
   }
   if (
     patch.audit_log_retention_days === undefined && patch.public === undefined &&
+    (patch.gateway === undefined || Object.keys(patch.gateway).length === 0) &&
     patch.security === undefined && patch.secrets === undefined &&
     patch.auth_source_defaults === undefined
   ) {
@@ -995,9 +1011,10 @@ function authSourceDefaultWriteStatements(
 function changedFields(patch: SettingsPatch): string[] {
   const fields = Object.keys(patch.public ?? {}).map((key) => `public.${key}`).sort()
   if (patch.audit_log_retention_days !== undefined) fields.push('audit_log_retention_days')
+  fields.push(...Object.keys(patch.gateway ?? {}).map(key => `gateway.${key}`))
   fields.push(...Object.keys(patch.security ?? {}).map((key) => `security.${key}`).sort())
-  if (patch.secrets?.turnstile_secret_key !== undefined) {
-    fields.push(`secrets.turnstile_secret_key:${patch.secrets.turnstile_secret_key === null ? 'clear' : 'set'}`)
+  for (const key of SETTINGS_SECRET_KEYS) {
+    if (patch.secrets?.[key] !== undefined) fields.push(`secrets.${key}:${patch.secrets[key] === null ? 'clear' : 'set'}`)
   }
   for (const source of AUTH_SOURCES) {
     const settings = patch.auth_source_defaults?.[source]
@@ -1008,47 +1025,14 @@ function changedFields(patch: SettingsPatch): string[] {
 }
 
 async function requireAdminActor(context: Context<ControlBindings>): Promise<AdminActor> {
-  const authorization = context.req.header('authorization')?.trim() ?? ''
-  const match = /^Bearer\s+([^\s]+)$/i.exec(authorization)
-  const pepper = context.env.API_KEY_PEPPER
-  if (match === null || !pepper || pepper.length < 32) {
-    throw new GatewayError(401, 'admin_session_context_required', 'Admin session context is required', 'authentication_error')
-  }
-  if (isOpaqueToken(match[1], 'access')) {
-    const digest = await tokenDigest(match[1], pepper, 'access')
-    const actor = await context.env.DB.prepare(
-      `SELECT s.id AS session_id, s.user_id
-         FROM user_sessions s
-         JOIN users u ON u.id = s.user_id
-        WHERE s.access_token_hash = ? AND s.revoked_at_ms IS NULL
-          AND s.access_expires_at_ms > ? AND s.auth_version = u.auth_version
-          AND u.status = 'active' AND u.role = 'admin'
-        LIMIT 1`,
-    ).bind(digest, Date.now()).first<AdminActor>()
-    if (actor === null) {
-      throw new GatewayError(401, 'admin_session_context_required', 'Admin session context is required', 'authentication_error')
-    }
-    return actor
-  }
-  const digest = await apiKeyDigest(`admin-session:v1:${match[1]}`, pepper)
-  const actor = await context.env.DB.prepare(
-    `SELECT s.id AS session_id, s.user_id
-       FROM admin_sessions s
-       JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = ? AND s.revoked_at_ms IS NULL AND s.expires_at_ms > ?
-        AND u.status = 'active' AND u.role = 'admin'
-      LIMIT 1`,
-  ).bind(digest, Date.now()).first<AdminActor>()
-  if (actor === null) {
-    throw new GatewayError(401, 'admin_session_context_required', 'Admin session context is required', 'authentication_error')
-  }
-  return actor
+  const actor = await authenticateAdminSession(context.req.raw, context.env)
+  return { session_id: actor.session_id, user_id: actor.user_id }
 }
 
 async function publishLatestPublicSettings(env: Env): Promise<void> {
   try {
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const candidate = publicAdminSettings(await requireSettingsRow(env), env)
+      const candidate = await publicAdminSettings(await requireSettingsRow(env), env)
       await env.CONFIG_KV.put(publicSettingsKey(env.ENVIRONMENT), JSON.stringify(publicProjection(candidate)))
       const after = await requireSettingsRow(env)
       if (after.control_version === candidate.control_version) return
@@ -1100,6 +1084,7 @@ function validIdempotentSettings(row: Parameters<typeof parseIdempotentResponse>
     ...value,
     audit_log_retention_days: auditLogRetentionDays,
     public: normalizedPublic,
+    gateway: normalizeGatewaySettings(value.gateway ?? {}),
     security: value.security ?? { step_up_enabled: false },
   }
 }

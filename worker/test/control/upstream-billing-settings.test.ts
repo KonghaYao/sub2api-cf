@@ -54,3 +54,19 @@ it('leases one bounded periodic scan and excludes disabled, opted-out and future
     expect(t.raw.prepare('SELECT lease_token,lease_expires_at_ms FROM upstream_billing_probe_settings').get()).toEqual({ lease_token: null, lease_expires_at_ms: 0 })
   } finally { t.raw.close() }
 })
+
+it('reads deployed settings and makes UI changes visible to the production maintenance runner', async () => {
+  const t = fixture()
+  try {
+    t.raw.prepare("INSERT INTO runtime_settings(name,value_json,control_version,updated_at_ms) VALUES('upstream-billing-probe',?,7,1)")
+      .run(JSON.stringify({ enabled: false, interval_minutes: 120 }))
+    expect(await (await t.app.request('/settings', {}, t.env)).json())
+      .toMatchObject({ data: { enabled: false, interval_minutes: 120 } })
+    expect(await probes.runUpstreamBillingProbes(t.env)).toEqual({ checked: 0 })
+    expect(await runDueUpstreamBillingProbes(t.env)).toBe(0)
+    expect((await t.put({ enabled: true, interval_minutes: 45 })).status).toBe(200)
+    const row = t.raw.prepare("SELECT value_json,control_version FROM runtime_settings WHERE name='upstream-billing-probe'").get()
+    expect(JSON.parse(row.value_json)).toEqual({ enabled: true, interval_minutes: 45 })
+    expect(row.control_version).toBe(8)
+  } finally { t.raw.close() }
+})

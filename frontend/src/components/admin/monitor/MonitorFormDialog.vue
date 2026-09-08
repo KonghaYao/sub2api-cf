@@ -319,7 +319,7 @@ interface MonitorForm {
   provider: Provider
   api_mode: APIMode
   check_mode: CheckMode
-  account_id: number | null
+  account_id: number | string | null
   endpoint: string
   api_key: string
   primary_model: string
@@ -529,7 +529,7 @@ function selectCheckMode(mode: CheckMode) {
 // --- 关联账号选择器 ---
 
 interface LinkedAccount {
-  id: number
+  id: number | string
   name: string
 }
 
@@ -543,7 +543,7 @@ const accountHydrationFailed = ref(false)
 const pinnedAccount = ref<LinkedAccount | null>(null)
 let accountSearchSeq = 0
 let accountSearchAbort: AbortController | null = null
-const hydrationAttempted = new Set<number>()
+const hydrationAttempted = new Set<number | string>()
 
 const accountOptions = computed(() => {
   const opts = linkedAccounts.value.map((a) => ({
@@ -567,8 +567,8 @@ const accountSelectValue = computed<string>({
       accountHydrationFailed.value = false
       return
     }
-    const id = Number(raw)
-    if (Number.isFinite(id)) {
+    const id = /^\d+$/.test(raw) ? Number(raw) : raw
+    if (typeof id === 'string' ? id.length > 0 : Number.isSafeInteger(id) && id > 0) {
       form.account_id = id
       pinnedAccount.value = linkedAccounts.value.find((a) => a.id === id) ?? pinnedAccount.value
     }

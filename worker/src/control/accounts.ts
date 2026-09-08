@@ -4,6 +4,12 @@ import { claimAccountOAuthRefresh, releaseAccountOAuthRefresh, accountOAuthRefre
 import { refreshAnthropicOAuthToken } from './anthropic-oauth-refresh'
 import { accountInitializationInsert, accountInitializationReset, dispatchAccountInitializations, initializeAccountNow } from './account-initialization'
 import { applyOpenAIAccountPrivacy } from './account-privacy'
+import { effectiveProviderAccount } from './provider-runtime'
+import { readGrokSettings } from './grok-runtime'
+import { grokBaseURLs, resolveGrokModel } from './grok-settings'
+import { enrichAccountOllamaUsage } from './ollama-cloud-usage'
+import { accountFetcher, accountProxyId, type AccountFetcher } from '../proxy/account-fetch'
+import { validateAccountProxy } from './proxies'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { decryptCredential, decryptCredentialPayload, encryptCredential } from '../gateway/crypto'
@@ -49,6 +55,9 @@ import {
   requireSafeInteger,
   requireString,
 } from './http'
+
+import { testAccountModel } from './account-model-test'
+import { fetchUpstreamModels } from './upstream-models'
 
 type ControlBindings = { Bindings: Env }
 
@@ -164,13 +173,13 @@ const ACCOUNT_PROJECTION = `
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
          a.created_at_ms, a.updated_at_ms, a.billing_rate_multiplier_ppm,
          a.ui_config_json,
-         (SELECT json_object('id', p.id, 'name', p.name, 'protocol', p.protocol,
+         (SELECT json_object('id', p.id, 'name', COALESCE(json_extract(p.config_json,'$.name'),p.name), 'protocol', p.protocol,
            'host', p.host, 'port', p.port, 'status', p.status,
            'expires_at', CASE WHEN p.expires_at IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ', p.expires_at, 'unixepoch') END,
            'fallback_mode', p.fallback_mode, 'backup_proxy_id', p.backup_proxy_id,
            'expiry_warn_days', p.expiry_warn_days)
           FROM proxies p WHERE p.id=CAST(json_extract(a.ui_config_json, '$.proxy_id') AS TEXT)) AS proxy_summary_json,
-         (SELECT p.name FROM proxies p WHERE p.id=CAST(json_extract(a.ui_config_json, '$.proxy_fallback_origin_id') AS TEXT)) AS proxy_fallback_origin_name,
+         (SELECT COALESCE(json_extract(p.config_json,'$.name'),p.name) FROM proxies p WHERE p.id=CAST(json_extract(a.ui_config_json, '$.proxy_fallback_origin_id') AS TEXT)) AS proxy_fallback_origin_name,
          s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64,
          COALESCE((
            SELECT json_group_array(json_object(
@@ -218,6 +227,8 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
         OR (a.platform = 'anthropic' AND a.protocol = 'anthropic' AND a.auth_scheme = 'x-api-key')
         OR (a.platform = 'gemini' AND a.protocol = 'gemini' AND a.auth_scheme = 'x-goog-api-key')
         OR (a.platform = 'codex' AND a.protocol = 'codex' AND a.auth_scheme = 'bearer')
+        OR (a.platform = 'grok' AND a.protocol = 'openai' AND a.auth_scheme = 'bearer')
+        OR (a.platform = 'antigravity' AND a.protocol = 'gemini' AND a.auth_scheme = 'bearer')
       )`,
       'a.base_url IS NOT NULL',
     ]
@@ -321,8 +332,10 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       throw new GatewayError(500, 'invalid_account_count', 'Account count projection is invalid', 'server_error')
     }
     const total = totalValue as number
+    const rows = rowsResult.results as unknown as AccountRow[]
+    const ollama = await enrichAccountOllamaUsage(context.env, rows)
     return controlSuccess({
-      items: (rowsResult.results as unknown as AccountRow[]).map(publicAccount),
+      items: rows.map(row => ({ ...publicAccount(row), ...(ollama.has(row.id) ? { ollama_cloud_usage: ollama.get(row.id) } : {}) })),
       total,
       page,
       page_size: pageSize,
@@ -336,7 +349,8 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
 export async function getAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
-    return controlSuccess(publicAccount(account))
+    const ollama = await enrichAccountOllamaUsage(context.env, [account])
+    return controlSuccess({ ...publicAccount(account), ...(ollama.has(account.id) ? { ollama_cloud_usage: ollama.get(account.id) } : {}) })
   } catch (error) {
     return controlError(asGatewayError(error))
   }
@@ -756,6 +770,7 @@ export async function executeAccountCreate(env: Env, body: Record<string, unknow
     if ((await findAccount(env, accountId)) !== null) {
       throw new GatewayError(409, 'idempotency_record_missing', 'Account exists without its idempotency record')
     }
+    await validateAccountProxy(env, input.ui_config.proxy_id)
     await validateLinks(env, input.platform, input.group_links, input.model_capabilities)
     const masterKey = requireCredentialsMasterKey(env)
     const encrypted = await encryptCredential(
@@ -1020,8 +1035,14 @@ export async function executeAccountUpdate(env: Env, id: string, body: Record<st
       patch.credential_patch !== undefined ||
       patch.provider_config !== undefined ||
       patch.image_adapter !== undefined ||
-      patch.credential_kind !== undefined)
+      patch.credential_kind !== undefined ||
+      (patch.ui_config !== undefined && patch.ui_config.proxy_id !== accountProxyId(account.ui_config_json)))
     let nextUiConfig = patch.ui_config ?? parseUiConfig(account.ui_config_json)
+    if (patch.ui_config !== undefined) await validateAccountProxy(env, nextUiConfig.proxy_id)
+    const billingProbeExtra = nextUiConfig.extra as Record<string,unknown> | undefined
+    if (patch.billing_rate_multiplier_ppm !== undefined && patch.billing_rate_multiplier_ppm !== account.billing_rate_multiplier_ppm && billingProbeExtra?.upstream_billing_probe_enabled === true && billingProbeExtra?.upstream_billing_rate_sync_enabled === true) {
+      throw new GatewayError(409,'upstream_billing_rate_sync_conflict','Disable upstream billing rate sync before manually changing the account rate')
+    }
     let nextCredential: StoredAccountCredential | undefined
     let credentialIdentityChanged = false
     if (patch.credential_patch !== undefined) {
@@ -1413,6 +1434,7 @@ export async function duplicateAdminAccount(context: Context<ControlBindings>): 
     const idempotency = await controlIdempotency('admin.accounts.duplicate.v1', idempotencyKey, { source_id: source.id })
     const previous = await findControlIdempotency(context.env, idempotency)
     if (previous !== null) return controlSuccess(safeIdempotentAccount(previous))
+    await validateAccountProxy(context.env, accountProxyId(source.ui_config_json))
 
     const accountId = await deterministicUuid('admin.accounts.duplicate.v1', idempotencyKey)
     const secretId = await deterministicUuid('admin.account-secrets.duplicate.v1', idempotencyKey)
@@ -1624,6 +1646,41 @@ export async function deleteAdminAccountModelCapability(context: Context<Control
   return deleteRelation(context, 'model')
 }
 
+export async function previewAdminUpstreamModels(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    const platform = requireProviderPlatform(body.platform)
+    const defaults = { openai: 'https://api.openai.com', anthropic: 'https://api.anthropic.com', gemini: 'https://generativelanguage.googleapis.com', codex: 'https://chatgpt.com/backend-api/codex', grok: grokBaseURLs.cli, antigravity: 'https://cloudcode-pa.googleapis.com' }
+    const baseUrl = body.base_url === undefined || body.base_url === '' ? defaults[platform] : requireString(body, 'base_url', 2048)
+    const account: ProviderAccount = { platform, ...providerContract(platform), base_url: baseUrl, provider_config: platform === 'grok' && (body.base_url === undefined || body.base_url === '') ? {use_default_base_url:true} : platform === 'antigravity' ? parseProviderConfig(body.provider_config ?? { project_id: body.project_id }, platform) : {} }
+    const credential = { api_key: requireProviderCredential({...body,api_key:body.api_key ?? body.access_token}, 'api_key') }
+    return controlSuccess(await fetchUpstreamModels(await effectiveProviderAccount(context.env, account), credential, accountFetcher(context.env, body.proxy_id)))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+export async function syncAdminUpstreamModels(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    requireSupportedAccount(account)
+    const credential = await decryptCredential(
+      account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(context.env),
+      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+    )
+    return controlSuccess(await fetchUpstreamModels(await effectiveProviderAccount(context.env, providerAccount(account)), credential, accountFetcher(context.env, accountProxyId(account.ui_config_json), account)))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+export async function listAdminAccountTestModels(context: Context<ControlBindings>): Promise<Response> {
+  const response = await syncAdminUpstreamModels(context)
+  if (!response.ok) return response
+  const { data } = await response.json() as { data: { models: string[]; metadata: Record<string, { display_name?: string }> } }
+  return controlSuccess(data.models.map(id => ({ id, display_name: data.metadata[id]?.display_name ?? id })))
+}
+
 export async function clearAdminAccountRateLimit(context: Context<ControlBindings>): Promise<Response> {
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
@@ -1797,8 +1854,15 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
           anthropicBearer: (parseUiConfig(account.ui_config_json).extra as Record<string, unknown> | undefined)?.anthropic_apikey_auth_scheme === 'authorization_bearer',
         })
     }
+    if (['grok', 'antigravity'].includes(account.platform) && typeof input.model_id === 'string' && input.model_id.trim()) {
+      const extra = parseUiConfig(account.ui_config_json).extra
+      return testAccountModel(context, await effectiveProviderAccount(context.env, providerAccount(account)), credential,
+        account.platform === 'grok' ? { ...input, model_id: resolveGrokModel(await readGrokSettings(context.env), input.model_id) } : input,
+        extra && typeof extra === 'object' && !Array.isArray(extra) ? extra as Record<string, unknown> : {},
+        accountFetcher(context.env, accountProxyId(account.ui_config_json), account))
+    }
     const plan = buildProviderHealthRequest({
-      account: providerAccount(account),
+      account: await effectiveProviderAccount(context.env, providerAccount(account)),
       credential,
     })
     const started = Date.now()
@@ -1810,6 +1874,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       const init: RequestInit = {
         method: plan.method,
         headers: plan.headers,
+        body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
         redirect: 'manual',
         cache: 'no-store',
         signal: controller.signal,
@@ -1993,6 +2058,9 @@ async function runAccountBatch(
 
 function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   rejectUnknownFields(body, CREATE_ACCOUNT_FIELDS)
+  if (body.schedulable !== undefined && typeof body.schedulable !== 'boolean') {
+    throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+  }
   const platform = body.platform === undefined ? 'openai' : requireProviderPlatform(body.platform)
   const contract = providerContract(platform)
   const protocol = body.protocol === undefined
@@ -2017,14 +2085,15 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   const oauth = credentialKind === 'oauth' || credentialKind === 'setup_token'
   const rawBaseUrl = body.base_url ?? submittedCredentials.base_url ??
     (oauth && platform === 'openai' ? 'https://api.openai.com' : oauth && platform === 'codex' ? 'https://chatgpt.com' : oauth && platform === 'anthropic' ? 'https://api.anthropic.com' : undefined)
-  const baseUrl = normalizeBaseUrl(requireString({ base_url: rawBaseUrl }, 'base_url', 2_048))
+  const useDefaultGrok = platform === 'grok' && (rawBaseUrl === undefined || rawBaseUrl === '')
+  const baseUrl = normalizeBaseUrl(requireString({ base_url: useDefaultGrok ? grokBaseURLs.cli : platform === 'antigravity' && !rawBaseUrl ? 'https://cloudcode-pa.googleapis.com' : rawBaseUrl }, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
   const imageAdapter = body.image_adapter === undefined
     ? defaultImageAdapter(platform)
     : requireAccountImageAdapter(body.image_adapter)
   validateAccountExecution(platform, imageAdapter, credentialKind)
   validateAccountType(body, platform, credentialKind)
-  const rawApiKey = body.api_key ?? submittedCredentials.api_key ?? (oauth ? submittedCredentials.access_token : undefined)
+  const rawApiKey = body.api_key ?? submittedCredentials.api_key ?? (oauth || ['antigravity','grok'].includes(platform) ? submittedCredentials.access_token : undefined)
   const agentIdentity=platform==='openai' && credentialKind==='oauth' && String(submittedCredentials.auth_mode).trim().toLowerCase()==='agentidentity'
   if(agentIdentity) {
     for(const field of ['agent_runtime_id','agent_private_key','chatgpt_account_id','chatgpt_user_id']) requireString(submittedCredentials,field,field==='agent_private_key'?16384:2048)
@@ -2053,7 +2122,7 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     auth_scheme: authScheme,
     provider_config: applySubscriptionPlan(
       assertProviderConfigSubscriptionPlanEligible(
-        parseProviderConfig(body.provider_config, platform),
+        parseProviderConfig(useDefaultGrok ? {...requireObjectOrEmpty(body.provider_config),use_default_base_url:true} : platform === 'antigravity' ? {...requireObjectOrEmpty(body.provider_config),project_id:requireObjectOrEmpty(body.provider_config).project_id ?? submittedCredentials.project_id ?? submittedCredentials.antigravity_project_id} : body.provider_config, platform),
         platform,
         credentialKind,
       ),
@@ -2089,11 +2158,15 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   const patch: AccountPatch = {}
   const currentUiConfig = parseUiConfig(account.ui_config_json)
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
-  if (body.base_url !== undefined) patch.base_url = normalizeBaseUrl(requireString(body, 'base_url', 2_048))
+  if (body.base_url !== undefined) patch.base_url = ['grok','antigravity'].includes(account.platform) && body.base_url === '' ? (account.platform === 'grok' ? grokBaseURLs.cli : 'https://cloudcode-pa.googleapis.com') : normalizeBaseUrl(requireString(body, 'base_url', 2_048))
   if (body.credentials !== undefined) {
     patch.credential_patch = requireCredentialObject(body.credentials, 'credentials', false)
+    if (['grok','antigravity'].includes(account.platform) && patch.credential_patch.access_token !== undefined) {
+      if (patch.credential_patch.access_token === '') delete patch.credential_patch.access_token
+      else patch.credential_patch.api_key = requireProviderCredential(patch.credential_patch, 'access_token')
+    }
     if (Object.prototype.hasOwnProperty.call(patch.credential_patch, 'base_url')) {
-      patch.base_url = normalizeBaseUrl(requireString(patch.credential_patch, 'base_url', 2_048))
+      patch.base_url = ['grok','antigravity'].includes(account.platform) && patch.credential_patch.base_url === '' ? (account.platform === 'grok' ? grokBaseURLs.cli : 'https://cloudcode-pa.googleapis.com') : normalizeBaseUrl(requireString(patch.credential_patch, 'base_url', 2_048))
       patch.credential_patch.base_url = patch.base_url
     }
   }
@@ -2102,6 +2175,13 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   }
   if (body.provider_config !== undefined) {
     patch.provider_config = parseProviderConfig(body.provider_config, account.platform)
+  }
+  if (account.platform === 'antigravity' && patch.credential_patch && (Object.hasOwn(patch.credential_patch, 'project_id') || Object.hasOwn(patch.credential_patch, 'antigravity_project_id'))) {
+    patch.provider_config = parseProviderConfig({...accountProviderConfig(account),...patch.provider_config,project_id:patch.credential_patch.project_id ?? patch.credential_patch.antigravity_project_id}, account.platform)
+  }
+  if (account.platform === 'grok' && (body.base_url !== undefined || (body.credentials && typeof body.credentials === 'object' && Object.hasOwn(body.credentials, 'base_url')))) {
+    const raw = body.base_url ?? (body.credentials as Record<string,unknown>).base_url
+    patch.provider_config = {...accountProviderConfig(account),...patch.provider_config,use_default_base_url:raw === ''}
   }
   if (body.image_adapter !== undefined) {
     patch.image_adapter = requireAccountImageAdapter(body.image_adapter)
@@ -2122,6 +2202,9 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   }
   if (patch.provider_config?.subscription_plan !== undefined) {
     assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
+  }
+  if (body.schedulable !== undefined && typeof body.schedulable !== 'boolean') {
+    throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
   }
   if (body.enabled !== undefined || body.status !== undefined) {
     if (body.status === 'error') {
@@ -2265,7 +2348,7 @@ function validateAccountType(
   const expected = credentialKind === 'api_key'
     ? 'apikey'
     : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'
-  if (body.type !== expected || (platform !== 'codex' && platform !== 'openai' && platform !== 'anthropic' && body.type !== 'apikey')) {
+  if (body.type !== expected || (!['codex','openai','grok','antigravity','anthropic'].includes(platform) && body.type !== 'apikey')) {
     throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
   }
 }
@@ -2273,7 +2356,7 @@ function validateAccountType(
 function credentialKindForType(value: unknown, platform: ProviderPlatform): AccountCredentialKind {
   if (value === undefined) return defaultCredentialKind(platform)
   if (value === 'apikey') return 'api_key'
-  if ((platform === 'codex' || platform === 'openai' || platform === 'anthropic') && value === 'oauth') return 'oauth'
+  if (['codex','openai','grok','antigravity','anthropic'].includes(platform) && value === 'oauth') return 'oauth'
   if ((platform === 'codex' || platform === 'anthropic') && value === 'setup-token') return 'setup_token'
   throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
 }
@@ -2293,6 +2376,7 @@ function validateAccountSchedulingFields(body: Record<string, unknown>): void {
   }
 }
 const UI_COMPAT_FIELDS = [
+  'schedulable',
   'notes', 'extra', 'proxy_id', 'load_factor', 'priority', 'expires_at',
   'auto_pause_on_expired', 'upstream_billing_probe_enabled',
   'upstream_billing_rate_sync_enabled', 'schedulable',
@@ -2359,7 +2443,7 @@ function createUiConfig(
       }
       assertNoSensitiveUiFields(body[field], field)
       config[field] = (field === 'expires_at' || field === 'load_factor') && typeof body[field] === 'number' && body[field] <= 0
-        ? null : cloneJsonValue(body[field])
+        ? null : field === 'proxy_id' && (body[field] === 0 || body[field] === '0') ? null : cloneJsonValue(body[field])
     }
   }
   return config
@@ -2385,7 +2469,7 @@ function updateUiConfig(
       }
       assertNoSensitiveUiFields(body[field], field)
       next[field] = (field === 'expires_at' || field === 'load_factor') && typeof body[field] === 'number' && body[field] <= 0
-        ? null : cloneJsonValue(body[field])
+        ? null : field === 'proxy_id' && (body[field] === 0 || body[field] === '0') ? null : cloneJsonValue(body[field])
       changed = true
     }
   }
@@ -2508,10 +2592,10 @@ function requireProviderCredential(body: Record<string, unknown>, field: string)
 }
 
 function requireProviderPlatform(value: unknown): ProviderPlatform {
-  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex') {
+  if (value === 'openai' || value === 'anthropic' || value === 'gemini' || value === 'codex' || value === 'grok' || value === 'antigravity') {
     return value
   }
-  throw new GatewayError(409, 'platform_not_supported', 'Supported platforms are openai, anthropic, gemini, and codex')
+  throw new GatewayError(409, 'platform_not_supported', 'Supported platforms are openai, anthropic, gemini, codex, grok, and antigravity')
 }
 
 function requireProviderProtocol(value: unknown): ProviderProtocol {
@@ -2549,7 +2633,7 @@ function defaultImageAdapter(platform: ProviderPlatform): AccountImageAdapter {
 }
 
 function defaultCredentialKind(platform: ProviderPlatform): AccountCredentialKind {
-  return platform === 'codex' ? 'oauth' : 'api_key'
+  return platform === 'codex' || platform === 'antigravity' ? 'oauth' : 'api_key'
 }
 
 function validateAccountExecution(
@@ -2560,7 +2644,9 @@ function validateAccountExecution(
   const supported = platform === 'codex'
     ? imageAdapter === 'responses_image_tool' &&
       (credentialKind === 'oauth' || credentialKind === 'setup_token')
-    : platform === 'openai'
+    : platform === 'antigravity'
+      ? imageAdapter === 'direct_images' && credentialKind === 'oauth'
+    : platform === 'openai' || platform === 'grok'
       ? imageAdapter === 'direct_images' && (credentialKind === 'api_key' || credentialKind === 'oauth')
       : platform === 'anthropic' ? imageAdapter === 'direct_images' && ['api_key','oauth','setup_token'].includes(credentialKind)
       : imageAdapter === 'direct_images' && credentialKind === 'api_key'
@@ -2590,7 +2676,7 @@ function parseProviderConfig(value: unknown, platform: ProviderPlatform): Provid
     throw new GatewayError(400, 'invalid_provider_config', 'provider_config must be an object')
   }
   const raw = value as Record<string, unknown>
-  const unsupported = Object.keys(raw).find((key) => key !== 'account_id' && key !== 'subscription_plan')
+  const unsupported = Object.keys(raw).find((key) => key !== 'account_id' && key !== 'subscription_plan' && key !== 'use_default_base_url' && key !== 'project_id')
   if (unsupported !== undefined) {
     throw new GatewayError(400, 'invalid_provider_config', `provider_config field '${unsupported}' is not supported`)
   }
@@ -2598,6 +2684,15 @@ function parseProviderConfig(value: unknown, platform: ProviderPlatform): Provid
     throw new GatewayError(400, 'invalid_provider_config', 'account_id is supported only for Codex')
   }
   const config: ProviderConfig = {}
+  if (raw.project_id !== undefined) {
+    if (platform !== 'antigravity' || typeof raw.project_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(raw.project_id)) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is invalid')
+    config.project_id = raw.project_id
+  }
+  if (platform === 'antigravity' && !config.project_id) throw new GatewayError(400, 'invalid_provider_config', 'Antigravity project_id is required')
+  if (raw.use_default_base_url !== undefined) {
+    if (platform !== 'grok' || typeof raw.use_default_base_url !== 'boolean') throw new GatewayError(400, 'invalid_provider_config', 'use_default_base_url is supported only for Grok')
+    config.use_default_base_url = raw.use_default_base_url
+  }
   if (raw.account_id !== undefined) {
     const accountId = requireString(raw, 'account_id', 256)
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(accountId)) {
@@ -3069,6 +3164,8 @@ function compatibilityProjection(
   uiConfig: Record<string, unknown>,
   value: {
     base_url: string
+    platform: ProviderPlatform
+    provider_config: ProviderConfig
     credential_kind: AccountCredentialKind
     max_concurrency: number
     group_links: GroupLink[]
@@ -3083,7 +3180,7 @@ function compatibilityProjection(
     type: uiConfig.type ?? (value.credential_kind === 'api_key'
       ? 'apikey'
       : value.credential_kind === 'setup_token' ? 'setup-token' : 'oauth'),
-    credentials: { ...credentials, base_url: value.base_url },
+    credentials: { ...credentials, base_url: value.base_url, ...(value.platform === 'antigravity' ? {project_id:value.provider_config.project_id,antigravity_project_id:value.provider_config.project_id} : {}) },
     concurrency: value.max_concurrency,
     // Account priority is distinct from group membership priority. The original
     // account schema defaults to 50; a missing field must not become form-invalid 0.
@@ -3193,6 +3290,7 @@ function mapAccountWriteError(error: unknown): GatewayError {
   if (message.includes('account_group_oauth_only')) {
     return new GatewayError(400, 'account_group_oauth_only', 'Selected group only allows OAuth accounts; API key accounts cannot be associated')
   }
+  if (message.includes('upstream_billing_rate_sync_conflict')) return new GatewayError(409,'upstream_billing_rate_sync_conflict','Disable upstream billing rate sync before manually changing the account rate')
   if (/UNIQUE constraint failed: accounts\.platform, accounts\.name/i.test(message)) {
     return new GatewayError(409, 'account_name_exists', 'An account with this name already exists')
   }
@@ -3237,3 +3335,5 @@ function containsSensitiveCredentialField(value: unknown): boolean {
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
+
+function requireObjectOrEmpty(value:unknown):Record<string,unknown>{if(value===undefined)return {};if(!value||typeof value!=='object'||Array.isArray(value))throw new GatewayError(400,'invalid_provider_config','provider_config must be an object');return value as Record<string,unknown>}

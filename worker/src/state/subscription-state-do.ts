@@ -773,7 +773,7 @@ export class SubscriptionStateDO {
     if (row === null || row.subscription_id !== input.subscriptionId) {
       throw new StateApiError(403, 'subscription_unavailable', 'Subscription entitlement is no longer active')
     }
-    if (row.group_enabled !== 1 || !isProviderPlatform(row.platform)) {
+    if (row.group_enabled !== 1 || (!isProviderPlatform(row.platform) && row.platform !== 'composite')) {
       throw new StateApiError(403, 'group_unavailable', 'API key group is unavailable')
     }
   }

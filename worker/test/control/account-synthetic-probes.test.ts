@@ -13,6 +13,7 @@ import { encryptCredential } from '../../src/gateway/crypto'
 import { credentialAad } from '../../src/gateway/repository'
 import { apiKeyDigest } from '../../src/gateway/crypto'
 import { runScheduledRecovery } from '../../src/index'
+import { consumeSettingsMaintenance } from '../../src/maintenance/queue'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const NOW = Date.UTC(2026, 8, 6, 8, 0, 0)
@@ -33,6 +34,21 @@ class QueueCapture {
 }
 
 interface Fixture { raw: any; env: Env; queue: QueueCapture; app: Hono<{ Bindings: Env }> }
+
+async function runCronProbeRecovery(test: Fixture): Promise<void> {
+  const previousMessages = test.queue.messages.length
+  const previousProbeEvents = test.queue.messages.filter(isAccountSyntheticProbeEvent).length
+  await runScheduledRecovery(test.env)
+  const dispatched = test.queue.messages.slice(previousMessages)
+  expect(dispatched).toHaveLength(36)
+  expect(dispatched.every(event => event.event_type === 'settings.maintenance.v1')).toBe(true)
+  expect(test.queue.messages.filter(isAccountSyntheticProbeEvent)).toHaveLength(previousProbeEvents)
+  const maintenance = dispatched.find(event =>
+    (event.payload as { task?: string }).task === 'account_synthetic_probes')
+  expect(maintenance).toBeDefined()
+  expect(await consumeSettingsMaintenance(maintenance, test.env)).toBe(true)
+}
+
 
 async function fixture(): Promise<Fixture> {
   const { raw, d1 } = createSqliteD1()
@@ -143,8 +159,8 @@ describe('account model synthetic probes', () => {
     const test = await fixture()
     try {
       await seedTarget(test)
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('probe-proxy','Probe','https','proxy.test',443,'active','','',1,1)")
-      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','probe-proxy')")
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(10001,'Probe',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'probe-proxy','','',1,1)")
+      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',10001)")
       const direct = vi.fn().mockResolvedValue(Response.json({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }] }))
       vi.stubGlobal('fetch', direct)
       expect((await post(test, [target()], 'bound-proxy')).status).toBe(202)
@@ -400,7 +416,7 @@ describe('account model synthetic probes', () => {
       const expiredConsumer = consumeAccountSyntheticProbe(original, test.env, NOW + 1)
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
       vi.setSystemTime(NOW + 60_000)
-      await runScheduledRecovery(test.env)
+      await runCronProbeRecovery(test)
       const redelivered = test.queue.messages.find(isAccountSyntheticProbeEvent)
       expect(redelivered).toBeDefined()
       const winner = consumeAccountSyntheticProbe(redelivered!, test.env, NOW + 60_001)
@@ -440,7 +456,7 @@ describe('account model synthetic probes', () => {
       `).run()
 
       vi.setSystemTime(NOW + 60_000)
-      await runScheduledRecovery(test.env)
+      await runCronProbeRecovery(test)
       const recovered = test.queue.messages.filter(isAccountSyntheticProbeEvent)
       expect(recovered).toHaveLength(1)
       expect(JSON.stringify(recovered[0])).not.toContain('provider-secret')
@@ -484,7 +500,7 @@ describe('account model synthetic probes', () => {
          WHERE account_id = 'account-dispatch-exhausted'
       `).run(NOW - 1)
 
-      await runScheduledRecovery(test.env)
+      await runCronProbeRecovery(test)
       const recovered = test.queue.messages.filter(isAccountSyntheticProbeEvent)
       expect(recovered.map((event) => event.payload.account_id))
         .toEqual(['account-retryable'])

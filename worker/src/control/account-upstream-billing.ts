@@ -3,7 +3,7 @@ import type { Context } from 'hono'
 import type { Env } from '../env'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { controlError, controlSuccess, readJsonObject, requireResourceId } from './http'
-import { probeUpstreamBilling } from './upstream-billing-probe'
+import { probeUpstreamBilling, probeAccounts } from './upstream-billing-probe'
 
 // Original upstream_billing_probe.go: IsUpstreamBillingProbeIdentity.
 const PLATFORMS = new Set(['openai', 'anthropic', 'gemini', 'antigravity', 'grok', 'kimi', 'zhipu', 'deepseek'])
@@ -21,17 +21,7 @@ export async function probeAdminAccountsUpstreamBilling(context: Context<{ Bindi
       return requireResourceId(String(value), 'account')
     }))]
     const settings = await readUpstreamBillingSettings(context.env)
-    const results: Array<{ account_id: string; snapshot?: Awaited<ReturnType<typeof probeUpstreamBilling>>; error?: string }> = new Array(ids.length)
-    let next = 0
-    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
-      for (;;) {
-        const index = next++
-        if (index >= ids.length) return
-        const id = ids[index]
-        try { results[index] = { account_id: id, snapshot: await probeUpstreamBilling(context.env, id, settings.interval_minutes) } }
-        catch (error) { results[index] = { account_id: id, error: error instanceof GatewayError ? error.message : 'Upstream billing probe failed' } }
-      }
-    }))
+    const results = await probeAccounts(context.env, ids, settings)
     return controlSuccess({ results })
   } catch (error) { return controlError(asGatewayError(error)) }
 }

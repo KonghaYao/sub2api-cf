@@ -373,6 +373,38 @@ describe('useAuthStore', () => {
       expect(JSON.parse(localStorage.getItem('auth_user')!)).toEqual(updatedUser)
     })
 
+    it('旧资料请求晚到200时不覆盖新用户身份', async () => {
+      mockLogin.mockResolvedValue(fakeAuthResponse)
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      let resolveProfile!: (result: unknown) => void
+      mockGetCurrentUser.mockImplementationOnce(() => new Promise((resolve) => { resolveProfile = resolve }))
+      const pending = store.refreshUser()
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, access_token: 'next-user-token', user: fakeAdminUser })
+      await store.login({ email: 'admin@example.com', password: '123456' })
+      resolveProfile({ data: fakeUser })
+      await expect(pending).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(store.token).toBe('next-user-token')
+      expect(store.user).toEqual(fakeAdminUser)
+      expect(JSON.parse(localStorage.getItem('auth_user')!)).toEqual(fakeAdminUser)
+    })
+
+    it('旧资料请求因切换身份失败时保留新登录会话', async () => {
+      mockLogin.mockResolvedValue(fakeAuthResponse)
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      let rejectProfile!: (error: unknown) => void
+      mockGetCurrentUser.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectProfile = reject }))
+      const pending = store.refreshUser()
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, access_token: 'next-user-token', user: fakeAdminUser })
+      await store.login({ email: 'admin@example.com', password: '123456' })
+      rejectProfile({ status: 401, code: 'AUTH_SESSION_CHANGED' })
+      await expect(pending).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(store.token).toBe('next-user-token')
+      expect(localStorage.getItem('auth_token')).toBe('next-user-token')
+      expect(store.user).toEqual(fakeAdminUser)
+    })
+
     it('未认证时抛出错误', async () => {
       const store = useAuthStore()
       await expect(store.refreshUser()).rejects.toThrow('Not authenticated')

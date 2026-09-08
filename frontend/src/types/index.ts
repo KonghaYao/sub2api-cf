@@ -966,6 +966,8 @@ export interface ClaudeModel {
 }
 
 export interface Proxy {
+  control_version?: number
+  password_configured?: boolean
   id: number
   name: string
   protocol: ProxyProtocol
@@ -1173,7 +1175,7 @@ export interface OllamaCloudUsageSnapshot {
 }
 
 export interface OllamaCloudUsageState {
-  account_id: number
+  account_id: number | string
   eligible: boolean
   configured: boolean
   auto_refresh_enabled: boolean
@@ -1206,6 +1208,9 @@ export interface Account {
     tier: { status: 'unknown' | 'unsupported'; value: unknown | null }
     privacy: { status: 'unknown' | 'unsupported'; value: unknown | null }
   }
+  /** Worker provider connection metadata; credentials remain redacted. */
+  base_url?: string
+  provider_config?: Record<string, unknown>
   /** Worker account mutation version used by guarded bulk/probe operations. */
   control_version?: number
   /** Worker-only, per-model capabilities retained for synthetic probes. */

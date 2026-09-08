@@ -92,14 +92,14 @@ describe('original OpenAI account OAuth flow', () => {
   })
 
   it('uses the selected session proxy for tokens, profile and privacy, allowing an explicit proxy/redirect override', async () => {
-    for (const id of ['first-proxy', 'second-proxy']) raw.prepare("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(?,?,'http','proxy.test',8080,'active','','',1,1)").run(id, id)
-    const session = await generate({ proxy_id: 'first-proxy', redirect_uri: 'https://panel.test/callback' })
+    for (const id of [10001, 10002]) raw.prepare("INSERT INTO proxies(id,name,config_json,creation_key,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES(?,?,json_object('protocol','http','host','proxy.test','port',8080,'status','active'),?,'','',1,1)").run(id, String(id), String(id))
+    const session = await generate({ proxy_id: 10001, redirect_uri: 'https://panel.test/callback' })
     const fetcher = outbound(); const direct = vi.fn(); vi.stubGlobal('fetch', direct)
     const proxy = vi.spyOn(proxyTransport, 'fetchAccountProxy').mockImplementation(async (_env, id, url, init) => {
-      expect(id).toBe('second-proxy'); return fetcher(url.href, init)
+      expect(id).toBe('10002'); return fetcher(url.href, init)
     })
     const response = await post('/exchange', { session_id: session.id, code: 'proxied-code', state: session.state,
-      proxy_id: 'second-proxy', redirect_uri: 'https://panel.test/override' })
+      proxy_id: 10002, redirect_uri: 'https://panel.test/override' })
     expect(response.status, await response.clone().text()).toBe(200)
     expect(new URLSearchParams(String(fetcher.mock.calls[0]![1]!.body)).get('redirect_uri')).toBe('https://panel.test/override')
     expect(proxy).toHaveBeenCalledTimes(4); expect(direct).not.toHaveBeenCalled()

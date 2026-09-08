@@ -70,6 +70,8 @@ describe('request observation recorder', () => {
       error: { phase: 'upstream', type: 'upstream_error', owner: 'provider', message: 'bad gateway' },
       payload: { error: { body: { authorization: 'Bearer never-store-this' } } },
     })).resolves.toBe(true)
+    expect(test.messages.some(message=>(message as unknown as {event_type:string}).event_type==='ops.system-log.v1')).toBe(true)
+    test.messages.splice(0,test.messages.length,...test.messages.filter(message=>(message as unknown as {event_type:string}).event_type!=='ops.system-log.v1'))
     expect(test.messages).toHaveLength(1)
     expect(test.raw.prepare(
       `SELECT lifecycle, payload_state, payload_attempts FROM request_observations

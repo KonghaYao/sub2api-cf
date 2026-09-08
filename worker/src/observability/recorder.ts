@@ -1,3 +1,4 @@
+import { enqueueOpsSystemLog } from '../control/ops-system-logs'
 import { sha256Hex } from '../gateway/crypto'
 import {
   encodeObservabilityPayload,
@@ -169,6 +170,7 @@ export async function recordRequestOutcome(
     if (encoded !== null && objectKey !== null) {
       await persistPayloadOrScheduleRetry(env, handle.id, objectKey, encoded)
     }
+    try { await enqueueOpsSystemLog(env, handle.id) } catch { logObservabilityFailure('system_log_enqueue', new Error('queue_unavailable')) }
     return true
   } catch (error) {
     logObservabilityFailure('outcome', error)

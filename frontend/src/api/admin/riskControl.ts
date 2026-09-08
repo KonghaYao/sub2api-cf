@@ -10,6 +10,7 @@ export interface ContentModerationModelFilter {
 }
 
 export interface ContentModerationConfig {
+  control_version?: number
   enabled: boolean
   mode: ModerationMode
   base_url: string
@@ -23,7 +24,7 @@ export interface ContentModerationConfig {
   timeout_ms: number
   sample_rate: number
   all_groups: boolean
-  group_ids: number[]
+  group_ids: Array<number | string>
   record_non_hits: boolean
   thresholds: Record<string, number>
   worker_count: number
@@ -89,6 +90,7 @@ export interface ContentModerationTestAuditResult {
 }
 
 export interface UpdateContentModerationConfig {
+  expected_control_version?: number
   enabled?: boolean
   mode?: ModerationMode
   base_url?: string
@@ -103,7 +105,7 @@ export interface UpdateContentModerationConfig {
   timeout_ms?: number
   sample_rate?: number
   all_groups?: boolean
-  group_ids?: number[]
+  group_ids?: Array<number | string>
   record_non_hits?: boolean
   thresholds?: Record<string, number>
   worker_count?: number
@@ -173,11 +175,11 @@ export interface ContentModerationAPIKeyLoad {
 export interface ContentModerationLog {
   id: number
   request_id: string
-  user_id: number | null
+  user_id: number | string | null
   user_email: string
-  api_key_id: number | null
+  api_key_id: number | string | null
   api_key_name: string
-  group_id: number | null
+  group_id: number | string | null
   group_name: string
   endpoint: string
   provider: string
@@ -205,7 +207,7 @@ export interface ListContentModerationLogsParams {
   page?: number
   page_size?: number
   result?: string
-  group_id?: number
+  group_id?: number | string
   endpoint?: string
   search?: string
   from?: string
@@ -221,7 +223,7 @@ export interface ContentModerationLogsResponse {
 }
 
 export interface ContentModerationUnbanUserResponse {
-  user_id: number
+  user_id: number | string
   status: string
 }
 
@@ -267,7 +269,7 @@ export async function listLogs(
   return data
 }
 
-export async function unbanUser(userID: number): Promise<ContentModerationUnbanUserResponse> {
+export async function unbanUser(userID: number | string): Promise<ContentModerationUnbanUserResponse> {
   const { data } = await apiClient.post<ContentModerationUnbanUserResponse>(
     `/admin/risk-control/users/${userID}/unban`
   )

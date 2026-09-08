@@ -80,6 +80,38 @@ afterEach(() => {
 })
 
 describe('Stripe subscription order HTTP contract', () => {
+  it.each(['rolling', 'fixed'])('enforces saved %s cancellation limits on new orders while keeping retries safe', async mode => {
+    const test = await fixture()
+    const config = await userRequest(test, 'admin', '/api/v1/admin/payment/config', {
+      method: 'PUT', headers: { ...mutationHeaders(`payment-cancel-${mode}`), 'if-match': '"0"' },
+      body: JSON.stringify({ cancel_rate_limit_enabled: true, cancel_rate_limit_max: 1, cancel_rate_limit_window: 1, cancel_rate_limit_unit: 'minute', cancel_rate_limit_window_mode: mode }),
+    })
+    expect(config.status, await config.clone().text()).toBe(200)
+    expect(await json(config)).toMatchObject({ data: { cancel_rate_limit_enabled: true, cancel_rate_limit_window_mode: mode } })
+    const order = await createOrder(test, 'cancel-window-first')
+    const id = order.data.order_id
+    const cancel = await userRequest(test, 'alice', `/api/v1/payment/orders/${id}/cancel`, { method: 'POST' })
+    expect(cancel.status).toBe(200)
+    expect((await userRequest(test, 'alice', `/api/v1/payment/orders/${id}/cancel`, { method: 'POST' })).status).toBe(200)
+    const blocked = await userRequest(test, 'alice', '/api/v1/payment/orders', { method: 'POST', headers: mutationHeaders('cancel-window-second'), body: JSON.stringify({ payment_type: 'stripe', order_type: 'subscription', plan_id: 'plan-pro' }) })
+    expect(blocked.status, await blocked.clone().text()).toBe(429)
+    expect(await json(blocked)).toMatchObject({ code: 'CANCEL_RATE_LIMITED' })
+    vi.setSystemTime(NOW + 61000)
+    expect((await createOrder(test, 'cancel-window-third')).data.order_id).toBeTruthy()
+  })
+
+  it.each(['round-robin', 'least-amount'])('uses saved %s payment provider balancing for real order creation', async strategy => {
+    const test = await fixture()
+    const encrypted = await encryptCredential({ api_key: 'sk_test_secondary', webhook_secret: WEBHOOK_SECRET, publishable_key: 'pk_test_secondary' } as any, MASTER_KEY, paymentProviderAad('test', 'stripe-secondary-id', 'payment-key-v1', 0))
+    test.raw.prepare(`INSERT INTO payment_provider_instances (id,provider_key,provider_type,display_name,config_ciphertext,config_nonce,config_key_id,enabled,version,created_at_ms,updated_at_ms) VALUES ('stripe-secondary-id','stripe-secondary','stripe','Secondary',?,?,'payment-key-v1',1,0,?,?)`).run(encrypted.ciphertext_b64,encrypted.nonce_b64,NOW+1,NOW+1)
+    const config = await userRequest(test, 'admin', '/api/v1/admin/payment/config', { method: 'PUT', headers: { ...mutationHeaders(`balance-${strategy}`), 'if-match': '"0"' }, body: JSON.stringify({ load_balance_strategy: strategy }) })
+    expect(config.status, await config.clone().text()).toBe(200)
+    expect(await json(config)).toMatchObject({ data: { load_balance_strategy: strategy.replace(/-/g,'_') } })
+    const first = await createOrder(test, 'balance-first'), second = await createOrder(test, 'balance-second')
+    const selected = [first,second].map(order => test.raw.prepare('SELECT provider_instance_id FROM payment_orders WHERE id=?').get(order.data.order_id).provider_instance_id)
+    expect(selected).toEqual(['stripe-primary-id','stripe-secondary-id'])
+  })
+
   it('creates one server-priced hosted checkout and replays the durable idempotent response', async () => {
     const test = await fixture()
     const checkout = await userRequest(test, 'alice', '/api/v1/payment/checkout-info')
@@ -638,6 +670,7 @@ describe('Stripe subscription order HTTP contract', () => {
 async function fixture(): Promise<Fixture> {
   const { raw, d1 } = createSqliteD1()
   applyMigrations(raw)
+  raw.prepare("UPDATE payment_config SET created_at_ms=?,updated_at_ms=? WHERE id='global'").run(NOW,NOW)
   raw.prepare(
     `UPDATE payment_config
         SET enabled = 1, balance_disabled = 1, min_amount_micros = 10000,

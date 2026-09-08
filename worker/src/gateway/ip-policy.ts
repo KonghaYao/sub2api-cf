@@ -78,6 +78,24 @@ export function trustedSourceIp(request: Request, environment: string | undefine
   return controlled !== null && parseAddress(controlled.trim()) !== null ? controlled.trim() : null
 }
 
+/** Forwarded headers are considered only when the administrator explicitly enables trust. */
+export function configuredSourceIp(request:Request,environment:string|undefined,trustForwarded:boolean,headers:string[]):string|null {
+ if(trustForwarded)for(const header of headers){
+  const raw=request.headers.get(header)
+  if(raw===null)continue
+  let value=raw.split(',')[0].trim()
+  if(header==='forwarded'){
+   const match=/(?:^|;)\s*for=(?:"([^"\r\n]+)"|([^;\s]+))/i.exec(value)
+   if(!match)return null
+   value=match[1]??match[2]
+   if(value.startsWith('[')){const end=value.indexOf(']');if(end<0)return null;value=value.slice(1,end)}
+   else if(/^\d+\.\d+\.\d+\.\d+:\d+$/.test(value))value=value.slice(0,value.lastIndexOf(':'))
+  }
+  return parseAddress(value)!==null?value:null
+ }
+ return trustedSourceIp(request,environment)
+}
+
 function matches(address: ParsedIp, rule: ParsedRule): boolean {
   if (address.family !== rule.family) return false
   const bits = address.family === 4 ? 32 : 128

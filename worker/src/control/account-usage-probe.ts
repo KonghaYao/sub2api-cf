@@ -1,3 +1,4 @@
+import { requestProxyId } from '../proxy/request-selection'
 import type { Env } from '../env'
 import type { PrivacyAccount } from './account-privacy'
 import { decryptCredential } from '../gateway/crypto'
@@ -23,8 +24,9 @@ export async function probeOpenAIAccountUsage(env: Env, account: PrivacyAccount,
   plan.headers.set('accept', 'text/event-stream')
   const boundedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000)
   const init: RequestInit = { method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body), signal: boundedSignal, redirect: 'manual' }
-  const response = typeof ui.proxy_id === 'string' && ui.proxy_id
-    ? await fetchAccountProxy(env, ui.proxy_id, new URL(plan.url), init, boundedSignal) : await fetch(plan.url, init)
+  const proxyId = requestProxyId(ui.proxy_id)
+  const response = proxyId
+    ? await fetchAccountProxy(env, proxyId, new URL(plan.url), init, boundedSignal) : await fetch(plan.url, init)
   let updates: Record<string, unknown> | null
   try {
     updates = codexUsageHeaderUpdates(response.headers)

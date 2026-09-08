@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { createApp } from '../../src/app'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../../src/env'
 import {
@@ -41,7 +42,7 @@ async function harness(): Promise<Harness> {
   ).run(await apiKeyDigest(`admin-session:v1:${TOKEN}`, PEPPER), now, now + 60_000)
   const env = {
     APP_VERSION: 'test', ENVIRONMENT: 'test', API_KEY_PEPPER: PEPPER,
-    DB: database.d1, ASSETS: {} as Fetcher, CONFIG_KV: {} as KVNamespace,
+    DB: database.d1, ASSETS: {} as Fetcher, CONFIG_KV: { get: async () => ({}) } as unknown as KVNamespace,
     OBJECTS: {} as R2Bucket, EVENTS_QUEUE: {} as Queue,
     USER_STATE: {} as DurableObjectNamespace, POOL_STATE: {} as DurableObjectNamespace,
   } as Env
@@ -134,13 +135,15 @@ describe('admin request audit middleware', () => {
     }, JSON.stringify({ outcome: expectedStatus })), undefined, subject.env)
 
     expect(response.status).toBe(expectedStatus)
-    expect(response.headers.get('x-request-id')).toBe('request-ray-123')
+    const requestId = response.headers.get('x-request-id')
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(requestId).not.toBe('request-ray-123')
     const row = subject.raw.prepare('SELECT * FROM admin_request_audit_logs').get()
     expect(row).toMatchObject({
       actor_user_id: 'admin-one', actor_email: 'snapshot@example.com', actor_role: 'admin',
       auth_method: 'admin_api_key', method: 'POST', path,
       route_template: path,
-      request_id: 'request-ray-123', client_ip: '198.51.100.7',
+      request_id: requestId, client_ip: '198.51.100.7',
       user_agent: 'audit-test-agent', status_code: expectedStatus,
       request_body: `{"outcome":${expectedStatus}}`,
     })
@@ -300,7 +303,7 @@ async function clearHarness(enableTotp = true): Promise<ClearHarness> {
   const env = {
     APP_VERSION: 'test', ENVIRONMENT: 'test', API_KEY_PEPPER: PEPPER,
     CREDENTIALS_MASTER_KEY: 'm'.repeat(32),
-    DB: database.d1, ASSETS: {} as Fetcher, CONFIG_KV: {} as KVNamespace,
+    DB: database.d1, ASSETS: {} as Fetcher, CONFIG_KV: { get: async () => ({}) } as unknown as KVNamespace,
     OBJECTS: {} as R2Bucket, EVENTS_QUEUE: {} as Queue,
     USER_STATE: {} as DurableObjectNamespace, POOL_STATE: {} as DurableObjectNamespace,
   } as Env
@@ -457,7 +460,9 @@ describe('admin request audit clear', () => {
 
     expect(response.status).toBe(200)
     await expect(data(response)).resolves.toEqual({ deleted: 2 })
-    expect(response.headers.get('x-request-id')).toBe('clear-request-ray')
+    const requestId = response.headers.get('x-request-id')
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(requestId).not.toBe('clear-request-ray')
     const rows = subject.raw.prepare('SELECT * FROM admin_request_audit_logs').all()
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
@@ -469,7 +474,7 @@ describe('admin request audit clear', () => {
       method: 'POST',
       path: '/api/v1/admin/audit-logs/clear',
       route_template: '/api/v1/admin/audit-logs/clear',
-      request_id: 'clear-request-ray',
+      request_id: requestId,
       client_ip: '198.51.100.88',
       user_agent: 'clear-test-agent',
       status_code: 200,
@@ -664,5 +669,51 @@ describe('admin request audit list and detail', () => {
       const response = await subject.app.request(request(`/api/v1/admin/audit-logs?${query}`), undefined, subject.env)
       expect(response.status).toBe(400)
     }
+  })
+})
+
+describe('original audit UI contract through the production app', () => {
+  it('records real operations, filters and pages exact records, reads details, and clears with TOTP', async () => {
+    const subject = await clearHarness()
+    const app = createApp()
+    const headers = { authorization: `Bearer ${subject.accessToken}`, 'content-type': 'application/json',
+      'cf-connecting-ip': '203.0.113.18', 'idempotency-key': 'actual-audit-operation' }
+    try {
+      const operation = await app.request('/api/v1/admin/users/clear-admin', { method: 'PUT', headers: { ...headers, 'idempotency-key': 'actual-audit-success' }, body: JSON.stringify({ display_name: 'Audited rename' }) }, subject.env)
+      expect(operation.status, await operation.clone().text()).toBe(200)
+      const invalid = await app.request('/api/v1/admin/users/clear-admin', {
+        method: 'PUT', headers, body: JSON.stringify({ email: 'not-an-email' }),
+      }, subject.env)
+      expect(invalid.status).toBe(400)
+      const base = '/api/v1/admin/audit-logs?actor_email=clear%40example.com&auth_method=jwt&client_ip=203.0.113.18&q=users'
+      const listed = await app.request(base + '&page_size=1', { headers }, subject.env)
+      expect(listed.status, await listed.clone().text()).toBe(200)
+      const first = await data(listed)
+      expect(first).toMatchObject({ total: 2, page: 1, page_size: 1, pages: 2 })
+      expect(first.items[0]).toMatchObject({ method: 'PUT', status_code: 400 })
+      const next = await data(await app.request(base + '&page_size=1&page=2', { headers }, subject.env))
+      expect(next.items).toHaveLength(1)
+      expect(next.items[0]).toMatchObject({ method: 'PUT', status_code: 200 })
+      const failed = await data(await app.request(base + '&success=false&method=PUT&action=users', { headers }, subject.env))
+      expect(failed.total).toBe(1)
+      expect(failed.items[0].id).toBe(first.items[0].id)
+      const detail = await data(await app.request(`/api/v1/admin/audit-logs/${first.items[0].id}`, { headers }, subject.env))
+      expect(detail).toMatchObject({ id: first.items[0].id, status_code: 400, client_ip: '203.0.113.18' })
+      expect(detail.request_body).toContain('not-an-email')
+      expect(detail.credential_masked).not.toContain(subject.accessToken)
+      const status = await app.request('/api/v1/user/totp/status', { headers }, subject.env)
+      expect((await data(status)).enabled).toBe(true)
+      const before = subject.raw.prepare('SELECT COUNT(*) AS n FROM admin_request_audit_logs').get().n
+      const code = await generateTotpCode(TOTP_SECRET, Date.now())
+      const cleared = await app.request(clearRequest(subject.accessToken, code, 'actual-audit-clear'), undefined, subject.env)
+      expect(cleared.status, await cleared.clone().text()).toBe(200)
+      expect((await data(cleared)).deleted).toBe(before)
+      const records = subject.raw.prepare('SELECT action,extra_json FROM admin_request_audit_logs').all()
+      expect(records).toHaveLength(1)
+      expect(records[0].action).toBe('POST /api/v1/admin/audit-logs/clear')
+      expect(JSON.parse(records[0].extra_json).deleted_rows).toBe(before)
+      const replay = await app.request(clearRequest(subject.accessToken, code, 'actual-audit-clear'), undefined, subject.env)
+      expect((await data(replay)).deleted).toBe(before)
+    } finally { subject.raw.close() }
   })
 })

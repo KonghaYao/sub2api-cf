@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { get, post } = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
 
 vi.mock('@/api/client', () => ({ apiClient: { get, post } }))
+vi.mock('@/utils/format', () => ({ getBrowserTimeZone: () => 'Asia/Shanghai' }))
 
 import {
   getById,
@@ -81,7 +82,7 @@ describe('usage Explorer Worker contract', () => {
     expect(post).toHaveBeenCalledWith(
       '/usage/dashboard/api-keys-usage',
       { api_key_ids: ['key-1'] },
-      { signal: undefined },
+      { signal: undefined, params: { timezone: 'Asia/Shanghai' } },
     )
   })
 })

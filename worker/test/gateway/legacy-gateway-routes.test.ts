@@ -5,11 +5,13 @@ import type { Env } from '../../src/env'
 type Row = Record<string, unknown>
 
 class PrincipalStatement {
+  constructor(private readonly query: string) {}
   bind(): this {
     return this
   }
 
   async first<T>(): Promise<T> {
+    if (this.query.includes('SELECT gateway_json FROM system_settings')) return { gateway_json: '{}' } as T
     return {
       api_key_id: 'key-1',
       api_key_auth_version: 1,
@@ -53,7 +55,7 @@ function validationEnv(): Env {
     APP_VERSION: 'test',
     ENVIRONMENT: 'test',
     API_KEY_PEPPER: 'p'.repeat(32),
-    DB: { prepare: () => new PrincipalStatement() } as unknown as D1Database,
+    DB: { prepare: (query: string) => new PrincipalStatement(query) } as unknown as D1Database,
     ASSETS: {} as Fetcher,
     CONFIG_KV: {} as KVNamespace,
     OBJECTS: {} as R2Bucket,

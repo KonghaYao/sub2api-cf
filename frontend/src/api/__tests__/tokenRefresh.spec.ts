@@ -153,14 +153,18 @@ describe('refreshAuthTokens', () => {
     expect(localStorage.getItem('refresh_token')).toBe('new-refresh')
   })
 
-  it('does not adopt a token from a different signed-in user', async () => {
+  it.each([
+    [7, 8],
+    ['4d5f1031-a954-434e-9631-862b3dbb5531', '05ff44e5-0e0c-4d15-ae85-a6fa839fd1f4']
+  ])('does not adopt a token from a different signed-in user (%s → %s)', async (firstID, nextID) => {
     vi.useFakeTimers()
     seedSession()
+    localStorage.setItem('auth_user', JSON.stringify({ id: firstID, email: 'admin@example.com' }))
     mockedPost.mockRejectedValueOnce(new Error('refresh token already used'))
     const { refreshAuthTokens } = await import('@/api/tokenRefresh')
 
     window.setTimeout(() => {
-      localStorage.setItem('auth_user', JSON.stringify({ id: 8, email: 'other@example.com' }))
+      localStorage.setItem('auth_user', JSON.stringify({ id: nextID, email: 'other@example.com' }))
       localStorage.setItem('auth_token', 'other-access')
       localStorage.setItem('token_expires_at', String(Date.now() + 3600_000))
       localStorage.setItem('refresh_token', 'other-refresh')

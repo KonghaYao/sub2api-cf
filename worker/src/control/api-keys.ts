@@ -618,7 +618,7 @@ function parseCreateApiKey(body: Record<string, unknown>): CreateApiKeyInput {
   }
   rejectLegacyMonetaryFields(body)
   rejectServerManagedMonetaryFields(body)
-  const groupId = requireResourceId(requireString(body, 'group_id', 128), 'group')
+  const groupId = body.group_id === null || body.group_id === undefined ? 'worker-ungrouped-default' : requireResourceId(requireString(body, 'group_id', 128), 'group')
   let expiresAtMs: number | null = null
   if (body.expires_at_ms !== undefined && body.expires_at_ms !== null) {
     expiresAtMs = requireSafeInteger(body, 'expires_at_ms')
@@ -646,7 +646,7 @@ function parseApiKeyUpdatePatch(body: Record<string, unknown>): ApiKeyUpdatePatc
   if (body.name !== undefined) patch.name = requireString(body, 'name', 128)
   if (body.group_id !== undefined) {
     patch.group_id = body.group_id === null
-      ? null
+      ? 'worker-ungrouped-default'
       : requireResourceId(requireString(body, 'group_id', 128), 'group')
   }
   if (body.enabled !== undefined && body.status !== undefined) {

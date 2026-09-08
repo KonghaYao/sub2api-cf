@@ -540,7 +540,7 @@ const healthModeOptions = computed(() => [
 const filter = ref<MonitorFilter>({
   range: parseRange(route.query.range),
   platforms: csv(route.query.platform),
-  groupIds: csv(route.query.group).map(Number).filter(Boolean),
+  groupIds: csv(route.query.group).map(value => /^\d+$/.test(value) ? Number(value) : value).filter(Boolean),
   models: csv(route.query.model),
 })
 const activeTab = ref<Tab>(
@@ -607,7 +607,7 @@ const modelOptions = computed(() =>
 const selectedGroupIds = computed({
   get: () => filter.value.groupIds.map(String),
   set: (value: string[]) => {
-    filter.value.groupIds = value.map(Number).filter((id) => Number.isInteger(id) && id > 0)
+    filter.value.groupIds = value.map(raw => /^\d+$/.test(raw) ? Number(raw) : raw).filter((id) => typeof id === 'string' ? id.length > 0 : Number.isSafeInteger(id) && id > 0)
   },
 })
 // Soft-prune group/model selections that fall outside the platform cascade.
@@ -650,7 +650,7 @@ const matrixRows = computed(() => {
   const items = matrix.value?.items || []
   // platform_group views should only show real groups, never bare platform placeholders.
   if (matrixGroupBy.value === 'platform_group' || matrixGroupBy.value === 'platform_group_model') {
-    return items.filter((row) => row.group_id != null && Number(row.group_id) > 0)
+    return items.filter((row) => row.group_id != null && String(row.group_id) !== '' && String(row.group_id) !== '0')
   }
   return items
 })

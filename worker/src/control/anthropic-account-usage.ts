@@ -1,3 +1,4 @@
+import { requestProxyId } from '../proxy/request-selection'
 import type { Env } from '../env'
 import type { PrivacyAccount } from './account-privacy'
 import { GatewayError } from '../gateway/errors'
@@ -39,7 +40,7 @@ async function fetchAndPersist(env: Env, account: PrivacyAccount): Promise<Objec
   try { response = await openAIOAuthHttp(env,'https://api.anthropic.com/api/oauth/usage', { method:'GET',headers:{
     accept:'application/json, text/plain, */*','content-type':'application/json',authorization:`Bearer ${credentials.access_token}`,
     'anthropic-beta':'oauth-2025-04-20','user-agent':'claude-code/2.1.7',
-  } },typeof ui.proxy_id === 'string' ? ui.proxy_id : null,30000) }
+  } },requestProxyId(ui.proxy_id),30000) }
   catch { throw new GatewayError(502,'usage_upstream_error','Could not read Anthropic usage') }
   if (response.status !== 200) throw new GatewayError(502,'usage_upstream_error',`Anthropic usage returned HTTP ${response.status}`)
   let raw: ObjectValue

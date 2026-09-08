@@ -293,6 +293,27 @@ describe('ordinary asynchronous Images contract', () => {
     await expect(response.json()).resolves.toMatchObject({ task_id: taskId, status: 'processing' })
   })
 
+  it.each([false, true])('uploads actual image bytes and cleans external storage when result commit fails (%s)', async (failCommit) => {
+    const test = await fixture()
+    const secret = await encryptCredential({ api_key: 'storage-secret' }, MASTER_KEY, 'object-storage:images:v1')
+    test.raw.prepare(`INSERT INTO object_storage_settings(id,config_json,nonce_b64,ciphertext_b64,control_version,updated_at_ms) VALUES('images',?,?,?,1,?)`).run(JSON.stringify({ enabled: true, reuse_backup_s3: false, endpoint: 'https://storage.example.test', region: 'auto', bucket: 'images-bucket', access_key_id: 'IMAGEACCESS', prefix: 'images/', force_path_style: true, public_base_url: '', presign_expiry_hours: 1, max_download_bytes: 1048576 }), secret.nonce_b64, secret.ciphertext_b64, Date.now())
+    const stored: Uint8Array[] = []
+    const methods: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => { methods.push(request.method); expect(request.headers.get('authorization')).toContain('Credential=IMAGEACCESS/'); if(request.method==='PUT')stored.push(new Uint8Array(await request.arrayBuffer())); return new Response(null) }))
+    if(failCommit)test.failResultPut()
+    try {
+      const submitted = await submit(test)
+      await consumeImageTaskExecute(test.queued[0], test.env)
+      const response = await app().request(`/v1/images/tasks/${String(submitted.body.task_id)}`, { headers: { authorization: `Bearer ${RAW_KEY}` } }, test.env)
+      const body = await response.json() as any
+      if(failCommit){expect(body.status).toBe('failed');expect(methods).toEqual(['PUT','DELETE'])}
+      else{expect(JSON.stringify(body)).toContain('storage.example.test');expect(JSON.stringify(body)).toContain('X-Amz-Signature=');expect(methods).toEqual(['PUT'])}
+      expect(JSON.stringify(test.raw.prepare('SELECT * FROM image_task_outputs').all())).not.toContain('storage-secret')
+      expect(stored[0]).toEqual(test.imageBytes)
+      expect(test.settle).toHaveBeenCalledTimes(1)
+    } finally { vi.unstubAllGlobals(); test.raw.close() }
+  })
+
   it('executes a duplicate Queue delivery at most once', async () => {
     const test = await fixture()
     await submit(test)
@@ -673,6 +694,59 @@ describe('ordinary asynchronous Images contract', () => {
     expect(second.deleted).toBe(1)
     expect(test.raw.prepare('SELECT id FROM image_tasks WHERE id=?').get(taskId)).toBeUndefined()
   })
+  it('deletes a large nested R2 prefix over bounded maintenance invocations and survives a partial deletion failure', async () => {
+    const test = await fixture()
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+    await consumeImageTaskExecute(test.queued[0], test.env)
+    test.raw.prepare('UPDATE image_tasks SET created_at_ms=0,updated_at_ms=0,expires_at_ms=0 WHERE id=?').run(taskId)
+    for(let index=0;index<85;index++) await test.env.OBJECTS.put(`test/image-tasks/${taskId}/nested/${index}/image.png`, 'image')
+    let queries=0;const db=test.env.DB
+    test.env.DB=new Proxy(db,{get(target,key){if(key==='prepare')return(sql:string)=>{queries++;return target.prepare(sql)};const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value}})
+    vi.mocked(test.env.OBJECTS.delete).mockRejectedValueOnce(new Error('temporary deletion failure'))
+    let rounds=0
+    while(test.raw.prepare('SELECT id FROM image_tasks WHERE id=?').get(taskId)){
+      queries=0;vi.mocked(test.env.OBJECTS.list).mockClear();vi.mocked(test.env.OBJECTS.delete).mockClear();vi.mocked(test.env.EVENTS_QUEUE.send).mockClear()
+      await recoverImageTasks(test.env,1)
+      const subrequests=queries+vi.mocked(test.env.OBJECTS.list).mock.calls.length+vi.mocked(test.env.OBJECTS.delete).mock.calls.length+vi.mocked(test.env.EVENTS_QUEUE.send).mock.calls.length
+      expect(subrequests).toBeLessThanOrEqual(50)
+      if(rounds===0) expect(test.raw.prepare('SELECT status FROM image_tasks WHERE id=?').get(taskId)).toEqual({status:'deleting'})
+      rounds++;expect(rounds).toBeLessThan(15)
+    }
+    expect(rounds).toBeGreaterThan(8)
+    expect([...test.objects.keys()].filter(key=>key.includes(taskId))).toEqual([])
+    test.raw.close()
+  })
+
+  it('continues external S3 output deletion in bounded batches and keeps undeleted references after failure', async () => {
+    const test = await fixture()
+    const submitted = await submit(test)
+    const taskId = String(submitted.body.task_id)
+    await consumeImageTaskExecute(test.queued[0], test.env)
+    test.raw.prepare('UPDATE image_tasks SET created_at_ms=0,updated_at_ms=0,expires_at_ms=0 WHERE id=?').run(taskId)
+    const storage={endpoint:'https://storage.example.test',region:'auto',bucket:'test-images',access_key_id:'fixture-access',secret_access_key:'fixture-secret',prefix:'',force_path_style:true}
+    for(let index=1;index<=8;index++){
+      const ref=await encryptCredential({api_key:JSON.stringify({storage,key:`images/${taskId}/${index}.png`})},MASTER_KEY,'image-storage-locator:v1')
+      test.raw.prepare('INSERT INTO image_task_outputs(task_id,image_index,object_key,mime_type,byte_length,created_at_ms,external_storage_ref) VALUES(?,?,?,?,?,?,?)').run(taskId,index,`external-image-fixture/${taskId}/${index}.png`,'image/png',24,1,JSON.stringify(ref))
+    }
+    let queries=0;const db=test.env.DB
+    test.env.DB=new Proxy(db,{get(target,key){if(key==='prepare')return(sql:string)=>{queries++;return target.prepare(sql)};const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value}})
+    const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(null,{status:204})).mockRejectedValueOnce(new Error('temporary S3 failure'))
+    try {
+      const first=await recoverImageTasks(test.env,1);expect(first.deleted).toBe(0)
+      expect(test.raw.prepare('SELECT COUNT(*) AS n FROM image_task_outputs WHERE task_id=? AND external_storage_ref IS NOT NULL').get(taskId).n).toBe(8)
+      let rounds=0
+      while(test.raw.prepare('SELECT id FROM image_tasks WHERE id=?').get(taskId)){
+        queries=0;fetch.mockClear();vi.mocked(test.env.OBJECTS.list).mockClear();vi.mocked(test.env.OBJECTS.delete).mockClear()
+        await recoverImageTasks(test.env,1)
+        expect(fetch.mock.calls.length).toBeLessThanOrEqual(3)
+        expect(queries+fetch.mock.calls.length+vi.mocked(test.env.OBJECTS.list).mock.calls.length+vi.mocked(test.env.OBJECTS.delete).mock.calls.length).toBeLessThanOrEqual(50)
+        rounds++;expect(rounds).toBeLessThan(5)
+      }
+      expect(rounds).toBe(3)
+    }finally{fetch.mockRestore();test.raw.close()}
+  })
+
 })
 
 function encodeBase64(bytes: Uint8Array): string {

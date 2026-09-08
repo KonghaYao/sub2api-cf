@@ -35,6 +35,7 @@ class UserStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return null
     if (this.query.includes('SELECT 1 AS allowed') && this.query.includes('FROM admin_user_roles')) {
       return { allowed: 1 } as T
     }
@@ -119,11 +120,13 @@ class UserStatement {
         meta: { changes } as D1Meta & Record<string, unknown>,
       }
     }
-    if (this.query.includes('UPDATE user_sessions')) {
+    if (this.query.includes('UPDATE user_sessions') || this.query.includes('UPDATE admin_sessions')) {
       return { success: true, results: [], meta: {} as D1Meta & Record<string, unknown> }
     }
-    if (this.query.includes('UPDATE users') && this.query.includes('SET status = ?')) {
-      const [status, balanceMicros, stateVersion, updatedAt, id] = this.values
+    if (this.query.includes('UPDATE users') && this.query.includes('status = ?, balance_micros')) {
+      const [status, balanceMicros, stateVersion, updatedAt, id] = this.query.includes('SET auth_version = CASE')
+        ? this.values.slice(2)
+        : this.values
       const user = this.database.users.get(String(id))
       if (user !== undefined && user.state_version < Number(stateVersion)) {
         if (

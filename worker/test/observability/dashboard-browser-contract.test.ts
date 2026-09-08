@@ -99,7 +99,7 @@ describe('user dashboard browser API against Worker routes', () => {
       Awaited<ReturnType<typeof getDashboardModels>>, Awaited<ReturnType<typeof getByDateRange>>]
     expect(stats).toMatchObject({ total_requests: 1, total_tokens: 150, total_actual_cost: 0.075 })
     expect(trend.trend).toEqual([expect.objectContaining({ requests: 1, total_tokens: 150 })])
-    expect(trend.trend[0].date).toMatch(new RegExp(`^${today}`))
+    expect(trend.trend[0].date).toBe(`${today} ${new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hourCycle: 'h23' }).format(new Date(now))}:00`)
     expect(models.models).toEqual([expect.objectContaining({ model: 'composer-2.5', requests: 1 })])
     expect(recent.items).toEqual([expect.objectContaining({ id: 'event', actual_cost: 0.075 })])
   })

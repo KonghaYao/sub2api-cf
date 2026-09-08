@@ -354,11 +354,11 @@ function setModels(platform: MonitorConfig['platforms'][number], event: Event) {
   ].sort()
 }
 
-function toggleGroup(id: number) {
+function toggleGroup(id: number | string) {
   if (!draft.value) return
   draft.value.group_ids = draft.value.group_ids.includes(id)
     ? draft.value.group_ids.filter((value) => value !== id)
-    : [...draft.value.group_ids, id].sort((a, b) => a - b)
+    : [...draft.value.group_ids, id].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
 }
 
 function isCategoryIgnored(category: string): boolean {

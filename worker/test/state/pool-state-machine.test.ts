@@ -39,6 +39,27 @@ function poolWithTwoAccounts() {
 }
 
 describe("pool state machine", () => {
+  it("keeps configured load factors effective in the advanced scheduler without expanding concurrency", () => {
+    let state = applyPoolCommand(createPoolMachineState(), {
+      schema_version: 1, type: "sync_accounts", config_revision: 1, config_fingerprint: "1".repeat(64),
+      accounts: [
+        { account_id: "a", max_concurrency: 2, priority: 0, weight: 1, load_factor: 1 },
+        { account_id: "b", max_concurrency: 2, priority: 0, weight: 1, load_factor: 10 },
+      ],
+    }, 1000).state;
+    for (const account of ["a", "b"]) {
+      state = applyPoolCommand(state, { schema_version: 1, type: "reserve", request_id: `initial-${account}`,
+        preferred_account_id: account, lease_ttl_ms: 5000 }, 1100).state;
+    }
+    const scheduler = { enabled: true, sticky_weighted: false, top_k: 1,
+      weights: { priority: 0, load: 1, error_rate: 0, ttft: 0, session_sticky: 0 } };
+    const third = applyPoolCommand(state, { schema_version: 1, type: "reserve", request_id: "advanced-third", lease_ttl_ms: 5000, scheduler }, 1100);
+    expect(third.lease!.account_id).toBe("b");
+    const fourth = applyPoolCommand(third.state, { schema_version: 1, type: "reserve", request_id: "advanced-fourth", lease_ttl_ms: 5000, scheduler }, 1100);
+    expect(fourth.lease!.account_id).toBe("a");
+    expect(() => applyPoolCommand(fourth.state, { schema_version: 1, type: "reserve", request_id: "advanced-full", lease_ttl_ms: 5000, scheduler }, 1100)).toThrow();
+  });
+
   it("preserves configured load factor on partial account updates and clears it on authoritative sync", () => {
     const configured = applyPoolCommand(poolWithAccount(2), {
       schema_version: 1, type: "upsert_account", account_id: "account-1",

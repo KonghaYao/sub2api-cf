@@ -41,6 +41,15 @@ vi.mock('@/api/admin', () => ({
 }))
 
 describe('OpenAIFastPolicyUserSelector', () => {
+  it('keeps Worker UUIDs selected and hydrates them without numeric coercion', async () => {
+    const id = '12345678-1234-5234-8234-123456789012'
+    mockGetUserById.mockResolvedValue({ id, email: 'worker@example.test' })
+    const wrapper = mount(OpenAIFastPolicyUserSelector, { props: { modelValue: [id] } })
+    await flushPromises()
+    expect(mockGetUserById).toHaveBeenCalledWith(id, true)
+    expect(wrapper.text()).toContain('worker@example.test')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.useFakeTimers()
     mockSearchUsers.mockReset()

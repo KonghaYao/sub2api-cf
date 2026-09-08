@@ -533,16 +533,19 @@ function buildQuery() {
   }
 }
 
+let listRequestVersion = 0
 async function fetchLogs() {
+  const requestVersion = ++listRequestVersion
   loading.value = true
   try {
     const res = await adminAPI.audit.list(buildQuery())
+    if (requestVersion !== listRequestVersion) return
     logs.value = res.items
     total.value = res.total
   } catch (err: any) {
-    appStore.showError(err?.message || t('admin.audit.loadFailed'))
+    if (requestVersion === listRequestVersion) appStore.showError(err?.message || t('admin.audit.loadFailed'))
   } finally {
-    loading.value = false
+    if (requestVersion === listRequestVersion) loading.value = false
   }
 }
 
@@ -581,17 +584,21 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<AuditLog | null>(null)
 
+let detailRequestVersion = 0
 async function openDetail(id: number) {
+  const requestVersion = ++detailRequestVersion
   detailVisible.value = true
   detailLoading.value = true
   detail.value = null
   try {
-    detail.value = await adminAPI.audit.get(id)
+    const result = await adminAPI.audit.get(id)
+    if (requestVersion === detailRequestVersion) detail.value = result
   } catch (err: any) {
+    if (requestVersion !== detailRequestVersion) return
     appStore.showError(err?.message || t('admin.audit.loadFailed'))
     detailVisible.value = false
   } finally {
-    detailLoading.value = false
+    if (requestVersion === detailRequestVersion) detailLoading.value = false
   }
 }
 

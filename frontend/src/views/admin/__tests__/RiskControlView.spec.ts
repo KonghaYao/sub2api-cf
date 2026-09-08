@@ -200,7 +200,7 @@ describe('admin RiskControlView', () => {
     showError.mockReset()
     showSuccess.mockReset()
 
-    getConfig.mockResolvedValue(baseConfig())
+    getConfig.mockResolvedValue({...baseConfig(), control_version: 7})
     getStatus.mockResolvedValue(runtimeStatus())
     listLogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 1 })
     getGroups.mockResolvedValue([])
@@ -243,6 +243,7 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      expected_control_version: 7,
       model_filter: {
         type: 'include',
         models: ['gpt-5.5', 'gpt-5.4'],

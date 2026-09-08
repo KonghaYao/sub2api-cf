@@ -5,6 +5,8 @@ import { accountQuotaExceeded } from './account-quota-policy'
 import { accountNotExpiredSql } from './account-expiry'
 import { accountGroupPrivacyAllowedSql } from './account-group-policy'
 import { accountModelPolicy, accountModelAllowedSql } from './account-model-policy'
+import { effectiveProviderAccount } from '../control/provider-runtime'
+import { normalizeSecuritySettings, securityDefaults } from '../control/gateway-security-settings'
 import type { Env } from '../env'
 import { resolveCompositeRoute } from '../control/composite-routes'
 import { groupAccessPredicate } from '../user/group-access'
@@ -15,7 +17,7 @@ import type {
   FrozenTimePricing,
 } from './customer-pricing'
 import { GatewayError } from './errors'
-import { isSourceIpAllowed, parseStoredIpPolicy, trustedSourceIp } from './ip-policy'
+import { isSourceIpAllowed, parseStoredIpPolicy, configuredSourceIp } from './ip-policy'
 import { isProviderPlatform } from './platform'
 import type {
   AccountCandidate,
@@ -197,7 +199,7 @@ export async function authenticateGatewayRequest(
   ) {
     throw new GatewayError(401, 'invalid_api_key', 'Invalid or expired API key', 'authentication_error')
   }
-  enforceApiKeyIpPolicy(request, env, row)
+  await enforceApiKeyIpPolicy(request, env, row)
   if (row.user_status !== 'active') {
     throw new GatewayError(403, 'user_disabled', 'User account is disabled', 'permission_error')
   }
@@ -252,7 +254,7 @@ export async function authenticateGatewayRequest(
   }
 }
 
-function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): void {
+async function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): Promise<void> {
   // Compatibility for hand-written pre-0059 unit fixtures only. A partial
   // projection is never accepted; deployed D1 always returns both columns.
   if (row.ip_allowlist_json === undefined && row.ip_denylist_json === undefined) return
@@ -262,7 +264,10 @@ function enforceApiKeyIpPolicy(request: Request, env: Env, row: PrincipalRow): v
   const allowlist = parseStoredIpPolicy(row.ip_allowlist_json, 'ip_allowlist_json')
   const denylist = parseStoredIpPolicy(row.ip_denylist_json, 'ip_denylist_json')
   if (allowlist.length === 0 && denylist.length === 0) return
-  if (!isSourceIpAllowed(trustedSourceIp(request, env.ENVIRONMENT), allowlist, denylist)) {
+  const stored=await env.DB.prepare("SELECT gateway_json FROM system_settings WHERE id='global'").first<{gateway_json:string}>()
+  const raw=stored?JSON.parse(stored.gateway_json):{}
+  const config=normalizeSecuritySettings(Object.fromEntries(Object.entries(raw).filter(([key])=>Object.hasOwn(securityDefaults,key))))
+  if (!isSourceIpAllowed(configuredSourceIp(request, env.ENVIRONMENT,config.api_key_acl_trust_forwarded_ip,config.forwarded_client_ip_headers), allowlist, denylist)) {
     throw new GatewayError(
       403,
       'api_key_ip_restricted',
@@ -443,11 +448,11 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
              AND (json_extract(a.ui_config_json, '$.original_model_routing') = 1 OR
                (m.endpoint = 'chat_completions' AND (
                  am.chat_completions = 1 OR
-                 (a.platform IN ('openai', 'codex') AND am.responses = 1)
+                 (a.platform IN ('openai', 'codex', 'grok', 'antigravity') AND am.responses = 1)
                )) OR
                (m.endpoint = 'responses' AND (
                  am.responses = 1 OR
-                 (a.platform = 'openai' AND am.chat_completions = 1)
+                 (a.platform IN ('openai', 'grok', 'antigravity') AND am.chat_completions = 1)
                )) OR
                (m.endpoint = 'both' AND (am.chat_completions = 1 OR am.responses = 1)) OR
                (m.embeddings = 1 AND am.embeddings = 1) OR
@@ -1291,15 +1296,19 @@ function externalAliasCandidatesStatement(
 ): D1PreparedStatement {
   const cte = externalAliasCte(groupId, publicName, modelEndpoint)
   const platformPredicate = platformConstraint === 'openai'
-    ? "AND a.platform = 'openai'"
+    ? "AND a.platform IN ('openai', 'grok', 'antigravity')"
     : platformConstraint === 'openai_or_codex'
-      ? "AND a.platform IN ('openai', 'codex')"
+      ? "AND a.platform IN ('openai', 'codex', 'grok', 'antigravity')"
       : ''
   return env.DB.prepare(
     `${cte.sql}
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
+            CASE WHEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.credential_ref') = a.credential_ref
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.base_url') = a.base_url
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.platform') = a.platform
+                 THEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe') END AS upstream_billing_probe_json,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1711,9 +1720,9 @@ function accountCandidatesStatement(
   compositePlatform?: string | null,
 ): D1PreparedStatement {
   const platformPredicate = platformConstraint === 'openai'
-    ? "AND a.platform = 'openai'"
+    ? "AND a.platform IN ('openai', 'grok', 'antigravity')"
     : platformConstraint === 'openai_or_codex'
-      ? "AND a.platform IN ('openai', 'codex')"
+      ? "AND a.platform IN ('openai', 'codex', 'grok', 'antigravity')"
       : ''
   const modelCapability = modelEndpoint === 'embeddings'
     ? 'm.embeddings = 1'
@@ -1741,7 +1750,11 @@ function accountCandidatesStatement(
      )
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency, a.billing_rate_multiplier_ppm,
+            CASE WHEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.credential_ref') = a.credential_ref
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.base_url') = a.base_url
+                   AND json_extract(a.ui_config_json, '$.extra.upstream_billing_probe.identity.platform') = a.platform
+                 THEN json_extract(a.ui_config_json, '$.extra.upstream_billing_probe') END AS upstream_billing_probe_json,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -1776,6 +1789,9 @@ export async function getAccountCredential(
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
+            json_extract(a.ui_config_json, '$.proxy_id') AS proxy_id,
+            json_extract(a.ui_config_json, '$.extra.codex_cli_only') AS codex_cli_only,
+            json_extract(a.ui_config_json, '$.extra.codex_cli_only_allow_app_server') AS codex_cli_only_allow_app_server,
             a.image_adapter, a.credential_kind,
             a.provider_config_json, a.ui_config_json, a.config_version, a.control_version, m.upstream_name AS policy_model,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
@@ -1787,7 +1803,7 @@ export async function getAccountCredential(
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
       WHERE a.id = ? AND ag.group_id = ? AND m.id = ?
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND (${capabilityColumn} = 1 OR json_extract(a.ui_config_json, '$.original_model_routing') = 1) AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND ${accountGroupPrivacyAllowedSql()}
+        AND (${capabilityColumn} = 1 OR json_extract(a.ui_config_json, '$.original_model_routing') = 1) AND g.enabled = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND ${accountGroupPrivacyAllowedSql()}
         AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL
       LIMIT 1`,
@@ -1808,13 +1824,12 @@ export async function getAccountCredential(
   if (!policy.allowed) throw new GatewayError(503, 'credential_unavailable', 'Account no longer supports the requested model', 'server_error')
   const uiConfig = row.ui_config_json ? JSON.parse(row.ui_config_json) as { proxy_id?: unknown; extra?: { anthropic_apikey_auth_scheme?: unknown } } : {}
   const proxyId = uiConfig.proxy_id
-  return { ...parseAccountCredential(row), upstream_model_name: policy.upstream || requestedModel || row.policy_model,
+  return effectiveProviderAccount(env, { ...parseAccountCredential(row), upstream_model_name: policy.upstream || requestedModel || row.policy_model,
     ...(typeof row.config_version === 'number' && typeof row.control_version === 'number' && typeof row.ui_config_json === 'string'
       ? { runtime_snapshot: { config_version: row.config_version, control_version: row.control_version, ui_config_json: row.ui_config_json } } : {}),
     ...(row.platform === 'anthropic' && row.credential_kind === 'api_key' && uiConfig.extra?.anthropic_apikey_auth_scheme === 'authorization_bearer'
       ? { anthropic_auth_scheme: 'authorization_bearer' as const } : {}),
-    ...(proxyId == null || proxyId === 0 || proxyId === '0' ? {} : { proxy_id: String(proxyId) }) }
-
+    ...(proxyId == null || proxyId === 0 || proxyId === '0' ? {} : { proxy_id: String(proxyId) }) })
 }
 
 export function credentialAad(
@@ -1957,8 +1972,8 @@ function parseProviderAccountProjection(row: ProviderAccountProjection): {
 } {
   if (!isProviderPlatform(row.platform)) return invalidProviderAccount()
   const expected = row.platform
-  const valid = row.protocol === expected && (
-    (expected === 'openai' && row.auth_scheme === 'bearer') ||
+  const valid = row.protocol === (expected === 'grok' ? 'openai' : expected === 'antigravity' ? 'gemini' : expected) && (
+    ((expected === 'openai' || expected === 'grok' || expected === 'antigravity') && row.auth_scheme === 'bearer') ||
     (expected === 'anthropic' && row.auth_scheme === 'x-api-key') ||
     (expected === 'gemini' && row.auth_scheme === 'x-goog-api-key') ||
     (expected === 'codex' && row.auth_scheme === 'bearer')

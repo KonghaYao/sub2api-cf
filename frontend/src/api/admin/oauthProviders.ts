@@ -19,6 +19,8 @@ export type AdminOAuthAdapter<P extends AdminOAuthProvider = AdminOAuthProvider>
           : 'standard'
 
 export interface AdminOAuthProviderConfig<P extends AdminOAuthProvider = AdminOAuthProvider> {
+  wechat_variants?: Partial<Record<'open' | 'mp' | 'mobile', { enabled: boolean; client_id: string; client_secret?: string; client_secret_configured?: boolean }>>
+  advanced?: Record<string, unknown>
   schema_version: 1
   control_version: number
   provider: P
@@ -31,6 +33,7 @@ export interface AdminOAuthProviderConfig<P extends AdminOAuthProvider = AdminOA
   emails_endpoint: string | null
   jwks_endpoint: string | null
   client_id: string
+  redirect_uri?: string
   client_secret_configured: boolean
   scopes: string[]
   allowed_hosts: string[]
@@ -46,6 +49,8 @@ export interface AdminOAuthProviderListResponse {
 }
 
 export interface UpsertAdminOAuthProviderInput<P extends AdminOAuthProvider> {
+  wechat_variants?: Partial<Record<'open' | 'mp' | 'mobile', { enabled: boolean; client_id: string; client_secret?: string; client_secret_configured?: boolean }>>
+  advanced?: Record<string, unknown>
   adapter: AdminOAuthAdapter<P>
   enabled: boolean
   issuer: string

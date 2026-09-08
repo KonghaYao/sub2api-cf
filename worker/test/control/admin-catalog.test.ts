@@ -15,6 +15,7 @@ class CatalogStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return null
     if (this.query.includes('SELECT 1 AS allowed') && this.query.includes('FROM admin_user_roles')) {
       return { allowed: 1 } as T
     }
@@ -810,7 +811,7 @@ describe('admin catalog control plane', () => {
   it('rejects an enabled provider that the Worker gateway cannot consume', async () => {
     const response = await request(new CatalogDatabase(), '/api/v1/admin/groups', 'POST', 'catalog-create-2', {
       name: 'unsupported',
-      platform: 'grok',
+      platform: 'unimplemented-provider',
     })
 
     expect(response.status).toBe(409)

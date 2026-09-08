@@ -1,3 +1,5 @@
+import { getWorkerProviderSettings, saveWorkerProviderSettings } from './workerProviderSettings';
+export { getWorkerProviderSettings, saveWorkerProviderSettings } from './workerProviderSettings';
 /**
  * Admin Settings API endpoints
  * Handles system settings management for administrators
@@ -772,6 +774,7 @@ export interface SystemSettings {
 }
 
 export interface UpdateSettingsRequest {
+  gateway?: Record<string, unknown>;
   auth_source_defaults?: WorkerAuthSourceDefaultsPatch;
   registration_enabled?: boolean;
   email_verify_enabled?: boolean;
@@ -1080,7 +1083,34 @@ interface WorkerAdminSettings {
   schema_version: 1;
   control_version: number;
   audit_log_retention_days: number;
+  gateway?: Record<string, unknown>;
   public: {
+    table_default_page_size?: number;
+    table_page_size_options?: number[];
+    password_reset_enabled?: boolean;
+    frontend_url?: string;
+    totp_enabled?: boolean;
+    session_binding_enabled?: boolean;
+    login_agreement_enabled?: boolean;
+    login_agreement_mode?: 'modal' | 'checkbox';
+    login_agreement_updated_at?: string;
+    login_agreement_documents?: LoginAgreementDocument[];
+    force_email_on_third_party_signup?: boolean;
+    registration_email_domain_quota_enabled?: boolean;
+    default_balance?: number;
+    default_concurrency?: number;
+    plugin_management_enabled?: boolean;
+    allow_user_view_error_requests?: boolean;
+    default_user_rpm_limit?: number;
+    tencent_captcha_enabled?: boolean;
+    tencent_captcha_app_id?: string;
+    tencent_captcha_region?: string;
+    aliyun_captcha_enabled?: boolean;
+    aliyun_captcha_access_key_id?: string;
+    aliyun_captcha_scene_id?: string;
+    aliyun_captcha_prefix?: string;
+    aliyun_captcha_region?: string;
+    registration_email_suffix_whitelist?: string[];
     site_name: string;
     backend_mode_enabled: boolean;
     site_subtitle: string;
@@ -1109,20 +1139,22 @@ interface WorkerAdminSettings {
   };
   security?: {
     step_up_enabled: boolean;
+    totp_encryption_key_configured?: boolean;
     passkey_configured?: boolean;
     passkey_rp_id?: string;
     passkey_rp_origins?: string[];
   };
-  secrets: { turnstile_secret_key_configured: boolean };
+  secrets: { turnstile_secret_key_configured: boolean } & Record<string, boolean>;
   auth_source_defaults: WorkerAuthSourceDefaults;
   updated_at_ms: number;
 }
 
 interface WorkerSettingsPatch {
+  gateway?: Record<string, unknown>;
   audit_log_retention_days?: number;
   public?: Partial<WorkerAdminSettings["public"]>;
   security?: { step_up_enabled: boolean };
-  secrets?: { turnstile_secret_key: string | null };
+  secrets?: Partial<Record<string, string | null>>;
   auth_source_defaults?: WorkerAuthSourceDefaultsPatch;
 }
 
@@ -1148,6 +1180,10 @@ export type WorkerCommercialConfigPatch = Pick<
 >;
 
 let workerSettingsETag: string | null = null;
+let workerGatewayFields: string[] = [];
+export function buildWorkerGatewaySettings(form: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(workerGatewayFields.filter(key => !key.includes('_effective_') && !key.endsWith('_synced')).map(key => [key, form[key]]));
+}
 let pendingWorkerSettingsUpdate: { fingerprint: string; key: string } | null = null;
 let workerCommercialConfigETag: string | null = null;
 let pendingWorkerCommercialConfigUpdate: { fingerprint: string; key: string } | null = null;
@@ -1168,8 +1204,21 @@ function isWorkerAdminSettings(value: unknown): value is WorkerAdminSettings {
   );
 }
 
+const WORKER_MAIN_PUBLIC_FIELDS = [
+  'tencent_captcha_enabled', 'tencent_captcha_app_id', 'tencent_captcha_region', 'aliyun_captcha_enabled', 'aliyun_captcha_access_key_id', 'aliyun_captcha_scene_id', 'aliyun_captcha_prefix', 'aliyun_captcha_region',
+  'table_default_page_size', 'table_page_size_options', 'password_reset_enabled',
+  'frontend_url', 'totp_enabled', 'session_binding_enabled', 'login_agreement_enabled',
+  'login_agreement_mode', 'login_agreement_updated_at', 'login_agreement_documents',
+  'default_balance', 'default_concurrency', 'plugin_management_enabled', 'allow_user_view_error_requests',
+  'default_user_rpm_limit', 'registration_email_suffix_whitelist', 'registration_email_domain_quota_enabled', 'force_email_on_third_party_signup',
+] as const;
+
 function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
+  workerGatewayFields = Object.keys(settings.gateway ?? {});
   return {
+    ...settings.gateway,
+    ...settings.secrets,
+    ...Object.fromEntries(WORKER_MAIN_PUBLIC_FIELDS.map(field => [field, settings.public[field]])),
     cloudflare_worker_contract: true,
     schema_version: settings.schema_version,
     control_version: settings.control_version,
@@ -1205,6 +1254,7 @@ function adaptWorkerSettings(settings: WorkerAdminSettings): SystemSettings {
     passkey_rp_id: settings.security?.passkey_rp_id ?? "",
     passkey_rp_origins: settings.security?.passkey_rp_origins ?? [],
     step_up_enabled: settings.security?.step_up_enabled ?? false,
+    totp_encryption_key_configured: settings.security?.totp_encryption_key_configured ?? false,
     turnstile_secret_key_configured: settings.secrets.turnstile_secret_key_configured,
     auth_source_defaults: settings.auth_source_defaults,
   } as SystemSettings;
@@ -1250,6 +1300,9 @@ export async function updateSettings(
   }
 
   const publicPatch: WorkerSettingsPatch["public"] = {};
+  for (const field of WORKER_MAIN_PUBLIC_FIELDS) {
+    if (settings[field] !== undefined) publicPatch[field] = settings[field] as never;
+  }
   if (settings.site_name !== undefined) publicPatch.site_name = settings.site_name;
   for (const field of [
     "backend_mode_enabled", "site_subtitle", "api_base_url", "contact_info", "doc_url", "site_logo",
@@ -1300,6 +1353,7 @@ export async function updateSettings(
   }
 
   const patch: WorkerSettingsPatch = {};
+  if (settings.gateway !== undefined) patch.gateway = settings.gateway;
   if (settings.audit_log_retention_days !== undefined) {
     patch.audit_log_retention_days = settings.audit_log_retention_days;
   }
@@ -1310,10 +1364,14 @@ export async function updateSettings(
   if (settings.turnstile_secret_key !== undefined && settings.turnstile_secret_key !== "") {
     patch.secrets = { turnstile_secret_key: settings.turnstile_secret_key };
   }
+  for (const field of ["tencent_captcha_app_secret_key", "tencent_captcha_cloud_secret_id", "tencent_captcha_cloud_secret_key", "aliyun_captcha_access_key_secret"] as const) {
+    if (settings[field] !== undefined && settings[field] !== "") patch.secrets = { ...patch.secrets, [field]: settings[field] };
+  }
   if (settings.auth_source_defaults !== undefined) {
     patch.auth_source_defaults = settings.auth_source_defaults;
   }
   if (
+    patch.gateway === undefined &&
     patch.audit_log_retention_days === undefined &&
     patch.public === undefined &&
     patch.security === undefined &&
@@ -1759,7 +1817,7 @@ export interface OpenAIFastPolicyRule {
   service_tier: "all" | "priority" | "flex";
   action: "pass" | "filter" | "block" | "force_priority";
   scope: "all" | "oauth" | "apikey" | "bedrock";
-  user_ids?: number[];
+  user_ids?: Array<number | string>;
   error_message?: string;
   model_whitelist?: string[];
   fallback_action?: "pass" | "filter" | "block" | "force_priority";
@@ -1835,6 +1893,7 @@ export interface WebSearchProviderConfig {
 }
 
 export interface WebSearchEmulationConfig {
+  control_version?: number;
   enabled: boolean;
   providers: WebSearchProviderConfig[];
 }
@@ -1845,41 +1904,34 @@ export interface WebSearchTestResult {
   query: string;
 }
 
+let webSearchControlVersion: number | null = null;
+function requireWebSearchVersion(): number {
+  if (webSearchControlVersion === null) throw settingsContractError('settings_version_not_loaded', 'Reload search settings before saving');
+  return webSearchControlVersion;
+}
 export async function getWebSearchEmulationConfig(): Promise<WebSearchEmulationConfig> {
-  if (isCloudflareWorkerContractActive()) {
-    return { enabled: false, providers: [] };
-  }
   const { data } = await apiClient.get<WebSearchEmulationConfig>(
     "/admin/settings/web-search-emulation",
   );
+  webSearchControlVersion = data.control_version ?? null;
   return data;
 }
 
 export async function updateWebSearchEmulationConfig(
   config: WebSearchEmulationConfig,
 ): Promise<WebSearchEmulationConfig> {
-  if (isCloudflareWorkerContractActive()) {
-    throw settingsContractError(
-      "worker_feature_not_supported",
-      "Web search emulation is not available in the Cloudflare Worker product",
-    );
-  }
   const { data } = await apiClient.put<WebSearchEmulationConfig>(
     "/admin/settings/web-search-emulation",
     config,
+    isCloudflareWorkerContractActive() ? { headers: { 'If-Match': `"${requireWebSearchVersion()}"` } } : undefined,
   );
+  webSearchControlVersion = data.control_version ?? null;
   return data;
 }
 
 export async function testWebSearchEmulation(
   query: string,
 ): Promise<WebSearchTestResult> {
-  if (isCloudflareWorkerContractActive()) {
-    throw settingsContractError(
-      "worker_feature_not_supported",
-      "Web search emulation is not available in the Cloudflare Worker product",
-    );
-  }
   const { data } = await apiClient.post<WebSearchTestResult>(
     "/admin/settings/web-search-emulation/test",
     { query },
@@ -1890,12 +1942,6 @@ export async function testWebSearchEmulation(
 export async function resetWebSearchUsage(payload: {
   provider_type: string;
 }): Promise<void> {
-  if (isCloudflareWorkerContractActive()) {
-    throw settingsContractError(
-      "worker_feature_not_supported",
-      "Web search emulation is not available in the Cloudflare Worker product",
-    );
-  }
   await apiClient.post(
     "/admin/settings/web-search-emulation/reset-usage",
     payload,
@@ -1903,6 +1949,9 @@ export async function resetWebSearchUsage(payload: {
 }
 
 export const settingsAPI = {
+  buildWorkerGatewaySettings,
+  getWorkerProviderSettings,
+  saveWorkerProviderSettings,
   getSettings,
   updateSettings,
   getCommercialConfig,

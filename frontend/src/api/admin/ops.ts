@@ -697,6 +697,7 @@ export type MetricType =
 export type Operator = '>' | '>=' | '<' | '<=' | '==' | '!='
 
 export interface AlertRule {
+  control_version?: number
   id?: number
   name: string
   description?: string
@@ -732,6 +733,7 @@ export interface AlertEvent {
 }
 
 export interface EmailNotificationConfig {
+  control_version?: number
   alert: {
     enabled: boolean
     recipients: string[]
@@ -757,6 +759,7 @@ export interface EmailNotificationConfig {
 }
 
 export interface OpsMetricThresholds {
+  control_version?: number
   sla_percent_min?: number | null                 // SLA低于此值变红
   ttft_p99_ms_max?: number | null                 // TTFT P99高于此值变红
   request_error_rate_percent_max?: number | null  // 请求错误率高于此值变红
@@ -770,6 +773,9 @@ export interface OpsDistributedLockSettings {
 }
 
 export interface OpsAlertRuntimeSettings {
+  evaluation_min_interval_seconds?: number
+  evaluation_max_interval_seconds?: number
+  control_version?: number
   evaluation_interval_seconds: number
   distributed_lock: OpsDistributedLockSettings
   silencing: {
@@ -792,6 +798,7 @@ export interface OpsOpenAIAccountQuotaAutoPauseSettings {
 }
 
 export interface OpsAdvancedSettings {
+  control_version?: number
   data_retention: OpsDataRetentionSettings
   aggregation: OpsAggregationSettings
   openai_account_quota_auto_pause: OpsOpenAIAccountQuotaAutoPauseSettings
@@ -819,6 +826,7 @@ export interface OpsAggregationSettings {
 }
 
 export interface OpsRuntimeLogConfig {
+  control_version?: number
   level: 'debug' | 'info' | 'warn' | 'error'
   enable_sampling: boolean
   sampling_initial: number
@@ -886,12 +894,12 @@ export interface OpsSystemLogCleanupRequest {
 }
 
 export interface OpsSystemLogSinkHealth {
-  queue_depth: number
-  queue_capacity: number
+  queue_depth: number | null
+  queue_capacity: number | null
   dropped_count: number
-  write_failed_count: number
+  write_failed_count: number | null
   written_count: number
-  avg_write_delay_ms: number
+  avg_write_delay_ms: number | null
   last_error?: string
 }
 
@@ -1305,7 +1313,7 @@ export interface AlertEventsQuery {
   before_fired_at?: string
   before_id?: number
   platform?: string
-  group_id?: number
+  group_id?: GroupId
 }
 
 export async function listAlertEvents(params: AlertEventsQuery = {}): Promise<AlertEvent[]> {
@@ -1325,7 +1333,7 @@ export async function updateAlertEventStatus(id: number, status: 'resolved' | 'm
 export async function createAlertSilence(payload: {
   rule_id: number
   platform: string
-  group_id?: number | null
+  group_id?: GroupId | null
   region?: string | null
   until: string
   reason?: string
@@ -1366,7 +1374,8 @@ export async function updateRuntimeLogConfig(config: OpsRuntimeLogConfig): Promi
 }
 
 export async function resetRuntimeLogConfig(): Promise<OpsRuntimeLogConfig> {
-  const { data } = await apiClient.post<OpsRuntimeLogConfig>('/admin/ops/runtime/logging/reset')
+  const current = await getRuntimeLogConfig()
+  const { data } = await apiClient.post<OpsRuntimeLogConfig>('/admin/ops/runtime/logging/reset', { expected_control_version: current.control_version })
   return data
 }
 
@@ -1403,8 +1412,9 @@ async function getMetricThresholds(): Promise<OpsMetricThresholds> {
   return data
 }
 
-async function updateMetricThresholds(thresholds: OpsMetricThresholds): Promise<void> {
-  await apiClient.put('/admin/ops/settings/metric-thresholds', thresholds)
+async function updateMetricThresholds(thresholds: OpsMetricThresholds): Promise<OpsMetricThresholds> {
+  const { data } = await apiClient.put<OpsMetricThresholds>('/admin/ops/settings/metric-thresholds', thresholds)
+  return data
 }
 
 export const opsAPI = {

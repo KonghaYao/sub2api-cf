@@ -1469,7 +1469,7 @@ const handleUpdateProxy = async () => {
       updateData.password = editForm.password.trim() || null
     }
 
-    await adminAPI.proxies.update(editingProxy.value.id, updateData)
+    await adminAPI.proxies.update(editingProxy.value.id, updateData, editingProxy.value.control_version)
     appStore.showSuccess(t('admin.proxies.proxyUpdated'))
     closeEditModal()
     loadProxies()
@@ -1955,7 +1955,7 @@ const confirmDelete = async () => {
   if (!deletingProxy.value) return
 
   try {
-    await adminAPI.proxies.delete(deletingProxy.value.id)
+    await adminAPI.proxies.delete(deletingProxy.value.id, deletingProxy.value.control_version)
     appStore.showSuccess(t('admin.proxies.proxyDeleted'))
     showDeleteDialog.value = false
     removeSelectedProxies([deletingProxy.value.id])

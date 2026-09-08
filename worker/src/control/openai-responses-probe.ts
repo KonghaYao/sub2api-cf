@@ -1,3 +1,4 @@
+import { requestProxyId } from '../proxy/request-selection'
 import type { Env } from '../env'
 import { decryptCredential } from '../gateway/crypto'
 import { credentialAad, validateBaseUrl } from '../gateway/repository'
@@ -51,7 +52,7 @@ export async function applyOpenAIResponsesProbe(env: Env, account: PrivacyAccoun
   let verdict: boolean | null
   try {
     const response = await openAIOAuthHttp(env, responsesProbeUrl(account.base_url), { method: 'POST', headers,
-      body: JSON.stringify(responsesProbePayload(responsesProbeModel(credential))) }, typeof ui.proxy_id === 'string' ? ui.proxy_id : null, 15000, 256 * 1024)
+      body: JSON.stringify(responsesProbePayload(responsesProbeModel(credential))) }, requestProxyId(ui.proxy_id), 15000, 256 * 1024)
     if (response.status >= 300 && response.status < 400) return null
     verdict = responsesProbeVerdict(response.status, response.text)
   } catch { return null }

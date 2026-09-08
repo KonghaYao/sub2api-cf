@@ -87,7 +87,7 @@ interface UpdateApiKeyPatch {
   ip_blacklist?: string[]
 }
 
-type ApiKeyListStatus = 'active' | 'inactive'
+type ApiKeyListStatus = 'active' | 'inactive' | 'expired' | 'quota_exhausted'
 type ApiKeyListSort = keyof typeof API_KEY_LIST_SORT_COLUMNS | 'current_concurrency'
 type ApiKeyListSortOrder = 'asc' | 'desc'
 
@@ -184,8 +184,8 @@ function parseApiKeyListQuery(context: Context<UserBindings>): ApiKeyListQuery {
     API_KEY_LIST_SEARCH_MAXIMUM,
   )
   const statusRaw = optionalApiKeyListValue(context.req.query('status'), 'status', 16)
-  if (statusRaw !== undefined && statusRaw !== 'active' && statusRaw !== 'inactive') {
-    throw new GatewayError(400, 'invalid_status', 'status must be active or inactive')
+  if (statusRaw !== undefined && !['active', 'inactive', 'expired', 'quota_exhausted'].includes(statusRaw)) {
+    throw new GatewayError(400, 'invalid_status', 'status must be active, inactive, expired, or quota_exhausted')
   }
   const groupRaw = optionalApiKeyListValue(context.req.query('group_id'), 'group_id', 128)
   const sortByRaw = optionalApiKeyListValue(context.req.query('sort_by'), 'sort_by', 32)
@@ -206,7 +206,7 @@ function parseApiKeyListQuery(context: Context<UserBindings>): ApiKeyListQuery {
   }
   return {
     ...(search === undefined ? {} : { search }),
-    ...(statusRaw === undefined ? {} : { status: statusRaw }),
+    ...(statusRaw === undefined ? {} : { status: statusRaw as ApiKeyListStatus }),
     ...(groupRaw === undefined
       ? {}
       : { groupId: groupRaw === '0' ? null : requireResourceId(groupRaw, 'group') }),
@@ -242,9 +242,21 @@ function apiKeyListWhere(
     )
     values.push(literal, literal)
   }
-  if (query.status !== undefined) {
-    conditions.push('enabled = ?')
-    values.push(query.status === 'active' ? 1 : 0)
+  // Match publicApiKey's precedence: disabled, expired, quota exhausted, active.
+  // Filtering the stored enabled flag alone misclassifies expired/exhausted keys.
+  if (query.status === 'inactive') {
+    conditions.push('enabled = 0')
+  } else if (query.status !== undefined) {
+    conditions.push('enabled = 1')
+    if (query.status === 'expired') {
+      conditions.push('expires_at_ms IS NOT NULL AND expires_at_ms <= ?')
+    } else {
+      conditions.push('(expires_at_ms IS NULL OR expires_at_ms > ?)')
+      conditions.push(query.status === 'quota_exhausted'
+        ? 'quota_micros > 0 AND quota_used_micros >= quota_micros'
+        : '(quota_micros = 0 OR quota_used_micros < quota_micros)')
+    }
+    values.push(Date.now())
   }
   if (query.groupId === null) {
     conditions.push('group_id IS NULL')
@@ -645,7 +657,7 @@ function parseCreateInput(body: Record<string, unknown>): CreateApiKeyInput {
   const customKey = parseCustomKey(body)
   return {
     name: requireString(body, 'name', 128),
-    group_id: requireResourceId(requireString(body, 'group_id', 128), 'group'),
+    group_id: body.group_id === null || body.group_id === undefined ? 'worker-ungrouped-default' : requireResourceId(requireString(body, 'group_id', 128), 'group'),
     expires_at_ms: parseExpiresAt(body),
     quota_micros: optionalMonetaryLimit(body, 'quota_micros'),
     rate_limit_5h_micros: optionalMonetaryLimit(body, 'rate_limit_5h_micros'),
@@ -666,7 +678,7 @@ function parseUpdatePatch(body: Record<string, unknown>): UpdateApiKeyPatch {
   const patch: UpdateApiKeyPatch = {}
   if (Object.hasOwn(body, 'name')) patch.name = requireString(body, 'name', 128)
   if (Object.hasOwn(body, 'group_id')) {
-    patch.group_id = requireResourceId(requireString(body, 'group_id', 128), 'group')
+    patch.group_id = body.group_id === null ? 'worker-ungrouped-default' : requireResourceId(requireString(body, 'group_id', 128), 'group')
   }
   if (Object.hasOwn(body, 'expires_at') || Object.hasOwn(body, 'expires_at_ms')) {
     patch.expires_at_ms = parseExpiresAt(body)

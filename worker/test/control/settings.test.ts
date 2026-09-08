@@ -1,3 +1,6 @@
+import { captchaPublicDefaults } from '../../src/control/captcha-settings'
+import { schedulerEffectiveSettings } from '../../src/control/advanced-scheduler-settings'
+import { gatewayDefaults } from '../../src/control/gateway-settings'
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { requireAdminSession } from '../../src/control/admin-auth'
@@ -147,6 +150,16 @@ describe('admin system settings', () => {
     subject = await harness()
   })
 
+  it('saves table pagination preferences and publishes them for real table consumers', async () => {
+    const response = await subject.app.request('/settings', {
+      method: 'PUT', headers: headers('settings-table-preferences'),
+      body: JSON.stringify({ public: { table_default_page_size: 50, table_page_size_options: [10, 50, 100] } }),
+    }, subject.env)
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect((await responseJson(response)).data.public).toMatchObject({ table_default_page_size: 50, table_page_size_options: [10, 50, 100] })
+    expect(JSON.parse(subject.kv.values.get(publicSettingsKey('test'))!)).toMatchObject({ table_default_page_size: 50, table_page_size_options: [10, 50, 100] })
+  })
+
   it('returns typed versioned defaults after admin session auth without exposing secrets', async () => {
     const response = await subject.app.request('/settings', {
       headers: { authorization: `Bearer ${SESSION_TOKEN}` },
@@ -161,7 +174,12 @@ describe('admin system settings', () => {
         schema_version: PUBLIC_SETTINGS_SCHEMA_VERSION,
         control_version: 0,
         audit_log_retention_days: 180,
+        gateway: { ...gatewayDefaults, ...schedulerEffectiveSettings(gatewayDefaults) },
         public: {
+          ...captchaPublicDefaults,
+          table_default_page_size: 20, table_page_size_options: [10, 20, 50, 100],
+          password_reset_enabled: false, frontend_url: '', totp_enabled: true, session_binding_enabled: false,
+          login_agreement_enabled: false, login_agreement_mode: 'modal', login_agreement_updated_at: '', login_agreement_documents: [], default_balance: 0, default_concurrency: 5, plugin_management_enabled: false, allow_user_view_error_requests: false, default_user_rpm_limit: 0, registration_email_domain_quota_enabled: false, force_email_on_third_party_signup: false,
           site_name: 'Sub2API',
           backend_mode_enabled: false,
           site_subtitle: '', api_base_url: '', contact_info: '', doc_url: '', site_logo: '', home_content: '',
@@ -183,6 +201,7 @@ describe('admin system settings', () => {
           openai_advanced_scheduler_subscription_priority_enabled: false,
         },
         security: {
+          totp_encryption_key_configured: true,
           step_up_enabled: false,
           passkey_configured: false,
           passkey_rp_id: '',
@@ -475,6 +494,10 @@ describe('admin system settings', () => {
     const expectedProjection = {
       schema_version: 1,
       control_version: 1,
+      ...captchaPublicDefaults,
+      table_default_page_size: 20, table_page_size_options: [10, 20, 50, 100],
+          password_reset_enabled: false, frontend_url: '', totp_enabled: true, session_binding_enabled: false,
+          login_agreement_enabled: false, login_agreement_mode: 'modal', login_agreement_updated_at: '', login_agreement_documents: [], default_balance: 0, default_concurrency: 5, plugin_management_enabled: false, allow_user_view_error_requests: false, default_user_rpm_limit: 0, registration_email_domain_quota_enabled: false, force_email_on_third_party_signup: false,
       site_name: 'Edge Sub2API',
       backend_mode_enabled: true,
       site_subtitle: 'Fast gateway',

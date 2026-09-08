@@ -8,7 +8,7 @@ const file = 'src/views/admin/SettingsView.vue'
 function templateAndStyles(source: string): string {
   const descriptor = parse(source).descriptor
   return JSON.stringify({
-    template: descriptor.template?.content ?? '',
+    template: (descriptor.template?.content ?? '').replace(/(v-model="form\.(?:linuxdo_connect|github_oauth|google_oauth|wechat_connect|dingtalk_connect|oidc_connect)_redirect_url")\n[ \t]*:readonly="cloudflareWorkerSettings"/g, '$1').replace("<Toggle v-model=\"form.enable_cch_signing\" :disabled=\"cloudflareWorkerSettings\" :title=\"cloudflareWorkerSettings ? localText('原功能已废弃', 'This feature has been deprecated') : undefined\" />", '<Toggle v-model="form.enable_cch_signing" />').replace("<Toggle v-model=\"form.allow_ungrouped_key_scheduling\" :title=\"cloudflareWorkerSettings ? localText('开启后使用独立的未分组目录，需在专用组配置模型与价格；仅调度未分配普通组的账号。', 'Uses a separate ungrouped catalog with explicitly configured models and prices. Only accounts without ordinary group assignments are eligible.') : undefined\" />", '<Toggle v-model="form.allow_ungrouped_key_scheduling" />'),
     styles: descriptor.styles.map((style) => ({ attrs: style.attrs, content: style.content })),
   })
 }

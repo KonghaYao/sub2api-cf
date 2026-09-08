@@ -188,6 +188,21 @@ describe('MonitorFormDialog linked account selector', () => {
     )
   })
 
+  it('preserves a Worker UUID when choosing and submitting a quota account', async () => {
+    const uuid = '31b7e7a3-708c-4d2b-9a41-7db1ea6aa185'
+    accountsList.mockResolvedValue({ items: [{ id: uuid, name: 'Worker account', platform: 'anthropic' }] })
+    const wrapper = mountDialog()
+    await wrapper.get('[data-testid="monitor-check-mode-quota"]').trigger('click')
+    await flushPromises()
+    const dropdown = await openAccountDropdown(wrapper)
+    clickOption(dropdown, 'Worker account')
+    await nextTick()
+    await wrapper.findAll('input[type="text"]')[0].setValue('Worker quota monitor')
+    await wrapper.get('#channel-monitor-form').trigger('submit')
+    await flushPromises()
+    expect(monitorCreate).toHaveBeenCalledWith(expect.objectContaining({ account_id: uuid }))
+  })
+
   it('debounced typing hits server-side search and aborts the previous request', async () => {
     vi.useFakeTimers()
     const wrapper = mountDialog()

@@ -1,3 +1,5 @@
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   expect,
   test,
@@ -140,6 +142,7 @@ async function prepareAdministrator(request: APIRequestContext): Promise<{
       'if-match': settingsResponse.headers()['etag'] ?? '"0"',
     },
     data: {
+      gateway: { risk_control_enabled: true },
       public: {
         site_name: 'Admin Route Patrol',
         registration_enabled: true,
@@ -237,8 +240,18 @@ async function expectStableAdminPage(page: Page, route: string): Promise<void> {
 }
 
 let sharedSession: Awaited<ReturnType<typeof prepareAdministrator>>
-test.beforeAll(async ({ request }) => {
+test.beforeAll(async ({ request }, testInfo) => {
+  // Playwright replaces its worker after a failed test. Reuse the same local
+  // fixture instead of bootstrapping duplicate users in the existing D1 store.
+  const sessionPath = join(testInfo.project.outputDir, 'admin-route-session.json')
+  try {
+    const saved = JSON.parse(await readFile(sessionPath, 'utf8')) as typeof sharedSession
+    const current = await request.get('/api/v1/auth/me', { headers: { authorization: `Bearer ${saved.accessToken}` } })
+    if (current.ok()) { sharedSession = saved; return }
+  } catch { /* The initial worker creates the fixture. */ }
   sharedSession = await prepareAdministrator(request)
+  await mkdir(testInfo.project.outputDir, { recursive: true })
+  await writeFile(sessionPath, JSON.stringify(sharedSession), { mode: 0o600 })
 })
 
 test('original proxy bulk controls import across Worker chunks and delete selected records', async ({ page }) => {
@@ -344,11 +357,11 @@ test('original account controls toggle scheduling twice and save group changes w
   for (const next of [false, true]) {
     const response = page.waitForResponse(response => response.request().method() === 'POST' &&
       new URL(response.url()).pathname === `/api/v1/admin/accounts/${session.bootstrapAccountId}/schedulable`)
-    await row.getByRole('button', { name: /Scheduling (enabled|disabled)|调度已(开启|关闭)/ }).click()
+    await row.getByRole('switch').click()
     const changed = await response
     expect(changed.status()).toBe(200)
     expect((await changed.json()).data).toMatchObject({ enabled: true, status: 'active', schedulable: next })
-    await expect(row.getByRole('button', { name: next ? /Scheduling enabled|调度已开启/ : /Scheduling disabled|调度已关闭/ })).toBeVisible()
+    await expect(row.getByRole('switch')).toHaveAttribute('aria-checked',String(next))
   }
   await row.getByRole('button', { name: /编辑|Edit/i }).click()
   const form = page.locator('#edit-account-form')
@@ -436,8 +449,11 @@ test('original account controls toggle scheduling twice and save group changes w
     }))
     return observed.extra?.openai_responses_supported
   }, { timeout: 20000 }).toBe(true)
-  const initialAccountEdit = await responseData<{ config_version: number }>(await request.put(`/api/v1/admin/accounts/${createdAccount.id}`, {
-    headers: { authorization: `Bearer ${session.accessToken}`, 'if-match': '"0"' },
+  const currentCreatedAccount = await responseData<{ control_version: number }>(await request.get(`/api/v1/admin/accounts/${createdAccount.id}`, {
+    headers: { authorization: `Bearer ${session.accessToken}` },
+  }))
+  const initialAccountEdit = await responseData<{ config_version: number; control_version: number }>(await request.put(`/api/v1/admin/accounts/${createdAccount.id}`, {
+    headers: { authorization: `Bearer ${session.accessToken}`, 'if-match': `"${currentCreatedAccount.control_version}"` },
     data: { credentials: { model_mapping: { 'admin-route-patrol-model': 'gpt-browser-e2e-upstream' },
       header_override_enabled: true, header_overrides: { 'x-browser-account-route': 'saved-route' } } },
   }))
@@ -445,7 +461,7 @@ test('original account controls toggle scheduling twice and save group changes w
     const observed = await responseData<{ config_version: number; control_version: number }>(await request.get(`/api/v1/admin/accounts/${createdAccount.id}`, {
       headers: { authorization: `Bearer ${session.accessToken}` },
     }))
-    expect(observed.control_version).toBe(1)
+    expect(observed.control_version).toBe(currentCreatedAccount.control_version + 1)
     return observed.config_version
   }, { timeout: 20000 }).toBeGreaterThan(initialAccountEdit.config_version)
   const gatewayKey = await responseData<{ api_key: string }>(await request.post(`/api/v1/admin/users/${session.user.id}/api-keys`, {
@@ -475,7 +491,7 @@ test('original account controls toggle scheduling twice and save group changes w
     expect(privacyForward.status(), await privacyForward.text()).toBe(required ? 503 : 200)
   }
   const expiryUpdate = await responseData<{ control_version: number }>(await request.put(`/api/v1/admin/accounts/${createdAccount.id}`, {
-    headers: { authorization: `Bearer ${session.accessToken}`, 'if-match': '"1"' },
+    headers: { authorization: `Bearer ${session.accessToken}`, 'if-match': `"${initialAccountEdit.control_version}"` },
     data: { expires_at: 1, auto_pause_on_expired: true },
   }))
   const expiredCall = await request.post('/v1/chat/completions', {
@@ -1106,10 +1122,11 @@ test('original account controls toggle scheduling twice and save group changes w
 
 })
 
-test('every original administrator route renders without failing API requests', async ({ page }, testInfo) => {
+test('every original administrator route renders without failing API requests', async ({ page, request }, testInfo) => {
   test.setTimeout(180_000)
   const session = sharedSession
   await page.addInitScript((auth) => {
+    if (window !== window.top) return
     localStorage.setItem('auth_token', auth.accessToken)
     localStorage.setItem('refresh_token', auth.refreshToken)
     localStorage.setItem('token_expires_at', String(Date.now() + auth.expiresIn * 1_000))
@@ -1126,6 +1143,37 @@ test('every original administrator route renders without failing API requests', 
     patrol.setRoute(route)
     await expectStableAdminPage(page, route)
   }
+
+  patrol.setRoute('/admin/accounts')
+  await page.goto('/admin/accounts', { waitUntil: 'domcontentloaded' })
+  const accountRow = page.locator('tr').filter({ hasText: 'Admin Route Patrol Upstream' })
+  await expect(accountRow).toHaveCount(1)
+  const toggle = accountRow.getByRole('switch')
+  for (const value of [false, true]) {
+    const updated = page.waitForResponse(response => response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/v1/admin/accounts/${session.bootstrapAccountId}/schedulable`)
+    await toggle.click()
+    expect((await updated).status()).toBe(200)
+    await expect(toggle).toHaveAttribute('aria-checked', String(value))
+    const account = await responseData<{ enabled:boolean; schedulable:boolean }>(await request.get(`/api/v1/admin/accounts/${session.bootstrapAccountId}`, {
+      headers:{authorization:`Bearer ${session.accessToken}`},
+    }))
+    expect(account).toMatchObject({enabled:true,schedulable:value})
+  }
+  patrol.setRoute('/admin/audit-logs')
+  await page.goto('/admin/audit-logs', { waitUntil: 'domcontentloaded' })
+  const search = page.locator('input').first()
+  await search.fill(session.bootstrapAccountId)
+  const filtered = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/admin/audit-logs' && new URL(response.url()).searchParams.get('q') === session.bootstrapAccountId)
+  await search.press('Enter')
+  expect((await filtered).status()).toBe(200)
+  await expect(page.getByRole('button', {name:/Detail|详情/i}).first()).toBeVisible()
+  await page.screenshot({path:testInfo.outputPath('admin-audit-original.png'),fullPage:true})
+  const detail = page.waitForResponse(response => /\/api\/v1\/admin\/audit-logs\/[^/]+$/.test(new URL(response.url()).pathname))
+  await page.getByRole('button', {name:/Detail|详情/i}).first().click()
+  expect((await detail).status()).toBe(200)
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.keyboard.press('Escape')
 
   await page.waitForTimeout(500)
   await patrol.inspectResponses()

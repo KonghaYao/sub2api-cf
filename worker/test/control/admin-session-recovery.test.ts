@@ -16,6 +16,7 @@ class RecoveryStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return null
     if (this.query.includes('FROM users')) return this.database.activeAdmin as T | null
     throw new Error(`Unexpected first query: ${this.query}`)
   }

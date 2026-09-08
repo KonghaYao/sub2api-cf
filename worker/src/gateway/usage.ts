@@ -179,6 +179,9 @@ export class SseEventTransformer {
   private latestUsage: TokenUsage | null = null
   private emittedBytes = 0
   private sawChatDone = false
+  private sawEof = false
+  private sawChatFailure = false
+  private sawChatOutput = false
   private responsesTerminal: 'completed' | 'failed' | null = null
   private responsesFailure: ResponsesFailureDetails | null = null
   private responseModelValue: string | null = null
@@ -199,6 +202,7 @@ export class SseEventTransformer {
   }
 
   finish(): Uint8Array[] {
+    this.sawEof = true
     this.buffer += this.decoder.decode()
     const chunks = this.drain(false)
     if (this.buffer.length > MAX_SSE_EVENT_CHARS) {
@@ -220,8 +224,18 @@ export class SseEventTransformer {
   }
 
   terminal(endpoint: 'chat_completions' | 'responses'): 'completed' | 'failed' | 'missing' {
-    if (endpoint === 'chat_completions') return this.sawChatDone ? 'completed' : 'missing'
+    if (endpoint === 'chat_completions') {
+      // Compatible providers can send final usage after an error frame. Keep
+      // reading until DONE or EOF so failure does not discard billable usage.
+      if (this.sawChatFailure && (this.sawChatDone || this.sawEof)) return 'failed'
+      return this.sawChatDone ? 'completed' : 'missing'
+    }
     return this.responsesTerminal ?? 'missing'
+  }
+
+  chatFailureHasNoOutput(): boolean {
+    return this.sawChatFailure && !this.sawChatOutput &&
+      (this.latestUsage === null || (this.latestUsage.input_tokens === 0 && this.latestUsage.output_tokens === 0))
   }
 
   failure(): ResponsesFailureDetails | null {
@@ -265,6 +279,21 @@ export class SseEventTransformer {
         if (usage !== null) this.latestUsage = usage
         const object = objectRecord(parsed)
         if (object !== null) {
+          if (objectRecord(object.error) !== null) {
+            this.sawChatFailure = true
+            this.responsesFailure = responsesFailureDetails(object)
+          }
+          if (Array.isArray(object.choices)) {
+            for (const choice of object.choices) {
+              const delta = objectRecord(objectRecord(choice)?.delta)
+              if (delta !== null && (
+                (typeof delta.content === 'string' && delta.content.length > 0) ||
+                (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) ||
+                (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) ||
+                objectRecord(delta.function_call) !== null
+              )) this.sawChatOutput = true
+            }
+          }
           const type = typeof object.type === 'string' ? object.type : eventName
           const terminalEvent = typeof object.type === 'string' || type === undefined
             ? object

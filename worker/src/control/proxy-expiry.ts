@@ -15,21 +15,21 @@ export async function revertAdminProxyFallback(c: Context<{ Bindings: Env }>): P
     if (!row) throw new GatewayError(400, 'ACCOUNT_NOT_IN_FALLBACK', 'Account is not in proxy fallback state')
     return controlSuccess({ message: 'reverted' })
   } catch (error) {
-    if (String(error).includes('invalid_account_proxy')) return controlError(new GatewayError(409, 'proxy_not_found', 'Original proxy is no longer available'))
+    if ((String(error).includes('invalid_account_proxy') || String(error).includes('proxy_not_found'))) return controlError(new GatewayError(409, 'proxy_not_found', 'Original proxy is no longer available'))
     return controlError(asGatewayError(error))
   }
 }
 
 export interface ProxyFallbackRow {
-  id: string
+  id: string | number
   status: string
   expires_at: number | null
   fallback_mode: string
-  backup_proxy_id: string | null
+  backup_proxy_id: string | number | null
   control_version: number
 }
-export function resolveProxyFallback(start: ProxyFallbackRow, rows: Map<string, ProxyFallbackRow>, nowMs: number): { change: boolean; target: string | null } {
-  const visited = new Set<string>()
+export function resolveProxyFallback(start: ProxyFallbackRow, rows: Map<string | number, ProxyFallbackRow>, nowMs: number): { change: boolean; target: string | number | null } {
+  const visited = new Set<string | number>()
   let current = start
   while (!visited.has(current.id)) {
     visited.add(current.id)
@@ -53,15 +53,15 @@ export async function sweepExpiredProxies(env: Env, nowMs = Date.now()): Promise
   // the remainder. Configuration changes invalidate a stale fallback snapshot.
   for (const proxy of result.results.filter(row => row.status === 'active' && row.expires_at !== null && row.expires_at * 1000 <= nowMs).slice(0, 10)) {
     const fallback = resolveProxyFallback(proxy, rows, nowMs)
-    const dependencies: Array<{ id: string; version: number }> = []
-    const seen = new Set<string>()
+    const dependencies: Array<{ id: string | number; version: number }> = []
+    const seen = new Set<string | number>()
     let cursor: ProxyFallbackRow | undefined = proxy
     while (cursor && !seen.has(cursor.id)) {
       seen.add(cursor.id); dependencies.push({ id: cursor.id, version: cursor.control_version })
       cursor = cursor.backup_proxy_id ? rows.get(cursor.backup_proxy_id) : undefined
     }
     const results = await env.DB.batch([
-      env.DB.prepare(`UPDATE proxies SET status='expired', control_version=control_version+1, updated_at_ms=?
+      env.DB.prepare(`UPDATE proxies SET config_json=json_set(config_json,'$.status','expired'), control_version=control_version+1, updated_at_ms=?
         WHERE id=? AND status='active' AND expires_at IS NOT NULL AND expires_at*1000<=?
         AND NOT EXISTS (SELECT 1 FROM json_each(?) snapshot LEFT JOIN proxies current ON current.id=json_extract(snapshot.value, '$.id')
           WHERE current.id IS NULL OR current.control_version<>json_extract(snapshot.value, '$.version')) RETURNING id`)
@@ -73,7 +73,7 @@ export async function sweepExpiredProxies(env: Env, nowMs = Date.now()): Promise
         WHERE changes()=1 AND CAST(json_extract(ui_config_json, '$.proxy_id') AS TEXT)=?
           AND ((?=1 AND json_extract(ui_config_json, '$.proxy_fallback_origin_id') IS NULL)
             OR (?=0 AND credential_kind='api_key' AND json_type(ui_config_json, '$.extra.upstream_billing_probe') IS NOT NULL))`)
-        .bind(fallback.change ? 1 : 0, fallback.target, proxy.id, nowMs, proxy.id, fallback.change ? 1 : 0, fallback.change ? 1 : 0),
+        .bind(fallback.change ? 1 : 0, fallback.target, proxy.id, nowMs, String(proxy.id), fallback.change ? 1 : 0, fallback.change ? 1 : 0),
       env.DB.prepare('SELECT changes() AS changed_accounts'),
     ])
     if (fallback.change) changed += Number((results[2].results[0] as { changed_accounts: number }).changed_accounts)

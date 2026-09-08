@@ -148,7 +148,7 @@ interface BalanceHistoryCursor {
 const MAX_BALANCE_HISTORY_CURSOR_BYTES = 1_024
 const LIVE_USER_SQL = `NOT (
   status = 'disabled' AND display_name = '[deleted]'
-  AND email = 'deleted+' || id || '@users.invalid'
+  AND email IN ('deleted-' || id || '@users.invalid', 'deleted+' || id || '@users.invalid')
 )`
 
 export async function createAdminUser(context: Context<ControlBindings>): Promise<Response> {
@@ -264,7 +264,7 @@ export async function listAdminUsers(context: Context<ControlBindings>): Promise
     const orderBy = parseUserListOrder(context.req.query('sort_by'), context.req.query('sort_order'))
     const conditions: string[] = [`NOT (
       u.status = 'disabled' AND u.display_name = '[deleted]'
-      AND u.email = 'deleted+' || u.id || '@users.invalid'
+      AND u.email IN ('deleted-' || u.id || '@users.invalid', 'deleted+' || u.id || '@users.invalid')
     )`]
     const values: unknown[] = []
     const status = context.req.query('status')
@@ -1107,6 +1107,11 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
               SET revoked_at_ms = ?, revoke_reason = 'admin_password_reset'
             WHERE user_id = ? AND revoked_at_ms IS NULL`,
         ).bind(updatedAtMs, user.id))
+        statements.push(context.env.DB.prepare(
+          `UPDATE admin_sessions
+              SET revoked_at_ms = ?
+            WHERE user_id = ? AND revoked_at_ms IS NULL`,
+        ).bind(updatedAtMs, user.id))
       }
       controlVersion += 1
     }
@@ -1153,9 +1158,30 @@ export async function updateAdminUser(context: Context<ControlBindings>): Promis
       updatedAtMs = Date.now()
       statements.push(context.env.DB.prepare(
         `UPDATE users
-            SET status = ?, balance_micros = ?, state_version = ?, updated_at_ms = ?
+            SET auth_version = CASE
+                  WHEN status <> ? AND ? = 'disabled' THEN auth_version + 1
+                  ELSE auth_version
+                END,
+                status = ?, balance_micros = ?, state_version = ?, updated_at_ms = ?
           WHERE id = ? AND state_version < ?`,
-      ).bind(projectedStatus, balanceMicros, stateVersion, updatedAtMs, user.id, stateVersion))
+      ).bind(projectedStatus, projectedStatus, projectedStatus, balanceMicros, stateVersion, updatedAtMs, user.id, stateVersion))
+      if (projectedStatus === 'disabled') {
+        // Revocation is permanent: re-enabling an account must require a fresh
+        // login instead of reviving sessions that existed before its suspension.
+        // Gate on the projection so a stale DO result cannot revoke newer state.
+        statements.push(context.env.DB.prepare(
+          `UPDATE user_sessions
+              SET revoked_at_ms = ?, revoke_reason = 'admin_user_disabled'
+            WHERE user_id = ? AND revoked_at_ms IS NULL
+              AND EXISTS (SELECT 1 FROM users WHERE id = ? AND status = 'disabled' AND state_version = ?)`,
+        ).bind(updatedAtMs, user.id, user.id, stateVersion))
+        statements.push(context.env.DB.prepare(
+          `UPDATE admin_sessions
+              SET revoked_at_ms = ?
+            WHERE user_id = ? AND revoked_at_ms IS NULL
+              AND EXISTS (SELECT 1 FROM users WHERE id = ? AND status = 'disabled' AND state_version = ?)`,
+        ).bind(updatedAtMs, user.id, user.id, stateVersion))
+      }
     }
     const response = {
       ...user,
@@ -1666,13 +1692,15 @@ async function findUserByIdIncludingDeleted(
 }
 
 function deletedUserEmail(id: string): string {
-  return `deleted+${id}@users.invalid`
+  // '+' tags are stripped by canonical_email_inbox. Keep the unique user ID
+  // in the mailbox itself so deleting a second user cannot collide.
+  return `deleted-${id}@users.invalid`
 }
 
 function isDeletedUser(user: Pick<UserRow, 'id' | 'email' | 'display_name' | 'status'>): boolean {
   return user.status === 'disabled' &&
     user.display_name === '[deleted]' &&
-    user.email === deletedUserEmail(user.id)
+    (user.email === deletedUserEmail(user.id) || user.email === `deleted+${user.id}@users.invalid`)
 }
 
 function userDeletedResponse(): { message: string } {

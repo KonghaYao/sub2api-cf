@@ -1,0 +1,20 @@
+CREATE TABLE ops_dashboard_settings(id TEXT PRIMARY KEY CHECK(id IN('advanced','thresholds')),config_json TEXT NOT NULL CHECK(json_valid(config_json)),control_version INTEGER NOT NULL DEFAULT 0,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE ops_dashboard_cache(cache_key TEXT PRIMARY KEY,result_json TEXT NOT NULL CHECK(json_valid(result_json)),created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL) STRICT;
+CREATE INDEX ops_dashboard_cache_expiry ON ops_dashboard_cache(expires_at_ms);
+INSERT INTO schema_migrations(version,name,applied_at_ms) VALUES(91,'ops_dashboard',CAST(unixepoch('subsec')*1000 AS INTEGER));
+
+CREATE TABLE ops_alert_config(id TEXT PRIMARY KEY CHECK(id IN('runtime','email')),config_json TEXT NOT NULL CHECK(json_valid(config_json)),control_version INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE ops_alert_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,config_json TEXT NOT NULL CHECK(json_valid(config_json)),control_version INTEGER NOT NULL DEFAULT 1,created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,last_evaluated_at_ms INTEGER NOT NULL DEFAULT 0,breach_since_ms INTEGER,last_triggered_at_ms INTEGER,last_value REAL,last_error TEXT NOT NULL DEFAULT '') STRICT;
+CREATE INDEX ops_alert_due ON ops_alert_rules(last_evaluated_at_ms,id);
+CREATE TABLE ops_alert_events(id INTEGER PRIMARY KEY AUTOINCREMENT,rule_id INTEGER NOT NULL,severity TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN('firing','resolved','manual_resolved')),title TEXT NOT NULL,description TEXT NOT NULL,metric_value REAL,threshold_value REAL,dimensions_json TEXT NOT NULL DEFAULT '{}',fired_at_ms INTEGER NOT NULL,resolved_at_ms INTEGER,email_sent INTEGER NOT NULL DEFAULT 0,notification_state TEXT NOT NULL DEFAULT '') STRICT;
+CREATE UNIQUE INDEX ops_alert_one_firing ON ops_alert_events(rule_id) WHERE status='firing';
+CREATE INDEX ops_alert_events_time ON ops_alert_events(fired_at_ms,id);
+CREATE TABLE ops_alert_outbox(id TEXT PRIMARY KEY,event_id INTEGER,category TEXT NOT NULL,recipient TEXT NOT NULL,payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),due_at_ms INTEGER NOT NULL,created_at_ms INTEGER NOT NULL,sent_at_ms INTEGER,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',delivery_batch_id TEXT) STRICT;
+CREATE INDEX ops_alert_outbox_due ON ops_alert_outbox(sent_at_ms,due_at_ms);
+CREATE TABLE ops_alert_lease(id TEXT PRIMARY KEY,owner TEXT NOT NULL,expires_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE ops_alert_silences(id INTEGER PRIMARY KEY AUTOINCREMENT,rule_id INTEGER NOT NULL,platform TEXT NOT NULL DEFAULT '',group_id TEXT NOT NULL DEFAULT '',until_ms INTEGER NOT NULL,reason TEXT NOT NULL DEFAULT '') STRICT;
+CREATE TABLE ops_logging_config(id TEXT PRIMARY KEY CHECK(id='global'),config_json TEXT NOT NULL CHECK(json_valid(config_json)),control_version INTEGER NOT NULL DEFAULT 0,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE ops_system_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,observation_id TEXT NOT NULL UNIQUE,created_at_ms INTEGER NOT NULL,level TEXT NOT NULL,component TEXT NOT NULL,message TEXT NOT NULL,request_id TEXT NOT NULL,client_request_id TEXT,user_id TEXT,api_key_id TEXT,account_id TEXT,platform TEXT NOT NULL,model TEXT NOT NULL,extra_json TEXT NOT NULL CHECK(json_valid(extra_json))) STRICT;
+CREATE INDEX ops_system_logs_time ON ops_system_logs(created_at_ms,id);
+CREATE TABLE ops_log_sampling(bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL) STRICT;
+CREATE TABLE ops_log_receipts(observation_id TEXT PRIMARY KEY,decision TEXT NOT NULL,received_at_ms INTEGER NOT NULL) STRICT;

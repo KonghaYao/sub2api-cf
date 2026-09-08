@@ -1,5 +1,7 @@
+import { parsePoolSchedulerPolicy } from "../shared/state-machine/pool-scheduler";
 import {
   applyPoolCommand,
+  selectScheduledAccount,
   activeLeaseCounts,
   createPoolMachineState,
   nextActiveLeaseAlarmAt,
@@ -86,9 +88,15 @@ export class PoolStateDO {
         return await this.reclaim(await readJsonObject(request));
       }
 
+      if (request.method === "POST" && url.pathname === "/queue/cancel") return await this.cancelQueuedReserve(await readJsonObject(request));
+      if (request.method === "POST" && url.pathname === "/quota-snapshot") return this.quotaSnapshot(await readJsonObject(request));
+      if (request.method === "POST" && url.pathname === "/response-affinity") return this.responseAffinity(await readJsonObject(request));
+      if (request.method === "POST" && url.pathname === "/telemetry") return this.recordTelemetry(await readJsonObject(request));
       const commandType = commandTypeFor(request.method, url.pathname);
       if (commandType !== null) {
-        return await this.executeCommand(commandType, await readJsonObject(request));
+        const body=await readJsonObject(request);
+        if(commandType==="reserve" && (body.scheduler as {enabled?:unknown}|undefined)?.enabled===true) return await this.reserveWithWait(body,request.signal);
+        return await this.executeCommand(commandType, body);
       }
       throw new StateApiError(404, "route_not_found", "Durable object route was not found");
     } catch (error) {
@@ -128,6 +136,8 @@ export class PoolStateDO {
         config_revision: reclaimed.config_revision,
         config_fingerprint: reclaimed.config_fingerprint,
         idempotency_retention_ms: TOMBSTONE_RETENTION_MS,
+        waiting: Array.from(this.state.storage.sql.exec("SELECT request_id,account_id,created_at_ms,expires_at_ms FROM pool_waiters WHERE expires_at_ms>? ORDER BY rowid",nowMs)),
+        scheduler_metrics: Array.from(this.state.storage.sql.exec("SELECT account_id,COUNT(*) AS samples,AVG(failed) AS error_rate,AVG(ttft_ms) AS ttft_ms FROM pool_scheduler_samples WHERE observed_at_ms>=? GROUP BY account_id",nowMs-3600000)),
         accounts: Object.values(reclaimed.accounts).map((account) => ({
           ...account,
           active_leases: activeCounts[account.account_id] ?? 0,
@@ -182,6 +192,15 @@ export class PoolStateDO {
         affinityKey,
         affinityAccountId,
       );
+      if(command.type === "reserve") {
+        if(Array.from(this.state.storage.sql.exec("SELECT request_id FROM pool_queue_cancellations WHERE request_id=? AND expires_at_ms>?",command.request_id,nowMs)).length)throw new StateApiError(499,"client_cancelled","Queued reservation was cancelled");
+        this.cleanupWaiters(nowMs);
+        if(command.scheduler?.enabled)this.loadSchedulerMetrics(current,nowMs);
+        const heads=Array.from(this.state.storage.sql.exec("SELECT account_id,request_id FROM pool_waiters ORDER BY rowid")) as Array<{account_id:string;request_id:string}>;
+        const seen=new Set<string>(),blocked:string[]=[];
+        for(const head of heads)if(!seen.has(head.account_id)){seen.add(head.account_id);if(head.request_id!==command.request_id)blocked.push(head.account_id)}
+        command.excluded_account_ids=[...(command.excluded_account_ids??[]),...blocked];
+      }
       const transition = applyPoolCommand(current, command, nowMs);
       this.persistTransition(current, transition.state, eventId, failureAccountId, nowMs);
       if (
@@ -212,7 +231,110 @@ export class PoolStateDO {
     return response;
   }
 
+
+  private loadSchedulerMetrics(current:PoolMachineState,nowMs:number):void {
+        const rows=Array.from(this.state.storage.sql.exec(`SELECT account_id, AVG(failed) AS error_rate, AVG(ttft_ms) AS ttft_ms FROM pool_scheduler_samples WHERE observed_at_ms >= ? GROUP BY account_id`,nowMs-3600000)) as Array<{account_id:string;error_rate:number;ttft_ms:number|null}>;
+        current.scheduler_metrics=Object.fromEntries(rows.map(row=>[row.account_id,{error_rate:row.error_rate,ttft_ms:row.ttft_ms}]));
+        const quotas=Array.from(this.state.storage.sql.exec("SELECT account_id,headroom,reset_at_ms FROM pool_quota_snapshots WHERE reset_at_ms>?",nowMs)) as Array<{account_id:string;headroom:number;reset_at_ms:number}>;
+        for(const quota of quotas)current.scheduler_metrics[quota.account_id]={...(current.scheduler_metrics[quota.account_id]??{error_rate:0,ttft_ms:null}),quota_headroom:quota.headroom,quota_reset_at_ms:quota.reset_at_ms};
+
+    const queues=Array.from(this.state.storage.sql.exec("SELECT account_id,COUNT(*) AS n FROM pool_waiters WHERE expires_at_ms>? GROUP BY account_id",nowMs)) as Array<{account_id:string;n:number}>;
+    for(const row of queues)current.scheduler_metrics![row.account_id]={...(current.scheduler_metrics![row.account_id]??{error_rate:0,ttft_ms:null}),queue_depth:row.n};
+  }
+  private cleanupWaiters(nowMs:number):void {
+    this.state.storage.sql.exec("DELETE FROM pool_queue_cancellations WHERE expires_at_ms<=?",nowMs);
+    this.state.storage.sql.exec("DELETE FROM pool_waiters WHERE expires_at_ms<=?",nowMs);
+  }
+  private async cancelQueuedReserve(body:Record<string,unknown>):Promise<Response> {
+    requireSchemaVersion(body);const id=requireString(body,"request_id");
+    this.state.storage.sql.exec("INSERT OR IGNORE INTO pool_queue_cancellations(request_id,expires_at_ms) VALUES(?,?)",id,Date.now()+60000);
+    this.state.storage.sql.exec("DELETE FROM pool_waiters WHERE request_id=?",id);
+    const lease=Array.from(this.state.storage.sql.exec("SELECT request_id FROM pool_leases WHERE request_id=?",id))[0];
+    if(lease)return this.executeCommand("release",body);
+    return json({schema_version:1,cancelled:true});
+  }
+  private async reserveWithWait(body:Record<string,unknown>,signal:AbortSignal):Promise<Response> {
+    const command=parseCommand("reserve",body) as Extract<PoolCommand,{type:"reserve"}>;
+    const deadline=Date.now()+5000;
+    try {
+      while(true){
+        if(signal.aborted)throw new StateApiError(499,"client_cancelled","Client cancelled while waiting for an account");
+        try {return await this.executeCommand("reserve",body)} catch(error){
+          if(!(error instanceof PoolStateMachineError) || error.code!=="no_capacity")throw error;
+          if(Date.now()>=deadline)throw new StateApiError(503,"pool_queue_timeout","Account wait queue timed out");
+          this.state.storage.transactionSync(()=>{
+            this.cleanupWaiters(Date.now());
+            if(Array.from(this.state.storage.sql.exec("SELECT request_id FROM pool_waiters WHERE request_id=?",command.request_id)).length)return;
+            const size=Array.from(this.state.storage.sql.exec("SELECT COUNT(*) AS n FROM pool_waiters"))[0] as {n:number};
+            if(size.n>=128)throw new StateApiError(503,"pool_queue_full","Account wait queue is full");
+            const current=this.loadMachineState();this.loadSchedulerMetrics(current,Date.now());
+            const eligible=Object.values(current.accounts).filter(a=>a.enabled && a.cooldown_until_ms<=Date.now() && !(command.excluded_account_ids??[]).includes(a.account_id) && (!command.require_previous_account||a.account_id===command.previous_account_id));
+            if(eligible.length===0)throw error;
+            const selected=selectScheduledAccount(current,command,eligible,Date.now());
+            if((current.scheduler_metrics?.[selected.account_id]?.queue_depth??0)>=32)throw new StateApiError(503,"pool_queue_full","Account wait queue is full");
+            this.state.storage.sql.exec("INSERT INTO pool_waiters(request_id,account_id,created_at_ms,expires_at_ms) VALUES(?,?,?,?)",command.request_id,selected.account_id,Date.now(),deadline);
+          });
+          await new Promise<void>(resolve=>{
+            const done=()=>{clearTimeout(timer);signal.removeEventListener('abort',done);resolve()};
+            const timer=setTimeout(done,100);signal.addEventListener('abort',done,{once:true});
+          });
+        }
+      }
+    } finally {this.state.storage.sql.exec("DELETE FROM pool_waiters WHERE request_id=?",command.request_id)}
+  }
+
+  private quotaSnapshot(body:Record<string,unknown>):Response {
+    requireSchemaVersion(body);
+    const requestId=requireString(body,"request_id"),observed=requireSafeInteger(body,"observed_at_ms"),reset=requireSafeInteger(body,"reset_at_ms");
+    if(typeof body.headroom!=="number" || !Number.isFinite(body.headroom)||body.headroom<0||body.headroom>1||reset<=observed||reset-observed>8*3600000||observed>Date.now()+1000)throw new StateApiError(400,"invalid_quota_snapshot","Invalid upstream quota window");
+    return this.state.storage.transactionSync(()=>{
+      const lease=Array.from(this.state.storage.sql.exec("SELECT account_id FROM pool_leases WHERE request_id=?",requestId))[0] as {account_id:string}|undefined;
+      if(!lease)throw new StateApiError(404,"lease_not_found","Quota snapshot requires an existing lease");
+      this.state.storage.sql.exec("INSERT INTO pool_quota_snapshots(account_id,headroom,reset_at_ms,observed_at_ms) VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET headroom=excluded.headroom,reset_at_ms=excluded.reset_at_ms,observed_at_ms=excluded.observed_at_ms WHERE excluded.observed_at_ms>pool_quota_snapshots.observed_at_ms",lease.account_id,body.headroom,reset,observed);
+      return json({schema_version:1});
+    });
+  }
+
+  private responseAffinity(body:Record<string,unknown>):Response {
+    requireSchemaVersion(body);
+    const key=requireString(body,"response_key");
+    if(!/^[a-f0-9]{64}$/.test(key))throw new StateApiError(400,"invalid_response_key","Response key must be hashed");
+    return this.state.storage.transactionSync(()=>{
+      this.state.storage.sql.exec("DELETE FROM pool_response_affinities WHERE expires_at_ms<=?",Date.now());
+      const existing=Array.from(this.state.storage.sql.exec("SELECT account_id FROM pool_response_affinities WHERE response_key=?",key))[0] as {account_id:string}|undefined;
+      if(body.request_id===undefined)return json({schema_version:1,account_id:existing?.account_id??null});
+      const id=requireString(body,"request_id");
+      const lease=Array.from(this.state.storage.sql.exec("SELECT account_id FROM pool_leases WHERE request_id=?",id))[0] as {account_id:string}|undefined;
+      if(!lease)throw new StateApiError(404,"lease_not_found","Response affinity requires an existing lease");
+      if(existing && existing.account_id!==lease.account_id)throw new StateApiError(409,"response_affinity_conflict","Response ID already belongs to another account");
+      this.state.storage.sql.exec("INSERT OR IGNORE INTO pool_response_affinities(response_key,account_id,expires_at_ms) VALUES(?,?,?)",key,lease.account_id,Date.now()+3600000);
+      return json({schema_version:1,account_id:lease.account_id,idempotent:existing!==undefined});
+    });
+  }
+
+  private recordTelemetry(body:Record<string,unknown>):Response {
+    requireSchemaVersion(body);
+    const requestId=requireString(body,"request_id");
+    const failed=requireBoolean(body,"failed");
+    const ttft=body.ttft_ms===undefined || body.ttft_ms===null ? null : requireSafeInteger(body,"ttft_ms",{maximum:86400000});
+    return this.state.storage.transactionSync(()=>{
+      const lease=Array.from(this.state.storage.sql.exec("SELECT account_id FROM pool_leases WHERE request_id=?",requestId))[0] as {account_id:string}|undefined;
+      if(!lease) throw new StateApiError(404,"lease_not_found","Telemetry requires an existing lease");
+      this.state.storage.sql.exec("DELETE FROM pool_scheduler_samples WHERE observed_at_ms < ?",Date.now()-TOMBSTONE_RETENTION_MS);
+      const inserted=Array.from(this.state.storage.sql.exec("INSERT OR IGNORE INTO pool_scheduler_samples(request_id,account_id,failed,ttft_ms,observed_at_ms) VALUES(?,?,?,?,?) RETURNING request_id",requestId,lease.account_id,failed?1:0,ttft,Date.now()));
+      return json({schema_version:1,idempotent:inserted.length===0});
+    });
+  }
+
   private initializeSchema(): void {
+    this.state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pool_queue_cancellations(request_id TEXT PRIMARY KEY,expires_at_ms INTEGER NOT NULL) STRICT");
+    this.state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pool_waiters(request_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL) STRICT");
+    this.state.storage.sql.exec("CREATE INDEX IF NOT EXISTS pool_waiters_expiry ON pool_waiters(expires_at_ms)");
+    this.state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pool_quota_snapshots(account_id TEXT PRIMARY KEY,headroom REAL NOT NULL,reset_at_ms INTEGER NOT NULL,observed_at_ms INTEGER NOT NULL) STRICT");
+    this.state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pool_response_affinities(response_key TEXT PRIMARY KEY,account_id TEXT NOT NULL,expires_at_ms INTEGER NOT NULL) STRICT");
+    this.state.storage.sql.exec("CREATE INDEX IF NOT EXISTS pool_response_affinities_expiry ON pool_response_affinities(expires_at_ms)");
+    this.state.storage.sql.exec(`CREATE TABLE IF NOT EXISTS pool_scheduler_samples(request_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,failed INTEGER NOT NULL CHECK(failed IN(0,1)),ttft_ms INTEGER,observed_at_ms INTEGER NOT NULL) STRICT`);
+    this.state.storage.sql.exec("CREATE INDEX IF NOT EXISTS pool_scheduler_samples_time ON pool_scheduler_samples(observed_at_ms)");
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS pool_config (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -653,6 +775,10 @@ function parseCommand(
           minimum: 1,
           maximum: 86_400_000,
         }),
+        ...(body.previous_account_id === undefined ? {} : {previous_account_id:requireString(body,"previous_account_id")}),
+        ...(body.require_previous_account === undefined ? {} : {require_previous_account:requireBoolean(body,"require_previous_account")}),
+        ...(body.account_cost_rates === undefined ? {} : { account_cost_rates: parseCostRates(body.account_cost_rates) }),
+        ...(body.scheduler === undefined ? {} : { scheduler: parseSchedulerPolicy(body.scheduler) }),
         ...(preferredAccountId === undefined
           ? {}
           : { preferred_account_id: preferredAccountId }),
@@ -818,4 +944,14 @@ function accountForCommand(
 ): PoolAccountState | null {
   if ("account_id" in command) return state.accounts[command.account_id] ?? null;
   return null;
+}
+
+function parseSchedulerPolicy(value:unknown) {
+ try {return parsePoolSchedulerPolicy(value)} catch {throw new StateApiError(400,"invalid_scheduler_policy","Invalid advanced scheduler policy")}
+}
+
+function parseCostRates(value:unknown):Record<string,number> {
+ if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>10000)throw new StateApiError(400,'invalid_cost_rates','Invalid account cost rates')
+ for(const [id,rate] of Object.entries(value))if(!id||id.length>256||!Number.isSafeInteger(rate)||(rate as number)<0)throw new StateApiError(400,'invalid_cost_rates','Invalid account cost rate')
+ return value as Record<string,number>
 }

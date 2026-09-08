@@ -1,3 +1,4 @@
+import { previewAdminUpstreamModels, syncAdminUpstreamModels, listAdminAccountTestModels } from './accounts'
 import { resolveAccountRequestAuthentication } from './account-request-authentication'
 import { applyAccountCredentialHeaders } from '../gateway/account-header-overrides'
 export { applyAccountCredentialHeaders } from '../gateway/account-header-overrides'
@@ -59,6 +60,7 @@ async function account(env: Env, id: string): Promise<Account> {
 export async function getAdminAccountModels(context: Context<Bindings>): Promise<Response> {
   try {
     const saved = await account(context.env, requireResourceId(context.req.param('id'), 'account'))
+    if (saved.platform === 'grok' || saved.platform === 'antigravity') return listAdminAccountTestModels(context)
     const config = parseConfig(saved.ui_config_json)
     const extra = object(config.extra)
     const platform = saved.platform === 'codex' ? 'openai' : saved.platform
@@ -78,6 +80,7 @@ export async function getAdminAccountModels(context: Context<Bindings>): Promise
 export async function syncAdminAccountModels(context: Context<Bindings>): Promise<Response> {
   try {
     let saved = await account(context.env, requireResourceId(context.req.param('id'), 'account'))
+    if (saved.platform === 'grok' || saved.platform === 'antigravity') return syncAdminUpstreamModels(context)
     let secret = await context.env.DB.prepare(`SELECT id, key_version, nonce_b64, ciphertext_b64
       FROM account_secrets WHERE id = ? AND account_id = ?`).bind(saved.credential_ref, saved.id)
       .first<{ id: string; key_version: number; nonce_b64: string; ciphertext_b64: string }>()
@@ -113,11 +116,12 @@ export async function syncAdminAccountModels(context: Context<Bindings>): Promis
 
 export async function previewAdminAccountModels(context: Context<Bindings>): Promise<Response> {
   try {
-    const body = await readJsonObject(context.req.raw, 128 * 1024)
+    const body = await readJsonObject(context.req.raw.clone(), 128 * 1024)
+    if (['grok', 'antigravity'].includes(String(body.platform))) return previewAdminUpstreamModels(context)
     if (Object.keys(body).some(key => !['platform', 'type', 'base_url', 'api_key', 'model_mapping'].includes(key))) {
       throw new GatewayError(400, 'invalid_model_sync_request', 'Unknown model sync field')
     }
-    const platform = requireString(body, 'platform', 32) as ProviderPlatform
+    const platform = requireString(body, 'platform', 32) as keyof typeof DEFAULT_BASES
     if (!Object.hasOwn(DEFAULT_BASES, platform)) throw new GatewayError(400, 'provider_not_supported', 'Account provider is not implemented')
     if (body.type !== 'apikey') throw new GatewayError(400, 'type_not_supported', 'Model preview requires API-key credentials')
     const baseUrl = str(body.base_url) || DEFAULT_BASES[platform]
@@ -218,12 +222,19 @@ class UpstreamHttpError extends GatewayError {
 }
 async function fetchJson(url: string, headers: Headers, timeout: number,
   fetcher: (url: string, init: RequestInit) => Promise<Response> = fetch): Promise<unknown> {
-  const signal = AbortSignal.timeout(timeout)
+  const controller = new AbortController()
+  const signal = controller.signal
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = () => new GatewayError(504, 'upstream_model_sync_timeout', 'Upstream model synchronization timed out')
   try {
+    return await Promise.race([(async () => {
     const response = await fetcher(url, { method: 'GET', headers, redirect: 'manual', signal })
+    if (signal.aborted) { void response.body?.cancel().catch(() => undefined); throw timedOut() }
     if (!response.ok) { await response.body?.cancel(); throw new UpstreamHttpError(response.status) }
     if (!response.body) throw new Error('missing body')
     const reader = response.body.getReader()
+    activeReader = reader
     const chunks: Uint8Array[] = []
     let bytes = 0
     try {
@@ -234,11 +245,18 @@ async function fetchJson(url: string, headers: Headers, timeout: number,
         if (bytes > BODY_LIMIT) { await reader.cancel(); throw new GatewayError(502, 'upstream_model_response_too_large', 'Upstream model response exceeds 8 MiB') }
         chunks.push(value)
       }
-    } finally { reader.releaseLock() }
+    } finally { activeReader = undefined; reader.releaseLock() }
     const result = new Uint8Array(bytes)
     let offset = 0
     for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result))
+    })(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        void activeReader?.cancel().catch(() => undefined)
+        reject(timedOut())
+      }, timeout)
+    })])
   } catch (error) {
     if (signal.aborted) throw new GatewayError(504, 'upstream_model_sync_timeout', 'Upstream model synchronization timed out')
     if (error instanceof GatewayError) throw error
@@ -246,7 +264,7 @@ async function fetchJson(url: string, headers: Headers, timeout: number,
       throw new GatewayError(504, 'upstream_model_sync_timeout', 'Upstream model synchronization timed out')
     }
     throw new GatewayError(502, 'upstream_model_sync_failed', 'Failed to read a valid upstream model list')
-  }
+  } finally { if (timer !== undefined) clearTimeout(timer) }
 }
 
 export function parseUpstreamCatalog(value: unknown): Catalog {

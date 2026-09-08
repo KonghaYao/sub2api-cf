@@ -3,7 +3,7 @@ import { controlError, controlSuccess, queryInteger, readJsonObject, requireReso
 import type { Env } from '../env'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import { authenticateUserRequest } from '../auth/handler'
-import { addCalendarDays, calendarDayBoundaries, parseDate, parseTimezone, zonedDayStart } from '../gateway/info'
+import { addCalendarDays, calendarDayBoundaries, localDate, parseDate, parseTimezone, zonedDayStart } from '../gateway/info'
 
 type Bindings = { Bindings: Env }
 const DAY = 86_400_000
@@ -153,10 +153,12 @@ export async function getUserApiKeyDailyUsage(context: Context<Bindings>): Promi
     if (owned === null) throw new GatewayError(404, 'api_key_not_found', 'API key was not found')
 
     const timezone = parseTimezone(context.req.query('timezone'))
-    const end = usageDateLabel(Date.now(), timezone)
-    const start = addCalendarDays(end, -(days - 1))
+    const endDate = localDate(Date.now(), timezone)
+    const startDate = addCalendarDays(endDate, -(days - 1))
+    const [start, end] = dateRange(startDate, endDate, timezone)!
+    const bucket = calendarBucket(startDate, endDate, timezone, 'day')
     const rows = await context.env.DB.prepare(`
-      SELECT ${usageBucket(start, end, timezone, DAY)} AS bucket,
+      SELECT ${bucket} AS bucket,
         COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
@@ -164,18 +166,18 @@ export async function getUserApiKeyDailyUsage(context: Context<Bindings>): Promi
       FROM usage_projection
       WHERE user_id = ? AND api_key_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?
       GROUP BY bucket ORDER BY bucket ASC
-    `).bind(user.id, apiKeyId, zonedDayStart(start, timezone), zonedDayStart(addCalendarDays(end, 1), timezone)).all<any>()
+    `).bind(user.id, apiKeyId, start, end).all<any>()
     return controlSuccess({
-      items: rows.results.map((row) => ({ ...dailyPoint(row), date: usageDateLabel(row.bucket, timezone) })),
+      items: rows.results.map((row) => dailyPoint(row, timezone)),
       days,
-      start_date: start,
-      end_date: end,
+      start_date: startDate,
+      end_date: endDate,
     })
   } catch (error) { return controlError(asGatewayError(error)) }
 }
 
 async function dashboardAggregate(context: Context<Bindings>, kind: 'trend'|'models'|'snapshot'): Promise<Response> {
- try { const user=await authenticateUserRequest(context.req.raw,context.env); if(kind==='models'){const source=context.req.query('model_source');if(source!==undefined&&source!==''&&source!=='requested')throw new GatewayError(400,'invalid_model_source','User usage only supports requested models')} const f=usageFilter(context,user.id,true); const gran=context.req.query('granularity')==='hour'?'hour':'day'; const timezone=parseTimezone(context.req.query('timezone')); const bucket=usageBucket(f.start,f.end,timezone,gran==='hour'?3600000:DAY)
+ try { const user=await authenticateUserRequest(context.req.raw,context.env); if(kind==='models'){const source=context.req.query('model_source');if(source!==undefined&&source!==''&&source!=='requested')throw new GatewayError(400,'invalid_model_source','User usage only supports requested models')} const f=usageFilter(context,user.id,true); const gran=context.req.query('granularity')==='hour'?'hour':'day'; const bucket=calendarBucket(f.start, f.end, f.timezone, gran)
   if(kind==='models') return controlSuccess({models:await modelRows(context.env.DB, f),start_date:f.start,end_date:f.end})
   const includeTrend = kind === 'trend' || snapshotFlag(context, 'include_trend')
   const includeModels = kind === 'snapshot' && snapshotFlag(context, 'include_model_stats')
@@ -186,7 +188,7 @@ async function dashboardAggregate(context: Context<Bindings>, kind: 'trend'|'mod
   if (includeGroups) { const gf=usageFilter(context,user.id,true,'u.'); statements.push(groupStatement(context.env.DB, gf)) }
   const result = statements.length === 0 ? [] : await context.env.DB.batch(statements)
   let index = 0
-  const trend = includeTrend ? (result[index++].results as any[]).map((x) => ({...trendPoint(x,gran), ...(timezone==='UTC'?{}:{date:usageDateLabel(x.bucket,timezone,gran==='hour')})})) : undefined
+  const trend = includeTrend ? (result[index++].results as any[]).map((x) => trendPoint(x,gran,f.timezone)) : undefined
   const models = includeModels ? (result[index++].results as any[]).map(modelStat) : undefined
   const groups = includeGroups ? (result[index++].results as any[]).map(groupStat) : undefined
   if(kind==='trend') return controlSuccess({trend:trend ?? [],start_date:f.start,end_date:f.end,granularity:gran})
@@ -194,7 +196,7 @@ async function dashboardAggregate(context: Context<Bindings>, kind: 'trend'|'mod
  } catch(error){return controlError(asGatewayError(error))}
 }
 
-export async function dashboardApiKeysUsage(context: Context<Bindings>): Promise<Response> { try { const user=await authenticateUserRequest(context.req.raw,context.env); const body=await readJsonObject(context.req.raw); const ids=body.api_key_ids; if(!Array.isArray(ids)||ids.length>100) throw new GatewayError(400,'invalid_api_key_ids','api_key_ids must contain at most 100 ids'); const clean=ids.map(x=>typeof x==='string'?requireResourceId(x,'api_key'):Number.isSafeInteger(x)&&x>=0?requireResourceId(String(x),'api_key'):null); if(clean.some(x=>x===null)) throw new GatewayError(400,'invalid_api_key_ids','api_key_ids must contain ids'); if(clean.length===0)return controlSuccess({stats:{}}); const q=clean.map(()=>'?').join(','); const today=utcDay(Date.now()); const rows=await context.env.DB.prepare(`SELECT api_key_id, COALESCE(SUM(CASE WHEN occurred_at_ms>=? THEN amount_micros ELSE 0 END),0) today, COALESCE(SUM(amount_micros),0) total FROM usage_projection WHERE user_id=? AND api_key_id IN (${q}) GROUP BY api_key_id`).bind(today,user.id,...clean).all<any>(); const stats:Record<string,unknown>={}; for(const row of rows.results)stats[row.api_key_id]={api_key_id:row.api_key_id,today_actual_cost:usd(integer(row.today)),total_actual_cost:usd(integer(row.total))}; return controlSuccess({stats}) }catch(error){return controlError(asGatewayError(error))} }
+export async function dashboardApiKeysUsage(context: Context<Bindings>): Promise<Response> { try { const user=await authenticateUserRequest(context.req.raw,context.env); const body=await readJsonObject(context.req.raw); const ids=body.api_key_ids; if(!Array.isArray(ids)||ids.length>100) throw new GatewayError(400,'invalid_api_key_ids','api_key_ids must contain at most 100 ids'); const clean=ids.map(x=>typeof x==='string'?requireResourceId(x,'api_key'):Number.isSafeInteger(x)&&x>=0?requireResourceId(String(x),'api_key'):null); if(clean.some(x=>x===null)) throw new GatewayError(400,'invalid_api_key_ids','api_key_ids must contain ids'); if(clean.length===0)return controlSuccess({stats:{}}); const q=clean.map(()=>'?').join(','); const today=calendarDayBoundaries(Date.now(), parseTimezone(context.req.query('timezone'))).today; const rows=await context.env.DB.prepare(`SELECT api_key_id, COALESCE(SUM(CASE WHEN occurred_at_ms>=? THEN amount_micros ELSE 0 END),0) today, COALESCE(SUM(amount_micros),0) total FROM usage_projection WHERE user_id=? AND api_key_id IN (${q}) GROUP BY api_key_id`).bind(today,user.id,...clean).all<any>(); const stats:Record<string,unknown>={}; for(const row of rows.results)stats[row.api_key_id]={api_key_id:row.api_key_id,today_actual_cost:usd(integer(row.today)),total_actual_cost:usd(integer(row.total))}; return controlSuccess({stats}) }catch(error){return controlError(asGatewayError(error))} }
 const USAGE_COLUMNS=`event_id,request_id,user_id,api_key_id,account_id,COALESCE(requested_model,model) model,group_id,subscription_id,input_tokens,output_tokens,cache_read_tokens,input_amount_micros,output_amount_micros,cache_amount_micros,base_amount_micros,amount_micros,billing_type,outcome,stream,duration_ms,occurred_at_ms,platform,request_type,inbound_endpoint,upstream_endpoint,billing_mode,native_compaction_v2,dimensions_version,image_count,image_size,image_input_size,image_output_size,image_size_source,image_size_breakdown`
 type UsageFilter = { where: string; values: unknown[]; start: string; end: string }
 
@@ -220,10 +222,10 @@ function endpointStatement(db: D1Database, filter: UsageFilter): D1PreparedState
 }
 
 function usageFilter(c:Context<Bindings>, user:string, period=false, prefix=''){
+ const timezone=parseTimezone(c.req.query('timezone'))
  const col=(x:string)=>`${prefix}${x}`;const w=[`${col('user_id')} = ?`],v:unknown[]=[user]
  let start=c.req.query('start_date'),end=c.req.query('end_date')
- const timezone=parseTimezone(c.req.query('timezone'))
- if(period&&!start&&!end){const p=c.req.query('period')??'today';if(!['today','week','month','year'].includes(p))throw new GatewayError(400,'invalid_period','period must be today, week, month, or year');end=usageDateLabel(Date.now(),timezone);start=addCalendarDays(end,p==='today'?0:p==='week'?-6:p==='month'?-29:-364)}
+ if(period&&!start&&!end){const p=c.req.query('period')??'today';if(!['today','week','month','year'].includes(p))throw new GatewayError(400,'invalid_period','period must be today, week, month, or year');const n=localDate(Date.now(),timezone);start=addCalendarDays(n,p==='today'?0:p==='week'?-6:p==='month'?-29:-364);end=n}
  const range=dateRange(start,end,timezone);if(range){w.push(`${col('occurred_at_ms')} >= ?`,`${col('occurred_at_ms')} < ?`);v.push(range[0],range[1])}
  for(const [param,name] of [['api_key_id','api_key_id'],['group_id','group_id']] as const){const x=c.req.query(param);if(x){w.push(`${col(name)} = ?`);v.push(requireResourceId(x,param))}}
  const model=c.req.query('model');if(model){w.push(`COALESCE(${col('requested_model')}, ${col('model')}) = ?`);v.push(model)}
@@ -231,17 +233,32 @@ function usageFilter(c:Context<Bindings>, user:string, period=false, prefix=''){
  const requestType=c.req.query('request_type');if(requestType!==undefined&&requestType!==''){const value=requestTypeValue(requestType);if(value===1||value===2){w.push(`(${col('request_type')} = ? OR (${col('request_type')} = 0 AND ${col('dimensions_version')} = 0 AND ${col('stream')} = ?))`);v.push(value,value===2?1:0)}else if(value===0){w.push(`${col('request_type')} = 0 AND ${col('dimensions_version')} = 1`)}else{w.push(`${col('request_type')} = ?`);v.push(value)}}else{const stream=c.req.query('stream');if(stream!==undefined&&stream!==''){if(stream!=='true'&&stream!=='false')throw new GatewayError(400,'invalid_stream','stream is invalid');w.push(`${col('stream')} = ?`);v.push(stream==='true'?1:0)}}
  const compact=c.req.query('native_compaction_v2');if(compact!==undefined&&compact!==''){if(compact!=='true'&&compact!=='false')throw new GatewayError(400,'invalid_native_compaction_v2','native_compaction_v2 is invalid');w.push(`${col('native_compaction_v2')} = ?`);v.push(compact==='true'?1:0)}
  const billingMode=c.req.query('billing_mode');if(billingMode!==undefined&&billingMode!==''){if(!['token','per_request','image','video'].includes(billingMode))throw new GatewayError(400,'invalid_billing_mode','billing_mode is invalid');w.push(`${col('billing_mode')} = ?`);v.push(billingMode)}
- return {where:w.join(' AND '),values:v,start:start??'',end:end??''}
+ return {where:w.join(' AND '),values:v,start:start??'',end:end??'',timezone}
 }
 function snapshotFlag(context: Context<Bindings>, name: string): boolean { const value=context.req.query(name); if(value===undefined||value==='') return true; if(value==='true') return true; if(value==='false') return false; throw new GatewayError(400,`invalid_${name}`,`${name} must be true or false`) }
-function dateRange(s?:string,e?:string,timezone='UTC'):[number,number]|null{if(!s&&!e)return null;if(!s||!e)throw new GatewayError(400,'invalid_date_range','start_date and end_date must be YYYY-MM-DD');parseDate(s);parseDate(e);const span=Date.parse(e)-Date.parse(s);if(span<0||span>366*DAY)throw new GatewayError(400,'invalid_date_range','date range is invalid or exceeds 366 days');return[zonedDayStart(s,timezone),zonedDayStart(addCalendarDays(e,1),timezone)]}
+function dateRange(s?: string, e?: string, timezone = 'UTC'): [number, number] | null {
+  if (!s && !e) return null
+  if (!s || !e) throw new GatewayError(400, 'invalid_date_range', 'start_date and end_date must be YYYY-MM-DD')
+  const start = parseDate(s), end = parseDate(e)
+  const calendarDays = (Date.parse(end) - Date.parse(start)) / DAY
+  if (calendarDays < 0 || calendarDays > 366) throw new GatewayError(400, 'invalid_date_range', 'date range is invalid or exceeds 366 days')
+  return [zonedDayStart(start, timezone), zonedDayStart(addCalendarDays(end, 1), timezone)]
+}
 
-function usageDateLabel(ms:number,timezone:string,hour=false){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hourCycle:'h23'}).formatToParts(ms);const part=(type:string)=>parts.find(value=>value.type===type)!.value;return `${part('year')}-${part('month')}-${part('day')}`+(hour?` ${part('hour')}:00`:'')}
-function usageBucket(start:string,end:string,timezone:string,interval:number){
- if(timezone==='UTC')return `CAST(occurred_at_ms/${interval} AS INTEGER)*${interval}`
- const cases:string[]=[];const days=Math.round((Date.parse(end)-Date.parse(start))/DAY)+1
- for(let index=0;index<days;index++){const date=addCalendarDays(start,index),from=zonedDayStart(date,timezone),to=zonedDayStart(addCalendarDays(date,1),timezone);const value=interval===DAY?`${from}`:`${from}+CAST((occurred_at_ms-${from})/${interval} AS INTEGER)*${interval}`;cases.push(`WHEN occurred_at_ms>=${from} AND occurred_at_ms<${to} THEN ${value}`)}
- return `(CASE ${cases.join(' ')} ELSE CAST(occurred_at_ms/${interval} AS INTEGER)*${interval} END)`
+function calendarBucket(start: string, end: string, timezone: string, granularity: 'day' | 'hour'): string {
+  const interval = granularity === 'hour' ? 3_600_000 : DAY
+  if (timezone === 'UTC') return `CAST(occurred_at_ms / ${interval} AS INTEGER) * ${interval}`
+  const days = (Date.parse(end) - Date.parse(start)) / DAY + 1
+  const cases: string[] = []
+  // Validated calendar dates bound this CASE to at most 367 branches. Numeric
+  // boundaries use no query parameters, avoiding D1's 100-parameter ceiling.
+  for (let index = 0; index < days; index++) {
+    const date = addCalendarDays(start, index)
+    const from = zonedDayStart(date, timezone), to = zonedDayStart(addCalendarDays(date, 1), timezone)
+    const value = granularity === 'day' ? `${from}` : `${from} + CAST((occurred_at_ms - ${from}) / ${interval} AS INTEGER) * ${interval}`
+    cases.push(`WHEN occurred_at_ms >= ${from} AND occurred_at_ms < ${to} THEN ${value}`)
+  }
+  return `(CASE ${cases.join(' ')} END)`
 }
 function usageLog(x:any){const amount=integer(x.amount_micros),componentTotal=sum(integer(x.input_amount_micros),integer(x.output_amount_micros),integer(x.cache_amount_micros),integer(x.base_amount_micros));return{id:x.event_id,user_id:x.user_id,api_key_id:x.api_key_id,account_id:x.account_id,request_id:x.request_id,model:x.model,inbound_endpoint:x.inbound_endpoint||null,group_id:x.group_id,subscription_id:x.subscription_id,input_tokens:integer(x.input_tokens),output_tokens:integer(x.output_tokens),cache_creation_tokens:0,cache_read_tokens:integer(x.cache_read_tokens),cache_creation_5m_tokens:0,cache_creation_1h_tokens:0,input_cost:usd(integer(x.input_amount_micros)),output_cost:usd(integer(x.output_amount_micros)),cache_creation_cost:0,cache_read_cost:usd(integer(x.cache_amount_micros)),total_cost:usd(componentTotal),actual_cost:usd(amount),rate_multiplier:componentTotal===0?1:amount/componentTotal,long_context_billing_applied:false,billing_type:x.billing_type==='subscription'?1:0,request_type:requestTypeName(x.request_type,x.stream,x.dimensions_version),stream:x.stream===1,native_compaction_v2:x.native_compaction_v2===1,duration_ms:x.duration_ms,first_token_ms:null,image_count:integer(x.image_count),image_size:nullableText(x.image_size),image_input_size:nullableText(x.image_input_size),image_output_size:nullableText(x.image_output_size),image_size_source:nullableText(x.image_size_source),image_size_breakdown:imageBreakdown(x.image_size_breakdown),image_input_tokens:0,image_input_cost:0,image_output_tokens:0,image_output_cost:0,cache_ttl_overridden:false,billing_mode:x.billing_mode||'token',created_at:new Date(x.occurred_at_ms).toISOString()}}
 function encodeUsageCursor(row:{occurred_at_ms:number;event_id:string}){const bytes=new TextEncoder().encode(JSON.stringify({v:1,occurred_at_ms:row.occurred_at_ms,event_id:row.event_id} satisfies UsageCursor));let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
@@ -252,10 +269,10 @@ function modelStat(x:any){const i=integer(x.input_tokens),o=integer(x.output_tok
 function groupStat(x:any){const amount=integer(x.amount);return{group_id:x.group_id,group_name:x.group_name,requests:integer(x.requests),total_tokens:integer(x.tokens),cost:usd(amount),actual_cost:usd(amount)}}
 function endpointStat(x:any){const amount=integer(x.amount);return{endpoint:x.endpoint,requests:integer(x.requests),total_tokens:integer(x.tokens),cost:usd(amount),actual_cost:usd(amount)}}
 function platformStat(x:any){return{platform:x.platform,total_requests:integer(x.total_requests),total_tokens:integer(x.total_tokens),total_actual_cost:usd(integer(x.total_amount)),today_requests:integer(x.today_requests),today_tokens:integer(x.today_tokens),today_actual_cost:usd(integer(x.today_amount))}}
-function trendPoint(x:any,g:string){const i=integer(x.input_tokens),o=integer(x.output_tokens),c=integer(x.cache_read_tokens),a=integer(x.amount);return{date:g==='hour'?new Date(x.bucket).toISOString().slice(0,13)+':00:00Z':iso(x.bucket),requests:integer(x.requests),input_tokens:i,output_tokens:o,cache_creation_tokens:0,cache_read_tokens:c,total_tokens:sum(i,o,c),cost:usd(a),actual_cost:usd(a)}}
-function dailyPoint(x:any){const i=integer(x.input_tokens),o=integer(x.output_tokens),c=integer(x.cache_read_tokens),a=integer(x.amount);return{date:iso(x.bucket),requests:integer(x.requests),input_tokens:i,output_tokens:o,cache_read_tokens:c,cache_write_tokens:0,total_tokens:sum(i,o,c),cost:usd(a),actual_cost:usd(a)}}
+function trendPoint(x:any,g:string,timezone:string){const i=integer(x.input_tokens),o=integer(x.output_tokens),c=integer(x.cache_read_tokens),a=integer(x.amount);return{date:g==='hour'?localDate(x.bucket,timezone)+' '+new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hour:'2-digit',hourCycle:'h23'}).format(new Date(x.bucket))+':00':localDate(x.bucket,timezone),requests:integer(x.requests),input_tokens:i,output_tokens:o,cache_creation_tokens:0,cache_read_tokens:c,total_tokens:sum(i,o,c),cost:usd(a),actual_cost:usd(a)}}
+function dailyPoint(x:any,timezone:string){const i=integer(x.input_tokens),o=integer(x.output_tokens),c=integer(x.cache_read_tokens),a=integer(x.amount);return{date:localDate(x.bucket,timezone),requests:integer(x.requests),input_tokens:i,output_tokens:o,cache_read_tokens:c,cache_write_tokens:0,total_tokens:sum(i,o,c),cost:usd(a),actual_cost:usd(a)}}
 function requestTypeValue(value:string):number{const normalized=value.trim().toLowerCase();const values:Record<string,number>={unknown:0,sync:1,stream:2,ws_v2:3,cyber:4,live:5};if(!Object.hasOwn(values,normalized))throw new GatewayError(400,'invalid_request_type','request_type is invalid');return values[normalized]!}
 function requestTypeName(value:unknown,stream:unknown,dimensionsVersion:unknown):string{const values=['unknown','sync','stream','ws_v2','cyber','live'];if(value===0&&dimensionsVersion===0)return stream===1?'stream':'sync';return Number.isSafeInteger(value)&&Number(value)>=0&&Number(value)<values.length?values[Number(value)]!:'unknown'}
-function integer(v:any){return Number.isSafeInteger(v)&&v>=0?v:0} function sum(...n:number[]){const x=n.reduce((a,b)=>a+b,0);if(!Number.isSafeInteger(x))throw new GatewayError(503,'invalid_usage_projection','Usage information is unavailable','server_error');return x} function usd(v:number){return v/1e6} function utcDay(n:number){return Math.floor(n/DAY)*DAY} function iso(n:number){return new Date(n).toISOString().slice(0,10)}
+function integer(v:any){return Number.isSafeInteger(v)&&v>=0?v:0} function sum(...n:number[]){const x=n.reduce((a,b)=>a+b,0);if(!Number.isSafeInteger(x))throw new GatewayError(503,'invalid_usage_projection','Usage information is unavailable','server_error');return x} function usd(v:number){return v/1e6}
 function nullableText(v:unknown):string|null{return typeof v==='string'&&v!==''?v:null}
 function imageBreakdown(v:unknown):Record<string,number>|null{if(typeof v!=='string'||v==='')return null;try{const parsed=JSON.parse(v) as unknown;if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))return null;const result:Record<string,number>={};for(const tier of ['1K','2K','4K']){const count=(parsed as Record<string,unknown>)[tier];if(Number.isSafeInteger(count)&&Number(count)>0)result[tier]=Number(count)}return Object.keys(result).length===0?null:result}catch{return null}}

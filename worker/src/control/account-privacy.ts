@@ -1,3 +1,4 @@
+import { requestProxyId } from '../proxy/request-selection'
 import type { Env } from '../env'
 import { decryptCredentialPayload } from '../gateway/crypto'
 import { credentialAad } from '../gateway/repository'
@@ -20,7 +21,7 @@ export async function applyOpenAIAccountPrivacy(env: Env, account: PrivacyAccoun
   const token = typeof credential.access_token === 'string' ? credential.access_token.trim() : ''
   if (!token && skipWithoutToken) return ''
   if (!token) throw new GatewayError(400, 'privacy_access_token_missing', 'Cannot set privacy: missing access_token')
-  const mode = await setOpenAIPrivacy(env, token, typeof ui.proxy_id === 'string' ? ui.proxy_id : null, 15000)
+  const mode = await setOpenAIPrivacy(env, token, requestProxyId(ui.proxy_id), 15000)
   const extra = ui.extra && typeof ui.extra === 'object' && !Array.isArray(ui.extra) ? ui.extra : {}
   const saved = await env.DB.prepare(`UPDATE accounts SET ui_config_json = ?,
     config_version = config_version + 1, control_version = control_version + ?, updated_at_ms = ?

@@ -59,6 +59,7 @@ class KeyStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return null
     if (this.query.includes('SELECT 1 AS allowed') && this.query.includes('FROM admin_user_roles')) {
       return { allowed: 1 } as T
     }
@@ -567,8 +568,9 @@ describe('admin API keys', () => {
     expect(database.permissions).toContain('user-1:group-2')
   })
 
-  it('accepts an explicit null group and returns the frontend update shape', async () => {
+  it.each([false,true])('maps null only to an enabled isolated ungrouped catalog (enabled=%s)', async (enabled) => {
     const database = new KeyDatabase()
+    if(enabled)database.groups.set('worker-ungrouped-default',{...database.groups.get('group-1')!,id:'worker-ungrouped-default',platform:'composite',is_exclusive:0})
     database.keys.set('key-1', {
       id: 'key-1',
       user_id: 'user-1',
@@ -592,16 +594,17 @@ describe('admin API keys', () => {
       body: JSON.stringify({ group_id: null }),
     }, env(database))
 
+    if(!enabled){expect(response.status).toBe(404);expect(database.keys.get('key-1')?.group_id).toBe('group-1');return}
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
       code: 0,
       data: {
-        api_key: { id: 'key-1', group_id: null, status: 'active', auth_version: 2 },
+        api_key: { id: 'key-1', group_id: 'worker-ungrouped-default', status: 'active', auth_version: 2 },
         auto_granted_group_access: false,
       },
     })
     expect(database.keys.get('key-1')).toMatchObject({
-      group_id: null,
+      group_id: 'worker-ungrouped-default',
       auth_version: 2,
       control_version: 1,
     })

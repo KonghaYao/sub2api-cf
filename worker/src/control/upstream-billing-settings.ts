@@ -1,3 +1,4 @@
+import { readUpstreamBillingConfig, saveUpstreamBillingConfig } from './upstream-billing-config'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { asGatewayError, GatewayError } from '../gateway/errors'
@@ -5,10 +6,7 @@ import { controlError, controlSuccess, readJsonObject } from './http'
 import { probeUpstreamBilling } from './upstream-billing-probe'
 
 export async function readUpstreamBillingSettings(env: Env): Promise<{ enabled: boolean; interval_minutes: number }> {
-  const row = await env.DB.prepare("SELECT enabled,interval_minutes FROM upstream_billing_probe_settings WHERE id='global'")
-    .first<{ enabled: number; interval_minutes: number }>()
-  if (!row) throw new GatewayError(503, 'UPSTREAM_BILLING_PROBE_UNAVAILABLE', 'Upstream billing probe settings are unavailable')
-  return { enabled: row.enabled === 1, interval_minutes: row.interval_minutes }
+  return readUpstreamBillingConfig(env)
 }
 
 export async function getAdminUpstreamBillingSettings(context: Context<{ Bindings: Env }>): Promise<Response> {
@@ -18,21 +16,16 @@ export async function getAdminUpstreamBillingSettings(context: Context<{ Binding
 
 export async function updateAdminUpstreamBillingSettings(context: Context<{ Bindings: Env }>): Promise<Response> {
   try {
-    const body = await readJsonObject(context.req.raw, 4096)
-    if (typeof body.enabled !== 'boolean' || !Number.isSafeInteger(body.interval_minutes) || Number(body.interval_minutes) < 5 || Number(body.interval_minutes) > 1440) {
-      throw new GatewayError(400, 'INVALID_UPSTREAM_BILLING_PROBE_INTERVAL', 'enabled must be boolean and interval_minutes must be between 5 and 1440')
-    }
-    const result = await context.env.DB.prepare("UPDATE upstream_billing_probe_settings SET enabled=?,interval_minutes=?,updated_at_ms=? WHERE id='global'")
-      .bind(body.enabled ? 1 : 0, body.interval_minutes, Date.now()).run()
-    if (result.meta.changes !== 1) throw new GatewayError(503, 'UPSTREAM_BILLING_PROBE_UNAVAILABLE', 'Upstream billing probe settings are unavailable')
-    return controlSuccess(await readUpstreamBillingSettings(context.env))
+    return controlSuccess(await saveUpstreamBillingConfig(context.env, await readJsonObject(context.req.raw, 4096)))
   } catch (error) { return controlError(asGatewayError(error)) }
 }
 
 export async function runDueUpstreamBillingProbes(env: Env, now = Date.now()): Promise<number> {
+  const config = await readUpstreamBillingConfig(env)
+  if (!config.enabled) return 0
   const token = crypto.randomUUID()
   const claimed = await env.DB.prepare(`UPDATE upstream_billing_probe_settings SET lease_token=?,lease_expires_at_ms=?
-    WHERE id='global' AND enabled=1 AND lease_expires_at_ms<=? RETURNING interval_minutes`)
+    WHERE id='global' AND lease_expires_at_ms<=? RETURNING interval_minutes`)
     .bind(token, now + 120000, now).first<{ interval_minutes: number }>()
   if (!claimed) return 0
   let completed = 0
@@ -49,7 +42,7 @@ export async function runDueUpstreamBillingProbes(env: Env, now = Date.now()): P
       for (;;) {
         const row = due.results[next++]
         if (!row) return
-        try { await probeUpstreamBilling(env, row.id, claimed.interval_minutes, true); completed++ }
+        try { await probeUpstreamBilling(env, row.id, config.interval_minutes, true); completed++ }
         catch (error) {
           // Concurrent edits/deletions are expected; storage failures must reach
           // scheduled recovery logging after all active work has drained.

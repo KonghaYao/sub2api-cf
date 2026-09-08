@@ -129,4 +129,15 @@ describe('gateway API key IP policy', () => {
       'x-sub2api-test-client-ip': '10.2.3.4',
     }), test.env)).rejects.toMatchObject({ status: 500, code: 'invalid_api_key_ip_policy' })
   })
+  it('applies administrator forwarded header trust changes to the next authentication',async()=>{
+    const test=await fixture(['198.51.100.0/24'])
+    const incoming=request({'cf-connecting-ip':'203.0.113.8','x-forwarded-for':'198.51.100.9, 203.0.113.8'})
+    await expect(authenticateGatewayRequest(incoming,test.env)).rejects.toMatchObject({code:'api_key_ip_restricted'})
+    test.raw.exec("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.api_key_acl_trust_forwarded_ip',json('true'),'$.forwarded_client_ip_headers',json('[\"x-forwarded-for\"]')) WHERE id='global'")
+    await expect(authenticateGatewayRequest(incoming,test.env)).resolves.toMatchObject({api_key_id:'key-1'})
+    test.raw.exec("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.api_key_acl_trust_forwarded_ip',json('false')) WHERE id='global'")
+    await expect(authenticateGatewayRequest(incoming,test.env)).rejects.toMatchObject({code:'api_key_ip_restricted'})
+    test.raw.close()
+  })
+
 })

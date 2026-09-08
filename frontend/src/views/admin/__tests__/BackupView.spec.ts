@@ -96,6 +96,17 @@ describe('admin BackupView 分卷备份', () => {
     document.body.innerHTML = ''
   })
 
+  it('explains the missing full-backup executor and disables operations while storage settings stay available', async () => {
+    listBackups.mockResolvedValue({ items: [], capabilities: { full_backup: false, restore: false, reason: 'Configure a complete backup executor.' } })
+    const wrapper = mountBackupView()
+    await flushPromises()
+    expect(wrapper.get('[role="status"]').text()).toBe('Configure a complete backup executor.')
+    const create = wrapper.findAll('button').find(button => button.text().includes('admin.backup.operations.createBackup'))
+    expect(create?.attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('input[type="password"]').length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
   it('显示分卷数并在下载时列出每个分卷链接', async () => {
     listBackups.mockResolvedValue({
       items: [baseRecord('split', [{ index: 1 }, { index: 2 }, { index: 3 }])],

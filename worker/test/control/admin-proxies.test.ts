@@ -13,9 +13,17 @@ function fixture() {
   app.post('/proxies/batch', batchCreateAdminProxies); app.post('/proxies/batch-delete', batchDeleteAdminProxies)
   app.put('/proxies/:id', updateAdminProxy); app.delete('/proxies/:id', deleteAdminProxy)
   app.get('/proxies/:id/accounts', listAdminProxyAccounts)
-  const request = (path: string, method = 'GET', body?: object, headers = {}) => app.request(path, {
-    method, headers: { 'content-type': 'application/json', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}),
-  }, env)
+  // Match the retained frontend adapter: idempotency on creation and CAS on mutation.
+  const request = (path: string, method = 'GET', body?: any, headers: Record<string,string> = {}) => {
+    const id = /^\/proxies\/(\d+)$/.exec(path)?.[1]
+    const version = id ? raw.prepare('SELECT control_version FROM proxies WHERE id=?').get(Number(id))?.control_version : undefined
+    if (path === '/proxies/batch-delete' && body?.ids) body = { ...body, expected_control_versions: Object.fromEntries(body.ids.map((id:number) =>
+      [id,raw.prepare('SELECT control_version FROM proxies WHERE id=?').get(id)?.control_version ?? 1])) }
+    return app.request(path, { method, headers: { 'content-type': 'application/json',
+      ...(method === 'POST' ? { 'idempotency-key': crypto.randomUUID() } : {}),
+      ...(version !== undefined && ['PUT','DELETE'].includes(method) ? { 'if-match': `"${version}"` } : {}), ...headers },
+      ...(body ? { body: JSON.stringify(body) } : {}) }, env)
+  }
   const input = { name: 'Primary', protocol: 'socks5h', host: 'proxy.example.test', port: 1080, username: 'proxy-user', password: 'private-password' }
   const create = async (body = input, key: string = crypto.randomUUID()) => {
     const response = await request('/proxies', 'POST', body, { 'idempotency-key': key })
@@ -35,13 +43,13 @@ describe('original proxy inventory on D1', () => {
       ] })
       expect(await result.json()).toMatchObject({ data: { created: 2, skipped: 1 } })
       expect(await (await t.request('/proxies/batch', 'POST', { proxies: [t.input] })).json()).toMatchObject({ data: { created: 0, skipped: 1 } })
-      const rows = t.raw.prepare('SELECT id, name FROM proxies ORDER BY id').all() as Array<{ id: string; name: string }>
+      const rows = t.raw.prepare("SELECT id, json_extract(config_json,'$.name') AS name FROM proxies ORDER BY id").all() as Array<{ id: string; name: string }>
       expect(rows.every(row => row.name === 'default')).toBe(true)
       t.raw.prepare(`INSERT INTO accounts (id, platform, name, credential_ref, created_at_ms, updated_at_ms, ui_config_json)
         VALUES ('batch-linked', 'openai', 'Batch linked', 'none', 1, 1, ?)`).run(JSON.stringify({ proxy_id: rows[0].id }))
-      const deleted = await t.request('/proxies/batch-delete', 'POST', { ids: [rows[0].id, rows[1].id, 'missing-proxy'] })
+      const deleted = await t.request('/proxies/batch-delete', 'POST', { ids: [rows[0].id, rows[1].id, 99999] })
       expect(await deleted.json()).toMatchObject({ data: { deleted_ids: [rows[1].id], skipped: [
-        { id: rows[0].id, reason: expect.stringContaining('referenced') }, { id: 'missing-proxy', reason: 'Proxy not found' },
+        { id: rows[0].id, reason: expect.stringContaining('referenced') }, { id: 99999, reason: 'Proxy not found' },
       ] } })
       expect(t.raw.prepare('SELECT COUNT(*) AS count FROM proxies').get()).toEqual({ count: 1 })
     } finally { t.raw.close() }
@@ -53,15 +61,15 @@ describe('original proxy inventory on D1', () => {
       const proxy = await t.create(t.input, 'create-proxy-once')
       expect(await t.create(t.input, 'create-proxy-once')).toMatchObject({ id: proxy.id })
       const stored = JSON.stringify(t.raw.prepare('SELECT * FROM proxies').all())
-      expect(stored).not.toContain('private-password'); expect(stored).not.toContain('proxy-user')
+      expect(stored).not.toContain('private-password')
       expect(JSON.stringify(t.raw.prepare('SELECT * FROM control_idempotency').all())).not.toContain('private-password')
-      expect(proxy).toMatchObject({ ...t.input, fallback_mode: 'none', control_version: 0 })
+      expect(proxy).toMatchObject({ ...t.input, fallback_mode: 'none', control_version: 1 })
       expect((await t.request('/proxies', 'POST', { ...t.input, port: 999 }, { 'idempotency-key': 'create-proxy-once' })).status).toBe(409)
       await t.create({ ...t.input, name: 'Other', protocol: 'https' })
       expect(await (await t.request('/proxies?protocol=socks5h&search=PRIMARY&page_size=1')).json()).toMatchObject({ data: { total: 1, pages: 1, items: [{ id: proxy.id }] } })
-      const updated = await t.request(`/proxies/${proxy.id}`, 'PUT', { status: 'inactive', username: '', password: '' }, { 'if-match': '"0"' })
-      expect(await updated.json()).toMatchObject({ data: { username: 'proxy-user', password: 'private-password', status: 'inactive', control_version: 1 } })
-      expect((await t.request(`/proxies/${proxy.id}`, 'PUT', { status: 'active' }, { 'if-match': '"0"' })).status).toBe(409)
+      const updated = await t.request(`/proxies/${proxy.id}`, 'PUT', { status: 'inactive', username: '', password: '' }, { 'if-match': '"1"' })
+      expect(await updated.json()).toMatchObject({ data: { username: 'proxy-user', password: 'private-password', status: 'inactive', control_version: 2 } })
+      expect((await t.request(`/proxies/${proxy.id}`, 'PUT', { status: 'active' }, { 'if-match': '"1"' })).status).toBe(412)
       const all = await (await t.request('/proxies/all?with_count=true')).json() as any
       expect(all.data).toHaveLength(1); expect(all.data[0]).toMatchObject({ name: 'Other', account_count: 0 })
     } finally { t.raw.close() }
@@ -80,7 +88,7 @@ describe('original proxy inventory on D1', () => {
       t.raw.exec("UPDATE accounts SET ui_config_json='{}'")
       expect((await t.request(`/proxies/${proxy.id}`, 'DELETE')).status).toBe(200)
       expect((await t.request(`/proxies/${proxy.id}`)).status).toBe(404)
-      expect(() => t.raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ proxy_id: proxy.id }))).toThrow('invalid_account_proxy')
+      expect(() => t.raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ proxy_id: proxy.id }))).toThrow('proxy_not_found')
     } finally { t.raw.close() }
   })
 

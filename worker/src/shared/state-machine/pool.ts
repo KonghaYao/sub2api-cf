@@ -1,3 +1,4 @@
+import { parsePoolSchedulerPolicy, schedulerDraw, upstreamCostFactors, type PoolSchedulerPolicy, type PoolSchedulerMetric } from "./pool-scheduler";
 const POOL_SCHEMA_VERSION = 1 as const;
 
 export type PoolLeaseStatus = "active" | "released" | "expired";
@@ -45,6 +46,7 @@ export interface PoolMachineState {
   leases: Record<string, PoolLeaseState>;
   affinities: Record<string, PoolAffinityState>;
   failure_events: Record<string, string>;
+  scheduler_metrics?: Record<string, PoolSchedulerMetric>;
 }
 
 type PoolCommandEnvelope = { schema_version: typeof POOL_SCHEMA_VERSION };
@@ -82,6 +84,10 @@ export type PoolCommand = PoolCommandEnvelope &
         excluded_account_ids?: string[];
         affinity_key?: string;
         affinity_ttl_ms?: number;
+        scheduler?: PoolSchedulerPolicy;
+        account_cost_rates?: Record<string,number>;
+        previous_account_id?:string;
+        require_previous_account?:boolean;
       }
     | {
         type: "renew";
@@ -383,17 +389,19 @@ function reserve(
     (account) =>
       account.enabled &&
       !excludedAccountIds.has(account.account_id) &&
+      (!command.require_previous_account || account.account_id===command.previous_account_id) &&
       account.cooldown_until_ms <= nowMs &&
       (activeCounts[account.account_id] ?? 0) < account.max_concurrency,
   );
 
+  const scheduler = command.scheduler === undefined ? undefined : parsePoolSchedulerPolicy(command.scheduler);
   if (command.preferred_account_id !== undefined) {
     assertIdentifier(command.preferred_account_id, "preferred_account_id");
     const preferred = candidates.find(
       (account) => account.account_id === command.preferred_account_id,
     );
     if (preferred !== undefined) candidates = [preferred];
-  } else if (command.affinity_key !== undefined) {
+  } else if (command.affinity_key !== undefined && !(scheduler?.enabled && scheduler.sticky_weighted)) {
     const affinity = state.affinities[command.affinity_key];
     const preferred = affinity === undefined
       ? undefined
@@ -401,7 +409,16 @@ function reserve(
     if (preferred !== undefined) candidates = [preferred];
   }
 
+  const rates=command.account_cost_rates ?? {};
+  const knownRates=candidates.map(a=>rates[a.account_id]).filter((rate):rate is number=>Number.isFinite(rate) && rate>=0);
+  const preferRate=!scheduler?.enabled && scheduler?.legacy_low_rate_priority && knownRates.length>=2 && knownRates.some(rate=>rate!==knownRates[0]);
   candidates.sort((left, right) => {
+    if(preferRate) {
+      const l=rates[left.account_id],r=rates[right.account_id];
+      const lk=Number.isFinite(l)&&l>=0,rk=Number.isFinite(r)&&r>=0;
+      if(lk!==rk)return lk?-1:1;
+      if(lk && l!==r)return l-r;
+    }
     if (left.priority !== right.priority) return left.priority - right.priority;
     const leftActive = activeCounts[left.account_id] ?? 0;
     const rightActive = activeCounts[right.account_id] ?? 0;
@@ -415,6 +432,7 @@ function reserve(
     return left.account_id < right.account_id ? -1 : left.account_id > right.account_id ? 1 : 0;
   });
 
+  if (scheduler?.enabled && candidates.length>0) candidates=[selectScheduledAccount(state,command,candidates,nowMs)];
   const account = candidates[0];
   if (account === undefined) {
     throw new PoolStateMachineError("no_capacity", "No healthy account has capacity");
@@ -644,4 +662,36 @@ function validateLoadFactor(value: number | undefined): void {
   if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
     throw new PoolStateMachineError("invalid_load_factor", "load_factor must be a positive safe integer");
   }
+}
+
+export function selectScheduledAccount(state:PoolMachineState,command:Extract<PoolCommand,{type:"reserve"}>,candidates:PoolAccountState[],nowMs:number):PoolAccountState {
+  const scheduler=parsePoolSchedulerPolicy(command.scheduler);
+  const activeCounts=activeLeaseCounts(state);
+    const priorities = candidates.map(a=>a.priority);
+    const minPriority=Math.min(...priorities),maxPriority=Math.max(...priorities);
+    const ttfts=candidates.map(a=>state.scheduler_metrics?.[a.account_id]?.ttft_ms).filter((v):v is number=>v!==undefined && v!==null);
+    const minTTFT=Math.min(...ttfts),maxTTFT=Math.max(...ttfts);
+    const stickyAccount=command.affinity_key ? state.affinities[command.affinity_key]?.account_id : undefined;
+    const costs=upstreamCostFactors(candidates.map(a=>a.account_id),command.account_cost_rates??{});
+    const resets=candidates.map(a=>state.scheduler_metrics?.[a.account_id]?.quota_reset_at_ms).filter((v):v is number=>v!==undefined && v>nowMs);
+    const minReset=Math.min(...resets),maxReset=Math.max(...resets);
+    const maxQueue=Math.max(1,...candidates.map(a=>state.scheduler_metrics?.[a.account_id]?.queue_depth??0));
+    const scored=candidates.map(account=>{
+      const metric=state.scheduler_metrics?.[account.account_id];
+      const priority=maxPriority>minPriority ? 1-(account.priority-minPriority)/(maxPriority-minPriority) : 1;
+      const load=1-Math.min(1,(activeCounts[account.account_id]??0)/((account.load_factor ?? account.max_concurrency)*account.weight));
+      const error=1-(metric?.error_rate??0);
+      const ttft=metric?.ttft_ms!==null && metric?.ttft_ms!==undefined && maxTTFT>minTTFT ? 1-(metric.ttft_ms-minTTFT)/(maxTTFT-minTTFT) : 0.5;
+      const hasQuota=(metric?.quota_reset_at_ms??0)>nowMs;
+      const quota=hasQuota ? metric?.quota_headroom??0.5 : 0.5;
+      const reset=hasQuota ? maxReset>minReset ? 1-(metric!.quota_reset_at_ms!-minReset)/(maxReset-minReset) : 1 : 0;
+      const queue=1-(metric?.queue_depth??0)/maxQueue;
+      const w=scheduler.weights;
+      return {account,score:w.priority*priority+w.load*load+w.error_rate*error+w.ttft*ttft+(w.queue??0)*queue+(w.reset??0)*reset+(w.quota_headroom??0)*quota+(scheduler.sticky_weighted && account.account_id===command.previous_account_id ? w.previous_response??0 : 0)+(w.upstream_cost??0)*((costs[account.account_id]??0.5)-0.5)+(scheduler.sticky_weighted && account.account_id===stickyAccount ? w.session_sticky : 0)};
+    }).sort((a,b)=>b.score-a.score || a.account.account_id.localeCompare(b.account.account_id));
+    const top=scored.slice(0,scheduler.top_k),minimum=top[top.length-1]!.score;
+    let draw=schedulerDraw(command.request_id)*top.reduce((sum,a)=>sum+a.score-minimum+1,0);
+    let selected=top[top.length-1]!;
+    for(const entry of top){draw-=entry.score-minimum+1;if(draw<0){selected=entry;break}}
+    return selected.account;
 }

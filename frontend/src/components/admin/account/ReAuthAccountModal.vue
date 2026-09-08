@@ -120,7 +120,12 @@
         </div>
       </div>
 
-      <OAuthAuthorizationFlow
+      <div v-if="importedOAuthOnly" class="space-y-3" data-testid="reauth-imported-oauth">
+        <p class="input-hint">{{ t('admin.accounts.importedOAuthHint') }}</p>
+        <label class="input-label">{{ t('admin.accounts.importedOAuthToken') }}</label>
+        <input v-model="importedAccessToken" type="password" autocomplete="new-password" class="input" data-testid="reauth-imported-token" />
+      </div>
+      <OAuthAuthorizationFlow v-else
         ref="oauthFlowRef"
         :add-method="addMethod"
         :auth-url="currentAuthUrl"
@@ -148,11 +153,12 @@
 
     <template #footer>
       <div v-if="account" class="flex justify-between gap-3">
+        <button v-if="importedOAuthOnly" class="btn btn-primary" :disabled="importingToken || !importedAccessToken.trim()" @click="replaceImportedToken" data-testid="reauth-imported-submit">{{ t('common.save') }}</button>
         <button type="button" class="btn btn-secondary" @click="handleClose">
           {{ t('common.cancel') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="isManualInputMethod && !importedOAuthOnly"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -190,6 +196,7 @@
 </template>
 
 <script setup lang="ts">
+import { requiresImportedOAuthToken } from '@/utils/adminCapabilities'
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -233,6 +240,23 @@ const emit = defineEmits<{
   reauthorized: [account: Account]
 }>()
 
+const importedOAuthOnly = computed(() => requiresImportedOAuthToken(props.account?.platform))
+const importedAccessToken = ref('')
+const importingToken = ref(false)
+const replaceImportedToken = async () => {
+  if (!props.account || !importedAccessToken.value.trim()) return
+  importingToken.value = true
+  try {
+    const updated = await adminAPI.accounts.update(props.account.id, {
+      credentials: { access_token: importedAccessToken.value.trim() },
+    }, props.account.control_version)
+    emit('reauthorized', updated)
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    handleClose()
+  } catch (error) {
+    appStore.showError(error instanceof Error ? error.message : t('admin.accounts.failedToUpdate'))
+  } finally { importingToken.value = false }
+}
 const appStore = useAppStore()
 const { t } = useI18n()
 const accountProxyId = computed(() =>
@@ -330,6 +354,7 @@ const canExchangeCode = computed(() => {
 })
 
 // Watchers
+watch(() => props.account?.id, () => { importedAccessToken.value = '' })
 watch(
   () => props.show,
   (newVal) => {
@@ -358,6 +383,7 @@ watch(
 
 // Methods
 const resetState = () => {
+  importedAccessToken.value = ''
   addMethod.value = 'oauth'
   geminiOAuthType.value = 'code_assist'
   claudeOAuth.resetState()

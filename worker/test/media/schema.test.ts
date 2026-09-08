@@ -124,12 +124,12 @@ describe('media task migration', () => {
   it('backfills the exact model for old jobs and prevents later snapshot changes', () => {
     const { raw } = createSqliteD1()
     try {
-      applyMigrations(raw, 82)
+      applyMigrations(raw, 99)
       seedMediaDependencies(raw)
       const id = insertLegacyMediaTask(raw, 'snapshot')
       insertProviderJob(raw, id, 'submission-snapshot', 'jobs/snapshot')
       const task = raw.prepare('SELECT upstream_model FROM media_tasks WHERE id=?').get(id) as any
-      applyMigrations(raw, 83)
+      applyMigrations(raw, 100)
       expect(raw.prepare('SELECT provider_model FROM media_provider_jobs WHERE task_id=?').get(id)).toEqual({ provider_model: task.upstream_model })
       expect(() => raw.prepare('UPDATE media_provider_jobs SET provider_model=? WHERE task_id=?').run('changed', id)).toThrow('media_provider_model_immutable')
     } finally { raw.close() }

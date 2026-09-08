@@ -365,6 +365,7 @@
 </template>
 
 <script setup lang="ts">
+import { extractApiErrorMessage } from '@/utils/apiError'
 import { computed, ref, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -775,14 +776,19 @@ const loadAvailableModels = async () => {
       if (props.account.platform === 'gemini') {
         selectedModelId.value = availableModels.value[0].id
       } else {
-        // Try to select Sonnet as default, otherwise use first model
-        const sonnetModel = availableModels.value.find((m) => m.id.includes('sonnet'))
-        selectedModelId.value = sonnetModel?.id || availableModels.value[0].id
+        // Prefer a model matching the account protocol in mixed upstream catalogs.
+        const preferredModel = props.account.platform === 'openai'
+          ? availableModels.value.find((m) => props.account?.type === 'oauth'
+            ? /codex|^gpt-5/i.test(m.id)
+            : /^gpt-(?!image)/i.test(m.id))
+          : availableModels.value.find((m) => m.id.includes('sonnet'))
+        selectedModelId.value = preferredModel?.id || availableModels.value[0].id
       }
     }
   } catch (error) {
     console.error('Failed to load available models:', error)
-    // Fallback to empty list
+    status.value = 'error'
+    errorMessage.value = extractApiErrorMessage(error, t('admin.accounts.testFailed'))
     availableModels.value = []
     selectedModelId.value = ''
   } finally {
@@ -893,7 +899,12 @@ const startTest = async () => {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      const details = await response.json().catch(() => null)
+      throw new Error(extractApiErrorMessage(details, `HTTP error! status: ${response.status}`))
+    }
+    if (response.headers?.get('content-type')?.includes('application/json')) {
+      const details = await response.json().catch(() => null)
+      throw new Error(extractApiErrorMessage(details, t('admin.accounts.testFailed')))
     }
 
     const reader = response.body?.getReader()
@@ -925,6 +936,9 @@ const startTest = async () => {
           }
         }
       }
+    }
+    if (status.value === 'connecting') {
+      throw new Error(t('admin.accounts.testFailed'))
     }
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {

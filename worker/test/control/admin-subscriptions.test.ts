@@ -5,6 +5,7 @@ import { createApp } from '../../src/app'
 import type { Env } from '../../src/env'
 import { consumeEvents } from '../../src/gateway/queue'
 import { runScheduledRecovery } from '../../src/index'
+import { consumeSettingsMaintenance } from '../../src/maintenance/queue'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const PEPPER = 'admin-subscriptions-test-pepper-at-least-32-bytes'
@@ -631,7 +632,19 @@ describe('admin subscriptions HTTP contract', () => {
       'SELECT status, attempts FROM subscription_state_sync WHERE operation = \'reset_quota\'',
     ).get()).toEqual({ status: 'pending', attempts: 1 })
 
+    const maintenanceEvents: Array<{ event_type: string; payload: { task: string } }> = []
+    test.env.EVENTS_QUEUE = { send: async (event: typeof maintenanceEvents[number]) => {
+      maintenanceEvents.push(structuredClone(event))
+    } } as unknown as Queue
     await runScheduledRecovery(test.env)
+    expect(maintenanceEvents).toHaveLength(36)
+    expect(maintenanceEvents.every(event => event.event_type === 'settings.maintenance.v1')).toBe(true)
+    expect(test.raw.prepare(
+      "SELECT status, attempts FROM subscription_state_sync WHERE operation = 'reset_quota'",
+    ).get()).toEqual({ status: 'pending', attempts: 1 })
+    const maintenance = maintenanceEvents.find(event => event.payload.task === 'subscription_state')
+    expect(maintenance).toBeDefined()
+    expect(await consumeSettingsMaintenance(maintenance, test.env)).toBe(true)
 
     expect(test.raw.prepare(
       'SELECT status, attempts FROM subscription_state_sync WHERE operation = \'reset_quota\'',

@@ -1,3 +1,4 @@
+import type { PoolSchedulerPolicy } from "../shared/state-machine/pool-scheduler"
 import type { Env } from '../env'
 import type { PlatformEvent, UsageSettledPayload } from '../env'
 import { GatewayError } from './errors'
@@ -656,10 +657,22 @@ export async function reservePoolAccount(
   leaseId: string,
   affinityKey?: string,
   excludedAccountIds?: readonly string[],
+  scheduler?: PoolSchedulerPolicy,
+  accountCostRates?: Record<string,number>,
+  previousAccountId?:string,
+  requirePreviousAccount=false,
+  signal?:AbortSignal,
 ): Promise<string> {
+  const cancel=()=>{void post(stub,'/queue/cancel',{schema_version:1,request_id:leaseId}).catch(()=>undefined)}
+  if(signal?.aborted){cancel();throw new GatewayError(499,'client_cancelled','Client cancelled while waiting for an account')}
+  signal?.addEventListener('abort',cancel,{once:true})
+  try {
   const response = await requireStateOk(
     post(stub, '/reserve', {
       schema_version: STATE_SCHEMA_VERSION,
+      ...(scheduler === undefined ? {} : {scheduler}),
+      ...(accountCostRates === undefined ? {} : {account_cost_rates:accountCostRates}),
+      ...(previousAccountId===undefined ? {} : {previous_account_id:previousAccountId,require_previous_account:requirePreviousAccount}),
       request_id: leaseId,
       lease_ttl_ms: LEASE_TTL_MS,
       ...(excludedAccountIds === undefined || excludedAccountIds.length === 0
@@ -671,14 +684,16 @@ export async function reservePoolAccount(
             affinity_key: affinityKey,
             affinity_ttl_ms: POOL_AFFINITY_TTL_MS,
           }),
-    }),
+    }, signal),
   )
   const body = (await response.json()) as PoolLeaseBody
   const accountId = body.lease?.account_id
   if (typeof accountId !== 'string' || body.lease?.status !== 'active') {
     throw new GatewayError(500, 'invalid_pool_state', 'Account pool returned an invalid lease', 'server_error')
   }
+  if(signal?.aborted)throw new GatewayError(499,'client_cancelled','Client cancelled while waiting for an account')
   return accountId
+  } finally {signal?.removeEventListener('abort',cancel)}
 }
 
 export async function renewPoolLease(
@@ -771,11 +786,13 @@ function post(
   stub: DurableObjectStub,
   path: string,
   body: Record<string, unknown>,
+  signal?:AbortSignal,
 ): Promise<Response> {
   const request = new Request(`https://state.internal${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   return stub.fetch(request)
 }
@@ -948,4 +965,21 @@ async function stateResponseError(response: Response): Promise<GatewayError> {
       ? 'rate_limit_error'
       : 'server_error'
   return new GatewayError(status, code, message, type, response.headers.get('retry-after') ?? undefined)
+}
+
+export async function recordPoolTelemetry(stub:DurableObjectStub,leaseId:string,failed:boolean,ttftMs:number|null=null):Promise<void> {
+ await requireStateOk(post(stub,'/telemetry',{schema_version:1,request_id:leaseId,failed,ttft_ms:ttftMs}))
+}
+
+export async function poolResponseAffinity(stub:DurableObjectStub,responseKey:string,leaseId?:string):Promise<string|null> {
+ const response=await requireStateOk(post(stub,'/response-affinity',{schema_version:1,response_key:responseKey,...(leaseId===undefined?{}:{request_id:leaseId})}))
+ const body=await response.json() as {account_id?:string|null}
+ return typeof body.account_id==='string'?body.account_id:null
+}
+export async function responseAffinityKey(userId:string,keyId:string,responseId:string):Promise<string> {
+ return sha256Hex(JSON.stringify(['response-affinity-v1',userId,keyId,responseId]))
+}
+
+export async function recordPoolQuota(stub:DurableObjectStub,leaseId:string,snapshot:{headroom:number;reset_at_ms:number;observed_at_ms:number}):Promise<void> {
+ await requireStateOk(post(stub,'/quota-snapshot',{schema_version:1,request_id:leaseId,...snapshot}))
 }

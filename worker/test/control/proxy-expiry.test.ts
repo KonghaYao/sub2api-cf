@@ -24,12 +24,15 @@ describe('original proxy expiry fallback', () => {
 
   function fixture() {
     const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
-    for (const id of ['a', 'b', 'c']) raw.prepare(`INSERT INTO proxies
-      (id,name,protocol,host,port,status,expires_at,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms)
-      VALUES (?,?,'http','proxy.test',8080,'active',?,'unused','unused',1,1)`).run(id, id, id === 'c' ? 20 : 10)
-    raw.exec("UPDATE proxies SET fallback_mode='proxy',backup_proxy_id='b' WHERE id='a'; UPDATE proxies SET fallback_mode='proxy',backup_proxy_id='c' WHERE id='b'")
+    for (const id of [1, 2, 3]) raw.prepare(`INSERT INTO proxies
+      (id,name,config_json,nonce_b64,ciphertext_b64,creation_key,control_version,created_at_ms,updated_at_ms)
+      VALUES (?,?,?,'unused','unused',?,0,1,1)`).run(id, String(id), JSON.stringify({
+        protocol: 'http', host: 'proxy.test', port: 8080, status: 'active',
+        expires_at: id === 3 ? 20 : 10, fallback_mode: 'none', backup_proxy_id: null,
+      }), `creation-${id}`)
+    raw.exec("UPDATE proxies SET config_json=json_set(config_json,'$.fallback_mode','proxy','$.backup_proxy_id',2) WHERE id=1; UPDATE proxies SET config_json=json_set(config_json,'$.fallback_mode','proxy','$.backup_proxy_id',3) WHERE id=2")
     raw.prepare(`INSERT INTO accounts (id,platform,name,credential_ref,created_at_ms,updated_at_ms,ui_config_json)
-      VALUES ('account','openai','Account','unused',1,1,?)`).run(JSON.stringify({ proxy_id: 'a', extra: { upstream_billing_probe: { state: 'old' }, keep: true } }))
+      VALUES ('account','openai','Account','unused',1,1,?)`).run(JSON.stringify({ proxy_id: 1, extra: { upstream_billing_probe: { state: 'old' }, keep: true } }))
     return { raw, env: { DB: d1 } as Env }
   }
 
@@ -38,14 +41,14 @@ describe('original proxy expiry fallback', () => {
     try {
       expect(await sweepExpiredProxies(t.env, 10000)).toBe(1)
       const row = t.raw.prepare('SELECT ui_config_json,control_version,config_version FROM accounts').get() as any
-      expect(JSON.parse(row.ui_config_json)).toEqual({ proxy_id: 'c', proxy_fallback_origin_id: 'a', extra: { keep: true } })
+      expect(JSON.parse(row.ui_config_json)).toEqual({ proxy_id: 3, proxy_fallback_origin_id: 1, extra: { keep: true } })
       expect(row.control_version).toBe(1)
-      expect(t.raw.prepare("SELECT status FROM proxies WHERE id='a'").get()).toEqual({ status: 'expired' })
+      expect(t.raw.prepare("SELECT status FROM proxies WHERE id=1").get()).toEqual({ status: 'expired' })
       expect(await sweepExpiredProxies(t.env, 10000)).toBe(0)
-      t.raw.exec("UPDATE proxies SET fallback_mode='direct' WHERE id='c'")
+      t.raw.exec("UPDATE proxies SET config_json=json_set(config_json,'$.fallback_mode','direct') WHERE id=3")
       // Original origin marker prevents a second automatic rebind.
       expect(await sweepExpiredProxies(t.env, 20000)).toBe(0)
-      expect(JSON.parse((t.raw.prepare('SELECT ui_config_json FROM accounts').get() as any).ui_config_json).proxy_id).toBe('c')
+      expect(JSON.parse((t.raw.prepare('SELECT ui_config_json FROM accounts').get() as any).ui_config_json).proxy_id).toBe(3)
     } finally { t.raw.close() }
   })
 
@@ -54,7 +57,7 @@ describe('original proxy expiry fallback', () => {
     try {
       t.raw.exec("CREATE TRIGGER fail_rebind BEFORE UPDATE OF ui_config_json ON accounts BEGIN SELECT RAISE(ABORT,'injected_rebind_failure'); END")
       await expect(sweepExpiredProxies(t.env, 10000)).rejects.toThrow('injected_rebind_failure')
-      expect(t.raw.prepare("SELECT status,control_version FROM proxies WHERE id='a'").get()).toEqual({ status: 'active', control_version: 0 })
+      expect(t.raw.prepare("SELECT status,control_version FROM proxies WHERE id=1").get()).toEqual({ status: 'active', control_version: 0 })
     } finally { t.raw.close() }
   })
 
@@ -67,9 +70,24 @@ describe('original proxy expiry fallback', () => {
       const invoke = () => app.request('/accounts/account/revert-proxy-fallback', { method: 'POST' }, t.env)
       expect(await (await invoke()).json()).toMatchObject({ data: { message: 'reverted' } })
       const row = t.raw.prepare('SELECT ui_config_json,control_version FROM accounts').get() as any
-      expect(JSON.parse(row.ui_config_json)).toMatchObject({ proxy_id: 'a', proxy_fallback_origin_id: null })
+      expect(JSON.parse(row.ui_config_json)).toMatchObject({ proxy_id: 1, proxy_fallback_origin_id: null })
       expect(row.control_version).toBe(2)
       expect((await invoke()).status).toBe(400)
+    } finally { t.raw.close() }
+  })
+
+  it('keeps the active fallback when the original proxy was deleted before manual restoration', async () => {
+    const t = fixture()
+    const app = new Hono<{ Bindings: Env }>()
+    app.post('/accounts/:id/revert-proxy-fallback', revertAdminProxyFallback)
+    try {
+      await sweepExpiredProxies(t.env, 10000)
+      t.raw.exec('DELETE FROM proxies WHERE id=1')
+      const response = await app.request('/accounts/account/revert-proxy-fallback', { method: 'POST' }, t.env)
+      expect(response.status).toBe(409)
+      const row = t.raw.prepare('SELECT ui_config_json,control_version FROM accounts').get() as any
+      expect(JSON.parse(row.ui_config_json)).toMatchObject({ proxy_id: 3, proxy_fallback_origin_id: 1 })
+      expect(row.control_version).toBe(1)
     } finally { t.raw.close() }
   })
 
@@ -78,12 +96,12 @@ describe('original proxy expiry fallback', () => {
     const batch = t.env.DB.batch.bind(t.env.DB)
     let changed = false
     t.env.DB.batch = async statements => {
-      if (!changed) { changed = true; t.raw.exec("UPDATE proxies SET control_version=control_version+1 WHERE id='c'") }
+      if (!changed) { changed = true; t.raw.exec("UPDATE proxies SET control_version=control_version+1 WHERE id=3") }
       return batch(statements)
     }
     try {
       expect(await sweepExpiredProxies(t.env, 10000)).toBe(0)
-      expect(t.raw.prepare("SELECT status FROM proxies WHERE id='a'").get()).toEqual({ status: 'active' })
+      expect(t.raw.prepare("SELECT status FROM proxies WHERE id=1").get()).toEqual({ status: 'active' })
       expect(await sweepExpiredProxies(t.env, 10000)).toBe(1)
     } finally { t.raw.close() }
   })

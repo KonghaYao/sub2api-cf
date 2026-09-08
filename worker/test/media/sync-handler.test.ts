@@ -127,8 +127,8 @@ describe('synchronous image handler', () => {
   it.each(['openai', 'codex'] as const)('does not bypass a failed account proxy for %s images or settle its hold', async platform => {
     const test = await fixture(platform)
     try {
-      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('image-proxy','Images','https','proxy.test',443,'active','','',1,1)")
-      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','image-proxy')")
+      test.raw.exec("INSERT INTO proxies(id,name,config_json,nonce_b64,ciphertext_b64,creation_key,created_at_ms,updated_at_ms) VALUES(10001,'Images',json_object('protocol','https','host','proxy.test','port',443,'status','active'),'','','image-proxy',1,1)")
+      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id',10001)")
       const response = await app().request('/v1/images/generations', {
         method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
         body: JSON.stringify({ prompt: 'bound image' }),
@@ -163,6 +163,18 @@ describe('synchronous image handler', () => {
       expect(denied.status).toBe(503)
       expect(test.upstreamBodies).toHaveLength(1)
     } finally { test.raw.close() }
+  })
+
+  it('enforces Codex OAuth CLI-only on images before preparing any provider request',async()=>{
+    const test=await fixture('codex')
+    test.raw.exec(`UPDATE accounts SET ui_config_json='{"extra":{"codex_cli_only":true}}' WHERE id='account-1'`)
+    const response=await app().request('/v1/images/generations',{method:'POST',headers:{authorization:`Bearer ${RAW_KEY}`,'content-type':'application/json'},body:JSON.stringify({prompt:'draw a square',size:'1024x1024'})},test.env as never)
+    expect(response.status,await response.clone().text()).toBe(403)
+    expect(await response.text()).toContain('codex_cli_only')
+    expect(test.upstreamFetch).not.toHaveBeenCalled()
+    expect(test.settle).not.toHaveBeenCalled()
+    expect(test.cancel).toHaveBeenCalled()
+    test.raw.close()
   })
 
   it.each(['/v1/images/generations', '/images/generations'])('serves %s through the image account pool', async (path) => {

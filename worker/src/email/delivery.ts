@@ -1,11 +1,14 @@
 import type { Env } from '../env'
+import { readSmtpConfig } from './config'
+import { smtpExchange } from './smtp'
+import { readEmailTemplate, renderTemplate, templateHTMLToText } from './templates'
 
 const COMPATIBILITY_ENDPOINT = 'https://email-delivery.internal/v1/challenges'
 const COMPATIBILITY_TIMEOUT_MS = 5_000
 const MAX_DELIVERY_ID_LENGTH = 256
 const MAX_MESSAGE_BYTES = 128 * 1_024
 
-type EmailDeliveryEnv = Pick<Env, 'SEND_EMAIL' | 'EMAIL_FROM_ADDRESS' | 'EMAIL_DELIVERY'>
+type EmailDeliveryEnv = Pick<Env, 'SEND_EMAIL' | 'EMAIL_FROM_ADDRESS' | 'EMAIL_DELIVERY'> & Partial<Pick<Env, 'DB' | 'CREDENTIALS_MASTER_KEY'>>
 
 export interface PlatformEmail {
   eventId: string
@@ -46,6 +49,12 @@ export function hasEmailDeliveryBinding(env: EmailDeliveryEnv): boolean {
   return env.EMAIL_DELIVERY !== undefined
 }
 
+export async function hasEmailDeliveryConfigured(env: EmailDeliveryEnv): Promise<boolean> {
+  if (hasEmailDeliveryBinding(env)) return true
+  if (!env.DB) return false
+  return !!(await readSmtpConfig({ DB: env.DB, CREDENTIALS_MASTER_KEY: env.CREDENTIALS_MASTER_KEY }, false)).smtp_host
+}
+
 export function emailDeliveryFailure(error: unknown): EmailDeliveryFailure {
   if (error instanceof PlatformEmailDeliveryError) {
     return { code: error.code, retryable: error.retryable }
@@ -66,6 +75,30 @@ export async function deliverPlatformEmail(
   env: EmailDeliveryEnv,
 ): Promise<void> {
   validatePlatformEmail(email)
+  if (env.DB) {
+    const purpose = email.compatibilityPayload.purpose
+    const event = purpose === 'password_reset' ? 'auth.password_reset'
+      : purpose === 'notification_email_verification' ? 'notification_email.verify_code'
+      : ['registration_email_verification', 'email_verification', 'email_binding', 'totp_identity_verification'].includes(String(purpose)) ? 'auth.verify_code' : undefined
+    if (event) {
+      const locale = String(email.compatibilityPayload.locale ?? '').startsWith('zh') ? 'zh' : 'en'
+      const template = await readEmailTemplate({ DB: env.DB }, event, locale)
+      if (template.is_custom) {
+        const payload = email.compatibilityPayload
+        const rendered = renderTemplate(template, {
+          site_name: String(payload.site_name ?? 'Sub2API'), recipient_name: email.recipient, recipient_email: email.recipient,
+          verification_code: String(payload.token ?? ''), action_url: String(payload.action_url ?? ''), reset_url: String(payload.action_url ?? ''),
+          expires_in_minutes: String(Math.max(1, Math.ceil((Number(payload.expires_at_ms) - Date.now()) / 60000))),
+        })
+        email = { ...email, ...rendered, text: templateHTMLToText(rendered.html), compatibilityPayload: { ...email.compatibilityPayload, ...rendered } }
+      }
+    }
+    const smtp = await readSmtpConfig({ DB: env.DB, CREDENTIALS_MASTER_KEY: env.CREDENTIALS_MASTER_KEY })
+    if (smtp.smtp_host) {
+      try { await smtpExchange(smtp, { to: email.recipient, subject: email.subject, text: email.text, html: email.html, eventId: email.eventId }); return }
+      catch { throw new PlatformEmailDeliveryError('smtp_delivery_failed', true) }
+    }
+  }
 
   if (env.SEND_EMAIL !== undefined) {
     const from = requireEmailFromAddress(env.EMAIL_FROM_ADDRESS)
@@ -148,7 +181,7 @@ function requireEmailFromAddress(value: unknown): string {
   return email
 }
 
-function isEmailAddress(value: string): boolean {
+export function isEmailAddress(value: string): boolean {
   return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 }
 

@@ -377,7 +377,11 @@ export async function update(
   const updateRecord = updates as unknown as Record<string, unknown>
   const expectedVersion = expectedControlVersion ?? updateRecord.expected_control_version
   const payload = workerContract
-    ? Object.fromEntries(Object.entries(updateRecord).filter(([key]) => key !== 'expected_control_version'))
+    ? Object.fromEntries(Object.entries(updateRecord).filter(([key, value]) =>
+        key !== 'expected_control_version' &&
+        // Worker 'error' is a derived health status, not an editable enabled state.
+        !(key === 'status' && value === 'error'),
+      ))
     : updates
   const { data } = await apiClient.put<Account>(
     `/admin/accounts/${id}`,
@@ -1153,6 +1157,9 @@ export async function syncUpstreamModels(id: number | string): Promise<SyncUpstr
 }
 
 export interface SyncUpstreamPreviewParams {
+  project_id?: string
+  provider_config?: Record<string, unknown>
+  access_token?: string
   platform: string
   type: string
   base_url?: string
@@ -1607,31 +1614,31 @@ export async function updateOllamaCloudUsageSettings(
   return data
 }
 
-export async function getOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+export async function getOllamaCloudUsage(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.get<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage`)
   return data
 }
 
-export async function saveOllamaCloudUsageSession(id: number, session: string): Promise<OllamaCloudUsageState> {
+export async function saveOllamaCloudUsageSession(id: number | string, session: string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`, {
     session
   })
   return data
 }
 
-export async function deleteOllamaCloudUsageSession(id: number): Promise<OllamaCloudUsageState> {
+export async function deleteOllamaCloudUsageSession(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.delete<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`)
   return data
 }
 
-export async function setOllamaCloudUsageAutoRefresh(id: number, enabled: boolean): Promise<OllamaCloudUsageState> {
+export async function setOllamaCloudUsageAutoRefresh(id: number | string, enabled: boolean): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/auto-refresh`, {
     enabled
   })
   return data
 }
 
-export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+export async function refreshOllamaCloudUsage(id: number | string): Promise<OllamaCloudUsageState> {
   const { data } = await apiClient.post<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/refresh`)
   return data
 }

@@ -51,6 +51,7 @@ class AuthStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.query.includes('FROM runtime_settings')) return { value_json: JSON.stringify({enabled:false,user_rpm:240,heavy_rpm:60,exempt_admin:true,public_ip_rpm:300}) } as T
     return this.database.first(this.query, this.values) as T | null
   }
 
