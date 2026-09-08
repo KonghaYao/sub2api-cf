@@ -1,5 +1,5 @@
 import {env,exports} from 'cloudflare:workers'
-import {createExecutionContext,waitOnExecutionContext} from 'cloudflare:test'
+import {createExecutionContext,waitOnExecutionContext,runInDurableObject} from 'cloudflare:test'
 import {createApp} from '../../src/app'
 import {expect,it} from 'vitest'
 async function seed(mode:string){
@@ -50,4 +50,37 @@ it('preserves complete function and custom tool arguments when only argument-don
  const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
  expect(state.profile).toMatchObject({balance_micros:999983,reserved_micros:0})
  expect(state.ledger.filter((r:any)=>r.amount_delta_micros<0)).toHaveLength(1)
+})
+
+
+it.each(['quota', 'output-limit', 'server'])('rejects a native Responses embedded %s error without successful billing', async mode => {
+ const f=await seed('error-'+mode),ctx=createExecutionContext()
+ const response=await createApp().fetch(new Request('https://worker.e2e.invalid/v1/responses',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json'},body:JSON.stringify({model:f.model,input:'hello',stream:false,max_output_tokens:16})}),env,ctx)
+ expect(response.status).toBe(mode==='quota'?429:mode==='output-limit'?400:502)
+ expect(await response.text()).not.toContain('private provider detail')
+ await waitOnExecutionContext(ctx)
+ const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
+ expect(state.profile).toMatchObject({balance_micros:1000000,reserved_micros:0})
+ expect(state.ledger.filter((r:any)=>r.amount_delta_micros<0)).toHaveLength(0)
+ expect(await env.DB.prepare('SELECT quota_used_micros FROM api_keys WHERE id=?').bind(f.api_key_id).first()).toEqual({quota_used_micros:0})
+ const model=await env.DB.prepare('SELECT id FROM models WHERE public_name=?').bind(f.model).first<any>()
+ const pool=env.POOL_STATE.get(env.POOL_STATE.idFromName(`group:${f.group_id}:platform:openai:model:${model.id}:endpoint:responses:shard:0`))
+ const samples=await runInDurableObject(pool,(_instance,state)=>Array.from(state.storage.sql.exec('SELECT failed FROM pool_scheduler_samples')))
+ expect(samples).toEqual(mode==='output-limit'?[]:[{failed:1}])
+ const snapshot=await (await pool.fetch('https://state.test/snapshot')).json() as any
+ expect(snapshot.active_leases).toEqual([])
+})
+
+
+it.each(['document', 'cyber-document'])('keeps native failed Responses %s semantics and records a failed outcome', async mode => {
+ const f=await seed('error-'+mode),ctx=createExecutionContext()
+ const response=await createApp().fetch(new Request('https://worker.e2e.invalid/v1/responses',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json'},body:JSON.stringify({model:f.model,input:'hello',stream:false})}),env,ctx)
+ expect(response.status).toBe(200)
+ expect(await response.json()).toMatchObject({status:'failed',error:{code:mode==='document'?'server_error':'cyber_policy'}})
+ await waitOnExecutionContext(ctx)
+ const charge=mode==='document'?17:0
+ const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
+ expect(state.profile).toMatchObject({balance_micros:1000000-charge,reserved_micros:0})
+ expect(state.ledger.filter((r:any)=>r.amount_delta_micros<0)).toHaveLength(charge?1:0)
+ await expect.poll(async()=>await env.DB.prepare('SELECT outcome,amount_micros FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({outcome:'failed',amount_micros:charge})
 })

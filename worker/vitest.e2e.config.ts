@@ -52,6 +52,14 @@ export default defineConfig(async () => {
                 return body.stream?new Response('data: '+JSON.stringify({type:'response.failed',response:{id:'cyber-fixture',status:'failed',error}})+'\n\n',{headers:{'content-type':'text/event-stream'}}):Response.json({error},{status:400})
               }
               if (typeof body.model === 'string' && body.model.startsWith('native-buffer-')) {
+                if (body.model.startsWith('native-buffer-error-')) {
+                  const mode = body.model.slice('native-buffer-error-'.length)
+                  if (mode === 'document' || mode === 'cyber-document') return Response.json({id:'native-failed-document',object:'response',status:'failed',output:[],
+                    error:{code:mode === 'cyber-document' ? 'cyber_policy' : 'server_error',message:'failed document'},usage:{input_tokens:6,output_tokens:2}})
+                  return Response.json({error:mode === 'output-limit'
+                    ? {code:'3',errorType:'INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT',message:'private provider detail'}
+                    : {code:mode === 'quota' ? 'resource_exhausted' : 'server_error',message:'private provider detail'}})
+                }
                 if (body.model === 'native-buffer-tool-arguments') return new Response([
                   {type:'response.output_item.added',output_index:2,item:{type:'function_call',id:'fc_done',call_id:'call_done',name:'weather',arguments:''}},
                   {type:'response.function_call_arguments.delta',output_index:2,delta:'{"city":'},

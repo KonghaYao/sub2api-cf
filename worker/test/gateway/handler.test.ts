@@ -2330,6 +2330,7 @@ describe('OpenAI-compatible gateway', () => {
       body: JSON.stringify({ model: 'gpt-public', messages: [], max_tokens: 16 }),
     }, env)
     expect(response.status).toBe(400)
+    expect(pool.calls.filter(call => call.path === '/telemetry')).toHaveLength(0)
     expect(await response.json()).toMatchObject({ error: { code: 'max_output_tokens_exceeded' } })
     expect(user.calls.some(call => call.path === '/settle')).toBe(false)
     expect(user.calls.some(call => call.path === '/cancel')).toBe(true)
@@ -2337,17 +2338,17 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.some(call => call.path === '/release')).toBe(true)
   })
 
-  it('rejects a quota error embedded in HTTP 200 without charging for a successful completion', async () => {
+  it.each(['/v1/chat/completions', '/v1/responses'])('rejects a quota error embedded in HTTP 200 at %s without charging', async endpoint => {
     const { env, user, pool, limit } = await harness()
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
       model: 'gpt-upstream', choices: [{ message: { content: '' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 0, completion_tokens: 0 },
       error: { code: 'resource_exhausted', message: 'private upstream quota detail' },
     })))
-    const response = await createApp().request('/v1/chat/completions', {
+    const response = await createApp().request(endpoint, {
       method: 'POST',
       headers: { authorization: 'Bearer sk-customer', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-public', messages: [] }),
+      body: JSON.stringify(endpoint === '/v1/responses' ? { model: 'gpt-public', input: 'hello' } : { model: 'gpt-public', messages: [] }),
     }, env)
     expect(response.status).toBe(429)
     const text = await response.text()

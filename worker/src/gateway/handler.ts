@@ -2150,12 +2150,17 @@ async function createSynchronousResponse(
       throw new GatewayError(502, 'invalid_upstream_response', 'Upstream returned invalid JSON', 'server_error')
     }
     const embeddedError = objectValue(objectValue(parsed)?.error)
-    if ((input.upstreamEndpoint === 'chat_completions' || input.providerPlatform === 'antigravity') && embeddedError !== null) {
-      await bestEffort(() => recordPoolTelemetry(input.pool,input.leaseId,true))
+    // Bare error envelopes and structured Responses documents have different
+    // failure and usage semantics. Neither is a successful completion.
+    const responsesErrorEnvelope = input.upstreamEndpoint === 'responses' && objectValue(parsed)?.status === undefined
+    if ((input.upstreamEndpoint === 'chat_completions' || responsesErrorEnvelope || input.providerPlatform === 'antigravity') && embeddedError !== null) {
+      const outputLimit = embeddedError.errorType === 'INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT'
+      // A caller's output budget is not evidence that this account is unhealthy.
+      // Keep it out of both success and failure samples used by the scheduler.
+      if (!outputLimit) await bestEffort(() => recordPoolTelemetry(input.pool,input.leaseId,true))
       // Some compatible gateways encode provider failures inside HTTP 200.
       // Never settle those empty/error replies as completed billable requests.
       await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
-      const outputLimit = embeddedError.errorType === 'INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT'
       const quota = embeddedError.code === 'resource_exhausted' || embeddedError.code === 'insufficient_quota'
       const failure = new GatewayError(
         outputLimit ? 400 : quota ? 429 : 502,
@@ -2198,7 +2203,12 @@ async function createSynchronousResponse(
       }
     }
     if (input.upstreamEndpoint==='responses' && typeof objectValue(parsed)?.id==='string') input.upstreamResponseId=String(objectValue(parsed)!.id)
-    await settleAndProject(input, usage, 'completed', false, extractTrustedResponseModel(parsed))
+    const responseStatus = objectValue(parsed)?.status
+    const failedResponsesDocument = input.upstreamEndpoint === 'responses' &&
+      (['failed', 'cancelled', 'canceled'].includes(String(responseStatus)) || embeddedError !== null)
+    const zeroCostFailure = failedResponsesDocument && responsesFailureDetails(parsed).cyberPolicy
+    await settleAndProject(input, zeroCostFailure ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false } : usage,
+      failedResponsesDocument ? 'failed' : 'completed', zeroCostFailure, extractTrustedResponseModel(parsed))
     const output = downstreamValue === null
       ? bytes
       : encoder.encode(JSON.stringify(
