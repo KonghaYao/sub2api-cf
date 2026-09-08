@@ -1,3 +1,4 @@
+import { inspectChatSilentRefusal } from './protocols/chat-silent-refusal'
 import { chatJsonStream } from './protocols/chat-json-stream'
 import { normalizeOpenAIUsage } from './usage'
 import { normalizeResponsesToolArguments } from './protocols/tool-arguments'
@@ -1853,6 +1854,12 @@ async function acquireUpstream(
         await bestEffort(() => recordConfiguredUpstreamFailure(env, pool, accountId!, `${requestId}:failure:${attempt}`, response))
         await bestEffort(() => releasePoolLease(pool, leaseId))
         continue
+      }
+      if (response.ok && wireOperation === 'chat_completions' && (account.platform === 'openai' || account.platform === 'grok') &&
+          (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')) {
+        response = await inspectChatSilentRefusal(response,
+          encoder.encode(stringifyJsonPreservingIntegers(plan.body)).byteLength,
+          { signal: clientSignal, keepAlive: responseOwner ? renewHeaders : undefined })
       }
       if (
         response.ok && wireOperation === 'responses' &&
@@ -3946,6 +3953,7 @@ async function isRetryableEmbeddingsResponse(response: Response): Promise<boolea
 }
 
 function isRetryableAttemptError(error: GatewayError, endpoint: TextGatewayEndpoint): boolean {
+  if (error.status === 499 || error.code === 'client_cancelled') return false
   if (error.status === 400 && error.code === 'invalid_request_error') return false
   if (error.code === 'codex_cli_only') return false
   if (error.code === 'no_capacity') return true

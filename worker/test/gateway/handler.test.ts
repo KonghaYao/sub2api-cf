@@ -1720,6 +1720,49 @@ describe('OpenAI-compatible gateway', () => {
     }
   })
 
+  it('does not retry or cool down an account when a client cancels the Chat prelude', async () => {
+    const { env, user, pool } = await harness()
+    const abort = new AbortController()
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')) },
+    }), { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetcher)
+    const pending = createApp().fetch(new Request('https://worker.test/v1/chat/completions', {
+      method: 'POST', signal: abort.signal,
+      headers: { authorization: 'bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', stream: true, messages: [{ role: 'user', content: 'x'.repeat(65536) }] }),
+    }), env)
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce())
+    abort.abort()
+    expect((await pending).status).toBe(499)
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(pool.calls.some(call => call.path === '/failure')).toBe(false)
+    expect(user.calls.some(call => call.path === '/settle')).toBe(false)
+    expect(pool.calls.filter(call => call.path === '/release')).toHaveLength(1)
+  })
+
+  it('retries a large Chat silent refusal before exposing output and settles only the successful attempt', async () => {
+    const { env, database, user, pool } = await harness()
+    await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
+    pool.reserveAccountIds.push('account-1', 'account-2')
+    const fetcher = vi.fn(async (url: string | URL) => new Response(String(url).includes('upstream-two')
+      ? 'data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\ndata: {"usage":{"prompt_tokens":8,"completion_tokens":2}}\n\ndata: [DONE]\n\n'
+      : 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetcher)
+    const response = await createApp().request('/v1/chat/completions', { method: 'POST',
+      headers: { authorization: 'bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', stream: true, messages: [{ role: 'user', content: 'x'.repeat(65536) }] }) }, env)
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).toContain('Recovered')
+    expect(text).not.toContain('"finish_reason":"stop"')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(user.calls.filter(call => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find(call => call.path === '/settle')?.body).toMatchObject({ amount_micros: 24 })
+    expect(pool.calls.filter(call => call.path === '/release')).toHaveLength(2)
+  })
+
   it.each(['done', 'finish', 'usage'])('terminates an unterminated final Chat SSE frame exactly once: %s', async (ending) => {
     const { env } = await harness()
     const final = ending === 'done' ? '[DONE]' : JSON.stringify(ending === 'finish'

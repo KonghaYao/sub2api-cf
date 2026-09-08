@@ -12,11 +12,11 @@ async function request(path: string, token: string, body?: unknown): Promise<Res
   }))
 }
 type Fixture = { user_id: string; api_key_id: string; api_key: string; group_id: string; account_id: string }
-async function bootstrap(upstream = 'gpt-binding-upstream', balance = 1_000_000): Promise<Fixture> {
+async function bootstrap(upstream = 'gpt-binding-upstream', balance = 1_000_000, upstreamKey = 'local-fixture-key'): Promise<Fixture> {
   const response = await request('/api/v1/admin/bootstrap', env.ADMIN_TOKEN!, {
     user: { email: `${crypto.randomUUID()}@lifecycle.test`, balance_micros: balance },
     group: { name: `Lifecycle ${crypto.randomUUID()}` },
-    account: { name: `Upstream ${crypto.randomUUID()}`, base_url: 'https://upstream.e2e.invalid/v1', api_key: 'local-fixture-key', max_concurrency: 1 },
+    account: { name: `Upstream ${crypto.randomUUID()}`, base_url: 'https://upstream.e2e.invalid/v1', api_key: upstreamKey, max_concurrency: 1 },
     api_key: { name: 'Lifecycle key' },
     models: [{ public_name: `lifecycle-${crypto.randomUUID()}`, upstream_name: upstream, endpoint: 'chat_completions', input_micros_per_million: 1_000_000, output_micros_per_million: 2_000_000, per_request_micros: 7, minimum_reservation_micros: 100 }],
   })
@@ -48,6 +48,38 @@ async function assertNoCharge(fixture: Fixture): Promise<void> {
 }
 
 describe('billing lifecycle over real Worker/D1/DO/Queue', () => {
+  it.each([false, true])('protects large Chat requests from silent refusal with real billing and account failover=%s', async recover => {
+    const first = await bootstrap('lifecycle-silent-upstream')
+    if (recover) {
+      const second = await bootstrap('lifecycle-silent-upstream', 1_000_000, 'silent-recovery-key')
+      const now = Date.now()
+      const row = await env.DB.prepare('SELECT model_id FROM group_models WHERE group_id=?').bind(first.group_id).first<{ model_id: string }>()
+      await env.DB.batch([
+        env.DB.prepare('UPDATE account_groups SET priority=0 WHERE account_id=?').bind(first.account_id),
+        env.DB.prepare('INSERT INTO account_groups(account_id,group_id,priority,weight,created_at_ms,updated_at_ms) VALUES(?,?,100,1,?,?)').bind(second.account_id, first.group_id, now, now),
+        env.DB.prepare('INSERT INTO account_models(account_id,model_id,chat_completions,responses,created_at_ms,updated_at_ms) VALUES(?,?,1,0,?,?)').bind(second.account_id, row!.model_id, now, now),
+      ])
+    }
+    const response = await completion(first, { stream: true, messages: [{ role: 'user', content: 'x'.repeat(65536) }] })
+    if (!recover) {
+      expect(response.status).toBe(502)
+      expect(await response.json()).toMatchObject({ error: { code: 'openai_silent_refusal' } })
+      await assertNoCharge(first)
+    } else {
+      expect(response.status).toBe(200)
+      const text = await response.text()
+      expect(text).toContain('Recovered')
+      expect(text).not.toContain('"finish_reason":"stop"')
+      const state = await snapshot(first)
+      expect(state.profile).toMatchObject({ balance_micros: 999973, reserved_micros: 0 })
+      expect(state.ledger.filter(row => row.amount_delta_micros < 0)).toHaveLength(1)
+    }
+    const route = await env.DB.prepare('SELECT model_id FROM group_models WHERE group_id=?').bind(first.group_id).first<{ model_id: string }>()
+    const pool = env.POOL_STATE.get(env.POOL_STATE.idFromName(poolStateName(first.group_id, route!.model_id, 'chat_completions')))
+    const metrics = await (await pool.fetch('https://pool.test/snapshot')).json() as { scheduler_metrics: Array<{ account_id: string; samples: number; error_rate: number }> }
+    expect(metrics.scheduler_metrics.find(row => row.account_id === first.account_id)).toMatchObject({ samples: 1, error_rate: 1 })
+  })
+
   it('ties the same successful request to a single ledger debit, Key usage and projected usage', async () => {
     const fixture = await bootstrap()
     const response = await completion(fixture)

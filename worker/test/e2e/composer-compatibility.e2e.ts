@@ -15,7 +15,7 @@ it.each(['buffered', 'stream', 'slow'] as const)('bridges a Chat-only Composer c
   const f = (await bootstrap.json() as any).data
   const response = await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/responses', {
     method: 'POST', headers: { authorization: 'Bearer ' + f.api_key, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, input: 'Reply OK', max_output_tokens: 1024, stream: mode !== 'buffered' }),
+    body: JSON.stringify({ model, input: mode === 'slow' ? 'x'.repeat(65536) : 'Reply OK', max_output_tokens: 1024, stream: mode !== 'buffered' }),
   }))
   expect(response.status).toBe(200)
   const content = await response.text()

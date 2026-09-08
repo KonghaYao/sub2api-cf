@@ -129,3 +129,12 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 同步拒绝 `response.completed` 内的错误体，防止 SSE 上游 HTTP 200 被诊断为成功。自动探测同样拒绝错误对象和 failed/cancelled/incomplete 状态，避免部分文本覆盖故障事实或误解除告警。
 
 诊断新增回归先复现 3 项失败（两种 JSON 正常响应与 SSE 完成包夹带错误）；自动 Chat 探测先复现 HTTP 200 错误体/failed 状态两项误判。修复后 5 文件/83 项通过，类型检查通过；Cloudflare 原生 3 文件/7 项通过，包含真实管理员会话的账号测试、Chat EOF 和 provider 请求构建。提交 `76751881d` 已推送 origin/main 并部署 0.45.13，Worker version `4fc72c49-bbe7-4397-bd16-110e7e03a955`；线上 `/health` 确认 status=ok、version=0.45.13。生产 Composer 实际推理仍需可用的生产测试 Key 验证。
+
+
+## 0.45.14：大请求 Chat 空回复保护与安全切换账号
+
+对照原版 `openai_silent_refusal.go`、`openai_gateway_chat_completions_raw.go`，为 OpenAI/Grok raw Chat SSE 加入 64 KiB 请求阈值保护：只有 stop 结束且没有内容、工具/函数调用字段、推理字段、usage 对象、错误证据时判为 `openai_silent_refusal`。小请求及带这些证据的正常回复保持原行为；等待 DONE 或 EOF，避免丢掉 finish 后的 usage。
+
+在客户端收到首批内容前识别，复用现有账号失败冷却/重试；无可用备用账号时返回 502 并取消计费预留。只保留有界前缀，使用同一个 reader 交还剩余正文，不使用 tee；有效内容到达即交还，不等待整包。等待期间按原序列续租并发、Key admission 及长时计费预留，保留 15 分钟正文上限与客户端取消处理。客户端主动取消不再触发账号重试或故障冷却。
+
+网关 56 文件/827 项通过；收尾取消/超时/空回复专项 183 项通过，类型检查通过。全量原生 33 文件/97 项中，新增严格故障样本断言发现测试优先级顺序反置，其余 96 项通过；按实际“数值小优先”修正夹具后，计费生命周期 16 项复测通过，证明首个账号失败后才使用备用账号。无备用账号 502 且余额/Key 不扣费、预留归零；有备用账号恢复并仅扣费一次。另以大于 64 KiB 请求实测 65 秒响应头等待 + 25 秒正文等待，Composer 原生 3 项通过，租约续期不少于 4 次，无过期/序列错误。部署结果待追加。

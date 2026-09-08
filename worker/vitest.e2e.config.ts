@@ -146,6 +146,13 @@ export default defineConfig(async () => {
                 return Response.json(result)
               }
               if (body.model === 'runtime-overload-upstream') return new Response('fixture overload', { status: 529 })
+              if (body.model === 'lifecycle-silent-upstream') {
+                const recovered = request.headers.get('authorization') === 'Bearer silent-recovery-key'
+                return new Response(recovered
+                  ? 'data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\ndata: {"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n'
+                  : 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+                  { headers: { 'content-type': 'text/event-stream' } })
+              }
               if (body.model === 'lifecycle-invalid-json-upstream') {
                 return new Response('<html>upstream maintenance</html>', { headers: { 'content-type': 'text/html' } })
               }
