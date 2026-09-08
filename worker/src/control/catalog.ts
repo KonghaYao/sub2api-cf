@@ -859,10 +859,37 @@ export async function getAdminModelCandidates(context: Context<ControlBindings>)
     const platform = context.req.query('platform') ?? (groupId === '0'
       ? 'openai'
       : (await requireGroup(context.env, groupId)).platform)
-    const rows = await context.env.DB.prepare(
+    const globalRows = await context.env.DB.prepare(
       `SELECT public_name FROM models WHERE platform = ? AND enabled = 1 ORDER BY public_name ASC`,
     ).bind(platform).all<{ public_name: string }>()
-    return controlSuccess({ models: rows.results.map((row) => row.public_name) })
+    const candidates = globalRows.results.map((row) => row.public_name)
+    if (groupId !== '0') {
+      const accountRows = await context.env.DB.prepare(
+        `SELECT DISTINCT trim(mapping.key) AS public_name
+           FROM account_groups ag
+           JOIN accounts a ON a.id = ag.account_id
+           JOIN json_each(CASE
+             WHEN json_type(a.ui_config_json, '$.credentials.model_mapping') = 'object'
+             THEN json_extract(a.ui_config_json, '$.credentials.model_mapping')
+             ELSE '{}'
+           END) mapping
+          WHERE ag.group_id = ?
+            AND a.enabled = 1
+            AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
+            AND a.health_status <> 'unhealthy'
+            AND trim(mapping.key) <> ''
+            AND (? = 'composite' OR a.platform = ?)
+          ORDER BY public_name ASC`,
+      ).bind(groupId, platform, platform).all<{ public_name: string }>()
+      const seen = new Set(candidates)
+      for (const row of accountRows.results) {
+        if (!seen.has(row.public_name)) {
+          seen.add(row.public_name)
+          candidates.push(row.public_name)
+        }
+      }
+    }
+    return controlSuccess({ models: candidates })
   } catch (error) {
     return controlError(asGatewayError(error))
   }
