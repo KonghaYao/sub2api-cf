@@ -1,3 +1,4 @@
+import { ResponsesOutputEvidence, ChatResponsesOutputEvidence, responsesEventCommitsOutput, type ResponsesPreludeEvidence } from './responses-output-evidence'
 import { GatewayError } from '../errors'
 import {
   isResponsesFailedTerminal,
@@ -8,7 +9,7 @@ import {
 type JsonObject = Record<string, unknown>
 
 export type ResponsesPreludeDecision =
-  | { kind: 'visible' | 'completed' | 'unresolved' }
+  | { kind: 'visible' | 'completed' | 'unresolved' | 'empty_completed' }
   | { kind: 'failed'; failure: ResponsesFailureDetails }
 
 const MAX_PRELUDE_EVENT_CHARS = 256 * 1024
@@ -48,12 +49,13 @@ const deterministicFailureCodes = new Set([
  */
 export async function inspectResponsesSsePrelude(
   response: Response,
-  options: { stopAtVisible?: boolean; maxWaitMs?: number; idleTimeoutMs?: number; signal?: AbortSignal; keepAlive?: () => Promise<void> } = {},
+  options: { stopAtVisible?: boolean; rejectEmptyCompleted?: boolean; rejectSilentChat?: boolean; maxWaitMs?: number; idleTimeoutMs?: number; signal?: AbortSignal; keepAlive?: () => Promise<void> } = {},
 ): Promise<ResponsesPreludeInspection> {
   if (response.body === null) {
     return { decision: { kind: 'unresolved' }, response }
   }
 
+  const evidence = options.rejectEmptyCompleted ? new ResponsesOutputEvidence() : options.rejectSilentChat ? new ChatResponsesOutputEvidence() : undefined
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const deadline = Date.now() + (options.maxWaitMs ?? MAX_PRELUDE_WAIT_MS)
@@ -84,6 +86,7 @@ export async function inspectResponsesSsePrelude(
             buffer,
             true,
             options.stopAtVisible !== false,
+            evidence,
           ).decision ?? { kind: 'unresolved' },
         )
       }
@@ -98,6 +101,7 @@ export async function inspectResponsesSsePrelude(
         buffer,
         false,
         options.stopAtVisible !== false,
+        evidence,
       )
       buffer = inspected.remainder
       if (inspected.decision !== null) {
@@ -175,6 +179,7 @@ function inspectBufferedFrames(
   source: string,
   flush: boolean,
   stopAtVisible: boolean,
+  evidence?: ResponsesPreludeEvidence,
 ): { decision: ResponsesPreludeDecision | null; remainder: string } {
   let remainder = source
   while (true) {
@@ -182,17 +187,17 @@ function inspectBufferedFrames(
     if (match === null) break
     const frame = remainder.slice(0, match.index)
     remainder = remainder.slice(match.index + match[0].length)
-    const decision = inspectFrame(frame, stopAtVisible)
+    const decision = inspectFrame(frame, stopAtVisible, evidence)
     if (decision !== null) return { decision, remainder }
   }
   if (flush && remainder !== '') {
-    const decision = inspectFrame(remainder, stopAtVisible)
+    const decision = inspectFrame(remainder, stopAtVisible, evidence)
     return { decision, remainder: '' }
   }
   return { decision: null, remainder }
 }
 
-function inspectFrame(frame: string, stopAtVisible: boolean): ResponsesPreludeDecision | null {
+function inspectFrame(frame: string, stopAtVisible: boolean, evidence?: ResponsesPreludeEvidence): ResponsesPreludeDecision | null {
   let eventName: string | undefined
   const data: string[] = []
   for (const line of frame.split(/\r?\n/)) {
@@ -213,10 +218,11 @@ function inspectFrame(frame: string, stopAtVisible: boolean): ResponsesPreludeDe
   const normalized = typeof parsed.type === 'string' || type === undefined
     ? parsed
     : { ...parsed, type }
-  if (stopAtVisible && isVisibleResponsesEvent(type, parsed)) return { kind: 'visible' }
+  evidence?.observe(type, parsed)
   if (isResponsesFailedTerminal(normalized)) {
     return { kind: 'failed', failure: responsesFailureDetails(normalized) }
   }
+  if ((type === 'response.completed' || type === 'response.done') && evidence?.isEmptyCompleted(parsed)) return { kind: 'empty_completed' }
   if (type === 'response.completed' || type === 'response.incomplete') return { kind: 'completed' }
   if (type === 'response.done') {
     const response = objectValue(parsed.response)
@@ -224,20 +230,8 @@ function inspectFrame(frame: string, stopAtVisible: boolean): ResponsesPreludeDe
       return { kind: 'completed' }
     }
   }
+  if (stopAtVisible && (evidence?.canRelease() ?? responsesEventCommitsOutput(type, parsed))) return { kind: 'visible' }
   return null
-}
-
-function isVisibleResponsesEvent(type: string | undefined, event: JsonObject): boolean {
-  if (
-    type === 'response.output_text.delta' ||
-    type === 'response.reasoning_summary_text.delta' ||
-    type === 'response.reasoning_text.delta'
-  ) {
-    return typeof event.delta === 'string' && event.delta !== ''
-  }
-  if (type !== 'response.output_item.added') return false
-  const item = objectValue(event.item)
-  return item?.type === 'function_call' || item?.type === 'custom_tool_call'
 }
 
 function objectValue(value: unknown): JsonObject | null {

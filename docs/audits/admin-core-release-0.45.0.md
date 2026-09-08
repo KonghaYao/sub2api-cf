@@ -147,3 +147,12 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 检查器自身的超时明确进入 504/账号重试，不再把同一超时流交给正文阶段重新等待。上游自行发送的同名错误事件仍使用原有语义与结算，不与本地计时器混淆。预读超时遵守管理端 stream-timeout 的处置配置，本次请求排除已超时账号；关闭处置时不擅自冷却账号。异常与取消均释放 reader，取消不等待上游可能挂起的 Promise。
 
 先复现慢推理 15 秒假失败和心跳未延长空闲期限两项回归。修复后网关 56 文件/831 项通过，类型检查通过；双账号原生测试等待真实 65 秒后仍由原账号完成，无备用账号调用/故障样本，至少 3 次顺序续租，余额仅扣 27 micros 一次、预留归零。专项原生 17 项通过，最终完整原生 34 文件/98 项全部通过。提交 `00390f311` 已推送 origin/main 并部署 0.45.15，Worker version `7623215d-855f-4063-8a7b-c7679111fd3a`；线上 `/health` 确认 status=ok、version=0.45.15。
+
+
+## 0.45.16：Responses 空完成与 Chat 桥接的原版边界
+
+同步原版 `openai_gateway_responses_empty_completed_test.go`（issue #5009）、`openaiStreamAddedEventStartsClientOutput` 和 `openai_silent_refusal.go`。原生 OpenAI/Codex Responses 在没有此前有效输出/正用量/失败事件、完成事件自身也没有 output/usage/error 时，于发送客户端内容前判为 `openai_silent_refusal` 并换号；无备用账号返回 502、取消预留、不扣费。保留未知原生工具、有效加密推理、工具参数、拒绝内容与完成事件的 usage（包括显式 null）的原行为。此前 metadata 的 error:null 不当作真实失败，避免掩盖后续空完成。
+
+Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大小启用 64 KiB 阈值，采用原版 Chat 对工具/推理字段及 usage 对象的语义；小 Chat 请求保持原行为。入口接口与上游接口不再混用。原生 Responses 中空工具/消息/推理占位事件不提前提交请求；Chat 中原版允许的工具/推理占位证据仍保留。明确失败状态或 error 的 completed 事件按失败处理，不伪装空完成或成功。
+
+先复现 7 项检测缺口，网关 56 文件/856 项通过；最终边界与处理链 212 项通过，类型检查通过。原生覆盖 Chat 大/小请求、两种公开接口、流式/非流式、有无备用账号，验证失败账号样本、无空前缀泄漏、一次扣费与租约归零。完整原生 35 文件/107 项通过，补充真实 metadata null 字段后 9 项原生复测通过。部署结果待追加。

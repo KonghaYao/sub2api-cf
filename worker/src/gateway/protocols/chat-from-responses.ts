@@ -32,6 +32,7 @@ export function isResponsesFailedTerminal(value: unknown): boolean {
     type === 'response.failed' || type === 'response.canceled' ||
     type === 'response.cancelled' || type === 'error'
   ) return true
+  if (type === 'response.completed') return hasError || ['failed', 'cancelled', 'canceled'].includes(String(response?.status))
   if (type === 'response.incomplete') return hasError
   if (type !== 'response.done') return false
   const status = optionalString(response?.status)

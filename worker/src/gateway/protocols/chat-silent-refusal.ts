@@ -28,6 +28,17 @@ export class ChatSilentRefusalDetector {
     if (!root) return
     if (Object.hasOwn(root, 'error') || object(root.usage) || object(object(root.response)?.usage)) this.released = true
     if (root.type === 'error' || root.type === 'response.failed' || typeof root.type === 'string' && root.type.includes('reasoning')) this.released = true
+    const type = typeof root.type === 'string' ? root.type.trim() : event
+    if (type === 'error' || type === 'response.failed') this.released = true
+    if (type === 'response.output_text.delta' && typeof root.delta === 'string' && root.delta !== '') this.released = true
+    if (type === 'response.output_item.added' && ['function_call', 'reasoning'].includes(root.item?.type)) this.released = true
+    if (type === 'response.function_call_arguments.delta') this.released = true
+    if (type === 'response.completed' || type === 'response.done') this.finishReason = 'stop'
+    if (type === 'response.incomplete') this.finishReason = 'length'
+    if (Array.isArray(root.response?.output)) for (const item of root.response.output) {
+      if (['function_call', 'reasoning'].includes(item?.type)) this.released = true
+      if (item?.type === 'message' && Array.isArray(item.content) && item.content.some((part: any) => typeof part?.text === 'string' && part.text !== '')) this.released = true
+    }
     if (Array.isArray(root.choices)) for (const choice of root.choices) {
       if (typeof choice?.finish_reason === 'string' && choice.finish_reason.trim()) this.finishReason = choice.finish_reason.trim()
       const delta = object(choice?.delta)

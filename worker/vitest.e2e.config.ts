@@ -98,6 +98,14 @@ export default defineConfig(async () => {
                 if (!valid) return Response.json({error:'anthropic provider settings mismatch'},{status:422})
                 return Response.json({id:'provider',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'provider-settings-verified'}],stop_reason:'end_turn',usage:{input_tokens:10,output_tokens:5}})
               }
+              if (body.model === 'responses-empty-completed-fixture') {
+                const recovered = request.headers.get('authorization') === 'Bearer silent-recovery-key'
+                const events = recovered
+                  ? [{ type: 'response.completed', response: { id: 'recovered-attempt', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Recovered' }] }], usage: { input_tokens: 10, output_tokens: 5 } } }]
+                  : [{ type: 'response.created', response: { id: 'empty-attempt', status: 'in_progress', error: null, usage: null, output: [] } },
+                     { type: 'response.completed', response: { id: 'empty-attempt', status: 'completed', output: [] } }]
+                return new Response(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } })
+              }
               if (body.model === 'responses-slow-prelude-fixture') {
                 const fallback = request.headers.get('authorization') === 'Bearer unexpected-fallback-key'
                 return new Response(new ReadableStream<Uint8Array>({ start(controller) {

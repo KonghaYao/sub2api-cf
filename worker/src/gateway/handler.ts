@@ -1361,6 +1361,7 @@ async function dispatchGateway(
         return { endpoint: selectedEndpoint, dispatch: { ...dispatch, body: applyGatewayBodySettings(gatewaySettings, dispatch.body, candidate.platform) } }
       } : undefined,
       admission,
+      { endpoint, bodyBytes: parsed.bytes.byteLength },
     ).catch(async (error) => {
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
@@ -1680,6 +1681,7 @@ async function acquireUpstream(
   accountThresholds?: AccountSchedulingThresholds,
   resolveAttempt?: (accountId: string) => { endpoint: TextGatewayEndpoint; dispatch: ProviderDispatch },
   headerAdmission: ApiKeyAdmissionLease | null = null,
+  inbound?: { endpoint: TextGatewayEndpoint; bodyBytes: number },
 ): Promise<AcquiredUpstream> {
   const renewals: HeaderRenewals = { pool: 0, admission: 0, billing: 0, lastBillingRenewedAt: Date.now() }
   let agentRecoveryTried = false
@@ -1868,12 +1870,22 @@ async function acquireUpstream(
       ) {
         const inspected = await inspectResponsesSsePrelude(response, {
           stopAtVisible: clientStream,
+          rejectEmptyCompleted: (inbound?.endpoint ?? endpoint) !== 'chat_completions' && (account.platform === 'openai' || account.platform === 'codex'),
+          rejectSilentChat: (inbound?.endpoint ?? endpoint) === 'chat_completions' && (account.platform === 'openai' || account.platform === 'codex') &&
+            (inbound?.bodyBytes ?? encoder.encode(stringifyJsonPreservingIntegers(originalBody)).byteLength) >= 64 * 1024,
           signal: clientSignal,
           idleTimeoutMs: BODY_IDLE_TIMEOUT_MS,
           keepAlive: responseOwner ? renewHeaders : undefined,
         })
         response = inspected.response
         const semantic = inspected.decision
+        if (semantic.kind === 'empty_completed') {
+          void response.body?.cancel().catch(() => undefined)
+          thresholdExcluded.push(accountId)
+          const failure = new GatewayError(502, 'openai_silent_refusal', 'Upstream returned an empty completion without usage; no fallback account was available', 'upstream_error')
+          failure.upstreamAccountId = accountId
+          throw failure
+        }
         if (semantic.kind === 'failed') {
           if (inspected.timedOut) {
             void response.body?.cancel().catch(() => undefined)
