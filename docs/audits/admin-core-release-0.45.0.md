@@ -179,4 +179,4 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 - GPT-5/Codex Chat 桥接缺省键由已映射模型、system、首条 user、工具/函数及 reasoning/tool_choice 得到，后续 user/assistant 追加不改变键。API Key 自动缓存键按租户隔离，显式 body key 保留、上游 session 仍隔离。OAuth保留原版compat_cc种子形式、session按Key隔离。Worker Key是字符串ID，租户隔离使用显式版本命名空间SHA-256，而非Go整数ID的xxhash字节编码；稳定性与隔离契约一致，不声称跨部署实现的生成值相同。
 - OpenAI/Codex/Grok文本请求无显式session时，按原版 model/tools/functions/instructions/前置system或developer/首条user形成内容关联。Chat晚加入的system消息不改变调度身份；Responses input有独立原版规则。关联键在送入Pool之前以含user/key/group/model/endpoint命名空间的现有加密摘要隐藏原始内容。原生Chat请求体不新增自动缓存键，Embeddings等保持既有显式关联边界。
 
-新增原生测试验证桥接上游实际收到的键/会话：跨轮次稳定、跨Key隔离、显式键/头优先级、原生Chat不注入；计费一次、预留归零。专项177项通过，完整网关57文件/867项通过，类型检查通过。完整原生36文件/109项通过，部署证据待追加。本轮不将fixture中的稳定键表述为生产上游实际缓存命中率，也不宣称已完成所有OAuth账号身份能力。
+新增原生测试验证桥接上游实际收到的键/会话：跨轮次稳定、跨Key隔离、显式键/头优先级、原生Chat不注入；计费一次、预留归零。专项177项通过，完整网关57文件/867项通过，类型检查通过。完整原生36文件/109项通过。提交 `a2b37aff3` 已推送 origin/main 并部署0.45.18，Worker version `d0788e02-7391-4e0f-816c-72e434f945b6`；线上health确认status=ok、version=0.45.18。本轮不将fixture中的稳定键表述为生产上游实际缓存命中率，也不宣称已完成所有OAuth账号身份能力。
