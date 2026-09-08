@@ -1,3 +1,4 @@
+import { chatPromptCacheIdentity, openAIContentSessionSeed } from './chat-prompt-cache'
 import { inspectChatSilentRefusal } from './protocols/chat-silent-refusal'
 import { chatJsonStream } from './protocols/chat-json-stream'
 import { normalizeOpenAIUsage } from './usage'
@@ -1276,6 +1277,7 @@ async function dispatchGateway(
       principal,
       model.model_id,
       upstreamEndpoint,
+      (endpoint === 'chat_completions' || endpoint === 'responses') && ['openai', 'codex', 'grok'].includes(provider),
     )
     let providerDispatch = prepared.resolveUpstream(model, (route.candidates[0]?.upstream_endpoint ?? upstreamEndpoint) as TextGatewayEndpoint, provider)
     observedUpstreamEndpoint = providerOperationPath(providerDispatch.operation, provider)
@@ -1762,6 +1764,13 @@ async function acquireUpstream(
       const chatFromResponses = selectedOperation === 'chat_completions' && account.platform === 'openai' && account.credential_kind === 'oauth'
       const wireOperation = chatFromResponses ? 'responses' : selectedOperation
       if (chatFromResponses) mappedBody = chatCompletionsToResponsesRequest(mappedBody, actualModel)
+      const chatCache = inbound?.endpoint === 'chat_completions' && wireOperation === 'responses' && responseOwner &&
+        (account.platform === 'openai' || account.platform === 'codex')
+        ? await chatPromptCacheIdentity({ body: originalBody, model: actualModel ?? '', headers: inboundHeaders,
+          apiKeyId: responseOwner.api_key_id, oauth: account.platform === 'codex' || account.credential_kind === 'oauth' }) : null
+      if (chatCache && mappedBody && typeof mappedBody === 'object' && !Array.isArray(mappedBody)) {
+        mappedBody = { ...mappedBody, prompt_cache_key: chatCache.promptCacheKey }
+      }
       let plan = buildAccountProviderRequest({
         account,
         ...authentication,
@@ -1770,6 +1779,7 @@ async function acquireUpstream(
         body: mappedBody,
         client_headers: inboundHeaders,
       })
+      if (chatCache) plan.headers.set('session_id', chatCache.sessionId)
       if (wireOperation === 'responses' && plan.body && typeof plan.body === 'object' && 'model' in plan.body && typeof plan.body.model === 'string') {
         actualModel = plan.body.model
       }
@@ -4113,8 +4123,9 @@ async function gatewaySessionAffinityKey(
   principal: Awaited<ReturnType<typeof authenticateGatewayRequest>>,
   modelId: string,
   endpoint: TextGatewayEndpoint,
+  contentFallback = false,
 ): Promise<string | undefined> {
-  const signal = sessionAffinitySignal(headers, body)
+  const signal = sessionAffinitySignal(headers, body) ?? (contentFallback ? openAIContentSessionSeed(body) : undefined)
   if (signal === undefined || !env.API_KEY_PEPPER) return undefined
   return apiKeyDigest(
     [

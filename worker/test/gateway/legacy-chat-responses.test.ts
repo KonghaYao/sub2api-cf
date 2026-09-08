@@ -5,6 +5,10 @@ import {
 } from '../../src/gateway/protocols/chat-responses'
 
 describe('legacy Chat Completions to Responses contract', () => {
+  it('preserves an explicit prompt cache key for the Responses bridge', () => {
+    expect(chatCompletionsToResponsesRequest({ model: 'public', messages: [{role:'user',content:'Hi'}], prompt_cache_key: 'session-cache' }).prompt_cache_key).toBe('session-cache')
+  })
+
   it('normalizes fast and accepts scale service tiers', () => {
     expect(chatCompletionsToResponsesRequest({
       model: 'public-model', messages: [{ role: 'user', content: 'Hello' }],

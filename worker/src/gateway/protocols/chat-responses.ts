@@ -31,6 +31,7 @@ export class ChatToResponsesError extends Error {
 export interface ChatToResponsesRequest extends JsonObject {
   model: string
   instructions?: string
+  prompt_cache_key?: string
   input: Array<Record<string, unknown>>
   stream: true
   store: false
@@ -71,6 +72,10 @@ export function chatCompletionsToResponsesRequest(
     stream: true,
     store: false,
     include: ['reasoning.encrypted_content'],
+  }
+
+  if (typeof root.prompt_cache_key === 'string' && root.prompt_cache_key.trim()) {
+    result.prompt_cache_key = root.prompt_cache_key.trim()
   }
 
   if (root.instructions !== undefined) {

@@ -119,6 +119,10 @@ export default defineConfig(async () => {
                   if (fallback) finish(); else setTimeout(finish, 65_000)
                 } }), { headers: { 'content-type': 'text/event-stream' } })
               }
+              if (body.model === 'gpt-5.4-cache-probe') {
+                const text = JSON.stringify({ key: body.prompt_cache_key ?? null, session: request.headers.get('session_id') })
+                return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'cache-probe',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+              }
               if (body.model === 'provider-forwarding-native') {
                 if(request.headers.get('user-agent')!=='codex-tui/0.200.0 (Linux)' || request.headers.get('version')!=='0.200.0' || request.headers.get('originator')!=='codex-tui')return Response.json({error:'codex provider settings mismatch'},{status:422})
                 return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'provider',object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'provider-settings-verified'}]}],usage:{input_tokens:10,output_tokens:5}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
@@ -126,6 +130,7 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
+              if (body.model === 'gpt-5.4-cache-probe') return Response.json({id:'raw-cache-probe',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:JSON.stringify({key:body.prompt_cache_key??null,session:request.headers.get('session_id')})},finish_reason:'stop'}],usage:{prompt_tokens:6,completion_tokens:2}})
               if (body.model === 'chat-json-cache-fixture' || body.model === 'chat-json-diagnostic-fixture') {
                 if (body.stream !== true || (body.model === 'chat-json-cache-fixture' && (body.stream_options as any)?.include_usage !== true)) return Response.json({ error: 'stream flag missing' }, { status: 422 })
                 return Response.json({ id: 'json-cache', object: 'chat.completion', model: body.model, created: 123,

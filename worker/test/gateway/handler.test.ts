@@ -4831,6 +4831,22 @@ describe('OpenAI-compatible gateway', () => {
     expect(limit.calls.filter((call) => call.path === '/monetary/cancel')).toHaveLength(1)
   })
 
+  it('keeps headerless Chat turns on a content-derived, tenant-scoped account affinity', async () => {
+    const { env, pool } = await harness()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ id:'chat-cache',object:'chat.completion',model:'gpt-upstream',choices:[{index:0,message:{role:'assistant',content:'OK'},finish_reason:'stop'}],usage:{prompt_tokens:6,completion_tokens:2} })))
+    const messages = [{role:'system',content:'Private prefix'},{role:'user',content:'Private first message'}]
+    for (const turn of [messages,[...messages,{role:'assistant',content:'Answer'},{role:'user',content:'Next'}]]) {
+      const res = await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',messages:turn,stream:false})},env)
+      expect(res.status).toBe(200)
+      await res.text()
+    }
+    const reserves=pool.calls.filter(call=>call.path==='/reserve')
+    expect(reserves).toHaveLength(2)
+    expect(reserves[0].body.affinity_key).toMatch(/^[a-f0-9]{64}$/)
+    expect(reserves[1].body.affinity_key).toBe(reserves[0].body.affinity_key)
+    expect(JSON.stringify(reserves)).not.toContain('Private')
+  })
+
   it('keeps a hashed session sticky, clears it on failure, and rebinds the fallback account', async () => {
     const { env, database, user, pool, limit } = await harness()
     await addGatewayAccount(database, 'account-2', 'https://upstream-two.example/v1')
