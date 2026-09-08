@@ -232,4 +232,4 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 
 在实际上游send前，对client originalBody与最终plan.body分别计算消息、完整context、tools及显式cache/session标识的HMAC-SHA256指纹。API Key身份加入HMAC域，日志不输出提示词、工具名、原始会话值或凭据；最多128条消息指纹并注明截断，记录request_id/account_id用于关联既有usage。仅production Composer两模型启用，强制截止2026-09-09T00:00:00Z后自动关闭。日志事件context_cache_fingerprint_v1，可用wrangler tail观察。此版本只采集可用于定位的证据，不生成缓存、不替换回答、不宣称上下文缓存根因已修复。
 
-893项全量网关、2项原生Worker测试及typecheck通过。新增真实handler长前缀/工具历史/cachekey/retention跨轮保持测试，诊断的client/upstream指纹一致；原生crypto处理长context不修改原对象且不泄露正文，ChatJSON→SSE缓存回归保留。原版rawChat明确不透传Codex session/conversation头、不自动注入prompt_cache_key，因此没有盲目向Composer注入这些字段。部署结果待确认。
+893项全量网关、2项原生Worker测试及typecheck通过。新增真实handler长前缀/工具历史/cachekey/retention跨轮保持测试，诊断的client/upstream指纹一致；原生crypto处理长context不修改原对象且不泄露正文，ChatJSON→SSE缓存回归保留。原版rawChat明确不透传Codex session/conversation头、不自动注入prompt_cache_key，因此没有盲目向Composer注入这些字段。诊断提交 `389fbd907` 已推送origin/main并部署0.45.25，Worker version `54f363d6-4442-4f08-9d39-2dd8ce1f6dd4`，线上health确认status=ok/version=0.45.25。期间主分支新增模型配置及分组分页修复，已rebase保留并补验13项后端、23项前端测试。实时tail已启动，根因仍待新请求证据。
