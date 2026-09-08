@@ -1118,22 +1118,6 @@ export async function setSchedulable(id: number | string, schedulable: boolean, 
  * @param id - Account ID
  * @returns List of available models for this account
  */
-export interface AccountModelCapabilityInput {
-  model_id: string
-  chat_completions: boolean
-  responses: boolean
-  embeddings: boolean
-  image_generation: boolean
-}
-
-export async function setModelCapability(account: Account, input: AccountModelCapabilityInput): Promise<Account> {
-  const { data } = await apiClient.put<Account>(`/admin/accounts/${account.id}/models/${input.model_id}`, {
-    ...input,
-    expected_control_version: (account as any).control_version,
-  })
-  return adaptAccount(data)
-}
-
 export async function getAvailableModels(id: number | string): Promise<ClaudeModel[]> {
   const { data } = await apiClient.get<ClaudeModel[]>(`/admin/accounts/${id}/models`)
   return data
@@ -1686,7 +1670,6 @@ export const accountsAPI = {
   resetTempUnschedulable,
   setSchedulable,
   getAvailableModels,
-  setModelCapability,
   syncUpstreamModels,
   syncUpstreamModelsPreview,
   generateAuthUrl,

@@ -46,16 +46,6 @@ class CatalogStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
-    if (this.query.includes('SELECT public_name FROM models WHERE platform = ?')) {
-      const platform = String(this.values[0])
-      return rowsResult([...this.database.models.values()]
-        .filter((model) => model.platform === platform && model.enabled === 1)
-        .sort((left, right) => left.public_name.localeCompare(right.public_name))
-        .map((model) => ({ public_name: model.public_name })) as T[])
-    }
-    if (this.query.includes('JOIN json_each') && this.query.includes('credentials.model_mapping')) {
-      return rowsResult(this.database.accountMappingCandidates.map((public_name) => ({ public_name })) as T[])
-    }
     if (this.query.includes('FROM group_models gm JOIN models')) {
       const groupId = String(this.values[0])
       const rows = [...this.database.groupModels.values()]
@@ -298,7 +288,6 @@ class CatalogDatabase {
   readonly groupModels = new Map<string, Row>()
   readonly prices = new Map<string, Row>()
   readonly idempotency = new Map<string, Row>()
-  readonly accountMappingCandidates: string[] = []
   beforeBatch?: () => void
 
   prepare(query: string): CatalogStatement {
@@ -467,23 +456,6 @@ async function linkModel(database: CatalogDatabase, groupId: string, modelId: st
 }
 
 describe('admin catalog control plane', () => {
-  it('includes schedulable group account model mappings in model-list candidates', async () => {
-    const database = new CatalogDatabase()
-    const group = await createGroup(database, 'mapping-candidates')
-    await createModel(database, 'catalog-candidate', { public_name: 'catalog-model' })
-    database.accountMappingCandidates.push('mapped-model', 'catalog-model')
-
-    const response = await request(
-      database,
-      `/api/v1/admin/groups/${group.id}/models-list-candidates`,
-      'GET',
-      'unused-candidate-key',
-    )
-
-    expect(response.status).toBe(200)
-    expect((await json(response)).data.models).toEqual(['catalog-model', 'mapped-model'])
-  })
-
   it('creates an OpenAI group idempotently with gateway billing/catalog settings', async () => {
     const database = new CatalogDatabase()
     const body = {

@@ -3,7 +3,6 @@ import type { Env } from '../env'
 import { groupAccountCountColumnsSql } from './group-account-counts'
 import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { accountModelAllowedSql } from '../gateway/account-model-policy'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -854,80 +853,16 @@ export async function publishAdminModelPrice(context: Context<ControlBindings>):
   }
 }
 
-export async function diagnoseAdminGroupModel(context: Context<ControlBindings>): Promise<Response> {
-  try {
-    const groupId = requireResourceId(context.req.param('id'), 'group')
-    const modelId = requireResourceId(context.req.param('model_id'), 'model')
-    const row = await context.env.DB.prepare(
-      `SELECT g.enabled AS group_enabled, m.enabled AS model_enabled, gm.enabled AS group_model_enabled,
-              EXISTS(SELECT 1 FROM model_prices p WHERE p.group_id=gm.group_id AND p.model_id=gm.model_id AND p.active=1) AS active_price,
-              (SELECT COUNT(*) FROM account_groups ag JOIN accounts a ON a.id=ag.account_id WHERE ag.group_id=g.id) AS group_accounts,
-              (SELECT COUNT(*) FROM account_groups ag JOIN accounts a ON a.id=ag.account_id
-                JOIN account_models am ON am.account_id=a.id AND am.model_id=m.id
-               WHERE ag.group_id=g.id AND a.platform=m.platform AND a.enabled=1
-                 AND COALESCE(json_extract(a.ui_config_json,'$.schedulable'),1)=1 AND a.health_status<>'unhealthy'
-                 AND (json_extract(a.ui_config_json,'$.expires_at') IS NULL OR datetime(json_extract(a.ui_config_json,'$.expires_at')) > datetime('now'))
-                 AND (json_extract(a.ui_config_json,'$.rate_limit_reset_at') IS NULL OR datetime(json_extract(a.ui_config_json,'$.rate_limit_reset_at')) <= datetime('now'))
-                 AND (json_extract(a.ui_config_json,'$.temp_unschedulable_until') IS NULL OR datetime(json_extract(a.ui_config_json,'$.temp_unschedulable_until')) <= datetime('now'))
-                 AND (json_extract(a.ui_config_json,'$.temporary_block_until') IS NULL OR datetime(json_extract(a.ui_config_json,'$.temporary_block_until')) <= datetime('now'))
-                 AND ${accountModelAllowedSql()}
-                 AND CASE WHEN m.image_generation=1 THEN am.image_generation=1 WHEN m.embeddings=1 THEN am.embeddings=1
-                   WHEN m.endpoint='chat_completions' THEN am.chat_completions=1 WHEN m.endpoint='responses' THEN am.responses=1
-                   ELSE (am.chat_completions=1 OR am.responses=1) END) AS capable_accounts
-         FROM group_models gm JOIN "groups" g ON g.id=gm.group_id JOIN models m ON m.id=gm.model_id
-        WHERE gm.group_id=? AND gm.model_id=?`,
-    ).bind(groupId, modelId).first<Record<string, number>>()
-    const blockers: string[] = []
-    if (!row) blockers.push('group_model_missing')
-    else {
-      if (row.group_enabled !== 1) blockers.push('group_disabled')
-      if (row.model_enabled !== 1) blockers.push('global_model_disabled')
-      if (row.group_model_enabled !== 1) blockers.push('group_model_disabled')
-      if (row.active_price !== 1) blockers.push('active_price_missing')
-      if (row.group_accounts < 1) blockers.push('no_group_account')
-      if (row.capable_accounts < 1) blockers.push('no_healthy_capable_account')
-    }
-    return controlSuccess({ routable: blockers.length === 0, blockers, checks: row ?? null })
-  } catch (error) { return controlError(asGatewayError(error)) }
-}
-
 export async function getAdminModelCandidates(context: Context<ControlBindings>): Promise<Response> {
   try {
     const groupId = context.req.param('id')
     const platform = context.req.query('platform') ?? (groupId === '0'
       ? 'openai'
       : (await requireGroup(context.env, groupId)).platform)
-    const globalRows = await context.env.DB.prepare(
+    const rows = await context.env.DB.prepare(
       `SELECT public_name FROM models WHERE platform = ? AND enabled = 1 ORDER BY public_name ASC`,
     ).bind(platform).all<{ public_name: string }>()
-    const candidates = globalRows.results.map((row) => row.public_name)
-    if (groupId !== '0') {
-      const accountRows = await context.env.DB.prepare(
-        `SELECT DISTINCT trim(mapping.key) AS public_name
-           FROM account_groups ag
-           JOIN accounts a ON a.id = ag.account_id
-           JOIN json_each(CASE
-             WHEN json_type(a.ui_config_json, '$.credentials.model_mapping') = 'object'
-             THEN json_extract(a.ui_config_json, '$.credentials.model_mapping')
-             ELSE '{}'
-           END) mapping
-          WHERE ag.group_id = ?
-            AND a.enabled = 1
-            AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
-            AND a.health_status <> 'unhealthy'
-            AND trim(mapping.key) <> ''
-            AND (? = 'composite' OR a.platform = ?)
-          ORDER BY public_name ASC`,
-      ).bind(groupId, platform, platform).all<{ public_name: string }>()
-      const seen = new Set(candidates)
-      for (const row of accountRows.results) {
-        if (!seen.has(row.public_name)) {
-          seen.add(row.public_name)
-          candidates.push(row.public_name)
-        }
-      }
-    }
-    return controlSuccess({ models: candidates })
+    return controlSuccess({ models: rows.results.map((row) => row.public_name) })
   } catch (error) {
     return controlError(asGatewayError(error))
   }

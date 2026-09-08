@@ -4553,32 +4553,10 @@
       <div v-if="groupModelsLoading" class="py-8 text-center text-gray-500">
         {{ t("common.loading") }}
       </div>
+      <div v-else-if="groupModels.length === 0" class="py-8 text-center text-gray-500">
+        {{ t("admin.groups.groupModels.empty") }}
+      </div>
       <div v-else class="space-y-3">
-        <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-          <div class="mb-2 font-medium text-gray-900 dark:text-gray-100">
-            {{ t("admin.groups.groupModels.addModel") }}
-          </div>
-          <div class="flex gap-2">
-            <select v-model="selectedGroupModelCandidateId" class="input flex-1">
-              <option value="">{{ t("admin.groups.groupModels.selectModel") }}</option>
-              <option v-for="candidate in groupModelCandidates" :key="candidate.id" :value="candidate.id">
-                {{ candidate.public_name }}
-              </option>
-            </select>
-            <button
-              type="button"
-              class="btn btn-primary"
-              :disabled="!selectedGroupModelCandidateId || addingGroupModel"
-              @click="addGroupModel"
-            >
-              {{ addingGroupModel ? t("common.saving") : t("admin.groups.groupModels.add") }}
-            </button>
-          </div>
-          <p class="input-hint">{{ t("admin.groups.groupModels.routingHint") }}</p>
-        </div>
-        <div v-if="groupModels.length === 0" class="py-8 text-center text-gray-500">
-          {{ t("admin.groups.groupModels.empty") }}
-        </div>
         <div
           v-for="model in groupModels"
           :key="model.model_id"
@@ -4588,8 +4566,6 @@
             {{ model.public_name }}
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
-            <label class="flex items-center gap-2 text-sm"><input v-model="model.enabled" type="checkbox" />{{ t("admin.groups.groupModels.enabled", "可路由") }}</label>
-            <label class="flex items-center gap-2 text-sm"><input v-model="model.catalog_visible" type="checkbox" />{{ t("admin.groups.groupModels.catalogVisible", "目录可见") }}</label>
             <label class="space-y-1 text-sm">
               <span>{{ t("admin.groups.groupModels.maxOutputTokens") }}</span>
               <input v-model.number="model.max_output_tokens" class="input" type="number" min="1" max="1000000" />
@@ -4599,15 +4575,7 @@
               <input v-model.number="model.default_max_output_tokens" class="input" type="number" min="1" :max="model.max_output_tokens" />
             </label>
           </div>
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <div class="flex items-center gap-2 text-sm">
-              <span :class="groupModelDiagnoses[model.model_id]?.routable ? 'text-green-600' : 'text-amber-600'">
-                {{ groupModelDiagnoses[model.model_id]?.routable ? t('admin.groups.groupModels.diagnosis.routable') : t('admin.groups.groupModels.diagnosis.blocked') }}
-              </span>
-              <span v-for="code in groupModelDiagnoses[model.model_id]?.blockers || []" :key="code" class="rounded bg-amber-100 px-2 py-1 text-xs dark:bg-amber-900/30">{{ diagnosisReason(code) }}</span>
-              <button class="text-primary-600" type="button" @click="loadGroupModelDetails(model)">{{ t('admin.groups.groupModels.refreshDiagnosis') }}</button>
-              <button class="text-primary-600" type="button" @click="togglePricing(model)">{{ t('admin.groups.groupModels.pricing') }}</button>
-            </div>
+          <div class="mt-3 flex justify-end">
             <button
               type="button"
               class="btn btn-primary"
@@ -4616,18 +4584,6 @@
             >
               {{ savingGroupModelId === model.model_id ? t("common.saving") : t("common.save") }}
             </button>
-          </div>
-          <div v-if="pricingModelId === model.model_id" class="mt-4 border-t pt-4 dark:border-dark-600">
-            <h4 class="mb-2 font-medium">{{ t('admin.groups.groupModels.priceHistory') }}</h4>
-            <div class="mb-4 space-y-1 text-xs">
-              <div v-for="price in groupModelPrices[model.model_id] || []" :key="price.id" class="grid grid-cols-6 gap-2">
-                <span>v{{ price.version }} {{ price.active ? t('admin.groups.groupModels.active') : '' }}</span><span>{{ price.input_micros_per_million }}</span><span>{{ price.output_micros_per_million }}</span><span>{{ price.cache_read_micros_per_million }}</span><span>{{ price.per_request_micros }}</span><span>{{ price.minimum_reservation_micros }}</span>
-              </div>
-            </div>
-            <div class="grid gap-2 sm:grid-cols-5">
-              <label v-for="field in priceFields" :key="field" class="text-xs"><span>{{ t(`admin.groups.groupModels.priceFields.${field}`) }}</span><input v-model.number="priceForm[field]" class="input" type="number" :min="field === 'minimum_reservation_micros' ? 1 : 0" required /></label>
-            </div>
-            <div class="mt-2 flex justify-end"><button type="button" class="btn btn-primary" @click="publishPrice(model)">{{ t('admin.groups.groupModels.publishPrice') }}</button></div>
           </div>
         </div>
       </div>
@@ -4697,7 +4653,7 @@ import {
   toNullableNumber,
 } from "@/components/admin/channel/types";
 import type { ChannelModelPricing } from "@/api/admin/channels";
-import type { GroupModelCandidate, GroupModelConfig, GroupModelDiagnosis, GroupModelPrice, PublishGroupModelPriceInput } from "@/api/admin/groups";
+import type { GroupModelConfig } from "@/api/admin/groups";
 import { VueDraggable } from "vue-draggable-plus";
 import { createStableObjectKeyResolver } from "@/utils/stableObjectKey";
 import { extractApiErrorMessage } from "@/utils/apiError";
@@ -5230,20 +5186,8 @@ const rpmOverridesGroup = ref<AdminGroup | null>(null);
 const showGroupModelsModal = ref(false);
 const groupModelsGroup = ref<AdminGroup | null>(null);
 const groupModels = ref<GroupModelConfig[]>([]);
-const groupModelCandidates = ref<GroupModelCandidate[]>([]);
-const selectedGroupModelCandidateId = ref("");
-const addingGroupModel = ref(false);
 const groupModelsLoading = ref(false);
 const savingGroupModelId = ref<string | null>(null);
-const groupModelDiagnoses = reactive<Record<string, GroupModelDiagnosis>>({});
-const groupModelPrices = reactive<Record<string, GroupModelPrice[]>>({});
-const pricingModelId = ref<string | null>(null);
-const priceFields = ["input_micros_per_million", "output_micros_per_million", "cache_read_micros_per_million", "per_request_micros", "minimum_reservation_micros"] as const;
-const priceForm = reactive<PublishGroupModelPriceInput>({ input_micros_per_million: 0, output_micros_per_million: 0, cache_read_micros_per_million: 0, per_request_micros: 0, minimum_reservation_micros: 1 });
-const diagnosisReason = (code: string) => t(`admin.groups.groupModels.diagnosis.reasons.${code}`);
-const loadGroupModelDetails = async (model: GroupModelConfig) => { if (!groupModelsGroup.value) return; groupModelDiagnoses[model.model_id] = await adminAPI.groups.diagnoseGroupModel(groupModelsGroup.value.id, model.model_id); };
-const togglePricing = async (model: GroupModelConfig) => { pricingModelId.value = pricingModelId.value === model.model_id ? null : model.model_id; if (pricingModelId.value && groupModelsGroup.value) groupModelPrices[model.model_id] = await adminAPI.groups.listGroupModelPrices(groupModelsGroup.value.id, model.model_id); };
-const publishPrice = async (model: GroupModelConfig) => { if (!groupModelsGroup.value) return; try { await adminAPI.groups.publishGroupModelPrice(groupModelsGroup.value.id, model, { ...priceForm }); groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id); const refreshed = groupModels.value.find(item => item.model_id === model.model_id); if (refreshed) model = refreshed; groupModelPrices[model.model_id] = await adminAPI.groups.listGroupModelPrices(groupModelsGroup.value.id, model.model_id); await loadGroupModelDetails(model); appStore.showSuccess(t("admin.groups.groupModels.pricePublished")); } catch (error) { appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.pricePublishFailed"))); } };
 const sortableGroups = ref<AdminGroup[]>([]);
 type ConcreteGroupPlatform = Exclude<GroupPlatform, "composite">;
 type CompositeRouteFormState = {
@@ -6692,11 +6636,6 @@ const handleGroupModels = async (group: AdminGroup) => {
   groupModelsLoading.value = true;
   try {
     groupModels.value = await adminAPI.groups.listGroupModels(group.id);
-    await Promise.all(groupModels.value.map(loadGroupModelDetails));
-    groupModelCandidates.value = await adminAPI.groups.listGroupModelCandidates(
-      group.id,
-      new Set(groupModels.value.map((model) => model.model_id)),
-    );
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.loadFailed")));
   } finally {
@@ -6708,31 +6647,6 @@ const closeGroupModelsModal = () => {
   showGroupModelsModal.value = false;
   groupModelsGroup.value = null;
   groupModels.value = [];
-  groupModelCandidates.value = [];
-  selectedGroupModelCandidateId.value = "";
-};
-
-const addGroupModel = async () => {
-  if (!groupModelsGroup.value || !selectedGroupModelCandidateId.value) return;
-  const candidate = groupModelCandidates.value.find(
-    (model) => model.id === selectedGroupModelCandidateId.value,
-  );
-  if (!candidate) return;
-  addingGroupModel.value = true;
-  try {
-    await adminAPI.groups.createGroupModel(groupModelsGroup.value.id, candidate);
-    groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id);
-    groupModelCandidates.value = await adminAPI.groups.listGroupModelCandidates(
-      groupModelsGroup.value.id,
-      new Set(groupModels.value.map((model) => model.model_id)),
-    );
-    selectedGroupModelCandidateId.value = "";
-    appStore.showSuccess(t("admin.groups.groupModels.addSuccess"));
-  } catch (error) {
-    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.addFailed")));
-  } finally {
-    addingGroupModel.value = false;
-  }
 };
 
 const saveGroupModel = async (model: GroupModelConfig) => {
@@ -6744,8 +6658,6 @@ const saveGroupModel = async (model: GroupModelConfig) => {
   savingGroupModelId.value = model.model_id;
   try {
     const updated = await adminAPI.groups.updateGroupModel(groupModelsGroup.value.id, model, {
-      enabled: model.enabled,
-      catalog_visible: model.catalog_visible,
       max_output_tokens: model.max_output_tokens,
       default_max_output_tokens: model.default_max_output_tokens,
     });

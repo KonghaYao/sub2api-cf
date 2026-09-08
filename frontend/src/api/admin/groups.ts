@@ -379,7 +379,7 @@ export async function getById(id: string | number): Promise<AdminGroup> {
  * id=0 returns platform default models for create flow.
  */
 export async function getModelsListCandidates(
-  id: string | number,
+  id: number,
   platform?: GroupPlatform
 ): Promise<string[]> {
   const { data } = await apiClient.get<{ models: string[] }>(
@@ -856,76 +856,9 @@ export interface GroupModelConfig {
   control_version: number
 }
 
-export interface GroupModelCandidate {
-  id: string
-  public_name: string
-}
-
 export interface UpdateGroupModelConfig {
-  enabled?: boolean
-  catalog_visible?: boolean
   max_output_tokens: number
   default_max_output_tokens: number
-}
-
-export interface GroupModelPrice {
-  id: string
-  version: number
-  active: boolean
-  input_micros_per_million: number
-  output_micros_per_million: number
-  cache_read_micros_per_million: number
-  per_request_micros: number
-  minimum_reservation_micros: number
-}
-
-export type PublishGroupModelPriceInput = Omit<GroupModelPrice, 'id' | 'version' | 'active'>
-
-export async function listGroupModelCandidates(
-  groupId: string | number,
-  linkedModelIds: ReadonlySet<string>
-): Promise<GroupModelCandidate[]> {
-  const [candidateNames, firstCatalogPage] = await Promise.all([
-    getModelsListCandidates(groupId),
-    apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }>; pages: number }>(
-      '/admin/models',
-      { params: { page: 1, page_size: 100 } }
-    )
-  ])
-  const remainingPages = await Promise.all(
-    Array.from({ length: Math.max(0, firstCatalogPage.data.pages - 1) }, (_, index) =>
-      apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }> }>(
-        '/admin/models',
-        { params: { page: index + 2, page_size: 100 } }
-      )
-    )
-  )
-  const catalogModels = [
-    ...(firstCatalogPage.data.items || []),
-    ...remainingPages.flatMap((response) => response.data.items || [])
-  ]
-  const names = new Set(candidateNames)
-  return catalogModels
-    .filter((model) => model.enabled && names.has(model.public_name) && !linkedModelIds.has(String(model.id)))
-    .map((model) => ({ id: String(model.id), public_name: model.public_name }))
-}
-
-export async function createGroupModel(
-  groupId: string | number,
-  model: GroupModelCandidate
-): Promise<GroupModelConfig> {
-  const { data } = await apiClient.put<GroupModelConfig>(
-    `/admin/groups/${groupId}/models/${model.id}`,
-    {
-      enabled: true,
-      catalog_visible: true,
-      max_output_tokens: 65_536,
-      default_max_output_tokens: 32_768,
-      expected_control_version: 0
-    },
-    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-put') } }
-  )
-  return adaptGroupModel(data)
 }
 
 function adaptGroupModel(model: GroupModelConfig): GroupModelConfig {
@@ -955,37 +888,6 @@ export async function updateGroupModel(
     { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-put') } }
   )
   return adaptGroupModel(data)
-}
-
-export interface GroupModelDiagnosis {
-  routable: boolean
-  blockers: string[]
-  checks: null | {
-    group_enabled: number
-    model_enabled: number
-    group_model_enabled: number
-    active_price: number
-    group_accounts: number
-    capable_accounts: number
-  }
-}
-
-export async function diagnoseGroupModel(groupId: string | number, modelId: string): Promise<GroupModelDiagnosis> {
-  const { data } = await apiClient.get<GroupModelDiagnosis>(`/admin/groups/${groupId}/models/${modelId}/diagnosis`)
-  return data
-}
-
-export async function listGroupModelPrices(groupId: string | number, modelId: string): Promise<GroupModelPrice[]> {
-  const { data } = await apiClient.get<GroupModelPrice[]>(`/admin/groups/${groupId}/models/${modelId}/prices`)
-  return data || []
-}
-
-export async function publishGroupModelPrice(groupId: string | number, model: GroupModelConfig, input: PublishGroupModelPriceInput): Promise<GroupModelPrice> {
-  const { data } = await apiClient.post<GroupModelPrice>(`/admin/groups/${groupId}/models/${model.model_id}/prices`, {
-    ...input,
-    expected_control_version: model.control_version,
-  }, { headers: { 'Idempotency-Key': newControlOperationKey('admin-model-price') } })
-  return data
 }
 
 export const groupsAPI = {
@@ -1018,12 +920,7 @@ export const groupsAPI = {
   getUsageSummary,
   getCapacitySummary,
   listGroupModels,
-  listGroupModelCandidates,
-  createGroupModel,
-  updateGroupModel,
-  diagnoseGroupModel,
-  listGroupModelPrices,
-  publishGroupModelPrice
+  updateGroupModel
 }
 
 export default groupsAPI

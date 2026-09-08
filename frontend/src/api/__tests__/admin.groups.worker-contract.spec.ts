@@ -23,53 +23,6 @@ describe('admin groups Cloudflare Worker contract', () => {
     )
   })
 
-  it('lists addable model candidates and creates a group model with routing defaults', async () => {
-    get
-      .mockResolvedValueOnce({ data: { models: ['gpt-existing', 'gpt-image-2'] } })
-      .mockResolvedValueOnce({
-        data: {
-          items: [
-            { id: 'model-existing', public_name: 'gpt-existing', platform: 'openai', enabled: true }
-          ],
-          pages: 2
-        }
-      })
-      .mockResolvedValueOnce({
-        data: {
-          items: [
-            { id: 'model-image', public_name: 'gpt-image-2', platform: 'openai', enabled: true }
-          ]
-        }
-      })
-    put.mockResolvedValueOnce({
-      data: {
-        group_id: 'group-1', model_id: 'model-image', public_name: 'gpt-image-2',
-        upstream_name: 'gpt-image-2', endpoint: 'both', enabled: true,
-        catalog_visible: true, sort_order: 0, max_output_tokens: 65536,
-        default_max_output_tokens: 32768, control_version: 0
-      }
-    })
-    const { listGroupModelCandidates, createGroupModel } = await import('@/api/admin/groups')
-
-    const candidates = await listGroupModelCandidates('group-1', new Set(['model-existing']))
-    expect(get).toHaveBeenNthCalledWith(2, '/admin/models', { params: { page: 1, page_size: 100 } })
-    expect(get).toHaveBeenNthCalledWith(3, '/admin/models', { params: { page: 2, page_size: 100 } })
-    expect(candidates).toEqual([{ id: 'model-image', public_name: 'gpt-image-2' }])
-
-    await createGroupModel('group-1', candidates[0])
-    expect(put).toHaveBeenCalledWith(
-      '/admin/groups/group-1/models/model-image',
-      {
-        enabled: true,
-        catalog_visible: true,
-        max_output_tokens: 65536,
-        default_max_output_tokens: 32768,
-        expected_control_version: 0
-      },
-      { headers: { 'Idempotency-Key': expect.stringContaining('admin-group-model-put-') } }
-    )
-  })
-
   it('adapts and updates group model output-token fields with Worker concurrency headers', async () => {
     get.mockResolvedValueOnce({
       data: [{

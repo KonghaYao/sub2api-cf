@@ -5,7 +5,6 @@ export default {
       importedOAuthRequired: 'Enter an access token; Antigravity also requires a project ID.',
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
-      modelCapabilities: { title: 'Model capabilities', chat_completions: 'Chat Completions', responses: 'Responses', embeddings: 'Embeddings', image_generation: 'Image generation', saved: 'Model capabilities saved', loadFailed: 'Failed to load model capabilities', saveFailed: 'Failed to save model capabilities' },
       createAccount: 'Create Account',
       autoRefresh: 'Auto Refresh',
       enableAutoRefresh: 'Enable auto refresh',
