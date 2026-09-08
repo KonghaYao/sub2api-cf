@@ -46,6 +46,17 @@ class CatalogStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
+    if (this.query.includes('SELECT id AS model_id, public_name, upstream_name, platform, endpoint')) {
+      const platform = String(this.values[0])
+      return rowsResult([...this.database.models.values()]
+        .filter((model) => model.enabled === 1 && (platform === 'composite' || model.platform === platform))
+        .sort((left, right) => left.public_name.localeCompare(right.public_name))
+        .map((model) => ({
+          model_id: model.id, public_name: model.public_name, upstream_name: model.upstream_name,
+          platform: model.platform, endpoint: model.endpoint, embeddings: model.embeddings,
+          image_generation: model.image_generation,
+        })) as T[])
+    }
     if (this.query.includes('SELECT public_name FROM models WHERE platform = ?')) {
       const platform = String(this.values[0])
       return rowsResult([...this.database.models.values()]
@@ -349,6 +360,7 @@ class CatalogDatabase {
       endpoint: model.endpoint,
       embeddings: model.embeddings,
       image_generation: model.image_generation,
+      global_model_enabled: model.enabled,
       price_id: price?.id ?? null,
       price_version: price?.version ?? null,
       input_micros_per_million: price?.input_micros_per_million ?? null,
@@ -467,6 +479,25 @@ async function linkModel(database: CatalogDatabase, groupId: string, modelId: st
 }
 
 describe('admin catalog control plane', () => {
+  it('returns typed enabled global models as group-model candidates', async () => {
+    const database = new CatalogDatabase()
+    const group = await createGroup(database, 'typed-candidates')
+    const enabled = await createModel(database, 'typed-enabled', { public_name: 'enabled-model' })
+    await createModel(database, 'typed-disabled', { public_name: 'disabled-model', enabled: false })
+
+    const response = await request(
+      database,
+      `/api/v1/admin/groups/${group.id}/group-model-candidates`,
+      'GET',
+      'unused-candidate-key',
+    )
+
+    expect(response.status).toBe(200)
+    expect((await json(response)).data.models).toEqual([
+      expect.objectContaining({ model_id: enabled.id, public_name: 'enabled-model' }),
+    ])
+  })
+
   it('includes schedulable group account model mappings in model-list candidates', async () => {
     const database = new CatalogDatabase()
     const group = await createGroup(database, 'mapping-candidates')

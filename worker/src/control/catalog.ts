@@ -3,7 +3,7 @@ import type { Env } from '../env'
 import { groupAccountCountColumnsSql } from './group-account-counts'
 import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { accountModelAllowedSql } from '../gateway/account-model-policy'
+import { accountModelAllowedSql, modelCapabilityCompatibleSql } from '../gateway/account-model-policy'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -84,6 +84,7 @@ interface GroupModelRow {
   endpoint: ModelRow['endpoint']
   embeddings: number
   image_generation: number
+  global_model_enabled: number
   upstream_name_override: string | null
   enabled: number
   catalog_visible: number
@@ -859,11 +860,13 @@ export async function diagnoseAdminGroupModel(context: Context<ControlBindings>)
     const groupId = requireResourceId(context.req.param('id'), 'group')
     const modelId = requireResourceId(context.req.param('model_id'), 'model')
     const row = await context.env.DB.prepare(
-      `SELECT g.enabled AS group_enabled, m.enabled AS model_enabled, gm.enabled AS group_model_enabled,
+      `SELECT g.enabled AS group_enabled, g.catalog_mode, m.enabled AS model_enabled,
+              m.platform AS model_platform, g.platform AS group_platform,
+              gm.enabled AS group_model_enabled, gm.catalog_visible,
               EXISTS(SELECT 1 FROM model_prices p WHERE p.group_id=gm.group_id AND p.model_id=gm.model_id AND p.active=1) AS active_price,
               (SELECT COUNT(*) FROM account_groups ag JOIN accounts a ON a.id=ag.account_id WHERE ag.group_id=g.id) AS group_accounts,
               (SELECT COUNT(*) FROM account_groups ag JOIN accounts a ON a.id=ag.account_id
-                JOIN account_models am ON am.account_id=a.id AND am.model_id=m.id
+                LEFT JOIN account_models am ON am.account_id=a.id AND am.model_id=m.id
                WHERE ag.group_id=g.id AND a.platform=m.platform AND a.enabled=1
                  AND COALESCE(json_extract(a.ui_config_json,'$.schedulable'),1)=1 AND a.health_status<>'unhealthy'
                  AND (json_extract(a.ui_config_json,'$.expires_at') IS NULL OR datetime(json_extract(a.ui_config_json,'$.expires_at')) > datetime('now'))
@@ -871,24 +874,55 @@ export async function diagnoseAdminGroupModel(context: Context<ControlBindings>)
                  AND (json_extract(a.ui_config_json,'$.temp_unschedulable_until') IS NULL OR datetime(json_extract(a.ui_config_json,'$.temp_unschedulable_until')) <= datetime('now'))
                  AND (json_extract(a.ui_config_json,'$.temporary_block_until') IS NULL OR datetime(json_extract(a.ui_config_json,'$.temporary_block_until')) <= datetime('now'))
                  AND ${accountModelAllowedSql()}
-                 AND CASE WHEN m.image_generation=1 THEN am.image_generation=1 WHEN m.embeddings=1 THEN am.embeddings=1
-                   WHEN m.endpoint='chat_completions' THEN am.chat_completions=1 WHEN m.endpoint='responses' THEN am.responses=1
-                   ELSE (am.chat_completions=1 OR am.responses=1) END) AS capable_accounts
+                 AND (json_extract(a.ui_config_json,'$.original_model_routing')=1 OR
+                   ${modelCapabilityCompatibleSql()}) AS capable_accounts
          FROM group_models gm JOIN "groups" g ON g.id=gm.group_id JOIN models m ON m.id=gm.model_id
         WHERE gm.group_id=? AND gm.model_id=?`,
-    ).bind(groupId, modelId).first<Record<string, number>>()
+    ).bind(groupId, modelId).first<Record<string, number | string>>()
     const blockers: string[] = []
     if (!row) blockers.push('group_model_missing')
     else {
       if (row.group_enabled !== 1) blockers.push('group_disabled')
       if (row.model_enabled !== 1) blockers.push('global_model_disabled')
       if (row.group_model_enabled !== 1) blockers.push('group_model_disabled')
+      if (row.catalog_mode === 'allowlist' && row.catalog_visible !== 1) blockers.push('catalog_hidden')
+      if (row.group_platform !== 'composite' && row.group_platform !== row.model_platform) blockers.push('platform_mismatch')
       if (row.active_price !== 1) blockers.push('active_price_missing')
-      if (row.group_accounts < 1) blockers.push('no_group_account')
-      if (row.capable_accounts < 1) blockers.push('no_healthy_capable_account')
+      if (Number(row.group_accounts) < 1) blockers.push('no_group_account')
+      if (Number(row.capable_accounts) < 1) blockers.push('no_healthy_capable_account')
     }
     return controlSuccess({ routable: blockers.length === 0, blockers, checks: row ?? null })
   } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function getAdminGroupModelCandidates(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const group = await requireGroup(context.env, context.req.param('id'))
+    const rows = await context.env.DB.prepare(
+      `SELECT id AS model_id, public_name, upstream_name, platform, endpoint,
+              embeddings, image_generation
+         FROM models
+        WHERE enabled = 1 AND (? = 'composite' OR platform = ?)
+        ORDER BY public_name ASC, id ASC`,
+    ).bind(group.platform, group.platform).all<{
+      model_id: string
+      public_name: string
+      upstream_name: string
+      platform: string
+      endpoint: ModelRow['endpoint']
+      embeddings: number
+      image_generation: number
+    }>()
+    return controlSuccess({
+      models: rows.results.map((model) => ({
+        ...model,
+        embeddings: model.embeddings === 1,
+        image_generation: model.image_generation === 1,
+      })),
+    })
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
 }
 
 export async function getAdminModelCandidates(context: Context<ControlBindings>): Promise<Response> {
@@ -1373,7 +1407,7 @@ async function findGroupModel(env: Env, groupId: string, modelId: string): Promi
 
 function groupModelSelect(): string {
   return `SELECT gm.group_id, gm.model_id, m.public_name, m.upstream_name, m.endpoint,
-    m.embeddings, m.image_generation,
+    m.embeddings, m.image_generation, m.enabled AS global_model_enabled,
     gm.upstream_name_override, gm.enabled, gm.catalog_visible, gm.sort_order,
     gm.max_output_tokens, gm.default_max_output_tokens, gm.control_version,
     gm.created_at_ms, gm.updated_at_ms,
@@ -1420,6 +1454,7 @@ function publicGroupModel(row: GroupModelRow) {
     ...row,
     embeddings: row.embeddings === 1,
     image_generation: row.image_generation === 1,
+    global_model_enabled: row.global_model_enabled === 1,
     enabled: row.enabled === 1,
     catalog_visible: row.catalog_visible === 1,
     price: row.price_id === null ? null : {

@@ -34,6 +34,18 @@ export function accountModelPolicy(raw: unknown, requested: string, platform = '
   return { allowed: !!match, upstream: match ? match[1] : requested }
 }
 
+export function modelCapabilityCompatibleSql(model = 'm', accountModel = 'am', account = 'a'): string {
+  return `(CASE
+    WHEN ${model}.image_generation = 1 THEN ${accountModel}.image_generation = 1
+    WHEN ${model}.embeddings = 1 THEN ${accountModel}.embeddings = 1
+    WHEN ${model}.endpoint = 'chat_completions' THEN (${accountModel}.chat_completions = 1 OR
+      (${account}.platform IN ('openai', 'codex', 'grok', 'antigravity') AND ${accountModel}.responses = 1))
+    WHEN ${model}.endpoint = 'responses' THEN (${accountModel}.responses = 1 OR
+      (${account}.platform IN ('openai', 'grok', 'antigravity') AND ${accountModel}.chat_completions = 1))
+    ELSE (${accountModel}.chat_completions = 1 OR ${accountModel}.responses = 1)
+  END)`
+}
+
 /** SQL counterpart for model discovery. Identifiers are fixed internal expressions. */
 export function accountModelAllowedSql(model = 'COALESCE(gm.upstream_name_override, m.upstream_name)'): string {
   const mapping = `CASE WHEN json_type(a.ui_config_json, '$.credentials.model_mapping') = 'object'

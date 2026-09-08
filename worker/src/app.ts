@@ -164,6 +164,7 @@ import {
   deleteAdminModel,
   diagnoseAdminGroupModel,
   getAdminGroup,
+  getAdminGroupModelCandidates,
   getAdminModel,
   getAdminModelCandidates,
   listAdminGroupModels,
@@ -892,6 +893,7 @@ export function createApp() {
   app.put('/api/v1/admin/groups/:id/rpm-overrides', putAdminGroupRpmOverrides)
   app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)
   app.get('/api/v1/admin/groups/:id/models-list-candidates', getAdminModelCandidates)
+  app.get('/api/v1/admin/groups/:id/group-model-candidates', getAdminGroupModelCandidates)
   app.get('/api/v1/admin/groups/:id/models', listAdminGroupModels)
   app.put('/api/v1/admin/groups/:id/models/:model_id', putAdminGroupModel)
   app.delete('/api/v1/admin/groups/:id/models/:model_id', deleteAdminGroupModel)
