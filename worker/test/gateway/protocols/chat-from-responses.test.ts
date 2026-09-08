@@ -418,3 +418,32 @@ it('retains every content part and does not repeat item or terminal snapshots', 
   ]
   expect(events.flatMap(e => codec.push(e)).flatMap(c => c.choices).map(c => c.delta.content ?? '').join('')).toBe('Part one. Part two.')
 })
+
+it('preserves complete native output items, order, annotations and custom tool identity', () => {
+  const output = [
+    { type: 'reasoning', id: 'rs_1', encrypted_content: 'opaque-reasoning', summary: [{ type: 'summary_text', text: 'Checked.' }] },
+    { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'First.', annotations: [{ type: 'url_citation', url: 'https://example.test', title: 'Source', start_index: 0, end_index: 5 }] }] },
+    { type: 'custom_tool_call', id: 'ctc_1', call_id: 'call_patch', name: 'apply_patch', input: '*** Begin Patch', status: 'completed' },
+    { type: 'message', id: 'msg_2', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Second.' }] },
+    { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'example' } },
+  ]
+  const events = [4, 2, 0, 3, 1].map(index => ({ type: 'response.output_item.done', output_index: index, item: output[index] })) as Array<Record<string, unknown>>
+  events.push({ type: 'response.completed', response: { status: 'completed', output: [] } })
+  const acc = new BufferedResponsesToChatCompletions('model')
+  acc.push(new TextEncoder().encode(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')))
+  acc.finish()
+  expect(acc.nativeResponse().output).toEqual(output)
+  expect(acc.nativeResponse().output).toEqual(output)
+  expect(acc.response().choices[0].message).toMatchObject({ content: 'First.Second.', tool_calls: [{ id: 'call_patch', type: 'function', function: { name: 'apply_patch', arguments: '*** Begin Patch' } }] })
+})
+
+it('fills deltas into an added native message without dropping its ID or content metadata', () => {
+  const acc = new BufferedResponsesToChatCompletions('model')
+  const events = [
+    { type: 'response.output_item.added', output_index: 3, item: { type: 'message', id: 'msg_live', role: 'assistant', content: [{ type: 'output_text', text: '', annotations: [] }] } },
+    { type: 'response.output_text.delta', output_index: 3, content_index: 0, delta: 'Hello.' },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ]
+  acc.push(new TextEncoder().encode(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')))
+  expect(acc.nativeResponse().output).toEqual([{ type: 'message', id: 'msg_live', role: 'assistant', content: [{ type: 'output_text', text: 'Hello.', annotations: [] }] }])
+})

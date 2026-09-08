@@ -131,6 +131,12 @@ class ContentParts {
     return value.slice(prefix.length)
   }
   text(): string { return [...this.parts.values()].join('') }
+  entries(): Array<{ outputIndex: number; contentIndex: number; text: string }> {
+    return [...this.parts].map(([key, text]) => {
+      const [outputIndex, contentIndex] = key.split(':').map(Number)
+      return { outputIndex: outputIndex!, contentIndex: contentIndex!, text }
+    })
+  }
   private key(outputIndex: unknown, contentIndex: unknown): string {
     return `${outputIndex ?? 0}:${contentIndex ?? 0}`
   }
@@ -499,6 +505,8 @@ export class BufferedResponsesToChatCompletions {
   private readonly content = new TextCompletion()
   private readonly refusals = new ContentParts('refusal')
   private readonly tools = new Map<number, { callId: string; name: string; arguments: string }>()
+  private readonly outputItems = new Map<number, JsonObject>()
+  private readonly completedItems = new Set<number>()
 
   constructor(
     private readonly publicModel: string,
@@ -527,7 +535,7 @@ export class BufferedResponsesToChatCompletions {
   }
 
   hasOutput(): boolean {
-    return this.content.text.text().length > 0 || this.refusals.text().length > 0 || this.content.reasoning.text().length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
+    return this.completedItems.size > 0 || this.content.text.text().length > 0 || this.refusals.text().length > 0 || this.content.reasoning.text().length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
   }
 
   /** Return the authoritative Responses document, filling omitted output from streamed deltas. */
@@ -652,6 +660,8 @@ export class BufferedResponsesToChatCompletions {
     const item = objectValue(event.item)
     if (item === null) return
     const outputIndex = nonNegativeInteger(event.output_index, 'event.output_index')
+    this.outputItems.set(outputIndex, { ...this.outputItems.get(outputIndex), ...item })
+    if (event.type === 'response.output_item.done') this.completedItems.add(outputIndex)
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
       const existing = this.tools.get(outputIndex)
       const args = typeof item.arguments === 'string'
@@ -676,25 +686,47 @@ export class BufferedResponsesToChatCompletions {
   }
 
   private accumulatedOutput(): JsonObject[] {
-    const output: JsonObject[] = []
-    if (this.content.reasoning.text() !== '') output.push({
-      type: 'reasoning',
-      summary: [{ type: 'summary_text', text: this.content.reasoning.text() }],
-    })
-    if (this.content.text.text() !== '') output.push({
-      type: 'message',
-      role: 'assistant',
-      content: [{ type: 'output_text', text: this.content.text.text() }],
-    })
-    if (this.refusals.text()) output.push({ type: 'message', role: 'assistant',
-      content: [{ type: 'refusal', refusal: this.refusals.text() }] })
-    for (const tool of this.tools.values()) output.push({
-      type: 'function_call',
-      call_id: tool.callId,
-      name: tool.name,
-      arguments: tool.arguments,
-    })
-    return output
+    const items = new Map<string, { index: number; item: JsonObject }>()
+    for (const [index, value] of this.outputItems) {
+      items.set(`${index}:${value.type}`, { index, item: structuredClone(value) })
+    }
+    const ensure = (index: number, type: string): JsonObject => {
+      const key = `${index}:${type}`
+      let value = items.get(key)
+      if (!value) {
+        value = { index, item: { type, ...(type === 'message' ? { role: 'assistant' } : {}) } }
+        items.set(key, value)
+      }
+      return value.item
+    }
+    const indexedParts = new Map<string, Map<number, JsonObject>>()
+    const parts = (state: ContentParts, type: 'message' | 'reasoning', partType: string, field: 'text' | 'refusal') => {
+      for (const { outputIndex, contentIndex, text } of state.entries()) {
+        if (!text) continue
+        const item = ensure(outputIndex, type), listName = type === 'reasoning' ? 'summary' : 'content'
+        const key = `${outputIndex}:${type}`
+        let indexed = indexedParts.get(key)
+        if (!indexed) {
+          const existing = Array.isArray(item[listName]) ? item[listName] as unknown[] : []
+          indexed = new Map(existing.map((part, index) => [index, objectValue(part) ?? {}]))
+          indexedParts.set(key, indexed)
+        }
+        // Preserve sparse upstream indices without allocating a large holey array.
+        indexed.set(contentIndex, { ...indexed.get(contentIndex), type: partType, [field]: text })
+        item[listName] = [...indexed].sort(([a], [b]) => a - b).map(([, part]) => part)
+      }
+    }
+    parts(this.content.reasoning, 'reasoning', 'summary_text', 'text')
+    parts(this.content.text, 'message', 'output_text', 'text')
+    parts(this.refusals, 'message', 'refusal', 'refusal')
+    for (const [index, tool] of this.tools) {
+      const original = this.outputItems.get(index)
+      const custom = original?.type === 'custom_tool_call'
+      Object.assign(ensure(index, custom ? 'custom_tool_call' : 'function_call'), {
+        call_id: tool.callId, name: tool.name, [custom ? 'input' : 'arguments']: tool.arguments,
+      })
+    }
+    return [...items.values()].sort((a, b) => a.index - b.index).map(value => value.item)
   }
 
   private assertFrameLimit(): void {

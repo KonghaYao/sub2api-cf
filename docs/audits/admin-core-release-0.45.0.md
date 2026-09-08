@@ -55,3 +55,9 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 按 output/content/summary 片段追踪文本和推理前缀，处理 text.done、content_part.done、reasoning_summary_part.done、output_item.done 和终态快照。只补发缺失后缀，避免曾收到部分 delta 后丢弃完整终态文本；共享流式和非流式汇聚逻辑。
 
 协议与网关专项 180 项通过。共享工作区另有未完成分组修改引用不存在的 deleted_at_ms，故在基于 0.45.4 的独立检出验证本轮转发修改；真实 workerd 29 文件、78 项全部通过，包含文本与推理补齐后的实际结算与预留释放。部署使用同一隔离检出，保留其他工作区修改。提交 `a2cf8a479` 从独立检出成功部署 0.45.5，Worker version `db211b25-338c-437c-9e3e-f2857db3dfbc`。
+
+## 0.45.6：保留原生 Responses 输出项
+
+原始 Go 实现按 output_index 收集完整 done 输出项。Worker 的非流式 SSE 兜底汇聚现同样保留上游消息 ID、状态、引用 annotations、推理 encrypted_content、自定义工具 input/type 及其他原生工具输出，按输出索引恢复顺序，并用已有分片补齐缺失内容。避免把多个消息压成单个对象或把自定义工具误改为 function_call。
+
+独立检出协议/网关专项 182 项及真实 workerd 29 文件/79 项通过，类型检查通过。新增原生端到端场景验证乱序 done 输出恢复完整结构、用量只结算一次且预留释放。部署结果待追加。
