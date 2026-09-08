@@ -447,3 +447,30 @@ it('fills deltas into an added native message without dropping its ID or content
   acc.push(new TextEncoder().encode(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')))
   expect(acc.nativeResponse().output).toEqual([{ type: 'message', id: 'msg_live', role: 'assistant', content: [{ type: 'output_text', text: 'Hello.', annotations: [] }] }])
 })
+
+
+it.each(['function_call', 'custom_tool_call'] as const)('retains buffered %s arguments supplied only by argument completion', type => {
+  const accumulator = new BufferedResponsesToChatCompletions('model')
+  const field = type === 'function_call' ? 'arguments' : 'input'
+  const eventType = type === 'function_call' ? 'function_call_arguments' : 'custom_tool_call_input'
+  const full = type === 'function_call' ? '{"city":"上海"}' : '*** Begin Patch\n*** End Patch'
+  const item = { type, id: 'item-1', call_id: 'call-1', name: 'tool', [field]: '' }
+  const events = [
+    { type: 'response.output_item.added', output_index: 2, item },
+    { type: `response.${eventType}.delta`, output_index: 2, delta: full.slice(0, 3) },
+    { type: `response.${eventType}.done`, call_id: 'call-1', item_id: 'item-1', [field]: full },
+    { type: `response.${eventType}.done`, output_index: 2, [field]: full },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ]
+  accumulator.push(new TextEncoder().encode(events.map(event => 'data: '+JSON.stringify(event)+'\n\n').join('')))
+  accumulator.finish()
+  expect(accumulator.nativeResponse().output).toEqual([{ ...item, [field]: full }])
+  expect(accumulator.response().choices[0].message.tool_calls).toMatchObject([{ id: 'call-1', function: { name: 'tool', arguments: full } }])
+})
+
+it.each([{ call_id: 'another-call' }, { item_id: 'another-item' }])('rejects buffered argument completion with conflicting identity %j', identity => {
+  const accumulator = new BufferedResponsesToChatCompletions('model')
+  const push = (event: unknown) => accumulator.push(new TextEncoder().encode('data: '+JSON.stringify(event)+'\n\n'))
+  push({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'f' } })
+  expect(() => push({ type: 'response.function_call_arguments.done', output_index: 0, arguments: '{}', ...identity })).toThrow('identity')
+})

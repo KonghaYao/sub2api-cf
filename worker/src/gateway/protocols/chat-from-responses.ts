@@ -622,6 +622,25 @@ export class BufferedResponsesToChatCompletions {
       const tool = this.tools.get(outputIndex)
       if (tool !== undefined && typeof event.delta === 'string') tool.arguments += event.delta
     }
+    if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
+      const outputIndex = typeof event.output_index === 'number' && Number.isSafeInteger(event.output_index) && event.output_index >= 0
+        ? event.output_index : [...this.tools].find(([, tool]) => tool.callId === event.call_id)?.[0]
+      const tool = outputIndex === undefined ? undefined : this.tools.get(outputIndex)
+      if (tool && outputIndex !== undefined) {
+        if (typeof event.call_id === 'string' && event.call_id !== tool.callId) {
+          throw new ResponsesToChatError('Upstream changed the identity of a streamed tool call')
+        }
+        const item = this.outputItems.get(outputIndex)
+        if (typeof event.item_id === 'string' && typeof item?.id === 'string' && event.item_id !== item.id) {
+          throw new ResponsesToChatError('Upstream changed the identity of a streamed tool call')
+        }
+        const args = type === 'response.custom_tool_call_input.done' ? event.input : event.arguments
+        if (typeof args === 'string') {
+          tool.arguments = args
+          this.completedItems.add(outputIndex)
+        }
+      }
+    }
     if (type === 'response.completed' || (type === 'response.incomplete' && !isResponsesFailedTerminal(event))) {
       this.terminalResponse = {
         ...(observed ?? {}),

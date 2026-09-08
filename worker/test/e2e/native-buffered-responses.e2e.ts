@@ -36,3 +36,18 @@ it.each(['refusal', 'completion', 'items'])('preserves %s content and settles it
  expect(state.profile).toMatchObject({balance_micros:999983,reserved_micros:0})
  expect(state.ledger.filter((r:any)=>r.amount_delta_micros<0)).toHaveLength(1)
 })
+
+
+it('preserves complete function and custom tool arguments when only argument-done events supply them', async () => {
+ const f=await seed('tool-arguments'),ctx=createExecutionContext()
+ const response=await createApp().fetch(new Request('https://worker.e2e.invalid/v1/responses',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json'},body:JSON.stringify({model:f.model,input:'Call the tools',stream:false,max_output_tokens:128})}),env,ctx)
+ expect(response.status,await response.clone().text()).toBe(200)
+ expect(await response.json()).toMatchObject({status:'completed',output:[
+   {type:'function_call',id:'fc_done',call_id:'call_done',name:'weather',arguments:'{"city":"上海"}'},
+   {type:'custom_tool_call',id:'ctc_done',call_id:'custom_done',name:'apply_patch',input:'*** Begin Patch'},
+ ]})
+ await waitOnExecutionContext(ctx)
+ const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
+ expect(state.profile).toMatchObject({balance_micros:999983,reserved_micros:0})
+ expect(state.ledger.filter((r:any)=>r.amount_delta_micros<0)).toHaveLength(1)
+})

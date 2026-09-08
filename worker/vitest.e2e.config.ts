@@ -47,6 +47,14 @@ export default defineConfig(async () => {
                 return body.stream?new Response('data: '+JSON.stringify({type:'response.failed',response:{id:'cyber-fixture',status:'failed',error}})+'\n\n',{headers:{'content-type':'text/event-stream'}}):Response.json({error},{status:400})
               }
               if (typeof body.model === 'string' && body.model.startsWith('native-buffer-')) {
+                if (body.model === 'native-buffer-tool-arguments') return new Response([
+                  {type:'response.output_item.added',output_index:2,item:{type:'function_call',id:'fc_done',call_id:'call_done',name:'weather',arguments:''}},
+                  {type:'response.function_call_arguments.delta',output_index:2,delta:'{"city":'},
+                  {type:'response.function_call_arguments.done',output_index:2,item_id:'fc_done',arguments:'{"city":"上海"}'},
+                  {type:'response.output_item.added',output_index:4,item:{type:'custom_tool_call',id:'ctc_done',call_id:'custom_done',name:'apply_patch',input:''}},
+                  {type:'response.custom_tool_call_input.done',call_id:'custom_done',input:'*** Begin Patch'},
+                  {type:'response.completed',response:{id:'native-tool-done',status:'completed',output:[],usage:{input_tokens:6,output_tokens:2}}},
+                ].map(event=>'data: '+JSON.stringify(event)+'\n\n').join(''),{headers:{'content-type':'text/event-stream'}})
                 if (body.model === 'native-buffer-items') return new Response([
                   { type: 'response.output_item.done', output_index: 2, item: { type: 'custom_tool_call', id: 'ctc_native', call_id: 'call_native', name: 'apply_patch', input: '*** Begin Patch', status: 'completed' } },
                   { type: 'response.output_item.done', output_index: 0, item: { type: 'reasoning', id: 'rs_native', encrypted_content: 'opaque-native-reasoning', summary: [] } },
