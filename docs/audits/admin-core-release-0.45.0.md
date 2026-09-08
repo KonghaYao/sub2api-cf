@@ -80,4 +80,4 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 
 非流式 Responses SSE 汇聚原先忽略 function_call_arguments.done 和 custom_tool_call_input.done，导致只有完成事件包含完整参数时，返回截断或空工具输入。现以完成事件中的完整参数更新工具，支持 output_index 与缺省索引时的 call_id 关联，保留函数/自定义工具类型及原始 item ID。检测冲突的 call_id/item_id，拒绝错配工具；重复完成事件不会拼接重复参数。
 
-协议/网关专项 187 项、原生 Responses 汇聚及 Chat 桥接 10 项通过，类型检查通过。原生场景同时恢复函数的完整中文参数及自定义工具输入，确认 17 micros 只扣一次、预留归零。部署结果待追加。
+协议/网关专项 187 项、原生 Responses 汇聚及 Chat 桥接 10 项通过，类型检查通过。原生场景同时恢复函数的完整中文参数及自定义工具输入，确认 17 micros 只扣一次、预留归零。提交 `faf245633` 已推送 origin/main 并部署 0.45.8，Worker version `da241845-c21d-491b-a9bf-650efb54ad14`；线上 `/health` 确认 status=ok、version=0.45.8。
