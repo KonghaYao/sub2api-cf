@@ -98,11 +98,31 @@ describe('original monitor UI and actual synthetic probe lifecycle',()=>{
    }
   }finally{vi.unstubAllGlobals();f.raw.close()}
  })
+ it.each(['off','merge','replace'] as const)('validates arithmetic except for explicit %s body replacement',async(mode)=>{
+  const f=await clearHarness(false),app=createApp()
+  const call=(path:string,body:unknown,method='POST')=>app.request('/api/v1/admin'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json'},body:JSON.stringify(body)},f.env)
+  const fetcher=vi.fn(async()=>Response.json({choices:[{message:{content:'OK'}}]}));vi.stubGlobal('fetch',fetcher)
+  try{
+   expect((await call('/settings/channel-monitor',{expected_control_version:0,channel_monitor_enabled:true},'PUT')).status).toBe(200)
+   const created=await call('/channel-monitors',{name:'Answer validation',provider:'openai',endpoint:'https://api.example.test',api_key:'test-monitor-secret',primary_model:'model-a',interval_seconds:300,body_override_mode:mode,body_override:mode==='replace'?{model:'model-a',messages:[{role:'user',content:'Reply OK'}]}:{temperature:0}})
+   expect(created.status).toBe(200)
+   const monitor=(await created.json() as any).data
+   const run=await call(`/channel-monitors/${monitor.id}/run`,{})
+   expect(run.status).toBe(200)
+   expect((await run.json() as any).data.results[0].status).toBe(mode==='replace'?'operational':'failed')
+   if(mode!=='replace')expect(JSON.parse((fetcher.mock.calls as unknown as [unknown,RequestInit][])[0][1].body as string).max_tokens).toBe(50)
+  }finally{vi.unstubAllGlobals();f.raw.close()}
+ })
  it('creates template and monitor, probes real request, changes template snapshot, duplicates, disables and deletes',async()=>{
   const f=await clearHarness(false),app=createApp();
   const call=async(path:string,method='GET',body?:unknown,headers:Record<string,string>={})=>app.request('/api/v1'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})},f.env)
   const data=async(response:Response)=>{expect(response.status,await response.clone().text()).toBe(200);return(await response.json() as any).data}
-  const fetcher=vi.fn(async(_url:unknown,_init?:RequestInit)=>Response.json({choices:[{message:{content:'OK'}}]}));vi.stubGlobal('fetch',fetcher)
+  const fetcher=vi.fn(async(_url:unknown,_init?:RequestInit)=>{
+   const prompt=JSON.parse(_init!.body as string).messages[0].content as string
+   const question=/Q: (\d+) ([+-]) (\d+) = \?\nA:$/.exec(prompt)!
+   const answer=question[2]==='+'?Number(question[1])+Number(question[3]):Number(question[1])-Number(question[3])
+   return Response.json({choices:[{message:{content:String(answer)}}]})
+  });vi.stubGlobal('fetch',fetcher)
   try{
    await data(await call('/admin/settings/channel-monitor','PUT',{channel_monitor_enabled:true},{'if-match':'"0"'}))
    const template=await data(await call('/admin/channel-monitor-templates','POST',{name:'Probe defaults',provider:'openai',extra_headers:{'x-probe':'initial'},body_override_mode:'merge',body_override:{max_tokens:8}}))

@@ -6,7 +6,8 @@ import { GatewayError, asGatewayError } from '../gateway/errors';
 import { encryptCredential, decryptCredential } from '../gateway/crypto';
 import { validateBaseUrl } from '../gateway/repository';
 import { buildProviderRequest, type ProviderPlatform } from '../gateway/providers';
-import { minimalProbeBody, readBoundedProviderJson, validProviderResponse } from './account-synthetic-probes';
+import { readBoundedProviderJson } from './account-synthetic-probes';
+import { createMonitorChallenge, monitorChallengeBody, monitorResponseText, validMonitorAnswer } from './channel-monitor-challenge';
 import { controlSuccess, controlError, readJsonObject, requireExpectedControlVersion } from './http';
 import { authenticateAdminSession } from './admin-auth';
 import { quotaWindowStart } from '../notifications/scanner';
@@ -217,7 +218,8 @@ async function probe(env: Env, r: Row, config: Config, model: string, signal?: A
     const credential = await decryptCredential(r.nonce_b64, r.ciphertext_b64, env.CREDENTIALS_MASTER_KEY!, AAD);
     if (!credential.api_key)
         throw new Error('key');
-    let body = minimalProbeBody(platform, config.api_mode, model);
+    const challenge = createMonitorChallenge();
+    let body = monitorChallengeBody(platform, config.api_mode, model, challenge.prompt);
     if (config.body_override_mode === 'merge') {
         // Match the original channel monitor's provider-specific merge denylist.
         // Templates may tune generation but must not redirect the model or replace
@@ -239,11 +241,14 @@ async function probe(env: Env, r: Row, config: Config, model: string, signal?: A
     const abort = signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000);
     const upstream = await accountFetcher(env,proxyId)(plan.url, { method: plan.method, headers: plan.headers, body: JSON.stringify(plan.body), redirect: 'manual', signal: abort });
     let ok = false;
-    if (upstream.ok)
-        ok = validProviderResponse(platform, config.api_mode, await readBoundedProviderJson(upstream));
+    let answer = '';
+    if (upstream.ok) {
+        answer = monitorResponseText(platform, config.api_mode, await readBoundedProviderJson(upstream));
+        ok = config.body_override_mode === 'replace' ? answer.trim() !== '' : validMonitorAnswer(answer, challenge.expected);
+    }
     else
         await upstream.body?.cancel();
-    return { model, status: ok ? 'operational' : 'failed', latency_ms: Date.now() - started, ping_latency_ms: null, message: ok ? '' : upstream.ok ? 'upstream_invalid_response' : `upstream_http_${upstream.status}`, checked_at: new Date(started).toISOString() };
+    return { model, status: ok ? 'operational' : 'failed', latency_ms: Date.now() - started, ping_latency_ms: null, message: ok ? '' : upstream.ok ? answer ? 'challenge_mismatch' : 'upstream_invalid_response' : `upstream_http_${upstream.status}`, checked_at: new Date(started).toISOString() };
 }
 catch {
     return { model, status: 'error', latency_ms: Date.now() - started, ping_latency_ms: null, message: signal?.aborted ? 'request_cancelled' : 'probe_transport_or_configuration_failed', checked_at: new Date(started).toISOString() };
