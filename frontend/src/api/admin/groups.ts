@@ -379,7 +379,7 @@ export async function getById(id: string | number): Promise<AdminGroup> {
  * id=0 returns platform default models for create flow.
  */
 export async function getModelsListCandidates(
-  id: number,
+  id: string | number,
   platform?: GroupPlatform
 ): Promise<string[]> {
   const { data } = await apiClient.get<{ models: string[] }>(
@@ -856,9 +856,49 @@ export interface GroupModelConfig {
   control_version: number
 }
 
+export interface GroupModelCandidate {
+  id: string
+  public_name: string
+}
+
 export interface UpdateGroupModelConfig {
   max_output_tokens: number
   default_max_output_tokens: number
+}
+
+export async function listGroupModelCandidates(
+  groupId: string | number,
+  linkedModelIds: ReadonlySet<string>
+): Promise<GroupModelCandidate[]> {
+  const [candidateNames, catalogResponse] = await Promise.all([
+    getModelsListCandidates(groupId),
+    apiClient.get<{ items: Array<{ id: string | number; public_name: string; enabled: boolean }>; pages: number }>(
+      '/admin/models',
+      { params: { page: 1, page_size: 1000 } }
+    )
+  ])
+  const names = new Set(candidateNames)
+  return (catalogResponse.data.items || [])
+    .filter((model) => model.enabled && names.has(model.public_name) && !linkedModelIds.has(String(model.id)))
+    .map((model) => ({ id: String(model.id), public_name: model.public_name }))
+}
+
+export async function createGroupModel(
+  groupId: string | number,
+  model: GroupModelCandidate
+): Promise<GroupModelConfig> {
+  const { data } = await apiClient.put<GroupModelConfig>(
+    `/admin/groups/${groupId}/models/${model.id}`,
+    {
+      enabled: true,
+      catalog_visible: true,
+      max_output_tokens: 65_536,
+      default_max_output_tokens: 32_768,
+      expected_control_version: 0
+    },
+    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-put') } }
+  )
+  return adaptGroupModel(data)
 }
 
 function adaptGroupModel(model: GroupModelConfig): GroupModelConfig {
@@ -920,6 +960,8 @@ export const groupsAPI = {
   getUsageSummary,
   getCapacitySummary,
   listGroupModels,
+  listGroupModelCandidates,
+  createGroupModel,
   updateGroupModel
 }
 

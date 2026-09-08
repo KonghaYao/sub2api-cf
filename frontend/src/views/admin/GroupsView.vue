@@ -4553,10 +4553,32 @@
       <div v-if="groupModelsLoading" class="py-8 text-center text-gray-500">
         {{ t("common.loading") }}
       </div>
-      <div v-else-if="groupModels.length === 0" class="py-8 text-center text-gray-500">
-        {{ t("admin.groups.groupModels.empty") }}
-      </div>
       <div v-else class="space-y-3">
+        <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+          <div class="mb-2 font-medium text-gray-900 dark:text-gray-100">
+            {{ t("admin.groups.groupModels.addModel") }}
+          </div>
+          <div class="flex gap-2">
+            <select v-model="selectedGroupModelCandidateId" class="input flex-1">
+              <option value="">{{ t("admin.groups.groupModels.selectModel") }}</option>
+              <option v-for="candidate in groupModelCandidates" :key="candidate.id" :value="candidate.id">
+                {{ candidate.public_name }}
+              </option>
+            </select>
+            <button
+              type="button"
+              class="btn btn-primary"
+              :disabled="!selectedGroupModelCandidateId || addingGroupModel"
+              @click="addGroupModel"
+            >
+              {{ addingGroupModel ? t("common.saving") : t("admin.groups.groupModels.add") }}
+            </button>
+          </div>
+          <p class="input-hint">{{ t("admin.groups.groupModels.routingHint") }}</p>
+        </div>
+        <div v-if="groupModels.length === 0" class="py-8 text-center text-gray-500">
+          {{ t("admin.groups.groupModels.empty") }}
+        </div>
         <div
           v-for="model in groupModels"
           :key="model.model_id"
@@ -4653,7 +4675,7 @@ import {
   toNullableNumber,
 } from "@/components/admin/channel/types";
 import type { ChannelModelPricing } from "@/api/admin/channels";
-import type { GroupModelConfig } from "@/api/admin/groups";
+import type { GroupModelCandidate, GroupModelConfig } from "@/api/admin/groups";
 import { VueDraggable } from "vue-draggable-plus";
 import { createStableObjectKeyResolver } from "@/utils/stableObjectKey";
 import { extractApiErrorMessage } from "@/utils/apiError";
@@ -5186,6 +5208,9 @@ const rpmOverridesGroup = ref<AdminGroup | null>(null);
 const showGroupModelsModal = ref(false);
 const groupModelsGroup = ref<AdminGroup | null>(null);
 const groupModels = ref<GroupModelConfig[]>([]);
+const groupModelCandidates = ref<GroupModelCandidate[]>([]);
+const selectedGroupModelCandidateId = ref("");
+const addingGroupModel = ref(false);
 const groupModelsLoading = ref(false);
 const savingGroupModelId = ref<string | null>(null);
 const sortableGroups = ref<AdminGroup[]>([]);
@@ -6636,6 +6661,10 @@ const handleGroupModels = async (group: AdminGroup) => {
   groupModelsLoading.value = true;
   try {
     groupModels.value = await adminAPI.groups.listGroupModels(group.id);
+    groupModelCandidates.value = await adminAPI.groups.listGroupModelCandidates(
+      group.id,
+      new Set(groupModels.value.map((model) => model.model_id)),
+    );
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.loadFailed")));
   } finally {
@@ -6647,6 +6676,31 @@ const closeGroupModelsModal = () => {
   showGroupModelsModal.value = false;
   groupModelsGroup.value = null;
   groupModels.value = [];
+  groupModelCandidates.value = [];
+  selectedGroupModelCandidateId.value = "";
+};
+
+const addGroupModel = async () => {
+  if (!groupModelsGroup.value || !selectedGroupModelCandidateId.value) return;
+  const candidate = groupModelCandidates.value.find(
+    (model) => model.id === selectedGroupModelCandidateId.value,
+  );
+  if (!candidate) return;
+  addingGroupModel.value = true;
+  try {
+    await adminAPI.groups.createGroupModel(groupModelsGroup.value.id, candidate);
+    groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id);
+    groupModelCandidates.value = await adminAPI.groups.listGroupModelCandidates(
+      groupModelsGroup.value.id,
+      new Set(groupModels.value.map((model) => model.model_id)),
+    );
+    selectedGroupModelCandidateId.value = "";
+    appStore.showSuccess(t("admin.groups.groupModels.addSuccess"));
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.addFailed")));
+  } finally {
+    addingGroupModel.value = false;
+  }
 };
 
 const saveGroupModel = async (model: GroupModelConfig) => {
