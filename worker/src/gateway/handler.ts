@@ -3462,6 +3462,8 @@ async function settleAndProject(
     output_tokens: usage.output_tokens,
     cache_read_tokens: usage.cache_read_tokens,
     cache_write_tokens: usage.cache_write_tokens ?? 0,
+    cache_write_5m_tokens: usage.cache_write_5m_tokens ?? 0,
+    cache_write_1h_tokens: usage.cache_write_1h_tokens ?? 0,
     ...cost,
     ...accountCost,
     outcome,

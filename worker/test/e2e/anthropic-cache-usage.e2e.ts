@@ -35,8 +35,11 @@ it.each([false,true])('keeps native Anthropic cache usage in client, ledger and 
   const body=await response.text();expect(body).toContain('"cache_read_input_tokens":3');expect(body).toContain('Cache OK')
   await expect.poll(async()=>await env.DB.prepare('SELECT input_tokens,output_tokens,cache_read_tokens,cache_write_tokens FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({input_tokens:16,output_tokens:2,cache_read_tokens:3,cache_write_tokens:5})
   expect(await env.DB.prepare('SELECT account_stats_cost_micros,account_cost_micros FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({account_stats_cost_micros:65,account_cost_micros:65})
+  expect(await env.DB.prepare('SELECT cache_write_5m_tokens,cache_write_1h_tokens FROM usage_projection WHERE user_id=?').bind(f.user_id).first()).toEqual({cache_write_5m_tokens:2,cache_write_1h_tokens:3})
   const state=await(await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
   expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(20)
+  const detail=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage?page=1&user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
+  expect(detail.status).toBe(200);expect((await detail.json() as any).data.items[0]).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3})
   const dashboard=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/usage/stats?user_id='+f.user_id,{headers:{authorization:'Bearer '+adminSession}}))
   expect(dashboard.status).toBe(200)
   expect((await dashboard.json() as any).data).toMatchObject({total_input_tokens:8,total_cache_creation_tokens:5,total_cache_read_tokens:3,total_tokens:18})

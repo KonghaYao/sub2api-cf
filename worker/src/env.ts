@@ -74,6 +74,9 @@ export interface UsageSettledPayload {
   cache_read_tokens: number
   /** Absent only on events emitted before cache-write projection support. */
   cache_write_tokens?: number
+  /** Optional for backwards-compatible replay of events without TTL evidence. */
+  cache_write_5m_tokens?: number
+  cache_write_1h_tokens?: number
   input_amount_micros: number
   output_amount_micros: number
   cache_amount_micros: number

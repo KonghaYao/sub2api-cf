@@ -28,6 +28,17 @@ async function fixture() {
   return {env,headers:{authorization:`Bearer ${access}`}}
 }
 describe('user usage HTTP contract',()=>{
+ it('returns reported cache TTL details in user list and detail APIs',async()=>{
+  const t=await fixture(),app=createApp()
+  await t.env.DB.prepare("UPDATE usage_projection SET cache_write_tokens=5,cache_write_5m_tokens=2,cache_write_1h_tokens=3 WHERE event_id='alice-event'").run()
+  for(const path of ['/api/v1/usage','/api/v1/usage/alice-event']){
+   const response=await app.request(path,{headers:t.headers},t.env)
+   expect(response.status).toBe(200)
+   const data=(await response.json() as any).data
+   expect(data.items?.[0]??data).toMatchObject({cache_creation_tokens:5,cache_creation_5m_tokens:2,cache_creation_1h_tokens:3})
+  }
+ })
+
  it.each([
   ['Asia/Shanghai', '2026-09-07T16:05:00Z', '2026-09-08', '2026-09-07T16:00:00Z', '2026-09-08T16:00:00Z'],
   ['America/New_York', '2026-03-08T16:00:00Z', '2026-03-08', '2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z'],
