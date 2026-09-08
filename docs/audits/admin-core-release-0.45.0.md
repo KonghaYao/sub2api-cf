@@ -48,4 +48,4 @@ HTTPS 代理传输仍明确失败，不能把可保存配置误报为可执行�
 
 Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。现在保留 message.refusal、delta.refusal，处理 refusal delta/done、content_part.done、output_item.done 和终态完整输出；按内容片段补齐缺失后缀而不重复已发送内容。合法拒绝被视为实际输出，不被误判为空结果；保持正常 finish_reason 和实际用量。
 
-协议与网关 175 项、原生全量 76 项通过；新增原生拒绝链路连同失败/取消专项 4 项通过，确认 delta-only 拒绝返回完整、实际费用只扣一次、预留释放。类型检查通过。部署结果待追加。
+协议与网关 175 项、原生全量 76 项通过；新增原生拒绝链路连同失败/取消专项 4 项通过，确认 delta-only 拒绝返回完整、实际费用只扣一次、预留释放。类型检查通过。提交 `55469f79a` 已部署 0.45.4，Worker version `da72d8ba-6825-463b-aa14-80101b68272f`。
