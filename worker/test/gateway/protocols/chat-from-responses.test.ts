@@ -377,3 +377,44 @@ it('does not duplicate refusal deltas when part, item and terminal snapshots rep
   ]
   expect(events.flatMap(e => codec.push(e)).flatMap(c => c.choices).map(c => c.delta.refusal ?? '').join('')).toBe('Cannot comply.')
 })
+
+it.each(['text.done', 'part.done', 'item.done', 'terminal'] as const)('completes partial text and reasoning without repetition from %s', source => {
+  const text = '你好，完整内容。', reasoning = '检查后给出结论。'
+  const message = { type: 'message', content: [{ type: 'output_text', text }] }
+  const summary = { type: 'reasoning', summary: [{ type: 'summary_text', text: reasoning }] }
+  const events: Array<Record<string, unknown>> = [
+    { type: 'response.reasoning_summary_text.delta', output_index: 0, summary_index: 0, delta: '检查后' },
+    { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: '你好，' },
+  ]
+  if (source === 'text.done') events.push(
+    { type: 'response.reasoning_summary_text.done', output_index: 0, summary_index: 0, text: reasoning },
+    { type: 'response.output_text.done', output_index: 1, content_index: 0, text },
+  )
+  if (source === 'part.done') events.push(
+    { type: 'response.reasoning_summary_part.done', output_index: 0, summary_index: 0, part: summary.summary[0] },
+    { type: 'response.content_part.done', output_index: 1, content_index: 0, part: message.content[0] },
+  )
+  if (source === 'item.done') events.push(
+    { type: 'response.output_item.done', output_index: 0, item: summary },
+    { type: 'response.output_item.done', output_index: 1, item: message },
+  )
+  events.push({ type: 'response.completed', response: { status: 'completed', output: source === 'terminal' ? [summary, message] : [] } })
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const choices = events.flatMap(e => codec.push(e)).flatMap(c => c.choices)
+  expect(choices.map(c => c.delta.content ?? '').join('')).toBe(text)
+  expect(choices.map(c => c.delta.reasoning_content ?? '').join('')).toBe(reasoning)
+  const result = responsesSseToChatCompletionsResponse(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''), 'model')
+  expect(result.choices[0].message).toMatchObject({ content: text, reasoning_content: reasoning })
+})
+
+it('retains every content part and does not repeat item or terminal snapshots', () => {
+  const codec = new ResponsesToChatCompletionsEventCodec('model')
+  const item = { type: 'message', content: [{ type: 'output_text', text: 'Part one. ' }, { type: 'output_text', text: 'Part two.' }] }
+  const events = [
+    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'Part one. ' },
+    { type: 'response.output_text.delta', output_index: 0, content_index: 1, delta: 'Part ' },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { status: 'completed', output: [item] } },
+  ]
+  expect(events.flatMap(e => codec.push(e)).flatMap(c => c.choices).map(c => c.delta.content ?? '').join('')).toBe('Part one. Part two.')
+})

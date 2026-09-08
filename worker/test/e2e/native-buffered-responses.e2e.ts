@@ -21,11 +21,13 @@ it.each(['failed','missing','cancel'] as const)('handles native non-stream SSE %
  expect(await env.DB.prepare('SELECT quota_used_micros FROM api_keys WHERE id=?').bind(f.api_key_id).first()).toEqual({quota_used_micros:charge})
 })
 
-it('preserves a delta-only refusal and settles its actual usage once', async () => {
- const f=await seed('refusal'),ctx=createExecutionContext()
+it.each(['refusal', 'completion'])('preserves %s content and settles its actual usage once', async mode => {
+ const f=await seed(mode),ctx=createExecutionContext()
  const response=await createApp().fetch(new Request('https://worker.e2e.invalid/v1/responses',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json'},body:JSON.stringify({model:f.model,input:'hello',stream:false,max_output_tokens:16})}),env,ctx)
  expect(response.status,await response.clone().text()).toBe(200)
- expect(await response.json()).toMatchObject({status:'completed',output:[{type:'message',content:[{type:'refusal',refusal:'Cannot comply.'}]}]})
+ expect(await response.json()).toMatchObject({status:'completed',output:mode==='refusal'
+   ? [{type:'message',content:[{type:'refusal',refusal:'Cannot comply.'}]}]
+   : [{type:'reasoning',summary:[{type:'summary_text',text:'Thinking complete.'}]},{type:'message',content:[{type:'output_text',text:'Hello complete world.'}]}]})
  await waitOnExecutionContext(ctx)
  const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
  expect(state.profile).toMatchObject({balance_micros:999983,reserved_micros:0})

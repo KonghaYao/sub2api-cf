@@ -47,6 +47,13 @@ export default defineConfig(async () => {
                 return body.stream?new Response('data: '+JSON.stringify({type:'response.failed',response:{id:'cyber-fixture',status:'failed',error}})+'\n\n',{headers:{'content-type':'text/event-stream'}}):Response.json({error},{status:400})
               }
               if (typeof body.model === 'string' && body.model.startsWith('native-buffer-')) {
+                if (body.model === 'native-buffer-completion') return new Response([
+                  { type: 'response.reasoning_summary_text.delta', output_index: 0, summary_index: 0, delta: 'Think' },
+                  { type: 'response.reasoning_summary_text.done', output_index: 0, summary_index: 0, text: 'Thinking complete.' },
+                  { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: 'Hello ' },
+                  { type: 'response.output_text.done', output_index: 1, content_index: 0, text: 'Hello complete world.' },
+                  { type: 'response.completed', response: { id: 'completion-fixture', status: 'completed', output: [], usage: { input_tokens: 6, output_tokens: 2 } } },
+                ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } })
                 if (body.model === 'native-buffer-refusal') return new Response([
                   { type: 'response.refusal.delta', output_index: 0, content_index: 0, delta: 'Cannot comply.' },
                   { type: 'response.completed', response: { id: 'refusal-fixture', status: 'completed', output: [], usage: { input_tokens: 6, output_tokens: 2 } } },

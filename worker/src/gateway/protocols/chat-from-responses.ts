@@ -114,7 +114,8 @@ export interface ChatCompletionChunk extends JsonObject {
   usage?: ChatUsage
 }
 
-class RefusalParts {
+class ContentParts {
+  constructor(private readonly label = 'content') {}
   private readonly parts = new Map<string, string>()
   append(event: JsonObject): string {
     const delta = typeof event.delta === 'string' ? event.delta : ''
@@ -125,13 +126,50 @@ class RefusalParts {
   complete(outputIndex: unknown, contentIndex: unknown, value: unknown): string {
     if (typeof value !== 'string') return ''
     const key = this.key(outputIndex, contentIndex), prefix = this.parts.get(key) ?? ''
-    if (!value.startsWith(prefix)) throw new ResponsesToChatError('Upstream refusal differs from its streamed prefix')
+    if (!value.startsWith(prefix)) throw new ResponsesToChatError(`Upstream ${this.label} differs from its streamed prefix`)
     this.parts.set(key, value)
     return value.slice(prefix.length)
   }
   text(): string { return [...this.parts.values()].join('') }
   private key(outputIndex: unknown, contentIndex: unknown): string {
     return `${outputIndex ?? 0}:${contentIndex ?? 0}`
+  }
+}
+
+class TextCompletion {
+  readonly text = new ContentParts('text')
+  readonly reasoning = new ContentParts('reasoning')
+  observe(event: JsonObject): Array<{ content?: string; reasoning_content?: string }> {
+    const type = event.type
+    let delta = '', reasoning = false
+    if (type === 'response.output_text.delta') delta = this.text.append(event)
+    else if (type === 'response.output_text.done') delta = this.text.complete(event.output_index, event.content_index, event.text)
+    else if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
+      reasoning = true
+      delta = this.reasoning.append({ ...event, content_index: event.summary_index ?? event.content_index })
+    } else if (type === 'response.reasoning_summary_text.done' || type === 'response.reasoning_text.done') {
+      reasoning = true
+      delta = this.reasoning.complete(event.output_index, event.summary_index ?? event.content_index, event.text)
+    } else if (type === 'response.content_part.done' && objectValue(event.part)?.type === 'output_text') {
+      delta = this.text.complete(event.output_index, event.content_index, objectValue(event.part)?.text)
+    } else if (type === 'response.reasoning_summary_part.done') {
+      reasoning = true
+      delta = this.reasoning.complete(event.output_index, event.summary_index, objectValue(event.part)?.text)
+    } else if (type === 'response.output_item.done') return this.item(event.item, event.output_index)
+    return delta ? [reasoning ? { reasoning_content: delta } : { content: delta }] : []
+  }
+  item(value: unknown, outputIndex: unknown): Array<{ content?: string; reasoning_content?: string }> {
+    const item = objectValue(value)
+    if (!item) return []
+    const reasoning = item.type === 'reasoning'
+    const parts = reasoning ? item.summary : item.type === 'message' ? item.content : undefined
+    if (!Array.isArray(parts)) return []
+    return parts.flatMap((value, index) => {
+      const part = objectValue(value)
+      if (part?.type !== (reasoning ? 'summary_text' : 'output_text')) return []
+      const delta = (reasoning ? this.reasoning : this.text).complete(outputIndex, index, part.text)
+      return delta ? [reasoning ? { reasoning_content: delta } : { content: delta }] : []
+    })
   }
 }
 
@@ -230,9 +268,8 @@ export class ResponsesToChatCompletionsEventCodec {
   private readonly model: string
   private serviceTier: string | undefined
   private sentRole = false
-  private sentText = false
-  private sentReasoning = false
-  private readonly refusals = new RefusalParts()
+  private readonly content = new TextCompletion()
+  private readonly refusals = new ContentParts('refusal')
   private sawToolCall = false
   private finalized = false
   private nextToolIndex = 0
@@ -265,23 +302,8 @@ export class ResponsesToChatCompletionsEventCodec {
       const refusal = this.refusals.complete(event.output_index, event.content_index, objectValue(event.part)?.refusal)
       return refusal ? [...this.ensureRole(), this.delta({ refusal })] : []
     }
-    if (type === 'response.output_text.delta') {
-      const delta = optionalString(event.delta)
-      if (delta) this.sentText = true
-      return delta === undefined || delta === ''
-        ? []
-        : [...this.ensureRole(), this.delta({ content: delta })]
-    }
-    if (
-      type === 'response.reasoning_summary_text.delta' ||
-      type === 'response.reasoning_text.delta'
-    ) {
-      const delta = optionalString(event.delta)
-      if (delta) this.sentReasoning = true
-      return delta === undefined || delta === ''
-        ? []
-        : [...this.ensureRole(), this.delta({ reasoning_content: delta })]
-    }
+    const content = this.content.observe(event)
+    if (content.length && type !== 'response.output_item.done') return [...this.ensureRole(), ...content.map(delta => this.delta(delta))]
     if (type === 'response.output_item.added') {
       const item = objectAt(event.item, 'event.item')
       if (item.type !== 'function_call' && item.type !== 'custom_tool_call') return []
@@ -321,7 +343,8 @@ export class ResponsesToChatCompletionsEventCodec {
       })]
     }
     if (type === 'response.output_item.done') {
-      return [...this.completeRefusalItem(event.item, event.output_index),
+      return [...(content.length ? this.ensureRole() : []), ...content.map(delta => this.delta(delta)),
+        ...this.completeRefusalItem(event.item, event.output_index),
         ...this.completeTool(event.item, nonNegativeInteger(event.output_index, 'event.output_index'))]
     }
     if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
@@ -405,11 +428,9 @@ export class ResponsesToChatCompletionsEventCodec {
     this.usageValue = chatUsage(response?.usage ?? event.usage) ?? this.usageValue
     const chunks = [...this.ensureRole()]
     if (response && Array.isArray(response.output)) {
-      const message = responsesToChatCompletionsResponse(response, this.model, this.created).choices[0].message
-      if (!this.sentText && message.content) chunks.push(this.delta({ content: message.content }))
-      if (!this.sentReasoning && message.reasoning_content) chunks.push(this.delta({ reasoning_content: message.reasoning_content }))
       for (let outputIndex = 0; outputIndex < response.output.length; outputIndex++) {
-        chunks.push(...this.completeRefusalItem(response.output[outputIndex], outputIndex),
+        chunks.push(...this.content.item(response.output[outputIndex], outputIndex).map(delta => this.delta(delta)),
+          ...this.completeRefusalItem(response.output[outputIndex], outputIndex),
           ...this.completeTool(response.output[outputIndex], outputIndex))
       }
     }
@@ -475,9 +496,8 @@ export class BufferedResponsesToChatCompletions {
   private terminalValue: 'completed' | 'failed' | null = null
   private responseId: string | undefined
   private serviceTier: string | undefined
-  private text = ''
-  private readonly refusals = new RefusalParts()
-  private reasoning = ''
+  private readonly content = new TextCompletion()
+  private readonly refusals = new ContentParts('refusal')
   private readonly tools = new Map<number, { callId: string; name: string; arguments: string }>()
 
   constructor(
@@ -507,7 +527,7 @@ export class BufferedResponsesToChatCompletions {
   }
 
   hasOutput(): boolean {
-    return this.text.length > 0 || this.refusals.text().length > 0 || this.reasoning.length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
+    return this.content.text.text().length > 0 || this.refusals.text().length > 0 || this.content.reasoning.text().length > 0 || [...this.tools.values()].some(tool => tool.arguments.length > 0) || (Array.isArray(this.terminalResponse?.output) && this.terminalResponse.output.length > 0)
   }
 
   /** Return the authoritative Responses document, filling omitted output from streamed deltas. */
@@ -572,6 +592,7 @@ export class BufferedResponsesToChatCompletions {
 
   private processEvent(event: JsonObject): void {
     const type = optionalString(event.type)
+    this.content.observe(event)
     const observed = objectValue(event.response)
     if (observed !== null) {
       this.responseId = optionalString(observed.id) ?? this.responseId
@@ -583,13 +604,6 @@ export class BufferedResponsesToChatCompletions {
       this.refusals.complete(event.output_index, event.content_index, event.refusal)
     } else if (type === 'response.content_part.done' && objectValue(event.part)?.type === 'refusal') {
       this.refusals.complete(event.output_index, event.content_index, objectValue(event.part)?.refusal)
-    } else if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
-      this.text += event.delta
-    } else if (
-      (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') &&
-      typeof event.delta === 'string'
-    ) {
-      this.reasoning += event.delta
     } else if (type === 'response.output_item.added' || type === 'response.output_item.done') {
       this.observeOutputItem(event)
     } else if (
@@ -658,31 +672,19 @@ export class BufferedResponsesToChatCompletions {
         if (part?.type === 'refusal') this.refusals.complete(outputIndex, index, part.refusal)
       })
     }
-    if (item.type === 'message' && this.text === '') {
-      for (const partValue of optionalArray(item.content, 'event.item.content')) {
-        const part = objectAt(partValue, 'event.item.content[]')
-        if (part.type === 'output_text' && typeof part.text === 'string') this.text += part.text
-      }
-    } else if (item.type === 'reasoning' && this.reasoning === '') {
-      for (const summaryValue of optionalArray(item.summary, 'event.item.summary')) {
-        const summary = objectAt(summaryValue, 'event.item.summary[]')
-        if (summary.type === 'summary_text' && typeof summary.text === 'string') {
-          this.reasoning += summary.text
-        }
-      }
-    }
+    if (event.type === 'response.output_item.added') this.content.item(item, outputIndex)
   }
 
   private accumulatedOutput(): JsonObject[] {
     const output: JsonObject[] = []
-    if (this.reasoning !== '') output.push({
+    if (this.content.reasoning.text() !== '') output.push({
       type: 'reasoning',
-      summary: [{ type: 'summary_text', text: this.reasoning }],
+      summary: [{ type: 'summary_text', text: this.content.reasoning.text() }],
     })
-    if (this.text !== '') output.push({
+    if (this.content.text.text() !== '') output.push({
       type: 'message',
       role: 'assistant',
-      content: [{ type: 'output_text', text: this.text }],
+      content: [{ type: 'output_text', text: this.content.text.text() }],
     })
     if (this.refusals.text()) output.push({ type: 'message', role: 'assistant',
       content: [{ type: 'refusal', refusal: this.refusals.text() }] })
