@@ -119,6 +119,10 @@ export default defineConfig(async () => {
                   if (fallback) finish(); else setTimeout(finish, 65_000)
                 } }), { headers: { 'content-type': 'text/event-stream' } })
               }
+              if (body.model === 'cursor-shape-probe') {
+                const response={id:'shape-probe',object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify({body,session:request.headers.get('session_id')})}]}],usage:{input_tokens:6,output_tokens:2}}
+                return body.stream ? new Response('data: '+JSON.stringify({type:'response.completed',response})+'\n\n',{headers:{'content-type':'text/event-stream'}}) : Response.json(response)
+              }
               if (body.model === 'gpt-5.4-cache-probe') {
                 const text = JSON.stringify({ key: body.prompt_cache_key ?? null, session: request.headers.get('session_id') })
                 return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'cache-probe',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ChatToResponsesError,
+  chatRequestToResponses,
   chatCompletionsToResponsesRequest,
 } from '../../src/gateway/protocols/chat-responses'
 
@@ -196,4 +197,12 @@ describe('legacy Chat Completions to Responses contract', () => {
       function_call: { unexpected: true },
     })).toThrowError('$.function_call.name')
   })
+})
+
+it('preserves Responses-shaped Chat input and native tools, stripping only original unsupported fields', () => {
+  const body = {model:'alias',input:[{type:'custom_tool_call',call_id:'call-1',name:'patch',input:'raw patch'}],tools:[{type:'custom',name:'patch',format:{type:'text'}}],stream:false,store:true,service_tier:'fast',prompt_cache_key:'explicit',prompt_cache_retention:'24h',safety_identifier:'identity',metadata:{a:1},stream_options:{include_usage:true}}
+  expect(chatRequestToResponses(body,'upstream')).toEqual({model:'upstream',input:body.input,tools:body.tools,stream:false,store:true,service_tier:'priority',prompt_cache_key:'explicit'})
+  expect(body).toHaveProperty('metadata')
+  expect(chatRequestToResponses({model:'alias',input:'plain input'},'upstream').input).toBe('plain input')
+  expect(()=>chatRequestToResponses({model:'alias',messages:null,input:'must not hide invalid Chat messages'})).toThrow(ChatToResponsesError)
 })

@@ -47,6 +47,22 @@ export interface ChatToResponsesRequest extends JsonObject {
   tool_choice?: string | { type: 'function'; name: string }
 }
 
+/** Original ForwardAsChatCompletions Responses-shape short circuit (Cursor).
+ * Presence matters: an explicit messages:null is not a Responses-shaped request.
+ */
+export function chatRequestToResponses(value: unknown, upstreamModel?: string): JsonObject {
+  const root = objectAt(value, '$')
+  if (Object.hasOwn(root, 'messages') || !Object.hasOwn(root, 'input')) {
+    return chatCompletionsToResponsesRequest(root, upstreamModel)
+  }
+  const model = nonEmptyString(upstreamModel ?? root.model, '$.model', 256)
+  const result: JsonObject = { ...root, model }
+  for (const key of ['prompt_cache_retention', 'safety_identifier', 'metadata', 'stream_options']) delete result[key]
+  const tier = parseServiceTier(root.service_tier, '$.service_tier')
+  if (tier !== undefined) result.service_tier = tier
+  return result
+}
+
 /** Convert a public Chat Completions body to an allow-listed Responses body. */
 export function chatCompletionsToResponsesRequest(
   value: unknown,

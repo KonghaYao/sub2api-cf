@@ -26,11 +26,14 @@ export async function chatPromptCacheIdentity(input: {
   body: unknown; model: string; headers: Headers; apiKeyId: string; oauth: boolean
 }): Promise<{ promptCacheKey: string; sessionId: string } | null> {
   const body = object(input.body)
-  if (!body || !Array.isArray(body.messages)) return null
+  if (!body) return null
+  const responsesShape = !Object.hasOwn(body, 'messages') && Object.hasOwn(body, 'input')
+  if (!responsesShape && !Array.isArray(body.messages)) return null
   let key = SESSION_HEADERS.map(header => input.headers.get(header)?.trim()).find(Boolean)
     || (typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key.trim() : '')
   let isolated = false
   if (!key) {
+    if (responsesShape) return null
     const model = input.model.trim().toLowerCase()
     if (!model.includes('gpt-5') && !model.includes('codex')) return null
     const normalized = normalizeCodexModel(model).toLowerCase()

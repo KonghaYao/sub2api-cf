@@ -180,3 +180,12 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 - OpenAI/Codex/Grok文本请求无显式session时，按原版 model/tools/functions/instructions/前置system或developer/首条user形成内容关联。Chat晚加入的system消息不改变调度身份；Responses input有独立原版规则。关联键在送入Pool之前以含user/key/group/model/endpoint命名空间的现有加密摘要隐藏原始内容。原生Chat请求体不新增自动缓存键，Embeddings等保持既有显式关联边界。
 
 新增原生测试验证桥接上游实际收到的键/会话：跨轮次稳定、跨Key隔离、显式键/头优先级、原生Chat不注入；计费一次、预留归零。专项177项通过，完整网关57文件/867项通过，类型检查通过。完整原生36文件/109项通过。提交 `a2b37aff3` 已推送 origin/main 并部署0.45.18，Worker version `d0788e02-7391-4e0f-816c-72e434f945b6`；线上health确认status=ok、version=0.45.18。本轮不将fixture中的稳定键表述为生产上游实际缓存命中率，也不宣称已完成所有OAuth账号身份能力。
+
+
+## 0.45.19：Responses 格式请求发往 Chat URL 的兼容
+
+对照原版 `ForwardAsChatCompletions` 的 Cursor 分支：仅当顶层 messages 不存在而 input 存在时，将请求视作 Responses 格式。Worker 原先强制进入 Chat messages 转换，拒绝这类客户端；新增 chatRequestToResponses 短路，在Responses上游分支和OpenAI OAuth桥接中保留input（字符串/数组）、原生工具/工具结果和其他原生字段，重写模型并按原版仅清除prompt_cache_retention、safety_identifier、metadata、stream_options。显式messages:null保持原Chat校验，不静默忽略错误字段。service_tier沿用原版normalization。
+
+此格式不自动生成GPT缓存键，但保留显式prompt_cache_key/会话头及租户隔离session_id。修正按Responses形状设置默认max_output_tokens，避免原Chat默认max_tokens被误带至Codex。OAuth专项先复现同步/流式两项带max_tokens=4096的失败，再修复；既有Codex规范化负责删除不支持的输出限制字段。
+
+原生同步/流式测试通过Chat URL发送完整input、自定义工具定义、custom_tool_call及其output，验证实际上游字段不丢失，下游仍为Chat completion/chunks，流式DONE完整，账本一次扣费、预留归零。OAuth加密凭证执行链的同步/流式回归也覆盖输入规范化、原生字段清理、session及单次结算。完整网关57文件/871项通过，类型检查通过；全量原生37文件/111项通过，部署证据待追加。生产Composer实际推理仍未通过生产Key验证。

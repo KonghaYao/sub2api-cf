@@ -88,7 +88,7 @@ import {
 import type { ResponsesToolMapping } from './protocols/responses'
 import {
   ChatToResponsesError,
-  chatCompletionsToResponsesRequest,
+  chatRequestToResponses,
 } from './protocols/chat-responses'
 import {
   BufferedResponsesToChatCompletions,
@@ -1131,10 +1131,10 @@ function prepareOpenAiRequest(
         const fallbackBody = normalizedBody.max_output_tokens === undefined &&
           normalizedBody.max_completion_tokens === undefined &&
           normalizedBody.max_tokens === undefined
-          ? { ...normalizedBody, max_completion_tokens: model.default_max_output_tokens }
+          ? { ...normalizedBody, [!Object.hasOwn(normalizedBody, 'messages') && Object.hasOwn(normalizedBody, 'input') ? 'max_output_tokens' : 'max_completion_tokens']: model.default_max_output_tokens }
           : normalizedBody
         return {
-          body: chatCompletionsToResponsesRequest(
+          body: chatRequestToResponses(
             fallbackBody,
             model.upstream_name,
           ) as unknown as Record<string, unknown>,
@@ -1152,7 +1152,8 @@ function prepareOpenAiRequest(
         upstreamBody.max_completion_tokens === undefined &&
         upstreamBody.max_tokens === undefined
       ) {
-        upstreamBody[endpoint === 'responses' ? 'max_output_tokens' : 'max_tokens'] =
+        const responsesShape = endpoint === 'chat_completions' && !Object.hasOwn(normalizedBody, 'messages') && Object.hasOwn(normalizedBody, 'input')
+        upstreamBody[endpoint === 'responses' || responsesShape ? 'max_output_tokens' : 'max_tokens'] =
           model.default_max_output_tokens
       }
       if (stream && endpoint === 'chat_completions') {
@@ -1763,7 +1764,7 @@ async function acquireUpstream(
         ? { ...routedBody, model: actualModel } : routedBody
       const chatFromResponses = selectedOperation === 'chat_completions' && account.platform === 'openai' && account.credential_kind === 'oauth'
       const wireOperation = chatFromResponses ? 'responses' : selectedOperation
-      if (chatFromResponses) mappedBody = chatCompletionsToResponsesRequest(mappedBody, actualModel)
+      if (chatFromResponses) mappedBody = chatRequestToResponses(mappedBody, actualModel)
       const chatCache = inbound?.endpoint === 'chat_completions' && wireOperation === 'responses' && responseOwner &&
         (account.platform === 'openai' || account.platform === 'codex')
         ? await chatPromptCacheIdentity({ body: originalBody, model: actualModel ?? '', headers: inboundHeaders,

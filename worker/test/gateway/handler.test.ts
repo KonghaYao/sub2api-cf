@@ -1848,6 +1848,23 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
+  it.each([false,true])('forwards Responses-shaped Chat through OAuth without Chat-only defaults (stream=%s)', async stream => {
+    const {env,database,user}=await harness()
+    Object.assign(database.credential,{credential_kind:'oauth',...await encryptCredential({api_key:'unused',access_token:'shape-oauth'},masterKey,`test/${accountId}/${secretId}/1`)})
+    const upstream=vi.fn(async (_url:RequestInfo|URL,_init?:RequestInit)=>new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'shape',status:'completed',model:'gpt-upstream',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Shape OK'}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}}))
+    vi.stubGlobal('fetch',upstream)
+    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',input:'Original input',stream,prompt_cache_key:'shape-cache',metadata:{client:'cursor'},stream_options:{include_usage:true}})},env)
+    expect(response.status).toBe(200)
+    expect(await readStreamToTextWithin(response)).toContain('Shape OK')
+    const [url,init]=upstream.mock.calls[0]
+    expect(String(url)).toBe('https://chatgpt.com/backend-api/codex/responses')
+    const body=JSON.parse(String(init?.body))
+    expect(body).toMatchObject({input:[{role:'user',content:[{type:'input_text',text:'Original input'}]}],stream:true,store:false,prompt_cache_key:'shape-cache'})
+    for(const field of ['messages','metadata','stream_options','max_tokens','max_completion_tokens','max_output_tokens'])expect(body).not.toHaveProperty(field)
+    expect(new Headers(init?.headers).get('session_id')).toMatch(/^[a-f0-9-]{36}$/)
+    expect(user.calls.filter(call=>call.path==='/settle')).toHaveLength(1)
+  })
+
   it.each([
     ['responses', false], ['responses', true], ['chat/completions', false], ['chat/completions', true],
   ] as const)('forwards an original OpenAI OAuth %s request and settles exactly once (stream=%s)', async (endpoint, stream) => {

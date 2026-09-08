@@ -50,3 +50,10 @@ it('uses only leading Chat system/developer messages and the first user for sche
   expect(openAIContentSessionSeed({model:'gpt',input:[{role:'user',content:'First'},{role:'assistant',content:'Answer'},{role:'user',content:'Next'}]})).toBe(openAIContentSessionSeed({model:'gpt',input:[{role:'user',content:'First'}]}))
   expect(openAIContentSessionSeed({})).toBeUndefined()
 })
+
+it('preserves explicit Responses-shaped Chat identity without auto derivation', async () => {
+  const shape={...input,body:{model:'public',input:'Hello',prompt_cache_key:'explicit-shape'}}
+  expect((await chatPromptCacheIdentity(shape))?.promptCacheKey).toBe('explicit-shape')
+  expect((await chatPromptCacheIdentity({...shape,headers:new Headers({'session-id':'header-shape'})}))?.promptCacheKey).toBe('header-shape')
+  expect(await chatPromptCacheIdentity({...shape,body:{model:'public',input:'Hello'}})).toBeNull()
+})
