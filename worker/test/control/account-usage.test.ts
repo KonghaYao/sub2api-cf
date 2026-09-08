@@ -66,7 +66,7 @@ it('reads Anthropic passive samples and separates account, standard and user cos
     raw.prepare(`INSERT INTO usage_projection(event_id,request_id,user_id,account_id,model,input_tokens,output_tokens,cache_read_tokens,amount_micros,standard_cost_micros,account_cost_micros,occurred_at_ms,projected_at_ms)
       VALUES('event','request','u','account','model',10,5,2,3000000,5000000,4000000,?,?)`).run(Date.now(),Date.now())
     const result = await (await app.request('/accounts/account/usage?source=passive',{},env)).json() as any
-    expect(result.data).toMatchObject({source:'passive',five_hour:{utilization:40,window_stats:{requests:1,tokens:17,cost:4,standard_cost:5,user_cost:3}}})
+    expect(result.data).toMatchObject({source:'passive',five_hour:{utilization:40,window_stats:{requests:1,tokens:15,cost:4,standard_cost:5,user_cost:3}}})
     expect(fetcher).not.toHaveBeenCalled()
   } finally { raw.close() }
 })

@@ -153,7 +153,7 @@ describe('request explorer HTTP contracts', () => {
         total: 1, page: 1, page_size: 1, pages: 1,
         items: [{
           id: 'usage-z', user_id: 'alice', model: 'zeta', upstream_model: 'zeta-upstream',
-          input_tokens: 10, cache_read_tokens: 3, total_cost: 0.0006, actual_cost: 0.0009,
+          input_tokens: 7, cache_read_tokens: 3, total_cost: 0.0006, actual_cost: 0.0009,
           rate_multiplier: 1.5, upstream_model_mismatch: null, upstream_response_model: null,
           account_stats_cost: 0.0007, account_rate_multiplier: 1.25,
           user: { email: 'alice@example.test' }, api_key: { name: 'Alice key' },

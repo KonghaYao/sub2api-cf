@@ -10,7 +10,10 @@ it.each(['finish','usage','error','truncated'])('handles original raw Chat EOF m
  expect(response.status).toBe(200)
  expect(content).toContain('Chat OK')
  const failed=mode==='error'||mode==='truncated'
- if(!failed)expect(content).not.toContain('upstream_stream_error')
+ if(!failed) {
+  expect(content).not.toContain('upstream_stream_error')
+  expect(content.endsWith('data: [DONE]\n\n')).toBe(true)
+ }
  await expect.poll(async()=>(await env.DB.prepare('SELECT outcome FROM usage_projection WHERE user_id=?').bind(f.user_id).first<any>())?.outcome).toBe(failed?'failed':'completed')
  const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
  expect(state.profile.reserved_micros).toBe(0)

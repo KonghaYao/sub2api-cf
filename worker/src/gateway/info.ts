@@ -476,7 +476,7 @@ function usageBlock(
 ) {
   return {
     requests,
-    input_tokens: inputTokens,
+    input_tokens: Math.max(0, inputTokens - cacheReadTokens),
     output_tokens: outputTokens,
     cache_creation_tokens: 0,
     cache_read_tokens: cacheReadTokens,
@@ -491,7 +491,7 @@ function modelUsage(row: UsageModelRow) {
   return {
     model: row.model,
     requests: row.requests,
-    input_tokens: row.input_tokens,
+    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens),
     output_tokens: row.output_tokens,
     cache_creation_tokens: 0,
     cache_read_tokens: row.cache_read_tokens,
@@ -506,7 +506,7 @@ function dailyUsage(row: UsageDayRow) {
   return {
     date: row.local_date,
     requests: row.requests,
-    input_tokens: row.input_tokens,
+    input_tokens: Math.max(0, row.input_tokens - row.cache_read_tokens),
     output_tokens: row.output_tokens,
     cache_read_tokens: row.cache_read_tokens,
     cache_write_tokens: 0,

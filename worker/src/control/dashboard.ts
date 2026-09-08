@@ -11,9 +11,9 @@ type Bindings = {
 type Kind = 'snapshot-v2' | 'stats' | 'trend' | 'groups' | 'users-trend' | 'users-ranking' | 'api-keys-trend' | 'user-breakdown';
 const DAY = 86400000;
 const startedAt = Date.now();
-const aggregate = `COUNT(*) requests, COALESCE(SUM(u.input_tokens),0) input_tokens,
+const aggregate = `COUNT(*) requests, COALESCE(SUM(MAX(0,u.input_tokens-u.cache_read_tokens)),0) input_tokens,
   COALESCE(SUM(u.output_tokens),0) output_tokens, COALESCE(SUM(u.cache_read_tokens),0) cache_read_tokens,
-  COALESCE(SUM(u.input_tokens+u.output_tokens+u.cache_read_tokens),0) total_tokens,
+  COALESCE(SUM(u.input_tokens+u.output_tokens),0) total_tokens,
   COALESCE(SUM(COALESCE(u.standard_cost_micros,u.amount_micros)),0)/1000000.0 cost,
   COALESCE(SUM(u.amount_micros),0)/1000000.0 actual_cost,
   COALESCE(SUM(COALESCE(u.account_cost_micros,u.account_stats_cost_micros,u.amount_micros)),0)/1000000.0 account_cost`;

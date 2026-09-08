@@ -33,7 +33,7 @@ export async function refreshAccountUsage(env: Env, account: PrivacyAccount, for
 
 async function attachStats(env: Env, accountId: string, value: AccountUsageProgress | null, duration: number, now: number) {
   const start = codexUsageStatsStart(value, duration, now)
-  const stats = await env.DB.prepare(`SELECT COUNT(*) AS requests,COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) AS tokens,
+  const stats = await env.DB.prepare(`SELECT COUNT(*) AS requests,COALESCE(SUM(input_tokens+output_tokens),0) AS tokens,
     COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,standard_cost_micros,amount_micros)),0)/1000000.0 AS cost,
     COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0)/1000000.0 AS standard_cost,
     COALESCE(SUM(amount_micros),0)/1000000.0 AS user_cost FROM usage_projection WHERE account_id=? AND occurred_at_ms>=?`)

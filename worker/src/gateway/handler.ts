@@ -1,3 +1,5 @@
+import { chatJsonStream } from './protocols/chat-json-stream'
+import { normalizeOpenAIUsage } from './usage'
 import { normalizeResponsesToolArguments } from './protocols/tool-arguments'
 import { fetchWithHeaderTimeout, responseHeaderTimeout } from './upstream-timeout'
 import { resolveAccountRequestAuthentication } from '../control/account-request-authentication'
@@ -2174,6 +2176,7 @@ async function createSynchronousResponse(
       throw failure
     }
     if (input.upstreamEndpoint === 'responses') parsed = normalizeResponsesToolArguments(parsed)
+    if (input.upstreamEndpoint === 'responses' || input.upstreamEndpoint === 'chat_completions') parsed = normalizeOpenAIUsage(parsed)
     const usage = extractProviderUsage(parsed, input.providerPlatform) ??
       (input.providerPlatform==='antigravity' && !geminiHasOutput(parsed) ? {input_tokens:0,output_tokens:0,cache_read_tokens:0,estimated:false} : null) ??
       estimatedUsage(input.inputBytes, input.endpoint === 'embeddings' ? 0 : bytes.byteLength)
@@ -2207,17 +2210,33 @@ async function createSynchronousResponse(
     const failedResponsesDocument = input.upstreamEndpoint === 'responses' &&
       (['failed', 'cancelled', 'canceled'].includes(String(responseStatus)) || embeddedError !== null)
     const zeroCostFailure = failedResponsesDocument && responsesFailureDetails(parsed).cyberPolicy
-    await settleAndProject(input, zeroCostFailure ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false } : usage,
-      failedResponsesDocument ? 'failed' : 'completed', zeroCostFailure, extractTrustedResponseModel(parsed))
-    const output = downstreamValue === null
+    const chatStreamFallback = input.stream && input.endpoint === 'chat_completions'
+    let chatStreamBytes: Uint8Array | undefined
+    if (chatStreamFallback) {
+      try {
+        chatStreamBytes = chatJsonStream(rewriteModelNames(downstreamValue, input.model.upstream_name, input.requestedModel))
+      } catch (error) {
+        await bestEffort(() => recordPoolTelemetry(input.pool, input.leaseId, true))
+        await bestEffort(() => cancelGatewayReservations(input.env, input.principal, input.requestId))
+        throw error
+      }
+    }
+    const output = chatStreamBytes !== undefined
+      ? chatStreamBytes
+      : downstreamValue === null
       ? bytes
       : encoder.encode(JSON.stringify(
         input.transformResponse === undefined
           ? rewriteModelNames(downstreamValue, input.model.upstream_name, input.requestedModel)
           : downstreamValue,
       ))
+    await settleAndProject(input, zeroCostFailure ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false } : usage,
+      failedResponsesDocument ? 'failed' : 'completed', zeroCostFailure, extractTrustedResponseModel(parsed))
     const headers = responseHeaders(input.response.headers, false)
-    headers.set('content-length', String(output.byteLength))
+    if (chatStreamFallback) {
+      headers.set('content-type', 'text/event-stream; charset=utf-8')
+      headers.set('x-accel-buffering', 'no')
+    } else headers.set('content-length', String(output.byteLength))
     return new Response(output.buffer as ArrayBuffer, { status: input.response.status, headers })
   } finally {
     await Promise.all([
@@ -2267,7 +2286,11 @@ class OpenAiStreamTransformer implements GatewayStreamTransformer {
   }
 
   finish(): Uint8Array[] {
-    return this.delegate.finish()
+    const chunks = this.delegate.finish()
+    if (this.endpoint === 'chat_completions' && !this.delegate.chatDoneReceived() && this.delegate.terminal('chat_completions') === 'completed') {
+      chunks.push(encoder.encode('data: [DONE]\n\n'))
+    }
+    return chunks
   }
 
   usage(): TokenUsage | null {
@@ -2393,7 +2416,7 @@ class ChatResponsesStreamTransformer implements GatewayStreamTransformer {
     if (data === '') return []
     const events = data === '[DONE]'
       ? this.codec.finish()
-      : this.codec.push(JSON.parse(data) as unknown)
+      : this.codec.push(normalizeOpenAIUsage(JSON.parse(data)))
     return events.map((event) => {
       if (event.type === 'response.completed' || event.type === 'response.incomplete') {
         this.terminalValue = 'completed'
@@ -2520,7 +2543,7 @@ class ResponsesChatStreamTransformer implements GatewayStreamTransformer {
     if (data === '' || data === '[DONE]') return []
     let parsed: unknown
     try {
-      parsed = JSON.parse(data)
+      parsed = normalizeOpenAIUsage(JSON.parse(data))
     } catch {
       throw new GatewayError(
         502,
@@ -2743,7 +2766,7 @@ class AnthropicResponsesStreamTransformer implements GatewayStreamTransformer {
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(data)
+      parsed = normalizeOpenAIUsage(JSON.parse(data))
     } catch {
       throw new GatewayError(
         502,

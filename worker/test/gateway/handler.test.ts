@@ -1720,6 +1720,52 @@ describe('OpenAI-compatible gateway', () => {
     }
   })
 
+  it.each(['done', 'finish', 'usage'])('terminates an unterminated final Chat SSE frame exactly once: %s', async (ending) => {
+    const { env } = await harness()
+    const final = ending === 'done' ? '[DONE]' : JSON.stringify(ending === 'finish'
+      ? { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
+      : { choices: [], usage: { prompt_tokens: 100, completion_tokens: 2, cache_read_tokens: 80 } })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\ndata: ' + final + '\n', { headers: { 'content-type': 'text/event-stream' } })))
+    const response = await createApp().request('/v1/chat/completions', { method: 'POST',
+      headers: { authorization: 'bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', stream: true, messages: [] }) }, env)
+    const text = await response.text()
+    expect(text.endsWith('data: [DONE]\n\n')).toBe(true)
+    expect(text.match(/data: \[DONE\]/g)).toHaveLength(1)
+    if (ending === 'usage') expect(text).toContain('"cached_tokens":80')
+  })
+
+  it.each([false, true])('normalizes legacy cache usage and honors Chat streaming=%s with JSON-only upstream', async (stream) => {
+    const { env, user, pool } = await harness()
+    const upstream = vi.fn(async () => Response.json({
+      id: 'chatcmpl-json', object: 'chat.completion', model: 'gpt-upstream', created: 123,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'Hello', reasoning_content: 'Thought',
+        tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'weather', arguments: '{"city":"上海"}' } }] }, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cache_read_input_tokens: 80 },
+    }))
+    vi.stubGlobal('fetch', upstream)
+    const response = await createApp().request('/v1/chat/completions', {
+      method: 'POST', headers: { authorization: 'bearer sk-customer', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-public', stream, messages: [{ role: 'user', content: 'Hello' }] }),
+    }, env)
+    expect(response.status).toBe(200)
+    if (stream) {
+      expect(response.headers.get('content-type')).toContain('text/event-stream')
+      const text = await response.text()
+      const frames = text.split('\n\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)))
+      expect(frames.every(frame => frame.object === 'chat.completion.chunk' && frame.model === 'gpt-public')).toBe(true)
+      expect(frames[1].choices[0].delta).toMatchObject({ content: 'Hello', reasoning_content: 'Thought', tool_calls: [{ index: 0, id: 'call-1' }] })
+      expect(frames[2].choices[0].finish_reason).toBe('tool_calls')
+      expect(frames.at(-1)).toMatchObject({ choices: [], usage: { prompt_tokens_details: { cached_tokens: 80 } } })
+      expect(text.endsWith('data: [DONE]\n\n')).toBe(true)
+    } else expect(await response.json()).toMatchObject({ usage: { prompt_tokens_details: { cached_tokens: 80 } } })
+    expect(user.calls.filter(call => call.path === '/settle')).toHaveLength(1)
+    expect(user.calls.find(call => call.path === '/settle')?.body).toMatchObject({
+      amount_micros: 88, usage_event: { payload: { input_tokens: 100, cache_read_tokens: 80, output_tokens: 2, outcome: 'completed' } },
+    })
+    expect(pool.calls.filter(call => call.path === '/release')).toHaveLength(1)
+  })
+
   it('streams complete SSE frames and settles from the terminal usage event', async () => {
     const { env, user, pool } = await harness()
     vi.stubGlobal(

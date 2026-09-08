@@ -44,6 +44,15 @@ async function fixture() {
     return { raw, env, auth, objects };
 }
 describe('admin dashboard real routes', () => {
+    it('exposes uncached input to the original chart without double counting cache hits', async () => {
+        const test = await fixture(), now = Date.now();
+        test.raw.prepare(`INSERT INTO usage_projection(event_id,request_id,user_id,model,input_tokens,output_tokens,cache_read_tokens,amount_micros,occurred_at_ms,projected_at_ms) VALUES ('cache','cache','alice','model',100,2,80,88,?,?)`).run(now, now);
+        const response = await createApp().request('/api/v1/admin/dashboard/snapshot-v2', { headers: { authorization: test.auth.admin! } }, test.env);
+        expect(response.status).toBe(200);
+        const data = (await response.json() as any).data;
+        expect(data.trend[0]).toMatchObject({ input_tokens: 20, cache_read_tokens: 80, total_tokens: 102 });
+        expect(data.trend[0].cache_read_tokens / (data.trend[0].input_tokens + data.trend[0].cache_read_tokens)).toBe(.8);
+    });
     it('loads snapshot, user trend and spending ranking from billing projection', async () => {
         const test = await fixture();
         const now = Date.now(), date = new Date(now).toISOString().slice(0, 10);
@@ -57,16 +66,16 @@ describe('admin dashboard real routes', () => {
             return (await response.json() as any).data;
         };
         const snapshot = await request(`snapshot-v2?start_date=${date}&end_date=${date}&upstream_model_mismatch=false&granularity=hour&include_stats=true&include_trend=true&include_model_stats=true&include_group_stats=false&include_users_trend=false`);
-        expect(snapshot.stats).toMatchObject({ total_users: 3, total_requests: 2, total_tokens: 350, total_cost: 7, total_actual_cost: 4, today_requests: 2, active_users: 2 });
+        expect(snapshot.stats).toMatchObject({ total_users: 3, total_requests: 2, total_tokens: 300, total_cost: 7, total_actual_cost: 4, today_requests: 2, active_users: 2 });
         expect(snapshot.trend).toHaveLength(1);
-        expect(snapshot.trend[0]).toMatchObject({ requests: 2, total_tokens: 350, cost: 7, actual_cost: 4 });
+        expect(snapshot.trend[0]).toMatchObject({ requests: 2, total_tokens: 300, cost: 7, actual_cost: 4 });
         expect(snapshot.models[0]).toMatchObject({ model: 'composer-2.5', requests: 2, cost: 7, actual_cost: 4 });
         expect(snapshot).not.toHaveProperty('groups');
         const trend = await request(`users-trend?start_date=${date}&end_date=${date}&limit=1`);
         expect(trend.trend).toHaveLength(1);
-        expect(trend.trend[0]).toMatchObject({ user_id: 'bob', email: 'bob@example.test', tokens: 175, actual_cost: 3 });
+        expect(trend.trend[0]).toMatchObject({ user_id: 'bob', email: 'bob@example.test', tokens: 150, actual_cost: 3 });
         const ranking = await request(`users-ranking?start_date=${date}&end_date=${date}&limit=1`);
-        expect(ranking).toMatchObject({ total_requests: 2, total_tokens: 350, total_actual_cost: 4 });
+        expect(ranking).toMatchObject({ total_requests: 2, total_tokens: 300, total_actual_cost: 4 });
         expect(ranking.ranking).toHaveLength(1);
         expect(ranking.ranking[0]).toMatchObject({ user_id: 'bob', actual_cost: 3 });
     });

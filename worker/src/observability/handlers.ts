@@ -125,7 +125,7 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
         CAST(ROUND(AVG(duration_ms)) AS INTEGER) average_duration_ms
         FROM usage_projection u ${where}`).bind(...values),
       context.env.DB.prepare(`SELECT inbound_endpoint endpoint,COUNT(*) requests,
-        COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) tokens,
+        COALESCE(SUM(input_tokens+output_tokens),0) tokens,
         COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
         COALESCE(SUM(amount_micros),0) amount_micros
         FROM usage_projection u ${where}${where === '' ? 'WHERE' : ' AND'} inbound_endpoint <> ''
@@ -137,12 +137,12 @@ export async function getAdminUsageStats(context: Context<Bindings>): Promise<Re
     const cache = safeInteger(row.cache_read_tokens)
     return controlSuccess({
       total_requests: safeInteger(row.total_requests),
-      total_input_tokens: input,
+      total_input_tokens: Math.max(0, input - cache),
       total_output_tokens: output,
       total_cache_tokens: cache,
       total_cache_creation_tokens: 0,
       total_cache_read_tokens: cache,
-      total_tokens: safeSum(input, output, cache),
+      total_tokens: safeSum(input, output),
       total_cost: usdValue(row.standard_micros),
       total_actual_cost: usdValue(row.amount_micros),
       total_account_cost: usdValue(row.account_micros),
@@ -176,7 +176,7 @@ export async function getAdminUsageModels(context: Context<Bindings>): Promise<R
     const rows = await context.env.DB.prepare(`SELECT ${model} model,COUNT(*) requests,
       COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
       0 cache_creation_tokens,COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,
-      COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0) total_tokens,
+      COALESCE(SUM(input_tokens+output_tokens),0) total_tokens,
       COALESCE(SUM(COALESCE(standard_cost_micros,amount_micros)),0) standard_micros,
       COALESCE(SUM(amount_micros),0) amount_micros,
       COALESCE(SUM(COALESCE(account_cost_micros,account_stats_cost_micros,amount_micros)),0) account_micros
@@ -186,7 +186,7 @@ export async function getAdminUsageModels(context: Context<Bindings>): Promise<R
       models: rows.results.map((row) => ({
         model: row.model,
         requests: safeInteger(row.requests),
-        input_tokens: safeInteger(row.input_tokens),
+        input_tokens: Math.max(0, safeInteger(row.input_tokens) - safeInteger(row.cache_read_tokens)),
         output_tokens: safeInteger(row.output_tokens),
         cache_creation_tokens: 0,
         cache_read_tokens: safeInteger(row.cache_read_tokens),
@@ -565,7 +565,7 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     upstream_model_mismatch: null,
     group_id: row.group_id,
     subscription_id: row.subscription_id,
-    input_tokens: safeInteger(row.input_tokens),
+    input_tokens: Math.max(0, safeInteger(row.input_tokens) - safeInteger(row.cache_read_tokens)),
     output_tokens: safeInteger(row.output_tokens),
     cache_creation_tokens: 0,
     cache_read_tokens: safeInteger(row.cache_read_tokens),

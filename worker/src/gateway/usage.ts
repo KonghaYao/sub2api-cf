@@ -235,6 +235,10 @@ export class SseEventTransformer {
     return this.responsesTerminal ?? 'missing'
   }
 
+  chatDoneReceived(): boolean {
+    return this.sawChatDone
+  }
+
   chatFailureHasNoOutput(): boolean {
     return this.sawChatFailure && !this.sawChatOutput &&
       (this.latestUsage === null || (this.latestUsage.input_tokens === 0 && this.latestUsage.output_tokens === 0))
@@ -254,7 +258,7 @@ export class SseEventTransformer {
       chunks.push(this.transformFrame(frame, match[0]))
     }
     if (flush && this.buffer.length > 0) {
-      chunks.push(this.transformFrame(this.buffer, ''))
+      chunks.push(this.transformFrame(this.buffer.trimEnd(), '\n\n'))
       this.buffer = ''
     }
     return chunks
@@ -275,7 +279,7 @@ export class SseEventTransformer {
       this.sawChatDone = true
     } else if (data !== '') {
       try {
-        const parsed: unknown = normalizeResponsesToolArguments(JSON.parse(data), eventName)
+        const parsed: unknown = normalizeOpenAIUsage(normalizeResponsesToolArguments(JSON.parse(data), eventName))
         this.observeResponseModel(extractTrustedResponseModel(parsed))
         const usage = extractUsage(parsed)
         if (usage !== null) this.latestUsage = usage
@@ -403,16 +407,18 @@ function parseUsageObject(value: unknown, inputOnly = false): TokenUsage | null 
   const input = firstInteger(usage.input_tokens, usage.prompt_tokens)
   const output = firstInteger(usage.output_tokens, usage.completion_tokens) ?? (inputOnly ? 0 : null)
   if (input === null || output === null || input < 0 || output < 0) return null
-  const inputDetails = (usage.input_tokens_details ?? usage.prompt_tokens_details) as
-    | Record<string, unknown>
-    | undefined
-  const cached = firstInteger(inputDetails?.cached_tokens) ?? 0
+  const cached = firstInteger(
+    objectRecord(usage.input_tokens_details)?.cached_tokens,
+    objectRecord(usage.prompt_tokens_details)?.cached_tokens,
+  ) ?? firstPositiveInteger(usage.cache_read_input_tokens, usage.cache_read_tokens, usage.cached_tokens)
   if (cached < 0) return null
   const cacheWrite = firstInteger(
-    inputDetails?.cache_write_tokens,
-    inputDetails?.cache_creation_tokens,
-    usage.cache_creation_input_tokens,
-  ) ?? 0
+    objectRecord(usage.input_tokens_details)?.cache_write_tokens,
+    objectRecord(usage.prompt_tokens_details)?.cache_write_tokens,
+    objectRecord(usage.input_tokens_details)?.cache_creation_tokens,
+    objectRecord(usage.prompt_tokens_details)?.cache_creation_tokens,
+  ) ?? firstPositiveInteger(usage.cache_write_tokens, usage.cache_creation_input_tokens,
+    usage.cache_write_input_tokens, usage.cache_creation_tokens)
   return {
     input_tokens: input,
     output_tokens: output,
@@ -420,6 +426,29 @@ function parseUsageObject(value: unknown, inputOnly = false): TokenUsage | null 
     ...(cacheWrite > 0 ? { cache_write_tokens: Math.min(cacheWrite, input) } : {}),
     estimated: false,
   }
+}
+
+// Preserve explicit nested zero values, as in the original Go gateway. Only
+// legacy flat aliases use first-positive fallback. Never invent cache hits.
+function firstPositiveInteger(...values: unknown[]): number {
+  return values.find((value): value is number => Number.isSafeInteger(value) && Number(value) > 0) ?? 0
+}
+
+export function normalizeOpenAIUsage(value: unknown): unknown {
+  const root = objectRecord(value)
+  if (!root) return value
+  const usage = objectRecord(root.usage)
+  const parsed = parseUsageObject(usage)
+  let result = root
+  if (usage && parsed) {
+    const detailsKey = usage.prompt_tokens !== undefined ? 'prompt_tokens_details' : 'input_tokens_details'
+    result = { ...root, usage: { ...usage, [detailsKey]: {
+      ...objectRecord(usage[detailsKey]), cached_tokens: parsed.cache_read_tokens,
+      ...(parsed.cache_write_tokens ? { cache_write_tokens: parsed.cache_write_tokens } : {}),
+    } } }
+  }
+  if (objectRecord(root.response)) result = { ...result, response: normalizeOpenAIUsage(root.response) }
+  return result
 }
 
 function firstInteger(...values: unknown[]): number | null {

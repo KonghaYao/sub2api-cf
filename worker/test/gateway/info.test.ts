@@ -229,8 +229,8 @@ describe('gateway account information', () => {
       billing_type: 'balance',
       balance_micros: 12_500_000,
       usage: {
-        today: { requests: 2, total_tokens: 50, cost: 0.75, amount_micros: 750_000 },
-        total: { requests: 3, total_tokens: 70, cost: 1.25, amount_micros: 1_250_000 },
+        today: { requests: 2, input_tokens: 25, cache_read_tokens: 5, total_tokens: 50, cost: 0.75, amount_micros: 750_000 },
+        total: { requests: 3, input_tokens: 35, cache_read_tokens: 5, total_tokens: 70, cost: 1.25, amount_micros: 1_250_000 },
         average_duration_ms: 150,
       },
       model_stats: [{ model: 'public-model', requests: 3, cost: 1.25 }],

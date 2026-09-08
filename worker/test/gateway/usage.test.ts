@@ -29,6 +29,16 @@ const model: ModelRoute = {
 }
 
 describe('gateway usage accounting', () => {
+  it.each(['cache_read_input_tokens', 'cache_read_tokens', 'cached_tokens'])('reads legacy %s in JSON and SSE without overriding explicit zero', (field) => {
+    const usage = { prompt_tokens: 100, completion_tokens: 2, [field]: 80 }
+    expect(extractUsage({ usage })).toMatchObject({ input_tokens: 100, cache_read_tokens: 80 })
+    expect(extractUsage({ usage: { ...usage, prompt_tokens_details: { cached_tokens: 0 } } })).toMatchObject({ cache_read_tokens: 0 })
+    const transformer = new SseEventTransformer('upstream', 'public')
+    const chunks = transformer.push(new TextEncoder().encode(`data: ${JSON.stringify({ usage })}\n\ndata: [DONE]\n\n`))
+    expect(transformer.usage()).toMatchObject({ cache_read_tokens: 80 })
+    expect(chunks.map(chunk => new TextDecoder().decode(chunk)).join('')).toContain('"cached_tokens":80')
+  })
+
   it('applies the group rate multiplier using integer micro-units', () => {
     expect(
       calculateCost(
