@@ -74,6 +74,30 @@ describe('original monitor UI and actual synthetic probe lifecycle',()=>{
    count=0;await runScheduledChannelMonitors(f.env,now+2000);expect(count).toBeLessThanOrEqual(50);expect(fetcher).toHaveBeenCalledTimes(11)
   }finally{vi.unstubAllGlobals();f.raw.close()}
  })
+ it.each([['openai','chat_completions'],['openai','responses'],['anthropic','chat_completions'],['gemini','chat_completions']] as const)('protects model and challenge fields in %s %s merge templates',async(provider,api_mode)=>{
+  const f=await clearHarness(false),app=createApp()
+  const call=(path:string,body:unknown,method='POST')=>app.request('/api/v1/admin'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json'},body:JSON.stringify(body)},f.env)
+  const fetcher=vi.fn(async()=>Response.json(api_mode==='responses'?{output:[{type:'message',content:[{type:'output_text',text:'OK'}]}]}:{choices:[{message:{content:'OK'}}]}));vi.stubGlobal('fetch',fetcher)
+  try{
+   expect((await call('/settings/channel-monitor',{expected_control_version:0,channel_monitor_enabled:true},'PUT')).status).toBe(200)
+   const created=await call('/channel-monitors',{name:'Protected monitor',provider,api_mode,endpoint:'https://api.example.test',api_key:'test-monitor-secret',primary_model:'intended-model',interval_seconds:300,body_override_mode:'merge',body_override:{model:'wrong-model',messages:[{role:'user',content:'overridden'}],input:'overridden',instructions:'overridden',contents:[{parts:[{text:'overridden'}]}],stream:true,temperature:0,max_tokens:8,max_output_tokens:8}})
+   expect(created.status).toBe(200)
+   const monitor=(await created.json() as any).data
+   const run=await call(`/channel-monitors/${monitor.id}/run`,{})
+   expect(run.status).toBe(200);expect(fetcher).toHaveBeenCalledTimes(1)
+   const body=JSON.parse((fetcher.mock.calls as unknown as [unknown,RequestInit][])[0][1].body as string)
+   if(provider!=='gemini') expect(body.model).toBe('intended-model')
+   expect(body.temperature).toBe(0)
+   if(provider==='openai') expect(body.stream).toBe(false)
+   if(provider==='gemini'){
+    expect(body.contents).not.toEqual([{parts:[{text:'overridden'}]}])
+   }else if(api_mode==='responses'){
+    expect(body.input).not.toBe('overridden');expect(body.instructions).not.toBe('overridden');expect(body.max_output_tokens).toBe(8)
+   }else{
+    expect(body.messages).not.toEqual([{role:'user',content:'overridden'}]);expect(body.max_tokens).toBe(8)
+   }
+  }finally{vi.unstubAllGlobals();f.raw.close()}
+ })
  it('creates template and monitor, probes real request, changes template snapshot, duplicates, disables and deletes',async()=>{
   const f=await clearHarness(false),app=createApp();
   const call=async(path:string,method='GET',body?:unknown,headers:Record<string,string>={})=>app.request('/api/v1'+path,{method,headers:{authorization:`Bearer ${f.accessToken}`,'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})},f.env)

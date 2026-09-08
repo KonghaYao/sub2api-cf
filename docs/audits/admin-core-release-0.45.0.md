@@ -189,3 +189,10 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 此格式不自动生成GPT缓存键，但保留显式prompt_cache_key/会话头及租户隔离session_id。修正按Responses形状设置默认max_output_tokens，避免原Chat默认max_tokens被误带至Codex。OAuth专项先复现同步/流式两项带max_tokens=4096的失败，再修复；既有Codex规范化负责删除不支持的输出限制字段。
 
 原生同步/流式测试通过Chat URL发送完整input、自定义工具定义、custom_tool_call及其output，验证实际上游字段不丢失，下游仍为Chat completion/chunks，流式DONE完整，账本一次扣费、预留归零。OAuth加密凭证执行链的同步/流式回归也覆盖输入规范化、原生字段清理、session及单次结算。完整网关57文件/871项通过，类型检查通过；全量原生37文件/111项通过。提交 `909193aa2` 已推送origin/main并部署0.45.19，Worker version `be1b33c1-943b-4dd9-82a5-05b19b694765`；线上health确认status=ok、version=0.45.19。生产Composer实际推理仍未通过生产Key验证。
+
+
+## 0.45.20：保护渠道监控模板的模型及检测输入
+
+对照原版 channel_monitor_checker.go 的 bodyMergeKeyDenyList，修复 Worker 的 merge 模板可以覆盖模型名及检测输入、把错误模型的探测结果归到配置模型的问题。OpenAI Chat 保护 model/messages/stream，Responses 保护 model/instructions/input/stream，Anthropic 保护 model/messages，Gemini 保护 contents，其他 Chat 提供方沿用 Chat 规则。其余参数继续浅合并，replace 模式保持独立能力。
+
+新增 Chat/Responses HTTP 接口回归先复现实际发出 wrong-model，再通过修复；扩展 Anthropic/Gemini 覆盖。渠道监控、v2监控、账号探测、分组模型目录四文件46项通过；包含主分支既有分组模型候选修复。部署状态待核验。此次不宣称完成监控全量对齐：随机算术验证、45秒超时及多模型租约预算、慢响应降级、ping仍需继续修复；也不把监控测试作为生产 Composer 推理证据。

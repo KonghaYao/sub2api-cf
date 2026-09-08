@@ -218,8 +218,18 @@ async function probe(env: Env, r: Row, config: Config, model: string, signal?: A
     if (!credential.api_key)
         throw new Error('key');
     let body = minimalProbeBody(platform, config.api_mode, model);
-    if (config.body_override_mode === 'merge')
-        body = { ...body, ...config.body_override };
+    if (config.body_override_mode === 'merge') {
+        // Match the original channel monitor's provider-specific merge denylist.
+        // Templates may tune generation but must not redirect the model or replace
+        // the check input while its result is attributed to the configured model.
+        const protectedKeys = new Set(platform === 'gemini' ? ['contents']
+            : platform === 'anthropic' ? ['model', 'messages']
+            : config.provider === 'openai' && config.api_mode === 'responses'
+                ? ['model', 'instructions', 'input', 'stream']
+                : ['model', 'messages', 'stream']);
+        body = { ...body, ...Object.fromEntries(Object.entries(config.body_override ?? {})
+            .filter(([key]) => !protectedKeys.has(key))) };
+    }
     if (config.body_override_mode === 'replace')
         body = { ...config.body_override };
     body.stream = false;
