@@ -110,6 +110,7 @@ interface PoolTargetRow {
 }
 
 interface PoolMemberRow {
+  ui_config_json?: string
   account_id: string
   max_concurrency: number
   priority: number
@@ -908,7 +909,7 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
         ? 'am.embeddings'
         : 'am.image_generation'
   return env.DB.prepare(
-    `SELECT a.id AS account_id, a.max_concurrency, a.recovery_revision,
+    `SELECT a.id AS account_id, a.max_concurrency, a.recovery_revision, a.ui_config_json,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
@@ -934,13 +935,18 @@ async function syncPoolSnapshot(
   revision: number,
   members: PoolMemberRow[],
 ): Promise<void> {
-  const configured = members.map((member) => ({
-    account_id: member.account_id,
-    max_concurrency: member.max_concurrency,
-    priority: member.priority,
-    weight: member.weight,
-    recovery_revision: member.recovery_revision,
-  }))
+  const configured = members.map((member) => {
+    const factor: unknown = member.ui_config_json ? JSON.parse(member.ui_config_json).load_factor : undefined
+    const loadFactor = typeof factor === 'number' && Number.isSafeInteger(factor) && factor > 0 ? factor : undefined
+    return {
+      account_id: member.account_id,
+      max_concurrency: member.max_concurrency,
+      load_factor: loadFactor,
+      priority: member.priority,
+      weight: member.weight,
+      recovery_revision: member.recovery_revision,
+    }
+  })
   const fingerprint = await sha256Hex(JSON.stringify(configured))
   const stub = env.POOL_STATE.get(env.POOL_STATE.idFromName(
     poolStateName(target.group_id, target.model_id, target.endpoint),
