@@ -98,4 +98,4 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 
 正式 Responses 失败文档保留原始状态和内容，按 failed 记录上游实际用量；cyber_policy 维持零用量、零费用，与既有桥接行为一致。合法 incomplete 部分结果继续按成功语义处理，未改写为普通错误。
 
-最终网关/用量 165 项、原生 Responses/计费生命周期/调度 27 项通过，类型检查通过。原生验证包括 400/429/502 的无扣费与预留/并发释放、故障样本分类、正式 failed 文档的实际费用及 cyber_policy 零费用和 failed 投影。部署结果待追加。
+最终网关/用量 165 项、原生 Responses/计费生命周期/调度 27 项通过，类型检查通过。原生验证包括 400/429/502 的无扣费与预留/并发释放、故障样本分类、正式 failed 文档的实际费用及 cyber_policy 零费用和 failed 投影。提交 `d97f8405d` 已推送 origin/main 并部署 0.45.10，Worker version `60181ea4-a20e-40f5-a4b5-7f3595fe43ec`；线上 `/health` 确认 status=ok、version=0.45.10。
