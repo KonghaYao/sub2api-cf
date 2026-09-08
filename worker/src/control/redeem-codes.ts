@@ -983,7 +983,7 @@ function optionalText(
 
 async function requireSubscriptionGroup(env: Env, id: string): Promise<RedeemGroupRow> {
   const group = await env.DB.prepare(
-    `SELECT id, name, platform, enabled, group_type FROM "groups" WHERE id = ?`,
+    `SELECT id, name, platform, enabled, group_type FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL`,
   ).bind(id).first<RedeemGroupRow>()
   if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   if (group.group_type !== 'subscription') {

@@ -945,7 +945,7 @@ async function validateAuthSourceSubscriptionGroups(
   )]
   for (const groupId of groupIds) {
     const row = await env.DB.prepare(
-      `SELECT group_type FROM "groups" WHERE id = ? LIMIT 1`,
+      `SELECT group_type FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL LIMIT 1`,
     ).bind(groupId).first<{ group_type: string }>()
     if (row?.group_type !== 'subscription') {
       throw new GatewayError(

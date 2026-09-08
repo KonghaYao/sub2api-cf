@@ -1,5 +1,6 @@
 import type { Context } from 'hono'
 import type { Env } from '../env'
+import { groupAccountCountColumnsSql } from './group-account-counts'
 import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
@@ -28,6 +29,9 @@ import {
 type ControlBindings = { Bindings: Env }
 
 interface GroupRow {
+  account_count?: number
+  active_account_count?: number
+  rate_limited_account_count?: number
   ui_config_json: string
   id: string
   name: string
@@ -121,6 +125,7 @@ const GROUP_COLUMNS = `ui_config_json, id, name, description, platform, enabled,
   batch_image_hold_multiplier_ppm, image_price_1k_micros,
   image_price_2k_micros, image_price_4k_micros,
   control_version, created_at_ms, updated_at_ms`
+const GROUP_READ_COLUMNS = `${GROUP_COLUMNS}, ${groupAccountCountColumnsSql()}`
 const MODEL_COLUMNS = `id, platform, public_name, upstream_name, endpoint, embeddings,
   image_generation, enabled,
   control_version, created_at_ms, updated_at_ms`
@@ -129,7 +134,7 @@ export async function listAdminGroups(context: Context<ControlBindings>): Promis
   try {
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
-    const conditions: string[] = []
+    const conditions: string[] = ['deleted_at_ms IS NULL']
     const values: unknown[] = []
     const platform = context.req.query('platform')
     if (platform !== undefined) {
@@ -191,7 +196,7 @@ export async function listAdminGroups(context: Context<ControlBindings>): Promis
     const [count, rows] = await context.env.DB.batch([
       context.env.DB.prepare(`SELECT COUNT(*) AS total FROM "groups" ${where}`).bind(...values),
       context.env.DB.prepare(
-        `SELECT ${GROUP_COLUMNS} FROM "groups" ${where}
+        `SELECT ${GROUP_READ_COLUMNS} FROM "groups" ${where}
          ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
       ).bind(...values, pageSize, (page - 1) * pageSize),
     ])
@@ -212,7 +217,7 @@ export async function allAdminGroups(context: Context<ControlBindings>): Promise
   try {
     const includeInactive = context.req.query('include_inactive') === 'true'
     const platform = context.req.query('platform')
-    const conditions: string[] = includeInactive ? [] : ['enabled = 1']
+    const conditions: string[] = ['deleted_at_ms IS NULL', ...(includeInactive ? [] : ['enabled = 1'])]
     const values: unknown[] = []
     if (platform !== undefined) {
       conditions.push('platform = ?')
@@ -220,7 +225,7 @@ export async function allAdminGroups(context: Context<ControlBindings>): Promise
     }
     const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
     const rows = await context.env.DB.prepare(
-      `SELECT ${GROUP_COLUMNS} FROM "groups" ${where} ORDER BY sort_order ASC, id ASC`,
+      `SELECT ${GROUP_READ_COLUMNS} FROM "groups" ${where} ORDER BY sort_order ASC, id ASC`,
     ).bind(...values).all<GroupRow>()
     return controlSuccess(rows.results.map(publicGroup))
   } catch (error) {
@@ -316,7 +321,7 @@ export async function updateAdminGroupSortOrder(context: Context<ControlBindings
     const previous = await findControlIdempotency(context.env, idem)
     if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group_sort'))
     const rows = await context.env.DB.prepare(
-      `SELECT id, control_version FROM "groups" WHERE id IN (${updates.map(() => '?').join(', ')})`,
+      `SELECT id, control_version FROM "groups" WHERE deleted_at_ms IS NULL AND id IN (${updates.map(() => '?').join(', ')})`,
     ).bind(...updates.map(update => update.id)).all<{ id: string; control_version: number }>()
     const versions = new Map(rows.results.map(row => [row.id, row.control_version]))
     for (const update of updates) {
@@ -869,7 +874,7 @@ async function softDisable(context: Context<ControlBindings>, type: 'group' | 'm
     const key = requireIdempotencyKey(context.req.raw)
     const body = await readOptionalJson(context.req.raw)
     const expected = requireExpectedControlVersion(context.req.raw, body)
-    const scope = `admin.${type}s.disable.v1`
+    const scope = type === 'group' ? 'admin.groups.delete.v1' : 'admin.models.disable.v1'
     const idem = await controlIdempotency(scope, key, { id, expected })
     const previous = await findControlIdempotency(context.env, idem)
     if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, type))
@@ -880,15 +885,15 @@ async function softDisable(context: Context<ControlBindings>, type: 'group' | 'm
     const now = Date.now()
     const next = { ...current, enabled: 0, control_version: expected + 1, updated_at_ms: now }
     const response = type === 'group'
-      ? publicGroup(next as GroupRow)
+      ? publicGroup({ ...next, account_count: 0, active_account_count: 0, rate_limited_account_count: 0 } as GroupRow)
       : publicModel(next as ModelRow)
     try {
       await context.env.DB.batch([
         context.env.DB.prepare(
           `UPDATE ${type === 'group' ? '"groups"' : 'models'} SET enabled = 0,
              control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
-             updated_at_ms = ? WHERE id = ?`,
-        ).bind(expected, expected + 1, now, id),
+             updated_at_ms = ?${type === 'group' ? ', deleted_at_ms = ?' : ''} WHERE id = ?`,
+        ).bind(expected, expected + 1, now, ...(type === 'group' ? [now] : []), id),
         controlIdempotencyInsert(context.env, idem, type, id, response, now),
       ])
     } catch (error) {
@@ -1274,7 +1279,7 @@ function parseEnabled(body: Record<string, unknown>, fallback?: boolean): boolea
 async function requireGroup(env: Env, idValue: string | undefined): Promise<GroupRow> {
   const id = requireResourceId(idValue, 'group')
   const row = await env.DB.prepare(
-    `SELECT ${GROUP_COLUMNS} FROM "groups" WHERE id = ?`,
+    `SELECT ${GROUP_READ_COLUMNS} FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL`,
   ).bind(id).first<GroupRow>()
   if (row === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   return row
@@ -1282,7 +1287,7 @@ async function requireGroup(env: Env, idValue: string | undefined): Promise<Grou
 
 async function findGroupByName(env: Env, name: string): Promise<GroupRow | null> {
   return env.DB.prepare(
-    `SELECT ${GROUP_COLUMNS} FROM "groups" WHERE name = ?`,
+    `SELECT ${GROUP_READ_COLUMNS} FROM "groups" WHERE name = ?`,
   ).bind(name).first<GroupRow>()
 }
 

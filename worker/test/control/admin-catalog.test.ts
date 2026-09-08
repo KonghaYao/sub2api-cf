@@ -36,7 +36,8 @@ class CatalogStatement {
       return ([...this.database.groups.values()].find((group) => group.name === this.values[0]) ?? null) as T | null
     }
     if (this.query.includes('FROM "groups"') && this.query.includes('WHERE id = ?')) {
-      return (this.database.groups.get(String(this.values[0])) ?? null) as T | null
+      const group = this.database.groups.get(String(this.values[0]))
+      return (group && (!this.query.includes('deleted_at_ms IS NULL') || group.deleted_at_ms == null) ? group : null) as T | null
     }
     if (this.query.includes('FROM models') && this.query.includes('WHERE id = ?')) {
       return (this.database.models.get(String(this.values[0])) ?? null) as T | null
@@ -103,10 +104,10 @@ class CatalogStatement {
       return result()
     }
     if (this.query.includes('UPDATE "groups"') && this.query.includes('SET enabled = 0')) {
-      const [expected, nextVersion, updatedAt, id] = this.values
+      const [expected, nextVersion, updatedAt, deletedAt, id] = this.values
       const group = this.database.requireRow(this.database.groups, String(id))
       this.database.assertVersion(group, Number(expected))
-      Object.assign(group, { enabled: 0, control_version: Number(nextVersion), updated_at_ms: Number(updatedAt) })
+      Object.assign(group, { enabled: 0, deleted_at_ms: Number(deletedAt), control_version: Number(nextVersion), updated_at_ms: Number(updatedAt) })
       return result()
     }
     if (this.query.includes('UPDATE "groups"')) {
@@ -562,6 +563,13 @@ describe('admin catalog control plane', () => {
       expected_control_version: 1,
     })
     expect(disabled.status).toBe(200)
+    expect(database.groups.get(group.id)?.deleted_at_ms).toEqual(expect.any(Number))
+    const missing = await request(database, `/api/v1/admin/groups/${group.id}`, 'GET', 'unused')
+    expect(missing.status).toBe(404)
+    const revive = await request(database, `/api/v1/admin/groups/${group.id}`, 'PUT', 'revive-deleted', {
+      expected_control_version: 2, enabled: true,
+    })
+    expect(revive.status).toBe(404)
     expect((await json(disabled)).data).toMatchObject({
       name: 'renamed',
       description: 'keep me',

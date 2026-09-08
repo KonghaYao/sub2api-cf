@@ -251,7 +251,7 @@ function parseEntries(body: Record<string, unknown>): RateMultiplierInput[] {
 }
 
 async function requireGroup(env: Env, groupId: string): Promise<GroupRow> {
-  const group = await env.DB.prepare('SELECT control_version FROM "groups" WHERE id = ?').bind(groupId).first<GroupRow>()
+  const group = await env.DB.prepare('SELECT control_version FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL').bind(groupId).first<GroupRow>()
   if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   return group
 }

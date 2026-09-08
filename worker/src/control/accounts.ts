@@ -2939,7 +2939,7 @@ async function validateLinks(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(CASE WHEN platform = ? THEN 0 ELSE 1 END), 0) AS mismatched
            FROM "groups"
-          WHERE id IN (SELECT value FROM json_each(?))`,
+          WHERE deleted_at_ms IS NULL AND id IN (SELECT value FROM json_each(?))`,
       ).bind(platform, JSON.stringify(groups)).first<{ total: number; mismatched: number }>(),
     models.length === 0
       ? null

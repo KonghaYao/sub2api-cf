@@ -216,7 +216,7 @@ function parseEntries(body: Record<string, unknown>): RpmOverrideInput[] {
 
 async function requireGroup(env: Env, groupId: string): Promise<void> {
   const group = await env.DB.prepare(
-    `SELECT id FROM "groups" WHERE id = ?`,
+    `SELECT id FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL`,
   ).bind(groupId).first<{ id: string }>()
   if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
 }

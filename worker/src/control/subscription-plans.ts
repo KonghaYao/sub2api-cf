@@ -395,7 +395,7 @@ async function requirePlan(env: Env, idValue: string | undefined): Promise<Subsc
 
 async function requireSubscriptionGroup(env: Env, id: string): Promise<PlanGroupRow> {
   const group = await env.DB.prepare(
-    `SELECT id, name, platform, enabled, group_type, rate_multiplier_ppm FROM "groups" WHERE id = ?`,
+    `SELECT id, name, platform, enabled, group_type, rate_multiplier_ppm FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL`,
   ).bind(id).first<PlanGroupRow>()
   if (group === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   if (group.group_type !== 'subscription') {

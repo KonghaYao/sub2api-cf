@@ -658,7 +658,7 @@ async function validateGroups(env: Env, ids: string[], currentChannelId?: string
   const rows = await env.DB.prepare(
     `SELECT g.id, cg.channel_id FROM "groups" g
        LEFT JOIN channel_groups cg ON cg.group_id = g.id
-      WHERE g.id IN (${placeholders})`,
+      WHERE g.deleted_at_ms IS NULL AND g.id IN (${placeholders})`,
   ).bind(...ids).all<{ id: string; channel_id: string | null }>()
   if (rows.results.length !== ids.length) throw new GatewayError(409, 'channel_group_not_found', 'One or more groups do not exist')
   if (rows.results.some((row) => row.channel_id !== null && row.channel_id !== currentChannelId)) {

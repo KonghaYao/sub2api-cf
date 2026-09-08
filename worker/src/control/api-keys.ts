@@ -264,7 +264,7 @@ async function listScopedAdminApiKeys(context: Context<ControlBindings>, scope: 
     const userId = requireResourceId(context.req.param('id'), scope)
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
-    const user = await context.env.DB.prepare(scope === 'user' ? 'SELECT id, status FROM users WHERE id = ?' : 'SELECT id FROM "groups" WHERE id = ?')
+    const user = await context.env.DB.prepare(scope === 'user' ? 'SELECT id, status FROM users WHERE id = ?' : 'SELECT id FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL')
       .bind(userId)
       .first<{ id: string; status: string }>()
     if (user === null) throw new GatewayError(404, `${scope}_not_found`, `${scope === 'group' ? 'Group' : 'User'} was not found`)
@@ -928,7 +928,7 @@ async function requireAdminApiKeyGroupAuthorization(
     `WITH selected_group AS (
        SELECT id, name, description, platform, enabled, rate_multiplier_ppm,
               group_type, is_exclusive
-         FROM "groups" WHERE id = ?
+         FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL
      )
      SELECT g.id, g.name, g.description, g.platform, g.enabled,
             g.rate_multiplier_ppm, g.group_type, g.is_exclusive,

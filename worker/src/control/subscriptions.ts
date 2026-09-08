@@ -777,7 +777,7 @@ async function requireGroup(env: Env, id: string, requireEnabled: boolean): Prom
   const row = await env.DB.prepare(
     `SELECT id, name, description, platform, enabled, group_type, rate_multiplier_ppm,
             daily_quota_micros, weekly_quota_micros, monthly_quota_micros
-       FROM "groups" WHERE id = ?`,
+       FROM "groups" WHERE id = ? AND deleted_at_ms IS NULL`,
   ).bind(id).first<GroupRow>()
   if (row === null) throw new GatewayError(404, 'group_not_found', 'Group was not found')
   if (row.group_type !== 'subscription') {
