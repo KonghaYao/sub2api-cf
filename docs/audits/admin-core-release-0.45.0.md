@@ -188,4 +188,4 @@ Chat 桥接与原生 Responses 分开判定：Chat 按客户端原始请求大�
 
 此格式不自动生成GPT缓存键，但保留显式prompt_cache_key/会话头及租户隔离session_id。修正按Responses形状设置默认max_output_tokens，避免原Chat默认max_tokens被误带至Codex。OAuth专项先复现同步/流式两项带max_tokens=4096的失败，再修复；既有Codex规范化负责删除不支持的输出限制字段。
 
-原生同步/流式测试通过Chat URL发送完整input、自定义工具定义、custom_tool_call及其output，验证实际上游字段不丢失，下游仍为Chat completion/chunks，流式DONE完整，账本一次扣费、预留归零。OAuth加密凭证执行链的同步/流式回归也覆盖输入规范化、原生字段清理、session及单次结算。完整网关57文件/871项通过，类型检查通过；全量原生37文件/111项通过，部署证据待追加。生产Composer实际推理仍未通过生产Key验证。
+原生同步/流式测试通过Chat URL发送完整input、自定义工具定义、custom_tool_call及其output，验证实际上游字段不丢失，下游仍为Chat completion/chunks，流式DONE完整，账本一次扣费、预留归零。OAuth加密凭证执行链的同步/流式回归也覆盖输入规范化、原生字段清理、session及单次结算。完整网关57文件/871项通过，类型检查通过；全量原生37文件/111项通过。提交 `909193aa2` 已推送origin/main并部署0.45.19，Worker version `be1b33c1-943b-4dd9-82a5-05b19b694765`；线上health确认status=ok、version=0.45.19。生产Composer实际推理仍未通过生产Key验证。
