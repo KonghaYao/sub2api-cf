@@ -3451,7 +3451,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(pool.calls.filter((call) => call.path === '/release')).toHaveLength(1)
   })
 
-  it('passes through native Anthropic SSE and settles only after message_stop', async () => {
+  it.each([{zero:false,alias:false},{zero:true,alias:false},{zero:false,alias:true},{zero:true,alias:true}])('preserves native Anthropic SSE cache usage (zero=$zero alias=$alias)', async ({zero,alias}) => {
     const { env, database, user, pool } = await harness()
     Object.assign(database.principal, { platform: 'anthropic' })
     Object.assign(database.credential, {
@@ -3474,12 +3474,13 @@ describe('OpenAI-compatible gateway', () => {
             input_tokens: 8,
             output_tokens: 0,
             cache_creation_input_tokens: 5,
-            cache_read_input_tokens: 3,
+            ...(alias ? {cached_tokens:3} : {cache_read_input_tokens:3,cached_tokens:99}),
           },
         },
       },
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } },
       { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+      ...(zero ? [{type:'message_delta',usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0}}] : []),
       { type: 'message_stop' },
     ]
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -3504,12 +3505,14 @@ describe('OpenAI-compatible gateway', () => {
     expect(text).toContain('"model":"gpt-public"')
     expect(text).not.toContain('gpt-upstream')
     expect(text).not.toContain('response.failed')
+    expect(text).toContain('\"cache_read_input_tokens\":3')
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
       usage_event: {
         payload: {
           input_tokens: 16,
           output_tokens: 2,
           cache_read_tokens: 3,
+          cache_write_tokens: 5,
           outcome: 'completed',
         },
       },

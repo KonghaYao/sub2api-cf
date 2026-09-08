@@ -210,3 +210,10 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 恢复原版45秒请求总预算（含响应体）和6秒degraded阈值。独立deadline race覆盖忽略AbortSignal的transport、挂起body读取；取消不等待上游cancel完成，超64KiB响应有界拒绝，晚到response主动释放。HTTP非2xx归error，超时probe_timeout，用户取消request_cancelled。主/额外最多11模型并发执行，结果保留配置顺序，120秒租约保留；allSettled确保单条历史写入失败也要等其他探测结束才释放租约。管理端与用户端7/15/30天可用率将degraded计为可用，对齐原版repository。
 
 并发回归先证实只有第一个请求启动，修复后11模型同时启动且重复run返回409；注入SQLite历史写入失败验证租约不提前释放。60项相关测试及typecheck通过。原生workerd专项2项通过：真实等待9秒body正常解析，用户取消时上游cancel永久挂起也能终止。历史测试中的fetch调用先后改为按模型查找，API返回顺序仍严格测试。未声称生产Composer实际推理或命中率已验证。共享HEAD ping、智谱路径、配额/展示等监控差异仍待处理。代码 `87f7e83d1` 已推送origin/main并部署0.45.22，Worker version `a995270b-08f6-459f-80d2-1d07172247f0`，生产health确认status=ok/version=0.45.22。
+
+
+## 0.45.23：Anthropic 流式缓存计数及 Kimi 别名
+
+对照原版 gateway_upstream_response.go parseSSEUsagePatch/mergeSSEUsagePatch/reconcileCachedTokens，修复 message_delta 的零值会清空已知 input/output/cache-read/cache-write 正数计数的问题；仅 message_start/message_delta 更新对应usage。Kimi cached_tokens 在标准 cache_read_input_tokens 缺失/零值时补入标准字段，标准正数优先，同步JSON和SSE都把补正字段返回客户端并用于结算。保留原始cached_tokens字段，不伪造命中。
+
+接口回归先复现零delta、别名及组合3种失败，再修复；额外检查正数标准字段优先于冲突别名。完整网关57文件874项通过，typecheck通过。原生workerd/D1/DO专项3项通过，包含原有Chat JSON→SSE缓存链路和新Anthropic同步/流式实际入口：ordinary8+write5+read3=totalinput16，output2，后台total18，客户端cache_read字段3，投影缓存读3写5，一次结算20micros且预留归零。该费用是测试配置下既有价格引擎结果，不能据此宣称5m/1h缓存写入独立定价已完成；后者及生产真实命中率仍待验证。部署结果待确认。

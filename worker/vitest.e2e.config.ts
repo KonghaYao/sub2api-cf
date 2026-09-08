@@ -47,6 +47,16 @@ export default defineConfig(async () => {
             if (url.pathname === '/v1/sub2api/billing') return Response.json({object:'sub2api.key_billing',schema_version:1,billing_scope:'token',group_rate_multiplier:0.25,resolved_rate_multiplier:0.25,effective_rate_multiplier:0.25,peak_rate_enabled:false,observed_at:new Date().toISOString()})
             if (url.pathname === '/v1/messages' || url.pathname === '/v1/responses' || url.pathname === '/backend-api/codex/responses') {
               const body = await request.clone().json() as any
+              if (url.pathname === '/v1/messages' && body.model === 'anthropic-cache-alias-fixture') {
+                const message={id:'msg_cache_fixture',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'Cache OK'}],stop_reason:'end_turn',usage:{input_tokens:8,output_tokens:2,cache_creation_input_tokens:5,cache_read_input_tokens:0,cached_tokens:3}}
+                if (!body.stream) return Response.json(message)
+                const events=[{type:'message_start',message:{...message,content:[],usage:{...message.usage,output_tokens:0}}},
+                  {type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Cache OK'}},
+                  {type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:2}},
+                  {type:'message_delta',usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0}},
+                  {type:'message_stop'}]
+                return new Response(events.map(event=>'event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n').join(''),{headers:{'content-type':'text/event-stream'}})
+              }
               if (body.model === 'cyber-policy-test') {
                 const error={code:'cyber_policy',message:'Fixture cyber refusal'}
                 return body.stream?new Response('data: '+JSON.stringify({type:'response.failed',response:{id:'cyber-fixture',status:'failed',error}})+'\n\n',{headers:{'content-type':'text/event-stream'}}):Response.json({error},{status:400})

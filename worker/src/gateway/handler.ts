@@ -921,12 +921,21 @@ function unsupportedProviderOperation(
   )
 }
 
+// Original gateway reconciles Kimi's alias into the standard Anthropic field
+// for both client responses and accounting. A positive canonical value wins.
+function reconcileAnthropicCachedTokens(usage: Record<string, unknown> | null): void {
+  if (usage === null || (nonNegativeInteger(usage.cache_read_input_tokens) ?? 0) > 0) return
+  const cached = nonNegativeInteger(usage.cached_tokens) ?? 0
+  if (cached > 0) usage.cache_read_input_tokens = cached
+}
+
 function extractProviderUsage(value: unknown, platform: ProviderPlatform): TokenUsage | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const root = value as Record<string, unknown>
   if (platform === 'anthropic') {
     const usage = objectValue(root.usage)
     if (usage === null) return null
+    reconcileAnthropicCachedTokens(usage)
     const input = nonNegativeInteger(usage.input_tokens)
     const output = nonNegativeInteger(usage.output_tokens)
     if (input === null || output === null) return null
@@ -3012,8 +3021,8 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
   private observe(root: Record<string, unknown>, eventName?: string): void {
     if (this.platform === 'anthropic') {
       const type = typeof root.type === 'string' ? root.type : eventName
-      this.observeAnthropicUsage(objectValue(root.usage))
-      this.observeAnthropicUsage(objectValue(objectValue(root.message)?.usage))
+      if (type === 'message_start') this.observeAnthropicUsage(objectValue(objectValue(root.message)?.usage), false)
+      if (type === 'message_delta') this.observeAnthropicUsage(objectValue(root.usage), true)
       if (type === 'message_stop') this.terminalValue = 'completed'
       if (type === 'error') this.terminalValue = 'failed'
       return
@@ -3034,12 +3043,19 @@ class NativeProviderStreamTransformer implements GatewayStreamTransformer {
     })) this.terminalValue = 'completed'
   }
 
-  private observeAnthropicUsage(usage: Record<string, unknown> | null): void {
+  private observeAnthropicUsage(usage: Record<string, unknown> | null, delta: boolean): void {
     if (usage === null) return
-    this.inputTokens = nonNegativeInteger(usage.input_tokens) ?? this.inputTokens
-    this.outputTokens = nonNegativeInteger(usage.output_tokens) ?? this.outputTokens
-    this.cacheCreationTokens = nonNegativeInteger(usage.cache_creation_input_tokens) ?? this.cacheCreationTokens
-    this.cacheReadTokens = nonNegativeInteger(usage.cache_read_input_tokens) ?? this.cacheReadTokens
+    reconcileAnthropicCachedTokens(usage)
+    // Match parseSSEUsagePatch: zero-valued delta counters do not erase the
+    // positive totals already reported in message_start or an earlier delta.
+    const merge = (value: unknown, previous: number | null) => {
+      const next = nonNegativeInteger(value)
+      return next !== null && (!delta || next > 0) ? next : previous
+    }
+    this.inputTokens = merge(usage.input_tokens, this.inputTokens)
+    this.outputTokens = merge(usage.output_tokens, this.outputTokens)
+    this.cacheCreationTokens = merge(usage.cache_creation_input_tokens, this.cacheCreationTokens) ?? 0
+    this.cacheReadTokens = merge(usage.cache_read_input_tokens, this.cacheReadTokens) ?? 0
   }
 
   private encode(value: string): Uint8Array {
