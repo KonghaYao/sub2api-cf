@@ -243,3 +243,13 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 - Verification: 1,011 gateway/control/pool/migration tests plus 14 migration-runner tests passed; typecheck and original frontend production build passed.
 - Code pushed: `7d85a778f`. Deployed Worker Version `62f519a3-5e84-493e-9f93-8c37de6c9ab8`. Health returned `ok`, production version `0.45.26`; migration runner applied 0118 successfully.
 - Context-cache root cause remains unconfirmed. Expiring HMAC diagnostics remain enabled; no new diagnostic records captured during this stage, and realtime tail has reported reconnects. No claim of successful production inference after this fix.
+
+
+## 0.45.27 — persist reported cache creation TTL evidence
+
+- Original `backend/internal/service/usage_log.go` and `gateway_usage_billing.go` persist 5-minute and 1-hour cache creation counters. Worker previously retained them only in request/account-cost calculations while user/admin DTOs returned literal zeros.
+- Settled events, usage projection, incremental and recovery account rollups now preserve reported TTL counters. User usage and paginated admin usage return persisted values. Old events remain replay-compatible; historical rows default to zero without reconstructing evidence or changing money.
+- Migration 0119 `cache_write_ttl_usage` adds four nonnegative columns. This completes the earlier paused persistence patch (its old uncommitted 0118 file in `/tmp/sub2api-llm-forwarding` is obsolete and must not be deployed).
+- 1,019 related unit/integration tests and 2 native Worker tests passed, including JSON/SSE → Queue → D1 → admin API and unchanged ledger settlement. Typecheck, production frontend build and D1 migration reconciliation passed.
+- Code `027c23d88` pushed to main; Worker Version `2a3034ce-eb0b-4704-8570-2dd68ed73f55`; health returned production `0.45.27`, status `ok`.
+- No new production inference since the prior observed 13:49:38 UTC failure at time of this stage's read. Composer context-cache hit root cause remains unconfirmed. This release does not resolve customer cache-write pricing: `FrozenPricingPlan` still lacks separate write rates and `quoteCustomerCost` currently bills input minus cache reads; creation cost DTO remains zero. Next parity work must address pricing and evidence together.
