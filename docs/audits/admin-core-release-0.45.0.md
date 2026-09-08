@@ -209,4 +209,4 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 
 恢复原版45秒请求总预算（含响应体）和6秒degraded阈值。独立deadline race覆盖忽略AbortSignal的transport、挂起body读取；取消不等待上游cancel完成，超64KiB响应有界拒绝，晚到response主动释放。HTTP非2xx归error，超时probe_timeout，用户取消request_cancelled。主/额外最多11模型并发执行，结果保留配置顺序，120秒租约保留；allSettled确保单条历史写入失败也要等其他探测结束才释放租约。管理端与用户端7/15/30天可用率将degraded计为可用，对齐原版repository。
 
-并发回归先证实只有第一个请求启动，修复后11模型同时启动且重复run返回409；注入SQLite历史写入失败验证租约不提前释放。60项相关测试及typecheck通过。原生workerd专项2项通过：真实等待9秒body正常解析，用户取消时上游cancel永久挂起也能终止。历史测试中的fetch调用先后改为按模型查找，API返回顺序仍严格测试。未声称生产Composer实际推理或命中率已验证。共享HEAD ping、智谱路径、配额/展示等监控差异仍待处理。部署状态待确认。
+并发回归先证实只有第一个请求启动，修复后11模型同时启动且重复run返回409；注入SQLite历史写入失败验证租约不提前释放。60项相关测试及typecheck通过。原生workerd专项2项通过：真实等待9秒body正常解析，用户取消时上游cancel永久挂起也能终止。历史测试中的fetch调用先后改为按模型查找，API返回顺序仍严格测试。未声称生产Composer实际推理或命中率已验证。共享HEAD ping、智谱路径、配额/展示等监控差异仍待处理。代码 `87f7e83d1` 已推送origin/main并部署0.45.22，Worker version `a995270b-08f6-459f-80d2-1d07172247f0`，生产health确认status=ok/version=0.45.22。
