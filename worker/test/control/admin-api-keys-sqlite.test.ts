@@ -123,6 +123,34 @@ async function createKey(
 }
 
 describe('admin API key D1 authorization', () => {
+  it('lists only live keys bound to the requested group with safe pagination and masked credentials', async () => {
+    const test = await fixture()
+    try {
+      const app = createApp()
+      const created = []
+      for (let i = 0; i < 4; i++) {
+        const response = await createKey(test, EXCLUSIVE_GROUP_ID, `group-list-key-${i}`)
+        expect(response.status).toBe(201)
+        created.push((await response.json() as any).data)
+      }
+      test.raw.prepare('UPDATE api_keys SET group_id=? WHERE id=?').run(SUBSCRIPTION_GROUP_ID, created[2].id)
+      test.raw.prepare('UPDATE api_keys SET enabled=0, revoked_at_ms=1 WHERE id=?').run(created[3].id)
+      const read = (path: string) => app.request(path, { headers: test.headers }, test.env)
+      const url = `/api/v1/admin/groups/${EXCLUSIVE_GROUP_ID}/api-keys`
+      const first = await read(`${url}?page_size=1`)
+      expect(first.status).toBe(200)
+      const data = (await first.json() as any).data
+      expect(data).toMatchObject({ total: 2, page: 1, page_size: 1, pages: 2 })
+      expect(data.items[0].group_id).toBe(EXCLUSIVE_GROUP_ID)
+      expect(data.items[0]).not.toHaveProperty('key_hash')
+      const second = (await (await read(`${url}?page_size=1&page=2`)).json() as any).data
+      expect(second.items[0].id).not.toBe(data.items[0].id)
+      expect((await read('/api/v1/admin/groups/missing/api-keys')).status).toBe(404)
+      expect((await read(`${url}?page=0`)).status).toBe(400)
+      expect((await app.request(url, {}, test.env)).status).toBe(401)
+    } finally { test.raw.close() }
+  })
+
   it('creates, lists, and CAS-updates the same normalized IP policy used by gateway auth', async () => {
     const test = await fixture()
     const created = await createApp().request(`/api/v1/admin/users/${USER_ID}/api-keys`, {

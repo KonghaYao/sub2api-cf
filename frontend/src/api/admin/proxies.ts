@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { isCloudflareWorkerContractActive } from '@/utils/adminCapabilities'
 import type {
   Proxy,
   ProxyAccountSummary,
@@ -205,6 +206,15 @@ export async function batchCreate(
   created: number
   skipped: number
 }> {
+  if (isCloudflareWorkerContractActive()) {
+    const result = { created: 0, skipped: 0 }
+    for (let offset = 0; offset < proxies.length; offset += 5) {
+      const { data } = await apiClient.post<{ created: number; skipped: number }>('/admin/proxies/batch', { proxies: proxies.slice(offset, offset + 5) })
+      result.created += data.created
+      result.skipped += data.skipped
+    }
+    return result
+  }
   const { data } = await apiClient.post<{
     created: number
     skipped: number
@@ -216,6 +226,15 @@ export async function batchDelete(ids: number[]): Promise<{
   deleted_ids: number[]
   skipped: Array<{ id: number; reason: string }>
 }> {
+  if (isCloudflareWorkerContractActive()) {
+    const result: { deleted_ids: number[]; skipped: Array<{ id: number; reason: string }> } = { deleted_ids: [], skipped: [] }
+    for (let offset = 0; offset < ids.length; offset += 10) {
+      const { data } = await apiClient.post<typeof result>('/admin/proxies/batch-delete', { ids: ids.slice(offset, offset + 10) })
+      result.deleted_ids.push(...data.deleted_ids)
+      result.skipped.push(...data.skipped)
+    }
+    return result
+  }
   const { data } = await apiClient.post<{
     deleted_ids: number[]
     skipped: Array<{ id: number; reason: string }>

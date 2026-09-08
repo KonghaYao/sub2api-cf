@@ -1,3 +1,6 @@
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from './account-rate-limit'
+import { accountNotExpiredSql } from './account-expiry'
+import { accountModelAllowedSql } from './account-model-policy'
 import type { Context } from 'hono'
 import { authenticateUserRequest } from '../auth/handler'
 import { controlError, controlSuccess } from '../control/http'
@@ -78,12 +81,13 @@ export async function getModelPlaza(context: Context<Bindings>): Promise<Respons
             SELECT 1
               FROM account_groups ag
               JOIN accounts a ON a.id = ag.account_id
-              JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
-             WHERE ag.group_id = g.id AND a.enabled = 1
+              LEFT JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
+             WHERE ag.group_id = g.id AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()}
                AND a.health_status <> 'unhealthy' AND a.base_url IS NOT NULL
                AND a.platform = m.platform
+               AND ${accountModelAllowedSql()}
                AND (m.platform = g.platform OR g.platform = 'composite')
-               AND (
+               AND (json_extract(a.ui_config_json, '$.original_model_routing') = 1 OR
                  (m.endpoint = 'chat_completions' AND (am.chat_completions = 1 OR
                    (a.platform IN ('openai', 'codex') AND am.responses = 1)))
                  OR (m.endpoint = 'responses' AND (am.responses = 1 OR

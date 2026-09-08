@@ -129,6 +129,7 @@ export type MediaProviderJobPhase =
   | 'done'
 
 export interface MediaProviderJobRow {
+  provider_model?: string | null
   task_id: string
   provider_account_id: string
   submission_key: string
@@ -157,6 +158,8 @@ export interface MediaProviderJobRow {
 }
 
 export interface MediaProviderJobAccount {
+  proxyId?: string
+  upstreamModel?: string
   id: string
   baseUrl: string
   apiKey: string

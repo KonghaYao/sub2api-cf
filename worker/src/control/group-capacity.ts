@@ -1,3 +1,5 @@
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
+import { accountNotExpiredSql } from '../gateway/account-expiry'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { asGatewayError } from '../gateway/errors'
@@ -13,13 +15,14 @@ export async function getAdminGroupCapacitySummary(context: Context<{ Bindings: 
   try {
     // One D1 batch discovers every active group's configured account ceiling and
     // only the DOs already made real by gateway routing; it never scans rows per group.
-    const [accountsResult, poolsResult] = await context.env.DB.batch([
+    const [accountsResult, poolsResult, groupsResult] = await context.env.DB.batch([
       context.env.DB.prepare(`SELECT ag.group_id, a.max_concurrency
         FROM account_groups ag JOIN accounts a ON a.id = ag.account_id
         JOIN "groups" g ON g.id = ag.group_id
-        WHERE g.enabled = 1 AND a.enabled = 1 AND a.health_status <> 'unhealthy'`),
+        WHERE g.enabled = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND a.health_status <> 'unhealthy'`),
       context.env.DB.prepare(`SELECT r.group_id, r.model_id, r.endpoint
         FROM pool_state_registry r JOIN "groups" g ON g.id = r.group_id WHERE g.enabled = 1`),
+      context.env.DB.prepare(`SELECT id FROM "groups" WHERE enabled = 1 ORDER BY id`),
     ])
     const totals = new Map<string, number>()
     for (const row of accountsResult.results as unknown as AccountRow[]) {
@@ -44,7 +47,9 @@ export async function getAdminGroupCapacitySummary(context: Context<{ Bindings: 
         used.set(pool.group_id, (used.get(pool.group_id) ?? 0) + count)
       } catch { failed.add(pool.group_id) }
     })
-    const groupIds = [...new Set([...totals.keys(), ...pools.map(pool => pool.group_id)])].sort()
+    // Original GetAllGroupCapacity includes every active group, even when it
+    // has no accounts or all accounts are currently unschedulable.
+    const groupIds = (groupsResult.results as unknown as Array<{ id: string }>).map(group => group.id)
     return controlSuccess(groupIds.map(group_id => ({
       group_id,
       concurrency_status: failed.has(group_id) ? 'unknown' : 'known',

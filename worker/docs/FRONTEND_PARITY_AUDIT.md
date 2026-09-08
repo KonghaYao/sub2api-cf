@@ -1,3 +1,7 @@
+> Current work: [Admin core reimplementation](ADMIN_CORE_REIMPLEMENTATION.md).
+> The 2026-09-07 user requirement preserves all original frontend capabilities;
+> historical removal/hiding/defer-as-complete decisions below are superseded.
+
 # Frontend parity audit and migration rule
 
 Baseline: `origin/main` at `5097b3145`. Audited release: `ccdc74cb1` (`v0.40.0`).

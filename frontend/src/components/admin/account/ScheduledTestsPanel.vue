@@ -482,7 +482,7 @@ const appStore = useAppStore()
 
 const props = defineProps<{
   show: boolean
-  accountId: number | null
+  accountId: number | string | null
   modelOptions: SelectOption[]
 }>()
 

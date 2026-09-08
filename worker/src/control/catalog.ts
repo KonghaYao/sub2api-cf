@@ -915,7 +915,7 @@ function parseGroupUiConfig(body: Record<string, unknown>): Record<string, unkno
       }
     } else if (field === 'models_list_config') config[field] = parseModelsListConfig(value)
     else if (field === 'model_routing') config[field] = parseModelRouting(value)
-    else if (field === 'model_routing_enabled') config[field] = requireBoolean(value, field)
+    else if (['model_routing_enabled', 'require_oauth_only', 'require_privacy_set'].includes(field)) config[field] = requireBoolean(value, field)
     else if (GROUP_UI_FIELDS.has(field)) config[field] = value
     else if (!GROUP_CORE_FIELDS.has(field)) {
       throw new GatewayError(400, 'unsupported_group_field', `Field '${field}' is not supported`)

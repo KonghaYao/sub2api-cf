@@ -1,3 +1,4 @@
+import { isAdminPostQuery } from './read-routes'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../env'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from '../gateway/errors'
@@ -190,11 +191,14 @@ async function enforceAdminPermission(
 }
 
 function adminRoutePermissions(pathname: string, method: string): AdminPermission[] {
+  if (/^\/api\/v1\/admin\/openai\/(?:generate-auth-url|exchange-code|refresh-token)$/.test(pathname)) {
+    return ['admin.catalog.write']
+  }
   if (pathname.startsWith('/api/v1/admin/rbac/')) return []
   if (pathname === '/api/v1/admin/audit-logs/clear') {
     return ['admin.audit.read', 'admin.operations.write']
   }
-  const write = method !== 'GET' && method !== 'HEAD'
+  const write = method !== 'GET' && method !== 'HEAD' && !isAdminPostQuery(pathname, method)
   const category = (read: AdminPermission, mutation: AdminPermission): AdminPermission =>
     write ? mutation : read
   if (/^\/api\/v1\/admin\/audit(?:-logs)?(?:\/|$)/.test(pathname)) {
@@ -212,14 +216,14 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
     return [category('admin.commerce.read', 'admin.commerce.write')]
   }
   if (
-    /^\/api\/v1\/admin\/accounts\/(?:[^/]+\/test|health-probes|synthetic-probes)$/.test(pathname)
+    /^\/api\/v1\/admin\/accounts\/(?:[^/]+\/(?:test|upstream-billing-probe|models\/sync-upstream)|models\/sync-upstream-preview|upstream-billing-probe\/batch|health-probes|synthetic-probes)$/.test(pathname)
   ) {
     return ['admin.catalog.write', 'admin.operations.write']
   }
   if (/^\/api\/v1\/admin\/accounts\/synthetic-probes\/history$/.test(pathname)) {
     return ['admin.catalog.read', 'admin.operations.read']
   }
-  if (/^\/api\/v1\/admin\/accounts\/[^/]+\/stats$/.test(pathname)) {
+  if (/^\/api\/v1\/admin\/accounts\/(?:[^/]+\/(?:stats|today-stats)|today-stats\/batch)$/.test(pathname)) {
     return ['admin.catalog.read', 'admin.operations.read']
   }
   if (
@@ -241,10 +245,13 @@ function adminRoutePermissions(pathname: string, method: string): AdminPermissio
   if (/^\/api\/v1\/admin\/users\/[^/]+\/platform-quotas(?:\/|$)/.test(pathname)) {
     return [category('admin.commerce.read', 'admin.commerce.write')]
   }
+  if (/^\/api\/v1\/admin\/groups\/[^/]+\/api-keys$/.test(pathname)) {
+    return ['admin.catalog.read', 'admin.users.read']
+  }
   if (/^\/api\/v1\/admin\/(?:users|api-keys|financial-history)(?:\/|$)/.test(pathname)) {
     return [category('admin.users.read', 'admin.users.write')]
   }
-  if (/^\/api\/v1\/admin\/(?:groups|models|accounts|channels)(?:\/|$)/.test(pathname)) {
+  if (/^\/api\/v1\/admin\/(?:groups|models|accounts|channels|proxies)(?:\/|$)/.test(pathname)) {
     return [category('admin.catalog.read', 'admin.catalog.write')]
   }
   if (

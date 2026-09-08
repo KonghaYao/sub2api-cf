@@ -58,6 +58,31 @@ describe('admin mutation security boundary', () => {
     }
   })
 
+  it('allows a read-only administrator to query today stats with step-up enabled but blocks scheduling writes', async () => {
+    raw.exec("UPDATE system_settings SET step_up_enabled = 1 WHERE id = 'global'")
+    raw.exec(`
+      INSERT INTO users (id, email, display_name, role, status, created_at_ms, updated_at_ms)
+        VALUES ('backup-admin', 'backup@example.test', 'Backup', 'admin', 'active', 1, 1);
+      INSERT OR IGNORE INTO admin_user_roles (user_id, role_id, assigned_at_ms)
+        VALUES ('backup-admin', 'super_admin', 1);
+      UPDATE admin_user_roles SET role_id = 'read_only' WHERE user_id = 'admin-1';
+    `)
+    const app = createApp()
+    const query = (token: string, origin?: string) => app.request('/api/v1/admin/accounts/today-stats/batch', {
+      method: 'POST', headers: { authorization: token, 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+      body: JSON.stringify({ account_ids: ['missing-account'] }),
+    }, env)
+    expect((await query(authorization)).status).toBe(200)
+    expect((await query('Bearer invalid')).status).toBe(401)
+    expect((await query(authorization, 'https://attacker.example')).status).toBe(403)
+    const write = await app.request('/api/v1/admin/accounts/account-a/schedulable', {
+      method: 'POST', headers: { authorization, 'content-type': 'application/json', 'if-match': '"0"' },
+      body: JSON.stringify({ schedulable: true }),
+    }, env)
+    expect(write.status).toBe(403)
+    raw.close()
+  })
+
   it('rejects cross-site browser mutations while retaining non-browser administration', async () => {
     const crossSite = await mutate({
       origin: 'https://attacker.example',

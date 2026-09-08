@@ -1,3 +1,4 @@
+import { isAccountInitializationEvent, consumeAccountInitialization } from '../control/account-initialization'
 import type {
   Env,
   PlatformEvent,
@@ -44,6 +45,7 @@ import {
 } from '../media/provider-job'
 import { consumeImageTaskExecute, isImageTaskExecuteEvent } from '../media/image-task'
 import { financialSourceForMutation } from '../shared/user-financial-event'
+import { accountQuotaAccrual, accountQuotaCost } from './account-quota-accrual'
 
 const CONSUMER = 'usage-projection-v1'
 const USER_STATE_CONSUMER = 'user-state-projection-v1'
@@ -85,6 +87,11 @@ export async function consumeEvents(
 ): Promise<void> {
   for (const message of batch.messages) {
     try {
+      if (isAccountInitializationEvent(message.body)) {
+        await consumeAccountInitialization(env, message.body)
+        message.ack()
+        continue
+      }
       if (isMediaProviderJobAdvanceEvent(message.body)) {
         await consumeMediaProviderJobAdvance(message.body, env)
         message.ack()
@@ -177,7 +184,10 @@ export async function consumeEvents(
       }
 
       const payload = event.payload
+      const quotaUpdates = await accountQuotaAccrual(env, payload.account_id,
+        accountQuotaCost(payload.standard_cost_micros!, payload.account_rate_multiplier_ppm!), Date.now(), event.occurred_at_ms)
       await env.DB.batch([
+        ...quotaUpdates,
         env.DB.prepare(
           `INSERT INTO usage_projection (
              event_id, request_id, user_id, api_key_id, account_id, model,

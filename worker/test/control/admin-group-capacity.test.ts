@@ -14,6 +14,37 @@ class Stub {
 }
 
 describe('group capacity summary', () => {
+  it('includes empty and fully blocked active groups and preserves the original quota capacity semantics', async () => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
+    raw.exec(`
+      INSERT INTO "groups" (id, name, platform, enabled, created_at_ms, updated_at_ms) VALUES
+        ('empty', 'Empty', 'openai', 1, 1, 1), ('blocked', 'Blocked', 'openai', 1, 1, 1),
+        ('eligible', 'Eligible', 'openai', 1, 1, 1), ('disabled', 'Disabled', 'openai', 0, 1, 1);
+    `)
+    const accounts = [
+      ['disabled-account', 'blocked', 0, 'healthy', {}],
+      ['paused', 'blocked', 1, 'healthy', { schedulable: false }],
+      ['expired', 'blocked', 1, 'healthy', { expires_at: 1 }],
+      ['unhealthy', 'blocked', 1, 'unhealthy', {}],
+      ['cooling', 'blocked', 1, 'healthy', { rate_limit_reset_at: '2999-01-01T00:00:00Z' }],
+      ['quota-exhausted', 'eligible', 1, 'healthy', { extra: { quota_total: 10, quota_used: 10 } }],
+      ['expiry-opt-out', 'eligible', 1, 'healthy', { expires_at: 1, auto_pause_on_expired: false }],
+      ['cooldown-ended', 'eligible', 1, 'healthy', { rate_limit_reset_at: '2000-01-01T00:00:00Z' }],
+    ] as const
+    for (const [id, group, enabled, health, ui] of accounts) {
+      raw.prepare(`INSERT INTO accounts (id, platform, name, credential_ref, enabled, max_concurrency,
+        health_status, ui_config_json, created_at_ms, updated_at_ms) VALUES (?, 'openai', ?, ?, ?, 5, ?, ?, 1, 1)`)
+        .run(id, id, `secret-${id}`, enabled, health, JSON.stringify(ui))
+      raw.prepare('INSERT INTO account_groups (account_id, group_id, created_at_ms, updated_at_ms) VALUES (?, ?, 1, 1)').run(id, group)
+    }
+    const app = new Hono<{ Bindings: Env }>(); app.get('/capacity', getAdminGroupCapacitySummary)
+    const response = await app.request('/capacity', {}, { DB: d1 } as Env)
+    expect(response.status).toBe(200)
+    const body = await response.json() as { data: Array<Record<string, unknown>> }
+    expect(body.data.map(row => [row.group_id, row.concurrency_used, row.concurrency_max, row.concurrency_status]))
+      .toEqual([['blocked', 0, 0, 'known'], ['eligible', 0, 15, 'known'], ['empty', 0, 0, 'known']])
+  })
+
   it('aggregates active pool leases in bounded batches and marks failed snapshots unknown', async () => {
     const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
     raw.exec(`

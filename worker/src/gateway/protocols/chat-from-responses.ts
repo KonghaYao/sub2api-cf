@@ -204,6 +204,8 @@ export class ResponsesToChatCompletionsEventCodec {
   private readonly model: string
   private serviceTier: string | undefined
   private sentRole = false
+  private sentText = false
+  private sentReasoning = false
   private sawToolCall = false
   private finalized = false
   private nextToolIndex = 0
@@ -229,6 +231,7 @@ export class ResponsesToChatCompletionsEventCodec {
     }
     if (type === 'response.output_text.delta') {
       const delta = optionalString(event.delta)
+      if (delta) this.sentText = true
       return delta === undefined || delta === ''
         ? []
         : [...this.ensureRole(), this.delta({ content: delta })]
@@ -238,6 +241,7 @@ export class ResponsesToChatCompletionsEventCodec {
       type === 'response.reasoning_text.delta'
     ) {
       const delta = optionalString(event.delta)
+      if (delta) this.sentReasoning = true
       return delta === undefined || delta === ''
         ? []
         : [...this.ensureRole(), this.delta({ reasoning_content: delta })]
@@ -307,11 +311,21 @@ export class ResponsesToChatCompletionsEventCodec {
     this.observeResponse(event.response)
     const response = objectValue(event.response)
     this.usageValue = chatUsage(response?.usage ?? event.usage) ?? this.usageValue
+    const chunks = [...this.ensureRole()]
+    if (response && Array.isArray(response.output)) {
+      const message = responsesToChatCompletionsResponse(response, this.model, this.created).choices[0].message
+      if (!this.sentText && message.content) chunks.push(this.delta({ content: message.content }))
+      if (!this.sentReasoning && message.reasoning_content) chunks.push(this.delta({ reasoning_content: message.reasoning_content }))
+      if (!this.sawToolCall && message.tool_calls?.length) {
+        this.sawToolCall = true
+        chunks.push(this.delta({ tool_calls: message.tool_calls.map((tool, index) => ({ ...tool, index })) }))
+      }
+    }
     const reason = response === null
       ? (this.sawToolCall ? 'tool_calls' : 'stop')
       : finishReason(response, this.sawToolCall)
     this.finalized = true
-    const chunks = [...this.ensureRole(), this.finishChunk(reason)]
+    chunks.push(this.finishChunk(reason))
     if (this.includeUsage && this.usageValue !== undefined) chunks.push(this.usageChunk(this.usageValue))
     return chunks
   }
@@ -396,6 +410,10 @@ export class BufferedResponsesToChatCompletions {
   }
 
   response(): ChatCompletionResponse {
+    return responsesToChatCompletionsResponse(this.responsesDocument(), this.publicModel, this.nowSeconds)
+  }
+
+  responsesDocument(): JsonObject {
     if (this.terminalResponse === null || this.terminalValue === null) {
       throw new ResponsesToChatError('Upstream stream ended before a terminal response event')
     }
@@ -410,7 +428,7 @@ export class BufferedResponsesToChatCompletions {
     if (response.service_tier === undefined && this.serviceTier !== undefined) {
       response.service_tier = this.serviceTier
     }
-    return responsesToChatCompletionsResponse(response, this.publicModel, this.nowSeconds)
+    return response
   }
 
   private drain(flush: boolean): void {

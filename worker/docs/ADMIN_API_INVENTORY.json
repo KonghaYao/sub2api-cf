@@ -1,0 +1,4896 @@
+{
+  "scope": "Static literal/template API-client calls in frontend/src/api. Dynamic helper URLs and direct view fetches require manual/browser audit. Candidate registration is not proof of compatible handler semantics or functioning UI.",
+  "summary": {
+    "P0": {
+      "calls": 141,
+      "without_registration": 15
+    },
+    "P1": {
+      "calls": 142,
+      "without_registration": 69
+    },
+    "P2": {
+      "calls": 153,
+      "without_registration": 101
+    }
+  },
+  "calls": [
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts",
+      "function": "list",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 195,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts",
+      "function": "listWithEtag",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 272,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts",
+      "function": "create",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 314,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/accounts/:param",
+      "function": "deleteAccount",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 411,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 301,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 382,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/apply-oauth-credentials",
+      "function": "applyOAuthCredentials",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 541,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/clear-error",
+      "function": "clearError",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 572,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/clear-rate-limit",
+      "function": "clearRateLimit",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 611,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/duplicate",
+      "function": "duplicate",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 357,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/models",
+      "function": "getAvailableModels",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1118,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/models/sync-upstream",
+      "function": "syncUpstreamModels",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1151,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/ollama-cloud-usage",
+      "function": "getOllamaCloudUsage",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1611,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/:param/ollama-cloud-usage/auto-refresh",
+      "function": "setOllamaCloudUsageAutoRefresh",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1628,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/ollama-cloud-usage/refresh",
+      "function": "refreshOllamaCloudUsage",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1635,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/accounts/:param/ollama-cloud-usage/session",
+      "function": "deleteOllamaCloudUsageSession",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1623,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/:param/ollama-cloud-usage/session",
+      "function": "saveOllamaCloudUsageSession",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1616,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/recover-state",
+      "function": "recoverState",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 623,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/refresh",
+      "function": "refreshCredentials",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 517,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/reset-quota",
+      "function": "resetAccountQuota",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 633,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/revert-proxy-fallback",
+      "function": "revertProxyFallback",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1349,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/schedulable",
+      "function": "setSchedulable",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1104,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/scheduled-test-plans",
+      "function": "listByAccount",
+      "source": "frontend/src/api/admin/scheduledTests.ts",
+      "line": 20,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/set-privacy",
+      "function": "setPrivacy",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1441,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/shadow",
+      "function": "createSparkShadow",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1558,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 560,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/accounts/:param/temp-unschedulable",
+      "function": "resetTempUnschedulable",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 657,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/temp-unschedulable",
+      "function": "getTempUnschedulableStatus",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 645,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/test",
+      "function": "testAccount",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 455,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/test",
+      "function": "testAccount",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 497,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/today-stats",
+      "function": "getTodayStats",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1077,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/:param/upstream-billing-probe",
+      "function": "probeUpstreamBilling",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1582,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/:param/upstream-billing-probe",
+      "function": "setUpstreamBillingProbeEnabled",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1578,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/:param/usage",
+      "function": "getUsage",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 585,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/antigravity/default-model-mapping",
+      "function": "getAntigravityDefaultModelMapping",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1299,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch",
+      "function": "batchCreate",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 706,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-clear-error",
+      "function": "batchClearError",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1395,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-clear-error",
+      "function": "batchClearError",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1401,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-delete",
+      "function": "batchDelete",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1360,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-delete",
+      "function": "batchDelete",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1372,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-refresh",
+      "function": "batchRefresh",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1416,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-refresh",
+      "function": "batchRefresh",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1428,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/batch-update-credentials",
+      "function": "batchUpdateCredentials",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 734,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/bulk-update",
+      "function": "bulkUpdate",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 776,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/bulk-update",
+      "function": "workerBulkEdit",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 826,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/bulk-update",
+      "function": "bulkSetEnabled",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 978,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/bulk-update",
+      "function": "bulkSetSchedulable",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 993,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/check-mixed-channel",
+      "function": "checkMixedChannelRisk",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 398,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/data",
+      "function": "exportData",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1263,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/data",
+      "function": "importData",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1271,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/health-probes",
+      "function": "queueHealthProbes",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1007,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/import/codex-session",
+      "function": "importCodexSession",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1281,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/models/sync-upstream-preview",
+      "function": "syncUpstreamModelsPreview",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1169,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/ollama-cloud-usage/settings",
+      "function": "getOllamaCloudUsageSettings",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1596,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/ollama-cloud-usage/settings",
+      "function": "updateOllamaCloudUsageSettings",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1603,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/sync/crs",
+      "function": "syncFromCrs",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1214,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/sync/crs/preview",
+      "function": "previewFromCrs",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1191,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/synthetic-probes",
+      "function": "queueSyntheticProbes",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1046,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/synthetic-probes/history",
+      "function": "listSyntheticProbeHistory",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1064,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/today-stats/batch",
+      "function": "getBatchTodayStats",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1091,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/upstream-billing-probe/batch",
+      "function": "probeUpstreamBillingBatch",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1587,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/upstream-billing-probe/settings",
+      "function": "getUpstreamBillingProbeSettings",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1563,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/accounts/upstream-billing-probe/settings",
+      "function": "updateUpstreamBillingProbeSettings",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1570,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/accounts/upstream-billing-rates",
+      "function": "getUpstreamBillingRatesWithEtag",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 235,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/accounts/usage/batch",
+      "function": "getBatchUsage",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 598,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/api-keys/:param",
+      "function": "revokeApiKey",
+      "source": "frontend/src/api/admin/apiKeys.ts",
+      "line": 41,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/api-keys/:param",
+      "function": "updateApiKeyGroup",
+      "source": "frontend/src/api/admin/apiKeys.ts",
+      "line": 32,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/channels",
+      "function": "list",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 493,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/channels",
+      "function": "create",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 518,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/channels",
+      "function": "create",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 521,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/channels/:param",
+      "function": "remove",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 550,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/channels/:param",
+      "function": "remove",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 554,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/channels/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 509,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/channels/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 532,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/channels/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 536,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/channels/model-pricing",
+      "function": "getModelDefaultPricing",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 575,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/channels/pricing/sync-models",
+      "function": "syncPricingModels",
+      "source": "frontend/src/api/admin/channels.ts",
+      "line": 589,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups",
+      "function": "list",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 308,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/groups",
+      "function": "create",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 395,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/groups/:param",
+      "function": "deleteGroup",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 517,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 366,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 495,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/api-keys",
+      "function": "getGroupApiKeys",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 571,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/composite-routes",
+      "function": "listCompositeRoutes",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 578,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/groups/:param/composite-routes",
+      "function": "createCompositeRoute",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 589,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/groups/:param/composite-routes/:param",
+      "function": "deleteCompositeRoute",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 616,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/:param/composite-routes/:param",
+      "function": "updateCompositeRoute",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 602,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/groups/:param/composite-routes/preview",
+      "function": "previewCompositeRoute",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 635,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/groups/:param/duplicate",
+      "function": "duplicate",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 475,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/models-list-candidates",
+      "function": "getModelsListCandidates",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 380,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/groups/:param/rate-multipliers",
+      "function": "clearGroupRateMultipliers",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 698,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/rate-multipliers",
+      "function": "getGroupRateMultipliers",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 662,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/rate-multipliers",
+      "function": "getGroupRPMOverrides",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 762,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/:param/rate-multipliers",
+      "function": "batchSetGroupRateMultipliers",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 722,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/groups/:param/rpm-overrides",
+      "function": "clearGroupRPMOverrides",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 806,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/rpm-overrides",
+      "function": "getGroupRPMOverrides",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 757,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/:param/rpm-overrides",
+      "function": "batchSetGroupRPMOverrides",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 787,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 550,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/:param/subscriptions",
+      "function": "listByGroup",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 282,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/all",
+      "function": "list",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 268,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/all",
+      "function": "getAll",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 323,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/all",
+      "function": "getAllIncludingInactive",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 336,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/capacity-summary",
+      "function": "getCapacitySummary",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 834,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/live-capability",
+      "function": "getLiveCapability",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 356,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/sort-order",
+      "function": "updateSortOrder",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 677,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/groups/sort-order",
+      "function": "updateSortOrder",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 685,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/groups/usage-summary",
+      "function": "getUsageSummary",
+      "source": "frontend/src/api/admin/groups.ts",
+      "line": 822,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/subscriptions",
+      "function": "list",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 92,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/subscriptions/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 113,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/:param/extend",
+      "function": "extend",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 182,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/subscriptions/:param/progress",
+      "function": "getProgress",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 124,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/:param/reset-quota",
+      "function": "resetQuota",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 255,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/:param/restore",
+      "function": "restore",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 228,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/:param/revoke",
+      "function": "revoke",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 205,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/assign",
+      "function": "assign",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 138,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/subscriptions/bulk-assign",
+      "function": "bulkAssign",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 160,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users",
+      "function": "list",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 342,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users",
+      "function": "list",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 371,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users",
+      "function": "create",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 413,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users",
+      "function": "create",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 419,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "DELETE",
+      "path": "/admin/users/:param",
+      "function": "deleteUser",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 452,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 386,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/users/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 435,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/users/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 442,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/api-keys",
+      "function": "getUserApiKeys",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 552,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/attributes",
+      "function": "getUserAttributeValues",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 124,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/users/:param/attributes",
+      "function": "updateUserAttributeValues",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 141,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/users/:param/attributes",
+      "function": "updateUserAttributeValues",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 144,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/:param/auth-identities",
+      "function": "bindUserAuthIdentity",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 761,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/:param/balance",
+      "function": "updateBalance",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 479,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/:param/balance",
+      "function": "updateBalance",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 486,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/balance-history",
+      "function": "getUserBalanceHistory",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 683,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/balance-history",
+      "function": "getUserBalanceHistory",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 702,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/platform-quotas",
+      "function": "getPlatformQuotas",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 808,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "PUT",
+      "path": "/admin/users/:param/platform-quotas",
+      "function": "updatePlatformQuotas",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 825,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/:param/platform-quotas/reset",
+      "function": "resetPlatformQuotaWindow",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 843,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/:param/replace-group",
+      "function": "replaceGroup",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 750,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/subscriptions",
+      "function": "listByUser",
+      "source": "frontend/src/api/admin/subscriptions.ts",
+      "line": 304,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "GET",
+      "path": "/admin/users/:param/usage",
+      "function": "getUserUsageStats",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 582,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/batch-limits",
+      "function": "batchUpdateLimits",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 518,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P0",
+      "method": "POST",
+      "path": "/admin/users/batch-limits",
+      "function": "batchUpdateLimits",
+      "source": "frontend/src/api/admin/users.ts",
+      "line": 529,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/api-keys-trend",
+      "function": "getApiKeyUsageTrend",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 266,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/dashboard/api-keys-usage",
+      "function": "getBatchApiKeysUsage",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 363,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/groups",
+      "function": "getGroupStats",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 196,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/models",
+      "function": "getModelStats",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 141,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/realtime",
+      "function": "getRealtimeMetrics",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 71,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/snapshot-v2",
+      "function": "getSnapshotV2",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 241,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 57,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/trend",
+      "function": "getUsageTrend",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 109,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/user-breakdown",
+      "function": "getUserBreakdown",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 228,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/users-ranking",
+      "function": "getUserSpendingRanking",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 308,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/dashboard/users-trend",
+      "function": "getUserUsageTrend",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 294,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/dashboard/users-usage",
+      "function": "getBatchUsersUsage",
+      "source": "frontend/src/api/admin/dashboard.ts",
+      "line": 337,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/oauth-providers",
+      "function": "list",
+      "source": "frontend/src/api/admin/oauthProviders.ts",
+      "line": 129,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/oauth-providers/:param",
+      "function": "get",
+      "source": "frontend/src/api/admin/oauthProviders.ts",
+      "line": 137,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/oauth-providers/:param",
+      "function": "upsert",
+      "source": "frontend/src/api/admin/oauthProviders.ts",
+      "line": 150,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/oauth-providers/:param/disable",
+      "function": "disable",
+      "source": "frontend/src/api/admin/oauthProviders.ts",
+      "line": 169,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/:param/:param",
+      "function": "getErrorDetail",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1185,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/ops/:param/:param/:param",
+      "function": "updateErrorResolution",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1223,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/account-availability",
+      "function": "getAccountAvailabilityStats",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 417,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/advanced-settings",
+      "function": "getAdvancedSettings",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1390,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/advanced-settings",
+      "function": "updateAdvancedSettings",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1395,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/alert-events",
+      "function": "listAlertEvents",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1312,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/alert-events/:param",
+      "function": "getAlertEvent",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1317,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/alert-events/:param/status",
+      "function": "updateAlertEventStatus",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1322,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/alert-rules",
+      "function": "listAlertRules",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1279,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/ops/alert-rules",
+      "function": "createAlertRule",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1284,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/ops/alert-rules/:param",
+      "function": "deleteAlertRule",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1294,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/alert-rules/:param",
+      "function": "updateAlertRule",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1289,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/ops/alert-silences",
+      "function": "createAlertSilence",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1333,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/concurrency",
+      "function": "getConcurrencyStats",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 356,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/error-distribution",
+      "function": "getErrorDistribution",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1093,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/error-trend",
+      "function": "getErrorTrend",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1075,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/latency-histogram",
+      "function": "getLatencyHistogram",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1057,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/openai-token-stats",
+      "function": "getOpenAITokenStats",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1104,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/overview",
+      "function": "getDashboardOverview",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1003,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/snapshot-v2",
+      "function": "getDashboardSnapshotV2",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1021,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/dashboard/throughput-trend",
+      "function": "getThroughputTrend",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1039,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/email-notification/config",
+      "function": "getEmailNotificationConfig",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1338,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/email-notification/config",
+      "function": "updateEmailNotificationConfig",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1343,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/realtime-traffic",
+      "function": "getRealtimeTrafficSummary",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 456,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/request-errors",
+      "function": "listRequestErrors",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1160,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/request-errors/:param/upstream-errors",
+      "function": "listRequestErrorUpstreamErrors",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1209,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/requests",
+      "function": "listRequestDetails",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1273,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/runtime/alert",
+      "function": "getAlertRuntimeSettings",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1349,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/runtime/alert",
+      "function": "updateAlertRuntimeSettings",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1354,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/runtime/logging",
+      "function": "getRuntimeLogConfig",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1359,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/runtime/logging",
+      "function": "updateRuntimeLogConfig",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1364,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/ops/runtime/logging/reset",
+      "function": "resetRuntimeLogConfig",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1369,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/settings/metric-thresholds",
+      "function": "getMetricThresholds",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1402,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/ops/settings/metric-thresholds",
+      "function": "updateMetricThresholds",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1407,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/system-logs",
+      "function": "listSystemLogs",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1374,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/ops/system-logs/cleanup",
+      "function": "cleanupSystemLogs",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1379,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/system-logs/health",
+      "function": "getSystemLogSinkHealth",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1384,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/upstream-errors",
+      "function": "listUpstreamErrors",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 1169,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/ops/user-concurrency",
+      "function": "getUserConcurrencyStats",
+      "source": "frontend/src/api/admin/ops.ts",
+      "line": 361,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/channels",
+      "function": "getChannels",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 335,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/channels",
+      "function": "createChannel",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 340,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/payment/channels/:param",
+      "function": "deleteChannel",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 350,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/payment/channels/:param",
+      "function": "updateChannel",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 345,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/config",
+      "function": "getConfig",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 218,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/payment/config",
+      "function": "updateConfig",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 227,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/dashboard",
+      "function": "getDashboard",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 240,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/orders",
+      "function": "getOrders",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 259,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/orders/:param",
+      "function": "getOrder",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 264,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/orders/:param/cancel",
+      "function": "cancelOrder",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 269,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/orders/:param/refund",
+      "function": "refundOrder",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 279,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/orders/:param/refund/query",
+      "function": "queryRefund",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 286,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/orders/:param/retry",
+      "function": "retryRecharge",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 274,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/plans",
+      "function": "getPlans",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 357,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/plans",
+      "function": "createPlan",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 371,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/payment/plans/:param",
+      "function": "deletePlan",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 393,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/plans/:param",
+      "function": "getPlan",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 364,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/payment/plans/:param",
+      "function": "updatePlan",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 381,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/providers",
+      "function": "getProviders",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 405,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/providers",
+      "function": "createProvider",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 412,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/payment/providers/:param",
+      "function": "deleteProvider",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 434,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/payment/providers/:param",
+      "function": "updateProvider",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 422,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/reconciliation",
+      "function": "getReconciliationIssues",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 300,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/reconciliation/:param",
+      "function": "getReconciliationIssue",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 304,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/payment/reconciliation/:param/:param",
+      "function": "actOnReconciliationIssue",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 313,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/payment/reconciliation/:param/evidence",
+      "function": "downloadReconciliationEvidence",
+      "source": "frontend/src/api/admin/payment.ts",
+      "line": 326,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies",
+      "function": "list",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 40,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies",
+      "function": "create",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 87,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/proxies/:param",
+      "function": "deleteProxy",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 108,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 77,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/proxies/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 98,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/:param/accounts",
+      "function": "getProxyAccounts",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 188,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/:param/quality-check",
+      "function": "checkProxyQuality",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 156,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/:param/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 172,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/:param/test",
+      "function": "testProxy",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 137,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/all",
+      "function": "getAll",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 56,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/all",
+      "function": "getAllWithCount",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 65,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/batch",
+      "function": "batchCreate",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 212,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/batch",
+      "function": "batchCreate",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 218,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/batch-delete",
+      "function": "batchDelete",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 232,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/batch-delete",
+      "function": "batchDelete",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 238,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/proxies/data",
+      "function": "exportData",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 266,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/proxies/data",
+      "function": "importData",
+      "source": "frontend/src/api/admin/proxies.ts",
+      "line": 273,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/redeem-codes",
+      "function": "list",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 82,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/redeem-codes/:param",
+      "function": "deleteCode",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 167,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/redeem-codes/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 100,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/redeem-codes/:param/expire",
+      "function": "expire",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 259,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/redeem-codes/batch-delete",
+      "function": "batchDelete",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 195,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/redeem-codes/batch-update",
+      "function": "batchUpdate",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 227,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/redeem-codes/export",
+      "function": "exportCodes",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 300,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/redeem-codes/generate",
+      "function": "generate",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 149,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/redeem-codes/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/redeem.ts",
+      "line": 281,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings",
+      "function": "getSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1224,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings",
+      "function": "updateSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1336,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "DELETE",
+      "path": "/admin/settings/admin-api-key",
+      "function": "deleteAdminApiKey",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1585,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/admin-api-key",
+      "function": "getAdminApiKey",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1563,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/admin-api-key/regenerate",
+      "function": "regenerateAdminApiKey",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1574,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/beta-policy",
+      "function": "getBetaPolicySettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1803,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/beta-policy",
+      "function": "updateBetaPolicySettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1817,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/email-template-preview",
+      "function": "previewEmailTemplate",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1543,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/email-templates",
+      "function": "getEmailTemplates",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1502,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/email-templates/:param/:param",
+      "function": "getEmailTemplate",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1512,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/email-templates/:param/:param",
+      "function": "updateEmailTemplate",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1523,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/email-templates/:param/:param/restore-official",
+      "function": "restoreOfficialEmailTemplate",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1534,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/overload-cooldown",
+      "function": "getOverloadCooldownSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1602,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/overload-cooldown",
+      "function": "updateOverloadCooldownSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1611,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/panel-rate-limit",
+      "function": "getPanelRateLimitSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1658,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/panel-rate-limit",
+      "function": "updatePanelRateLimitSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1667,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/rate-limit-429-cooldown",
+      "function": "getRateLimit429CooldownSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1626,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/rate-limit-429-cooldown",
+      "function": "updateRateLimit429CooldownSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1635,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/rectifier",
+      "function": "getRectifierSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1731,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/rectifier",
+      "function": "updateRectifierSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1745,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/send-test-email",
+      "function": "sendTestEmail",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1442,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/stream-timeout",
+      "function": "getStreamTimeoutSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1692,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/stream-timeout",
+      "function": "updateStreamTimeoutSettings",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1706,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/test-smtp",
+      "function": "testSmtpConnection",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1413,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/settings/web-search-emulation",
+      "function": "getWebSearchEmulationConfig",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1852,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "PUT",
+      "path": "/admin/settings/web-search-emulation",
+      "function": "updateWebSearchEmulationConfig",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1867,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/web-search-emulation/reset-usage",
+      "function": "resetWebSearchUsage",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1899,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/settings/web-search-emulation/test",
+      "function": "testWebSearchEmulation",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1883,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/usage",
+      "function": "list",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 147,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/usage/cleanup-tasks",
+      "function": "listCleanupTasks",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 222,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/usage/cleanup-tasks",
+      "function": "createCleanupTask",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 235,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "POST",
+      "path": "/admin/usage/cleanup-tasks/:param/cancel",
+      "function": "cancelCleanupTask",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 244,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/usage/search-api-keys",
+      "function": "searchApiKeys",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 207,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/usage/search-users",
+      "function": "searchUsers",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 187,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P1",
+      "method": "GET",
+      "path": "/admin/usage/stats",
+      "function": "getStats",
+      "source": "frontend/src/api/admin/usage.ts",
+      "line": 175,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/invites",
+      "function": "listInviteRecords",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 225,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/rebates",
+      "function": "listRebateRecords",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 235,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/transfers",
+      "function": "listTransferRecords",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 245,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/users",
+      "function": "listUsers",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 148,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/affiliates/users/:param",
+      "function": "clearUserSettings",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 188,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/affiliates/users/:param",
+      "function": "updateUserSettings",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 174,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/users/:param/overview",
+      "function": "getUserOverview",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 255,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/affiliates/users/batch-rate",
+      "function": "batchSetRate",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 201,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/affiliates/users/lookup",
+      "function": "lookupUsers",
+      "source": "frontend/src/api/admin/affiliates.ts",
+      "line": 162,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/announcements",
+      "function": "list",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 27,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/announcements",
+      "function": "create",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 50,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/announcements/:param",
+      "function": "deleteAnnouncement",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 74,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/announcements/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 45,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/announcements/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 61,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/announcements/:param/read-status",
+      "function": "getReadStatus",
+      "source": "frontend/src/api/admin/announcements.ts",
+      "line": 93,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/antigravity/oauth/auth-url",
+      "function": "generateAuthUrl",
+      "source": "frontend/src/api/admin/antigravity.ts",
+      "line": 39,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/antigravity/oauth/exchange-code",
+      "function": "exchangeCode",
+      "source": "frontend/src/api/admin/antigravity.ts",
+      "line": 49,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/antigravity/oauth/refresh-token",
+      "function": "refreshAntigravityToken",
+      "source": "frontend/src/api/admin/antigravity.ts",
+      "line": 63,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/audit-logs",
+      "function": "list",
+      "source": "frontend/src/api/admin/audit.ts",
+      "line": 52,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/audit-logs/:param",
+      "function": "get",
+      "source": "frontend/src/api/admin/audit.ts",
+      "line": 58,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/audit-logs/clear",
+      "function": "clear",
+      "source": "frontend/src/api/admin/audit.ts",
+      "line": 64,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups",
+      "function": "listBackups",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 146,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/backups",
+      "function": "createBackup",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 141,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/backups/:param",
+      "function": "deleteBackup",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 156,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups/:param",
+      "function": "getBackup",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 151,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups/:param/download-url",
+      "function": "getDownloadURL",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 160,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/backups/:param/restore",
+      "function": "restoreBackup",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 166,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups/image-storage",
+      "function": "getImageStorageConfig",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 107,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/backups/image-storage",
+      "function": "updateImageStorageConfig",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 114,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/backups/image-storage/test",
+      "function": "testImageStorageConnection",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 121,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups/s3-config",
+      "function": "getS3Config",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 68,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/backups/s3-config",
+      "function": "updateS3Config",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 73,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/backups/s3-config/test",
+      "function": "testS3Connection",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 78,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/backups/schedule",
+      "function": "getSchedule",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 130,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/backups/schedule",
+      "function": "updateSchedule",
+      "source": "frontend/src/api/admin/backup.ts",
+      "line": 135,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitor-templates",
+      "function": "list",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 71,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/channel-monitor-templates",
+      "function": "create",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 85,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/channel-monitor-templates/:param",
+      "function": "del",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 101,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitor-templates/:param",
+      "function": "get",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 78,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/channel-monitor-templates/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 93,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/channel-monitor-templates/:param/apply",
+      "function": "apply",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 110,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitor-templates/:param/monitors",
+      "function": "listAssociatedMonitors",
+      "source": "frontend/src/api/admin/channelMonitorTemplate.ts",
+      "line": 121,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitor-v2/config",
+      "function": "getConfig",
+      "source": "frontend/src/api/channelMonitorV2.ts",
+      "line": 265,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/channel-monitor-v2/config",
+      "function": "updateConfig",
+      "source": "frontend/src/api/channelMonitorV2.ts",
+      "line": 269,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitors",
+      "function": "list",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 202,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/channel-monitors",
+      "function": "create",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 221,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/channel-monitors/:param",
+      "function": "del",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 320,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitors/:param",
+      "function": "get",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 213,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/channel-monitors/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 312,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/channel-monitors/:param/duplicate",
+      "function": "duplicate",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 294,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/channel-monitors/:param/history",
+      "function": "listHistory",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 339,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/channel-monitors/:param/run",
+      "function": "runNow",
+      "source": "frontend/src/api/admin/channelMonitor.ts",
+      "line": 328,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/cn-providers/accounts/:param/balance",
+      "function": "queryBalance",
+      "source": "frontend/src/api/admin/cnProviders.ts",
+      "line": 61,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/cn-providers/accounts/:param/quota",
+      "function": "queryQuota",
+      "source": "frontend/src/api/admin/cnProviders.ts",
+      "line": 53,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/commercial/config",
+      "function": "getCommercialConfig",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1354,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/commercial/config",
+      "function": "updateCommercialConfig",
+      "source": "frontend/src/api/admin/settings.ts",
+      "line": 1377,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/compliance",
+      "function": "getStatus",
+      "source": "frontend/src/api/admin/compliance.ts",
+      "line": 32,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/compliance/accept",
+      "function": "accept",
+      "source": "frontend/src/api/admin/compliance.ts",
+      "line": 37,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/agent/health",
+      "function": "getAgentHealth",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 220,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/backups",
+      "function": "listBackupJobs",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 301,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/backups",
+      "function": "createBackupJob",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 292,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/backups/:param",
+      "function": "getBackupJob",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 308,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/config",
+      "function": "getConfig",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 225,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/data-management/config",
+      "function": "updateConfig",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 230,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/s3/profiles",
+      "function": "listS3Profiles",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 264,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/s3/profiles",
+      "function": "createS3Profile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 269,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/data-management/s3/profiles/:param",
+      "function": "deleteS3Profile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 279,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/data-management/s3/profiles/:param",
+      "function": "updateS3Profile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 274,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/s3/profiles/:param/activate",
+      "function": "setActiveS3Profile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 283,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/s3/test",
+      "function": "testS3",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 235,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/data-management/sources/:param/profiles",
+      "function": "listSourceProfiles",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 240,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/sources/:param/profiles",
+      "function": "createSourceProfile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 245,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/data-management/sources/:param/profiles/:param",
+      "function": "deleteSourceProfile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 255,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/data-management/sources/:param/profiles/:param",
+      "function": "updateSourceProfile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 250,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/data-management/sources/:param/profiles/:param/activate",
+      "function": "setActiveSourceProfile",
+      "source": "frontend/src/api/admin/dataManagement.ts",
+      "line": 259,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/error-passthrough-rules",
+      "function": "list",
+      "source": "frontend/src/api/admin/errorPassthrough.ts",
+      "line": 73,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/error-passthrough-rules",
+      "function": "create",
+      "source": "frontend/src/api/admin/errorPassthrough.ts",
+      "line": 93,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/error-passthrough-rules/:param",
+      "function": "deleteRule",
+      "source": "frontend/src/api/admin/errorPassthrough.ts",
+      "line": 114,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/error-passthrough-rules/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/errorPassthrough.ts",
+      "line": 83,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/error-passthrough-rules/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/errorPassthrough.ts",
+      "line": 104,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/gemini/oauth/auth-url",
+      "function": "generateAuthUrl",
+      "source": "frontend/src/api/admin/gemini.ts",
+      "line": 52,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/gemini/oauth/capabilities",
+      "function": "getCapabilities",
+      "source": "frontend/src/api/admin/gemini.ts",
+      "line": 68,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/gemini/oauth/exchange-code",
+      "function": "exchangeCode",
+      "source": "frontend/src/api/admin/gemini.ts",
+      "line": 60,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/grok/accounts/:param/quota",
+      "function": "queryQuota",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 166,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/accounts/:param/reset-quota",
+      "function": "resetQuota",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 171,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/oauth/auth-url",
+      "function": "generateAuthUrl",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 136,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/grok/oauth/capabilities",
+      "function": "getCapabilities",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 29,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/oauth/exchange-code",
+      "function": "exchangeCode",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 144,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/oauth/password",
+      "function": "authorizePassword",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 212,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/oauth/refresh-token",
+      "function": "refreshGrokToken",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 158,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/oauth/sso-token",
+      "function": "validateSSOToken",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 191,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/grok/sso-to-oauth",
+      "function": "createFromSSO",
+      "source": "frontend/src/api/admin/grok.ts",
+      "line": 176,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/invitation-codes",
+      "function": "listInvitationCodes",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 73,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/invitation-codes",
+      "function": "createInvitationCode",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 87,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/invitation-codes/:param",
+      "function": "deleteInvitationCode",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 115,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/invitation-codes/:param",
+      "function": "getInvitationCode",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 80,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/invitation-codes/:param",
+      "function": "updateInvitationCode",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 98,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/invitation-codes/:param/usages",
+      "function": "listInvitationCodeUsages",
+      "source": "frontend/src/api/admin/invitationCodes.ts",
+      "line": 132,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/models",
+      "function": "list",
+      "source": "frontend/src/api/admin/models.ts",
+      "line": 22,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/openai/accounts/:param/quota/refresh",
+      "function": "refreshOpenAIQuota",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1527,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/openai/accounts/:param/reset-quota",
+      "function": "resetOpenAIQuota",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1542,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/openai/create-from-codex-pat",
+      "function": "createOpenAICodexPAT",
+      "source": "frontend/src/api/admin/accounts.ts",
+      "line": 1290,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/platform-quota-defaults",
+      "function": "getPlatformQuotaDefaults",
+      "source": "frontend/src/api/admin/platformQuotas.ts",
+      "line": 21,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/platform-quota-defaults",
+      "function": "updatePlatformQuotaDefaults",
+      "source": "frontend/src/api/admin/platformQuotas.ts",
+      "line": 38,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/plugins",
+      "function": "list",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 88,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/plugins/:param",
+      "function": "remove",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 120,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/plugins/:param/config",
+      "function": "getConfig",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 124,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/plugins/:param/config",
+      "function": "saveConfig",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 132,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/plugins/:param/disable",
+      "function": "disable",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 115,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/plugins/:param/enable",
+      "function": "enable",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 107,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/plugins/:param/test",
+      "function": "test",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 137,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/plugins/:param/ui-session",
+      "function": "createUISession",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 142,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/plugins/upload",
+      "function": "upload",
+      "source": "frontend/src/api/admin/plugins.ts",
+      "line": 95,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/promo-codes",
+      "function": "list",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 27,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/promo-codes",
+      "function": "create",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 47,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/promo-codes/:param",
+      "function": "deleteCode",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 64,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/promo-codes/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 42,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/promo-codes/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 54,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/promo-codes/:param/usages",
+      "function": "getUsages",
+      "source": "frontend/src/api/admin/promo.ts",
+      "line": 75,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/risk-control/api-keys/test",
+      "function": "testAPIKeys",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 257,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/risk-control/config",
+      "function": "getConfig",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 238,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/risk-control/config",
+      "function": "updateConfig",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 245,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/risk-control/hashes",
+      "function": "deleteFlaggedHash",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 278,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/risk-control/hashes/all",
+      "function": "clearFlaggedHashes",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 285,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/risk-control/logs",
+      "function": "listLogs",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 264,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/risk-control/status",
+      "function": "getStatus",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 250,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/risk-control/users/:param/unban",
+      "function": "unbanUser",
+      "source": "frontend/src/api/admin/riskControl.ts",
+      "line": 271,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/scheduled-test-plans",
+      "function": "create",
+      "source": "frontend/src/api/admin/scheduledTests.ts",
+      "line": 32,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/scheduled-test-plans/:param",
+      "function": "deletePlan",
+      "source": "frontend/src/api/admin/scheduledTests.ts",
+      "line": 58,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/scheduled-test-plans/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/scheduledTests.ts",
+      "line": 46,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/scheduled-test-plans/:param/results",
+      "function": "listResults",
+      "source": "frontend/src/api/admin/scheduledTests.ts",
+      "line": 68,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/system/check-updates",
+      "function": "checkUpdates",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 37,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/system/restart",
+      "function": "restartService",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 100,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/system/rollback",
+      "function": "rollback",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 88,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/system/rollback-versions",
+      "function": "getRollbackVersions",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 58,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/system/update",
+      "function": "performUpdate",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 77,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/system/version",
+      "function": "getVersion",
+      "source": "frontend/src/api/admin/system.ts",
+      "line": 28,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/tls-fingerprint-profiles",
+      "function": "list",
+      "source": "frontend/src/api/admin/tlsFingerprintProfile.ts",
+      "line": 66,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/tls-fingerprint-profiles",
+      "function": "create",
+      "source": "frontend/src/api/admin/tlsFingerprintProfile.ts",
+      "line": 76,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/tls-fingerprint-profiles/:param",
+      "function": "deleteProfile",
+      "source": "frontend/src/api/admin/tlsFingerprintProfile.ts",
+      "line": 86,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/tls-fingerprint-profiles/:param",
+      "function": "getById",
+      "source": "frontend/src/api/admin/tlsFingerprintProfile.ts",
+      "line": 71,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/tls-fingerprint-profiles/:param",
+      "function": "update",
+      "source": "frontend/src/api/admin/tlsFingerprintProfile.ts",
+      "line": 81,
+      "registration": "not-found",
+      "handlers": []
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/user-attributes",
+      "function": "listDefinitions",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 46,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "GET",
+      "path": "/admin/user-attributes",
+      "function": "listEnabledDefinitions",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 54,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/user-attributes",
+      "function": "createDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 67,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/user-attributes",
+      "function": "createDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 70,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/user-attributes/:param",
+      "function": "deleteDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 99,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "DELETE",
+      "path": "/admin/user-attributes/:param",
+      "function": "deleteDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 102,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/user-attributes/:param",
+      "function": "updateDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 85,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/user-attributes/:param",
+      "function": "updateDefinition",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 88,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "POST",
+      "path": "/admin/user-attributes/batch",
+      "function": "getBatchUserAttributes",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 161,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/user-attributes/reorder",
+      "function": "reorderDefinitions",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 113,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    },
+    {
+      "priority": "P2",
+      "method": "PUT",
+      "path": "/admin/user-attributes/reorder",
+      "function": "reorderDefinitions",
+      "source": "frontend/src/api/admin/userAttributes.ts",
+      "line": 116,
+      "registration": "candidate",
+      "handlers": [
+        "worker/src/app.ts",
+        "worker/src/app.ts"
+      ]
+    }
+  ]
+}

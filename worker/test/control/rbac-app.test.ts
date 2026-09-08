@@ -63,6 +63,15 @@ describe('production admin route permission matrix', () => {
     expect(groups.status).toBe(403)
   })
 
+  it('allows account catalog readers to load proxy choices and denies proxy mutations', async () => {
+    grantRole('proxy-reader', ['admin.catalog.read'])
+    expect((await request('/api/v1/admin/proxies/all')).status).toBe(200)
+    expect((await request('/api/v1/admin/proxies')).status).toBe(200)
+    expect((await request('/api/v1/admin/proxies', 'POST')).status).toBe(403)
+    expect((await request('/api/v1/admin/proxies/missing', 'PUT')).status).toBe(403)
+    expect((await request('/api/v1/admin/proxies/missing', 'DELETE')).status).toBe(403)
+  })
+
   it('classifies channel administration as catalog access', async () => {
     grantRole('channel-reader', ['admin.catalog.read'])
 
@@ -124,6 +133,57 @@ describe('production admin route permission matrix', () => {
     })
   })
 
+  it('allows catalog readers to query mixed-channel risk without granting writes', async () => {
+    grantRole('mixed-channel-reader', ['admin.catalog.read'])
+    const response = await request('/api/v1/admin/accounts/check-mixed-channel', 'POST')
+    // Empty input reaches validation instead of being denied as a mutation.
+    expect(response.status).toBe(400)
+    expect((await request('/api/v1/admin/accounts', 'POST')).status).toBe(403)
+  })
+
+  it('requires user-read permission for keys exposed through a group', async () => {
+    grantRole('group-key-catalog-reader', ['admin.catalog.read'])
+    const response = await request('/api/v1/admin/groups/group-1/api-keys')
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({ error: { message: expect.stringContaining('admin.users.read') } })
+  })
+
+  it('requires catalog write permission for applying reauthorized credentials', async () => {
+    grantRole('reauth-reader', ['admin.catalog.read'])
+    const response = await request('/api/v1/admin/accounts/opaque-account/apply-oauth-credentials', 'POST')
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining('admin.catalog.write') } })
+  })
+
+  it('permits temporary state reads but requires catalog write for clearing', async () => {
+    grantRole('temp-state-reader', ['admin.catalog.read'])
+    expect((await request('/api/v1/admin/accounts/opaque-account/temp-unschedulable')).status).toBe(404)
+    expect((await request('/api/v1/admin/accounts/opaque-account/temp-unschedulable', 'DELETE')).status).toBe(403)
+  })
+
+  it('requires catalog write for original batch account creation', async () => {
+    grantRole('batch-create-reader', ['admin.catalog.read'])
+    expect((await request('/api/v1/admin/accounts/batch', 'POST')).status).toBe(403)
+  })
+
+  it('requires catalog write for original batch credential field updates', async () => {
+    grantRole('batch-field-reader', ['admin.catalog.read'])
+    expect((await request('/api/v1/admin/accounts/batch-update-credentials', 'POST')).status).toBe(403)
+  })
+
+  it('requires catalog write permission for manual account privacy', async () => {
+    grantRole('privacy-reader', ['admin.catalog.read'])
+    const response = await request('/api/v1/admin/accounts/opaque-account/set-privacy', 'POST')
+    expect(response.status).toBe(403)
+  })
+
+  it.each(['generate-auth-url', 'exchange-code', 'refresh-token'])('requires catalog write permission for OpenAI OAuth %s', async action => {
+    grantRole('oauth-operations-only', ['admin.operations.write'])
+    const response = await request(`/api/v1/admin/openai/${action}`, 'POST')
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining('admin.catalog.write') } })
+  })
+
   it('routes nested subscription reads to commerce instead of user or catalog permissions', async () => {
     grantRole('commerce-reader', ['admin.commerce.read'])
 
@@ -137,6 +197,15 @@ describe('production admin route permission matrix', () => {
     expect(await group.clone().json()).toMatchObject({ error: { code: 'admin_permission_required' } })
     expect(group.status).toBe(403)
     expect(user.status).toBe(403)
+  })
+
+  it.each(['/api/v1/admin/accounts/account-1/models/sync-upstream', '/api/v1/admin/accounts/models/sync-upstream-preview'])('requires operations permission for model sync %s', async path => {
+    grantRole('model-sync-catalog-writer', ['admin.catalog.write'])
+    const response = await request(path, 'POST')
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toMatchObject({ error: {
+      code: 'admin_permission_required', message: expect.stringContaining('admin.operations.write'),
+    } })
   })
 
   it('requires operations permission in addition to catalog permission for probes', async () => {

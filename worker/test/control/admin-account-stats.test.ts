@@ -1,3 +1,4 @@
+import { getAdminAccountTodayStats, getAdminAccountsTodayStats } from '../../src/control/account-today-stats'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAdminAccountStats } from '../../src/control/accounts'
@@ -47,6 +48,8 @@ function fixture() {
   } as Env
   const app = new Hono<{ Bindings: Env }>()
   app.get('/accounts/:id/stats', getAdminAccountStats)
+  app.get('/accounts/:id/today-stats', getAdminAccountTodayStats)
+  app.post('/accounts/today-stats/batch', getAdminAccountsTodayStats)
   return { app, env, raw }
 }
 
@@ -57,6 +60,33 @@ afterEach(() => {
 })
 
 describe('admin account statistics projection', () => {
+  it('serves real single and batch today costs with server calendar boundaries and no rollup double count', async () => {
+    const test = fixture()
+    try {
+      test.env.GROUP_USAGE_TIMEZONE = 'Asia/Shanghai'
+      // At 00:30 Shanghai, the event belongs to today even though its UTC date is yesterday.
+      vi.setSystemTime(Date.UTC(2026, 8, 6, 16, 30))
+      test.raw.prepare("UPDATE usage_projection SET occurred_at_ms = ? WHERE event_id = 'event-1'")
+        .run(Date.UTC(2026, 8, 6, 16, 0))
+      const single = await test.app.request('/accounts/account-a/today-stats', {}, test.env)
+      const expected = { requests: 1, tokens: 150, cost: 0.8, standard_cost: 1, user_cost: 0.9 }
+      expect(single.status).toBe(200)
+      expect(await single.json()).toMatchObject({ data: expected })
+      const batch = (ids: unknown) => test.app.request('/accounts/today-stats/batch', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ account_ids: ids }),
+      }, test.env)
+      expect(await (await batch(['account-a', 'account-a', 'empty-account'])).json())
+        .toMatchObject({ data: { stats: { 'account-a': expected,
+          'empty-account': { requests: 0, tokens: 0, cost: 0, standard_cost: 0, user_cost: 0 } } } })
+      expect(await (await batch([])).json()).toMatchObject({ data: { stats: {} } })
+      expect((await batch([null])).status).toBe(400)
+      expect((await batch(Array(1001).fill('account-a'))).status).toBe(400)
+      await recoverAccountStatsRollups(test.env, { nowMs: Date.now() })
+      expect(await (await test.app.request('/accounts/account-a/today-stats', {}, test.env)).json())
+        .toMatchObject({ data: expected })
+    } finally { test.raw.close() }
+  })
+
   it('returns the legacy-shaped daily and model account-cost view in USD', async () => {
     const test = fixture()
     const response = await test.app.request('/accounts/account-a/stats?days=2', {}, test.env)

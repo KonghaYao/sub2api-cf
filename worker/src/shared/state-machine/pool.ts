@@ -7,6 +7,7 @@ export interface PoolAccountState {
   account_id: string;
   enabled: boolean;
   max_concurrency: number;
+  load_factor?: number;
   priority: number;
   weight: number;
   recovery_revision: number;
@@ -57,6 +58,7 @@ export type PoolCommand = PoolCommandEnvelope &
         accounts: Array<{
           account_id: string;
           max_concurrency: number;
+          load_factor?: number;
           priority: number;
           weight: number;
           /** Absent only for callers predating account recovery support. */
@@ -68,6 +70,7 @@ export type PoolCommand = PoolCommandEnvelope &
         account_id: string;
         enabled: boolean;
         max_concurrency: number;
+        load_factor?: number;
         priority?: number;
         weight?: number;
       }
@@ -184,6 +187,7 @@ function syncAccounts(
   const accounts: Record<string, PoolAccountState> = {};
   for (const configured of command.accounts) {
     assertIdentifier(configured.account_id, "account_id");
+    validateLoadFactor(configured.load_factor);
     if (configuredIds.has(configured.account_id)) {
       throw new PoolStateMachineError("duplicate_account", "accounts contains a duplicate account_id");
     }
@@ -207,6 +211,7 @@ function syncAccounts(
       account_id: configured.account_id,
       enabled: true,
       max_concurrency: configured.max_concurrency,
+      load_factor: configured.load_factor,
       priority: configured.priority,
       weight: configured.weight,
       recovery_revision: recoveryRevision,
@@ -266,6 +271,7 @@ function upsertAccount(
   nowMs: number,
 ): PoolTransition {
   assertIdentifier(command.account_id, "account_id");
+  validateLoadFactor(command.load_factor);
   if (!Number.isSafeInteger(command.max_concurrency) || command.max_concurrency <= 0) {
     throw new PoolStateMachineError(
       "invalid_max_concurrency",
@@ -280,9 +286,11 @@ function upsertAccount(
   }
 
   const existing = state.accounts[command.account_id];
+  const loadFactor = command.load_factor ?? existing?.load_factor;
   if (
     existing?.enabled === command.enabled &&
     existing.max_concurrency === command.max_concurrency &&
+    existing.load_factor === loadFactor &&
     existing.priority === priority &&
     existing.weight === weight &&
     (command.enabled || !Object.values(state.affinities).some(
@@ -297,6 +305,7 @@ function upsertAccount(
     account_id: command.account_id,
     enabled: command.enabled,
     max_concurrency: command.max_concurrency,
+    load_factor: loadFactor,
     priority,
     weight,
     recovery_revision: existing?.recovery_revision ?? 0,
@@ -397,8 +406,8 @@ function reserve(
     const leftActive = activeCounts[left.account_id] ?? 0;
     const rightActive = activeCounts[right.account_id] ?? 0;
     const utilizationOrder =
-      leftActive * right.max_concurrency * right.weight -
-      rightActive * left.max_concurrency * left.weight;
+      leftActive * (right.load_factor ?? right.max_concurrency) * right.weight -
+      rightActive * (left.load_factor ?? left.max_concurrency) * left.weight;
     if (utilizationOrder !== 0) return utilizationOrder;
     if (left.consecutive_failures !== right.consecutive_failures) {
       return left.consecutive_failures - right.consecutive_failures;
@@ -628,5 +637,11 @@ function assertNonNegativeSafeInteger(value: number, fieldName: string): void {
       `invalid_${fieldName}`,
       `${fieldName} must be a non-negative safe integer`,
     );
+  }
+}
+
+function validateLoadFactor(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new PoolStateMachineError("invalid_load_factor", "load_factor must be a positive safe integer");
   }
 }

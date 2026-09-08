@@ -1,7 +1,7 @@
 import { sha256Hex } from '../gateway/crypto'
 import { fileExtension, mediaObjectPrefix } from './domain'
 import { createGeminiBatchClient, type GeminiBatchItemResult } from './gemini-batch'
-import { geminiMediaProviderJobAccounts } from './provider'
+import { geminiMediaProviderJobAccounts, mediaAccountFetcher } from './provider'
 import {
   appendMediaEvent,
   cancelPendingMediaItems,
@@ -23,6 +23,7 @@ import type {
   MediaProviderJobAdvanceEvent,
   MediaProviderJobPhase,
   MediaProviderJobRow,
+  MediaProviderJobAccount,
   MediaTaskItemRow,
   MediaTaskRow,
 } from './types'
@@ -36,7 +37,7 @@ const ITEM_LEASE_MS = 2 * 60 * 1_000
 const MAX_JOB_ERRORS = 8
 const MAX_SUBMIT_RECOVERY_MISSES = 3
 
-const JOB_COLUMNS = `task_id, provider_account_id, submission_key, provider_job_id,
+const JOB_COLUMNS = `task_id, provider_account_id, provider_model, submission_key, provider_job_id,
   phase, provider_raw_state, next_action_at_ms, deadline_at_ms, attempt_count,
   consecutive_errors, poll_count, reservation_renewal_sequence, lease_token,
   lease_expires_at_ms, result_manifest_object_key, result_manifest_sha256,
@@ -54,6 +55,7 @@ export async function planMediaProviderJob(
   },
 ): Promise<{
   accountId: string
+  upstreamModel: string
   submissionKey: string
   deadlineAtMs: number
 } | undefined> {
@@ -69,6 +71,7 @@ export async function planMediaProviderJob(
   })
   return {
     accountId: account.id,
+    upstreamModel: account.upstreamModel ?? input.manifest.upstream_model,
     submissionKey: input.taskId,
     deadlineAtMs: input.now + JOB_DEADLINE_MS,
   }
@@ -342,10 +345,10 @@ async function submitProviderJob(
   ).bind(Date.now() + 60_000, Date.now(), job.task_id, leaseToken).run()
   if ((marked.meta.changes ?? 0) !== 1) return
   try {
-    const result = await batchClient(env).submit({
+    const result = await batchClient(env, account).submit({
       baseUrl: account.baseUrl,
       apiKey: account.apiKey,
-      upstreamModel: task.upstream_model,
+      upstreamModel: job.provider_model ?? task.upstream_model,
       displayName: job.submission_key,
       items: manifest.items,
       imageSize: task.image_size,
@@ -376,7 +379,7 @@ async function recoverAmbiguousSubmit(
   leaseToken: string,
 ): Promise<void> {
   const account = await accountResolver(env).exact(env, job.provider_account_id)
-  const result = await batchClient(env).findByDisplayName({
+  const result = await batchClient(env, account).findByDisplayName({
     baseUrl: account.baseUrl,
     apiKey: account.apiKey,
     displayName: job.submission_key,
@@ -418,7 +421,7 @@ async function pollProviderJob(
     return
   }
   const account = await accountResolver(env).exact(env, job.provider_account_id)
-  const result = await batchClient(env).poll({
+  const result = await batchClient(env, account).poll({
     baseUrl: account.baseUrl,
     apiKey: account.apiKey,
     providerJobId: job.provider_job_id,
@@ -459,7 +462,7 @@ async function cancelProviderJob(
     return
   }
   const account = await accountResolver(env).exact(env, job.provider_account_id)
-  await batchClient(env).cancel({
+  await batchClient(env, account).cancel({
     baseUrl: account.baseUrl,
     apiKey: account.apiKey,
     providerJobId: job.provider_job_id,
@@ -967,8 +970,8 @@ function accountResolver(env: MediaEnv) {
   return env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER ?? geminiMediaProviderJobAccounts
 }
 
-function batchClient(env: MediaEnv) {
-  return env.MEDIA_PROVIDER_JOB_CLIENT ?? createGeminiBatchClient()
+function batchClient(env: MediaEnv, account: MediaProviderJobAccount) {
+  return env.MEDIA_PROVIDER_JOB_CLIENT ?? createGeminiBatchClient(mediaAccountFetcher(env, account))
 }
 
 function mediaBucket(env: MediaEnv): R2Bucket {

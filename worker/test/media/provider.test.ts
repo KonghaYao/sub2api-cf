@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { encryptCredential } from '../../src/gateway/crypto'
 import { GatewayError } from '../../src/gateway/errors'
 import { createGeminiMediaProvider } from '../../src/media/provider'
+import { resolveExactGeminiMediaAccount } from '../../src/media/provider'
+import * as proxyTransport from '../../src/gateway/proxy-fetch'
 import type { MediaEnv, MediaManifest, MediaTaskRow } from '../../src/media/types'
 
 const MASTER_KEY = 'media-provider-master-key-'.repeat(2)
@@ -9,6 +11,69 @@ const ENVIRONMENT = 'test'
 
 describe('built-in Gemini media provider', () => {
   beforeEach(() => vi.restoreAllMocks())
+
+  it('retains the current proxy for exact job-account lookup and sends generated images through it', async () => {
+    const row = await encryptedAccount({ ui_config_json: JSON.stringify({ proxy_id: 'opaque-media-proxy' }) })
+    const env = mediaEnv(row)
+    const proxy = vi.spyOn(proxyTransport, 'fetchAccountProxy').mockResolvedValue(Response.json(geminiImage('image/png', 'aGVsbG8=')))
+    const direct = vi.fn()
+    const exact = await resolveExactGeminiMediaAccount(env, row.account_id)
+    expect(exact.proxyId).toBe('opaque-media-proxy')
+    const result = await createGeminiMediaProvider(direct).generate({ env, task: mediaTask(), manifest: mediaManifest() })
+    expect(result.items[0].error).toBeUndefined()
+    expect(proxy).toHaveBeenCalledOnce()
+    const [, id, url, init] = proxy.mock.calls[0]
+    expect(id).toBe('opaque-media-proxy')
+    expect(url.pathname).toContain(':generateContent')
+    expect(new Headers(init.headers).get('x-goog-api-key')).toBe('upstream-secret')
+    expect(direct).not.toHaveBeenCalled()
+  })
+
+  it('propagates proxy failure instead of using direct access', async () => {
+    const row = await encryptedAccount({ ui_config_json: JSON.stringify({ proxy_id: 'opaque-media-proxy' }) })
+    vi.spyOn(proxyTransport, 'fetchAccountProxy').mockRejectedValue(new GatewayError(502, 'proxy_connection_failed', 'Proxy unavailable'))
+    const direct = vi.fn()
+    await expect(createGeminiMediaProvider(direct).generate({ env: mediaEnv(row), task: mediaTask(), manifest: mediaManifest() }))
+      .rejects.toMatchObject({ code: 'proxy_connection_failed' })
+    expect(direct).not.toHaveBeenCalled()
+  })
+
+  it('sends the account-mapped model to Gemini and rejects a changed whitelist before fetching', async () => {
+    const row = await encryptedAccount({ ui_config_json: JSON.stringify({ credentials: { model_mapping: { 'gemini-3.1-flash-image': 'gemini-3.1-pro-image' } } }) })
+    const fetcher = vi.fn(async () => Response.json(geminiImage('image/png', 'aGVsbG8=')))
+    await createGeminiMediaProvider(fetcher).generate({ env: mediaEnv(row), task: mediaTask(), manifest: mediaManifest() })
+    expect(String((fetcher.mock.calls as unknown[][])[0][0])).toContain('/models/gemini-3.1-pro-image:generateContent')
+    row.ui_config_json = JSON.stringify({ credentials: { model_mapping: { other: 'denied' } } })
+    await expect(createGeminiMediaProvider(fetcher).generate({ env: mediaEnv(row), task: mediaTask(), manifest: mediaManifest() }))
+      .rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects new generation on exhausted quota but retains assigned-job credential access', async () => {
+    const row = await encryptedAccount({ ui_config_json: JSON.stringify({ extra: { quota_limit: 1, quota_used: 1 } }) })
+    const env = mediaEnv(row), fetcher = vi.fn()
+    await expect(createGeminiMediaProvider(fetcher).generate({ env, task: mediaTask(), manifest: mediaManifest() }))
+      .rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    expect(fetcher).not.toHaveBeenCalled()
+    await expect(resolveExactGeminiMediaAccount(env, row.account_id)).resolves.toMatchObject({ id: row.account_id })
+  })
+
+  it('continues past an exhausted page and uses the next available account', async () => {
+    const ready = await encryptedAccount()
+    const blocked = Array.from({ length: 100 }, (_, index) => ({ ...ready, account_id: `blocked-${index}`,
+      ui_config_json: JSON.stringify({ extra: { quota_limit: 1, quota_used: 1 } }) }))
+    const offsets: number[] = []
+    const env = mediaEnv(ready)
+    env.DB = { prepare: () => ({ bind: (...values: unknown[]) => ({ all: async () => {
+      const offset = values[3] as number; offsets.push(offset)
+      return { results: [...blocked, ready].slice(offset, offset + 100) }
+    } }) }) } as unknown as D1Database
+    const fetcher = vi.fn(async () => Response.json(geminiImage('image/png', 'aGVsbG8=')))
+    const result = await createGeminiMediaProvider(fetcher).generate({ env, task: mediaTask(), manifest: mediaManifest() })
+    expect(result.accountId).toBe(ready.account_id)
+    expect(offsets).toEqual([0, 100])
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
 
   it('selects a schedulable account, decrypts its key, and generates once per requested output', async () => {
     const row = await encryptedAccount()
@@ -25,7 +90,7 @@ describe('built-in Gemini media provider', () => {
     expect(result.items[0].error).toBeUndefined()
     expect(result.items[0].outputs).toHaveLength(2)
     expect(new TextDecoder().decode(result.items[0].outputs?.[0].bytes)).toBe('hello')
-    expect(observedBindings).toEqual([['group-1', 'gemini-image', 'gemini-3.1-flash-image']])
+    expect(observedBindings).toEqual([['group-1', 'gemini-image', 'gemini-3.1-flash-image', 0]])
     expect(fetcher).toHaveBeenCalledTimes(2)
 
     const [url, init] = fetcher.mock.calls[0]
@@ -133,6 +198,7 @@ interface AccountRow {
   protocol: string
   auth_scheme: string
   provider_config_json: string
+  ui_config_json?: string
   secret_id: string
   key_version: number
   nonce_b64: string
@@ -171,7 +237,7 @@ function mediaEnv(row: AccountRow | null, observedBindings: unknown[][] = []): M
         return {
           bind(...values: unknown[]) {
             observedBindings.push(values)
-            return { first: async () => row }
+            return { first: async () => row, all: async () => ({ results: row ? [row] : [] }) }
           },
         }
       },

@@ -1,3 +1,10 @@
+import { accountOpenAIEndpointAllowed } from './account-openai-protocol'
+import { accountModelRateLimited } from './account-model-rate-limit'
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from './account-rate-limit'
+import { accountQuotaExceeded } from './account-quota-policy'
+import { accountNotExpiredSql } from './account-expiry'
+import { accountGroupPrivacyAllowedSql } from './account-group-policy'
+import { accountModelPolicy, accountModelAllowedSql } from './account-model-policy'
 import type { Env } from '../env'
 import { resolveCompositeRoute } from '../control/composite-routes'
 import { groupAccessPredicate } from '../user/group-access'
@@ -427,12 +434,13 @@ export async function listModels(env: Env, groupId: string): Promise<ModelRoute[
           SELECT 1
             FROM account_groups ag
             JOIN accounts a ON a.id = ag.account_id
-            JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
-           WHERE ag.group_id = gm.group_id AND a.enabled = 1
+            LEFT JOIN account_models am ON am.account_id = a.id AND am.model_id = m.id
+           WHERE ag.group_id = gm.group_id AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()}
              AND a.health_status <> 'unhealthy'
              AND a.platform = m.platform
+             AND ${accountModelAllowedSql()}
              AND (m.platform = g.platform OR g.platform = 'composite')
-             AND (
+             AND (json_extract(a.ui_config_json, '$.original_model_routing') = 1 OR
                (m.endpoint = 'chat_completions' AND (
                  am.chat_completions = 1 OR
                  (a.platform IN ('openai', 'codex') AND am.responses = 1)
@@ -532,6 +540,7 @@ export async function resolveGatewayRoute(
   endpoint: GatewayEndpoint,
   userId: string,
   fallbackEndpoint?: GatewayEndpoint,
+  combineProtocolCandidates = false,
 ): Promise<{
   model: ModelRoute
   candidates: AccountCandidate[]
@@ -592,6 +601,7 @@ export async function resolveGatewayRoute(
       endpoint,
       userId,
       fallbackEndpoint,
+      combineProtocolCandidates,
     )
   }
   const modelRouting = resolveModelRouting(modelRow.ui_config_json, publicName)
@@ -605,15 +615,20 @@ export async function resolveGatewayRoute(
   // Account eligibility and customer billing remain attached to the requested
   // catalog model. The channel policy may independently snapshot a uniquely
   // resolved mapped model's base price for provider-account cost reporting.
-  let candidates = filterModelRoutingCandidates(candidateResult.results.map(parseAccountCandidate), modelRouting)
+  let candidates = filterModelRoutingCandidates(candidateResult.results.filter(row => accountOpenAIEndpointAllowed(row, endpoint) && !accountQuotaExceeded((row as { ui_config_json?: string }).ui_config_json, String((row as { credential_kind?: string }).credential_kind)) && !accountModelRateLimited((row as { ui_config_json?: string }).ui_config_json, routedModel.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)) && accountModelPolicy((row as { ui_config_json?: string }).ui_config_json, routedModel.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)).allowed).map(parseAccountCandidate), modelRouting)
   let upstreamEndpoint = endpoint
   if (
-    candidates.length === 0 &&
+    (combineProtocolCandidates || candidates.length === 0) &&
     fallbackEndpoint !== undefined &&
     fallbackCandidateResult !== undefined
   ) {
-    candidates = filterModelRoutingCandidates(fallbackCandidateResult.results.map(parseAccountCandidate), modelRouting)
-    upstreamEndpoint = fallbackEndpoint
+    const alternate = filterModelRoutingCandidates(fallbackCandidateResult.results.filter(row => accountOpenAIEndpointAllowed(row, fallbackEndpoint!) && !accountQuotaExceeded((row as { ui_config_json?: string }).ui_config_json, String((row as { credential_kind?: string }).credential_kind)) && !accountModelRateLimited((row as { ui_config_json?: string }).ui_config_json, routedModel.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)) && accountModelPolicy((row as { ui_config_json?: string }).ui_config_json, routedModel.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)).allowed).map(parseAccountCandidate), modelRouting)
+    if (combineProtocolCandidates) {
+      const seen = new Set(candidates.map(candidate => candidate.account_id))
+      candidates = [...candidates.map(candidate => ({ ...candidate, upstream_endpoint: endpoint })),
+        ...alternate.filter(candidate => !seen.has(candidate.account_id)).map(candidate => ({ ...candidate, upstream_endpoint: fallbackEndpoint }))]
+        .sort((a, b) => a.priority - b.priority || a.account_id.localeCompare(b.account_id))
+    } else { candidates = alternate; upstreamEndpoint = fallbackEndpoint }
   }
   if (
     candidates.length === 0 ||
@@ -995,6 +1010,7 @@ async function resolveExternalChannelAlias(
   endpoint: GatewayEndpoint,
   userId: string,
   fallbackEndpoint?: GatewayEndpoint,
+  combineProtocolCandidates = false,
 ): Promise<{
   model: ModelRoute
   candidates: AccountCandidate[]
@@ -1040,15 +1056,20 @@ async function resolveExternalChannelAlias(
   assertSupportedChannelBillingSource(aliasModel.billing_model_source)
   const customerPricing = frozenPricingPlan(aliasModel, aliasModel.platform)
   const model = externalAliasRouteModel(aliasModel)
-  let candidates = candidateResult.results.map(parseAccountCandidate)
+  let candidates = candidateResult.results.filter(row => accountOpenAIEndpointAllowed(row, endpoint) && !accountQuotaExceeded((row as { ui_config_json?: string }).ui_config_json, String((row as { credential_kind?: string }).credential_kind)) && !accountModelRateLimited((row as { ui_config_json?: string }).ui_config_json, model.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)) && accountModelPolicy((row as { ui_config_json?: string }).ui_config_json, model.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)).allowed).map(parseAccountCandidate)
   let upstreamEndpoint = endpoint
   if (
-    candidates.length === 0 &&
+    (combineProtocolCandidates || candidates.length === 0) &&
     fallbackEndpoint !== undefined &&
     fallbackCandidateResult !== undefined
   ) {
-    candidates = fallbackCandidateResult.results.map(parseAccountCandidate)
-    upstreamEndpoint = fallbackEndpoint
+    const alternate = fallbackCandidateResult.results.filter(row => accountOpenAIEndpointAllowed(row, fallbackEndpoint!) && !accountQuotaExceeded((row as { ui_config_json?: string }).ui_config_json, String((row as { credential_kind?: string }).credential_kind)) && !accountModelRateLimited((row as { ui_config_json?: string }).ui_config_json, model.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)) && accountModelPolicy((row as { ui_config_json?: string }).ui_config_json, model.upstream_name, String((row as { platform?: string }).platform), String((row as { credential_kind?: string }).credential_kind)).allowed).map(parseAccountCandidate)
+    if (combineProtocolCandidates) {
+      const seen = new Set(candidates.map(candidate => candidate.account_id))
+      candidates = [...candidates.map(candidate => ({ ...candidate, upstream_endpoint: endpoint })),
+        ...alternate.filter(candidate => !seen.has(candidate.account_id)).map(candidate => ({ ...candidate, upstream_endpoint: fallbackEndpoint }))]
+        .sort((a, b) => a.priority - b.priority || a.account_id.localeCompare(b.account_id))
+    } else { candidates = alternate; upstreamEndpoint = fallbackEndpoint }
   }
   if (
     candidates.length === 0 ||
@@ -1278,24 +1299,24 @@ function externalAliasCandidatesStatement(
     `${cte.sql}
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
                  THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
             a.recovery_revision,
-            revision.revision AS config_revision, am.model_id
+            revision.revision AS config_revision, resolved.model_id
        FROM resolved_alias resolved
-       JOIN account_models am ON am.model_id = resolved.model_id
-       JOIN accounts a ON a.id = am.account_id AND a.platform = resolved.platform
+       JOIN accounts a ON a.platform = resolved.platform
+       LEFT JOIN account_models am ON am.model_id = resolved.model_id AND am.account_id = a.id
        JOIN account_groups ag ON ag.account_id = a.id AND ag.group_id = resolved.group_id
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
        CROSS JOIN system_settings settings
-      WHERE resolved.match_count = 1 AND a.enabled = 1 AND a.base_url IS NOT NULL
+      WHERE resolved.match_count = 1 AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND ${accountGroupPrivacyAllowedSql()} AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND ${capabilityColumn} = 1
+        AND (${capabilityColumn} = 1 OR json_extract(a.ui_config_json, '$.original_model_routing') = 1)
         ${platformPredicate}
       ORDER BY priority ASC, a.id ASC`,
   ).bind(...cte.bindings)
@@ -1720,25 +1741,24 @@ function accountCandidatesStatement(
      )
      SELECT a.id AS account_id, a.platform, a.protocol, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json, a.base_url, a.max_concurrency,
+            a.provider_config_json, a.ui_config_json, a.base_url, a.max_concurrency,
             CASE WHEN json_extract(settings.public_json, '$.openai_advanced_scheduler_subscription_priority_enabled') = 1
                     AND a.platform = 'openai' AND a.credential_kind = 'oauth'
                     AND lower(trim(COALESCE(json_extract(a.provider_config_json, '$.subscription_plan'), ''))) NOT IN ('', 'free', 'abnormal')
                  THEN ag.priority + 1000 ELSE ag.priority + 3001 END AS priority, ag.weight, a.config_version,
             a.recovery_revision,
-            revision.revision AS config_revision, am.model_id
+            revision.revision AS config_revision, resolved.model_id
        FROM account_groups ag
        JOIN accounts a ON a.id = ag.account_id
-       JOIN account_models am ON am.account_id = a.id
-       JOIN resolved_model resolved
-         ON resolved.model_id = am.model_id AND resolved.platform = a.platform
+       JOIN resolved_model resolved ON resolved.platform = a.platform
+       LEFT JOIN account_models am ON am.account_id = a.id AND am.model_id = resolved.model_id
        JOIN "groups" g ON g.id = ag.group_id
        CROSS JOIN gateway_config_revision revision
        CROSS JOIN system_settings settings
-      WHERE ag.group_id = ? AND a.enabled = 1 AND a.base_url IS NOT NULL
+      WHERE ag.group_id = ? AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND ${accountGroupPrivacyAllowedSql()} AND a.base_url IS NOT NULL
         AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND ${capabilityColumn} = 1
+        AND (${capabilityColumn} = 1 OR json_extract(a.ui_config_json, '$.original_model_routing') = 1)
         ${platformPredicate}
       ORDER BY priority ASC, a.id ASC`,
   )
@@ -1751,32 +1771,50 @@ export async function getAccountCredential(
   modelId: string,
   endpoint: GatewayEndpoint,
   accountId: string,
+  requestedModel?: string,
 ): Promise<AccountCredential> {
   const capabilityColumn = accountCapabilityColumn(endpoint)
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.platform, a.protocol, a.base_url, a.auth_scheme,
             a.image_adapter, a.credential_kind,
-            a.provider_config_json,
+            a.provider_config_json, a.ui_config_json, a.config_version, a.control_version, m.upstream_name AS policy_model,
             s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64
        FROM accounts a
        JOIN account_groups ag ON ag.account_id = a.id
-       JOIN account_models am ON am.account_id = a.id
        JOIN "groups" g ON g.id = ag.group_id
-       JOIN models m ON m.id = am.model_id AND m.platform = a.platform
+       JOIN models m ON m.platform = a.platform
+       LEFT JOIN account_models am ON am.model_id = m.id AND am.account_id = a.id
        JOIN account_secrets s ON s.id = a.credential_ref AND s.account_id = a.id
-      WHERE a.id = ? AND ag.group_id = ? AND am.model_id = ?
+      WHERE a.id = ? AND ag.group_id = ? AND m.id = ?
         AND (g.platform = a.platform OR g.platform = 'composite')
-        AND ${capabilityColumn} = 1 AND a.enabled = 1
+        AND (${capabilityColumn} = 1 OR json_extract(a.ui_config_json, '$.original_model_routing') = 1) AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND ${accountGroupPrivacyAllowedSql()}
         AND a.health_status <> 'unhealthy'
         AND a.base_url IS NOT NULL
       LIMIT 1`,
   )
     .bind(accountId, groupId, modelId)
-    .first<AccountCredentialRow>()
+    .first<AccountCredentialRow & { ui_config_json?: string; policy_model?: string; config_version?: number; control_version?: number }>()
   if (row === null) {
     throw new GatewayError(503, 'credential_unavailable', 'Upstream account credential is unavailable', 'server_error')
   }
-  return parseAccountCredential(row)
+  if (!accountOpenAIEndpointAllowed(row, endpoint)) throw new GatewayError(503, 'credential_unavailable', 'Account upstream protocol changed; retry the request', 'server_error')
+  const policy = accountModelPolicy(row.ui_config_json, requestedModel ?? row.policy_model ?? '', row.platform, row.credential_kind)
+  if (accountModelRateLimited(row.ui_config_json, requestedModel ?? row.policy_model ?? '', row.platform, row.credential_kind)) {
+    throw new GatewayError(503, 'credential_unavailable', 'Upstream account is temporarily unavailable for this model', 'server_error')
+  }
+  if (accountQuotaExceeded(row.ui_config_json, row.credential_kind)) {
+    throw new GatewayError(503, 'credential_unavailable', 'Upstream account quota is exhausted', 'server_error')
+  }
+  if (!policy.allowed) throw new GatewayError(503, 'credential_unavailable', 'Account no longer supports the requested model', 'server_error')
+  const uiConfig = row.ui_config_json ? JSON.parse(row.ui_config_json) as { proxy_id?: unknown; extra?: { anthropic_apikey_auth_scheme?: unknown } } : {}
+  const proxyId = uiConfig.proxy_id
+  return { ...parseAccountCredential(row), upstream_model_name: policy.upstream || requestedModel || row.policy_model,
+    ...(typeof row.config_version === 'number' && typeof row.control_version === 'number' && typeof row.ui_config_json === 'string'
+      ? { runtime_snapshot: { config_version: row.config_version, control_version: row.control_version, ui_config_json: row.ui_config_json } } : {}),
+    ...(row.platform === 'anthropic' && row.credential_kind === 'api_key' && uiConfig.extra?.anthropic_apikey_auth_scheme === 'authorization_bearer'
+      ? { anthropic_auth_scheme: 'authorization_bearer' as const } : {}),
+    ...(proxyId == null || proxyId === 0 || proxyId === '0' ? {} : { proxy_id: String(proxyId) }) }
+
 }
 
 export function credentialAad(
@@ -1898,8 +1936,10 @@ type AccountCredentialRow = Omit<AccountCredential, 'platform' | 'protocol' | 'a
 
 function parseAccountCandidate(value: unknown): AccountCandidate {
   const row = value as AccountCandidateRow
-  const { provider_config_json: _providerConfigJson, ...candidate } = row
-  return { ...candidate, ...parseProviderAccountProjection(row) }
+  const { provider_config_json: _providerConfigJson, ui_config_json: _uiConfig, ...candidate } = row as AccountCandidateRow & { ui_config_json?: string }
+  const factor = _uiConfig ? (JSON.parse(_uiConfig) as { load_factor?: unknown }).load_factor : undefined
+  const loadFactor = typeof factor === 'number' && Number.isSafeInteger(factor) && factor > 0 ? factor : undefined
+  return { ...candidate, ...(loadFactor === undefined ? {} : { load_factor: loadFactor }), ...parseProviderAccountProjection(row) }
 }
 
 function parseAccountCredential(row: AccountCredentialRow): AccountCredential {

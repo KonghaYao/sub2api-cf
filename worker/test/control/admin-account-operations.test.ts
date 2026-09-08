@@ -10,7 +10,8 @@ import {
 } from '../../src/control/account-operations'
 import { consumeAccountHealthProbe, type AccountHealthProbeEvent } from '../../src/control/account-lifecycle'
 import type { Env, PlatformEvent } from '../../src/env'
-import { apiKeyDigest } from '../../src/gateway/crypto'
+import { credentialAad } from '../../src/gateway/repository'
+import { apiKeyDigest, encryptCredential, decryptCredential } from '../../src/gateway/crypto'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 const NOW = Date.UTC(2026, 8, 6, 6, 0, 0)
@@ -118,6 +119,79 @@ beforeEach(() => {
 })
 
 describe('admin account operations', () => {
+  it('bulk edits original fields with per-account CAS, encrypted credential merges and atomic replay receipts', async () => {
+    const test = await fixture()
+    try {
+      test.env.CREDENTIALS_MASTER_KEY = 'm'.repeat(32)
+      for (const id of ['edit-a', 'edit-b']) {
+        seedAccount(test, id, 2)
+        const storedCredential = { api_key: 'keep-private', old_field: 'keep' }
+        const secret = await encryptCredential(storedCredential, test.env.CREDENTIALS_MASTER_KEY, credentialAad('test', id, `secret-${id}`, 1))
+        test.raw.prepare(`INSERT INTO account_secrets (id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms) VALUES (?, ?, 1, ?, ?, ?, ?)`)
+          .run(`secret-${id}`, id, secret.nonce_b64, secret.ciphertext_b64, NOW, NOW)
+      }
+      test.raw.exec(`UPDATE accounts SET ui_config_json = '{"extra":{"retained":true,"replace":"old"}}'`)
+      const groupIds = Array.from({ length: 100 }, (_, index) => `bulk-group-${index}`)
+      for (const id of groupIds) test.raw.prepare(`INSERT INTO "groups" (id, name, platform, enabled, created_at_ms, updated_at_ms) VALUES (?, ?, 'openai', 1, ?, ?)`).run(id, id, NOW, NOW)
+      const queries = countD1Queries(test)
+      const body = { accounts: [{ id: 'edit-a', expected_control_version: 2 }, { id: 'edit-b', expected_control_version: 1 }],
+        updates: { group_ids: groupIds, concurrency: 7, priority: 80, rate_multiplier: 1.25, credentials: { model_mapping: { alias: 'target' } }, extra: { replace: 'new' } } }
+      const response = await request(test, '/accounts/bulk-update', body, 'general-edit-one')
+      expect(response.status).toBe(200)
+      const value = await response.json() as any
+      expect(value.data).toMatchObject({ success: 1, failed: 1, success_ids: ['edit-a'], failed_ids: ['edit-b'] })
+      expect(value.data.results[1].code).toBe('account_version_conflict')
+      expect(queries.count).toBeLessThan(50)
+      expect(test.raw.prepare("SELECT count(*) total FROM account_groups WHERE account_id='edit-a'").get().total).toBe(100)
+
+      const state = test.raw.prepare("SELECT * FROM accounts WHERE id='edit-a'").get()
+      expect(state).toMatchObject({ max_concurrency: 7, control_version: 3, billing_rate_multiplier_ppm: 1250000 })
+      expect(JSON.parse(state.ui_config_json)).toMatchObject({ priority: 80, extra: { retained: true, replace: 'new' } })
+      const secret = test.raw.prepare("SELECT * FROM account_secrets WHERE account_id='edit-a'").get()
+      expect(await decryptCredential(secret.nonce_b64, secret.ciphertext_b64, test.env.CREDENTIALS_MASTER_KEY, credentialAad('test', 'edit-a', secret.id, secret.key_version)))
+        .toMatchObject({ api_key: 'keep-private', old_field: 'keep', model_mapping: { alias: 'target' } })
+      expect(await (await request(test, '/accounts/bulk-update', body, 'general-edit-one')).json()).toEqual(value)
+      expect(test.raw.prepare("SELECT key_version FROM account_secrets WHERE account_id='edit-a'").get().key_version).toBe(2)
+      const conflict = await (await request(test, '/accounts/bulk-update', { ...body, updates: { concurrency: 9 } }, 'general-edit-one')).json() as any
+      expect(conflict.data.results[0]).toMatchObject({ success: false, code: 'idempotency_conflict' })
+      expect(JSON.stringify(value)).not.toContain('keep-private')
+      const priorityOnly = await request(test, '/accounts/bulk-update', {
+        accounts: [{ id: 'edit-a', expected_control_version: 3 }], updates: { priority: 12 },
+      }, 'general-edit-priority-only')
+      expect(await priorityOnly.json()).toMatchObject({ data: { success: 1, failed: 0 } })
+      expect(test.raw.prepare("SELECT min(priority) low, max(priority) high, min(control_version) version FROM account_groups WHERE account_id='edit-a'").get())
+        .toEqual({ low: 12, high: 12, version: 1 })
+
+    } finally { test.raw.close() }
+  })
+
+  it('bulk scheduling preserves disabled state and health, audits once, and rejects stale targets', async () => {
+    const test = await fixture()
+    try {
+      seedAccount(test, 'account-a', 2, false)
+      seedAccount(test, 'account-b', 4)
+      test.raw.exec("UPDATE accounts SET health_status = 'unhealthy', last_health_error = 'preserve me'")
+      const body = { accounts: [
+        { id: 'account-a', expected_control_version: 2 },
+        { id: 'account-b', expected_control_version: 3 },
+      ], schedulable: false }
+      const response = await request(test, '/accounts/bulk-update', body, 'bulk-scheduling-1')
+      expect(response.status).toBe(200)
+      const payload = await response.json()
+      expect(payload).toMatchObject({ data: { success: 1, failed: 1, results: [
+        { account_id: 'account-a', success: true, schedulable: false, control_version: 3 },
+        { account_id: 'account-b', success: false, error: { code: 'account_version_conflict' } },
+      ] } })
+      expect(test.raw.prepare(`SELECT enabled, health_status, last_health_error,
+        json_extract(ui_config_json, '$.schedulable') schedulable, control_version FROM accounts WHERE id = 'account-a'`).get())
+        .toEqual({ enabled: 0, health_status: 'unhealthy', last_health_error: 'preserve me', schedulable: 0, control_version: 3 })
+      expect(await (await request(test, '/accounts/bulk-update', body, 'bulk-scheduling-1')).json()).toEqual(payload)
+      expect(test.raw.prepare('SELECT action, metadata_json FROM admin_account_audit_events').all())
+        .toEqual([{ action: 'account.schedulable', metadata_json: '{"schedulable":false}' }])
+      expect((await request(test, '/accounts/bulk-update', { ...body, enabled: true }, 'ambiguous-scheduling')).status).toBe(400)
+    } finally { test.raw.close() }
+  })
+
   it('keeps the real max-25 health route within budget through user auth, RBAC, and step-up', async () => {
     const test = await fixture()
     try {
@@ -279,7 +353,8 @@ describe('admin account operations', () => {
         UPDATE accounts SET health_status = 'unhealthy', last_checked_at_ms = ${NOW - 1_000},
           last_latency_ms = 42, last_health_error = 'rate limited', consecutive_health_failures = 4,
           health_probe_generation = 8, health_probe_lease_until_ms = ${NOW + 60_000},
-          next_health_probe_at_ms = ${NOW + 60_000}, recovery_revision = 2
+          next_health_probe_at_ms = ${NOW + 60_000}, recovery_revision = 2,
+          ui_config_json = json_set(ui_config_json, '$.rate_limit_reset_at', '2099-01-01T00:00:00Z', '$.extra.keep', 'value')
         WHERE id IN ('account-enabled', 'account-disabled');
         INSERT INTO account_health_probes (
           id, account_id, generation, config_version, credential_ref, status,
@@ -313,6 +388,8 @@ describe('admin account operations', () => {
         consecutive_health_failures: 0, health_probe_generation: 9,
         health_probe_lease_until_ms: null, next_health_probe_at_ms: NOW, recovery_revision: 3,
       })
+      expect(JSON.parse((test.raw.prepare(`SELECT ui_config_json FROM accounts WHERE id = 'account-disabled'`).get() as any).ui_config_json)).toMatchObject({ extra: { keep: 'value' } })
+      expect(JSON.parse((test.raw.prepare(`SELECT ui_config_json FROM accounts WHERE id = 'account-disabled'`).get() as any).ui_config_json)).not.toHaveProperty('rate_limit_reset_at')
       expect(test.raw.prepare(`SELECT status FROM account_health_probes WHERE id = 'account-enabled:health:8'`).get())
         .toEqual({ status: 'stale' })
       expect((test.raw.prepare(`SELECT revision FROM gateway_config_revision WHERE singleton = 1`).get() as { revision: number }).revision)

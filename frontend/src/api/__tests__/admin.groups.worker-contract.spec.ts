@@ -294,12 +294,19 @@ describe('admin groups Cloudflare Worker contract', () => {
     expect(put.mock.calls[1][1]).toEqual({ updates: [{ id: 'opaque-group', sort_order: 1, control_version: 4 }] })
   })
 
+  it('loads group keys with opaque IDs and original pagination on Worker', async () => {
+    const result = { items: [{ id: 'key-opaque', group_id: 'group-opaque' }], total: 1, page: 2, page_size: 10, pages: 1 }
+    get.mockResolvedValueOnce({ data: result })
+    const groups = await import('@/api/admin/groups')
+    expect(await groups.getGroupApiKeys('group-opaque', 2, 10)).toEqual(result)
+    expect(get).toHaveBeenCalledWith('/admin/groups/group-opaque/api-keys', { params: { page: 2, page_size: 10 } })
+  })
+
   it('blocks only group routes that the Worker does not implement', async () => {
     const groups = await import('@/api/admin/groups')
 
     await expect(groups.getLiveCapability()).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     await expect(groups.getStats(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
-    await expect(groups.getGroupApiKeys(1)).rejects.toMatchObject({ code: 'worker_feature_not_supported' })
     expect(get).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
     expect(put).not.toHaveBeenCalled()

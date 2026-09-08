@@ -1,7 +1,19 @@
+import { importAdminCodexSession } from './control/codex-session-import'
+import { replaceAdminUserGroup } from './control/user-group-replacement'
+import { listAccountScheduledTests, createScheduledTest, updateScheduledTest, deleteScheduledTest, listScheduledTestResults } from './control/scheduled-tests'
+import { getAdminAccountUsage, getBatchAdminAccountUsage } from './control/account-usage'
+import { getAdminUpstreamBillingSettings, updateAdminUpstreamBillingSettings } from './control/upstream-billing-settings'
+import { setAdminAccountUpstreamBillingProbeEnabled, probeAdminAccountUpstreamBilling, probeAdminAccountsUpstreamBilling } from './control/account-upstream-billing'
+import { checkAdminAccountMixedChannel } from './control/account-mixed-channel'
+import { getAdminAccountModels, syncAdminAccountModels, previewAdminAccountModels } from './control/account-models'
+import { getAdminAccountTodayStats, getAdminAccountsTodayStats } from './control/account-today-stats'
 import { adminDashboard, adminDashboardBatch } from './control/dashboard'
 import { getAdminGroupUsageSummary } from './control/group-usage'
 import { getAdminGroupCapacitySummary } from './control/group-capacity'
+import { revertAdminProxyFallback } from './control/proxy-expiry'
+import { listAdminProxies, getAdminProxy, createAdminProxy, updateAdminProxy, deleteAdminProxy, listAdminProxyAccounts, batchCreateAdminProxies, batchDeleteAdminProxies } from './control/proxies'
 import { Hono } from 'hono'
+import { generateOpenAIAuthURL, exchangeOpenAIAuthCode, refreshOpenAIAuthToken } from './control/openai-oauth'
 import {
   currentUser,
   loginWithTotp,
@@ -33,6 +45,7 @@ import { oauthPublicSettings } from './auth/oauth-public-settings'
 import {
   createAdminApiKey,
   listAdminApiKeys,
+  listAdminGroupApiKeys,
   revokeAdminApiKey,
   updateAdminApiKey,
 } from './control/api-keys'
@@ -41,11 +54,20 @@ import {
   duplicateAdminAccount,
   batchDeleteAdminAccounts,
   batchRefreshAdminAccountCredentials,
+  batchUpdateAdminAccountCredentials,
+  batchCreateAdminAccounts,
   refreshAdminAccountCredentials,
+  applyAdminAccountOAuthCredentials,
+  setAdminAccountPrivacy,
+  getAdminAccountTempUnschedulable,
+  clearAdminAccountTempUnschedulable,
   deleteAdminAccount,
   deleteAdminAccountGroupLink,
   deleteAdminAccountModelCapability,
   getAdminAccount,
+  clearAdminAccountRateLimit,
+  recoverAdminAccountState,
+  resetAdminAccountQuota,
   getAdminAccountStats,
   listAdminAccounts,
   putAdminAccountGroupLink,
@@ -669,6 +691,7 @@ export function createApp() {
     continueAdminFinancialHistoryBackfillBatch,
   )
   app.put('/api/v1/admin/users/:id', updateAdminUser)
+  app.post('/api/v1/admin/users/:id/replace-group', replaceAdminUserGroup)
   app.post('/api/v1/admin/users/:id/balance', adjustAdminUserBalance)
   app.get('/api/v1/admin/users/:id/platform-quotas', getAdminUserPlatformQuotas)
   app.put('/api/v1/admin/users/:id/platform-quotas', replaceAdminUserPlatformQuotas)
@@ -676,10 +699,26 @@ export function createApp() {
   app.get('/api/v1/admin/platform-quota-defaults', getAdminPlatformQuotaDefaults)
   app.put('/api/v1/admin/platform-quota-defaults', replaceAdminPlatformQuotaDefaults)
   app.get('/api/v1/admin/users/:id/api-keys', listAdminApiKeys)
+  app.get('/api/v1/admin/groups/:id/api-keys', listAdminGroupApiKeys)
   app.post('/api/v1/admin/users/:id/api-keys', createAdminApiKey)
   app.put('/api/v1/admin/api-keys/:id', updateAdminApiKey)
   app.delete('/api/v1/admin/api-keys/:id', revokeAdminApiKey)
   app.get('/api/v1/admin/groups', listAdminGroups)
+  app.get('/api/v1/admin/proxies', listAdminProxies)
+  app.post('/api/v1/admin/accounts/:id/revert-proxy-fallback', revertAdminProxyFallback)
+  app.put('/api/v1/admin/accounts/:id/upstream-billing-probe', setAdminAccountUpstreamBillingProbeEnabled)
+  app.post('/api/v1/admin/accounts/:id/upstream-billing-probe', probeAdminAccountUpstreamBilling)
+  app.post('/api/v1/admin/accounts/upstream-billing-probe/batch', probeAdminAccountsUpstreamBilling)
+  app.get('/api/v1/admin/accounts/upstream-billing-probe/settings', getAdminUpstreamBillingSettings)
+  app.put('/api/v1/admin/accounts/upstream-billing-probe/settings', updateAdminUpstreamBillingSettings)
+  app.get('/api/v1/admin/proxies/all', listAdminProxies)
+  app.get('/api/v1/admin/proxies/:id', getAdminProxy)
+  app.post('/api/v1/admin/proxies', createAdminProxy)
+  app.post('/api/v1/admin/proxies/batch', batchCreateAdminProxies)
+  app.post('/api/v1/admin/proxies/batch-delete', batchDeleteAdminProxies)
+  app.put('/api/v1/admin/proxies/:id', updateAdminProxy)
+  app.delete('/api/v1/admin/proxies/:id', deleteAdminProxy)
+  app.get('/api/v1/admin/proxies/:id/accounts', listAdminProxyAccounts)
   app.get('/api/v1/admin/groups/all', allAdminGroups)
   app.get('/api/v1/admin/groups/usage-summary', getAdminGroupUsageSummary)
   app.get('/api/v1/admin/groups/capacity-summary', getAdminGroupCapacitySummary)
@@ -722,13 +761,41 @@ export function createApp() {
   app.post('/api/v1/admin/accounts', createAdminAccount)
   app.post('/api/v1/admin/accounts/:id/duplicate', duplicateAdminAccount)
   app.post('/api/v1/admin/accounts/:id/refresh', refreshAdminAccountCredentials)
+  app.post('/api/v1/admin/accounts/:id/apply-oauth-credentials', applyAdminAccountOAuthCredentials)
+  app.post('/api/v1/admin/accounts/:id/set-privacy', setAdminAccountPrivacy)
+  app.get('/api/v1/admin/accounts/:id/temp-unschedulable', getAdminAccountTempUnschedulable)
+  app.delete('/api/v1/admin/accounts/:id/temp-unschedulable', clearAdminAccountTempUnschedulable)
+  app.post('/api/v1/admin/openai/generate-auth-url', generateOpenAIAuthURL)
+  app.post('/api/v1/admin/openai/exchange-code', exchangeOpenAIAuthCode)
+  app.post('/api/v1/admin/openai/refresh-token', refreshOpenAIAuthToken)
+  app.post('/api/v1/admin/accounts/:id/clear-rate-limit', clearAdminAccountRateLimit)
+  app.post('/api/v1/admin/accounts/:id/clear-error', recoverAdminAccountState)
+  app.post('/api/v1/admin/accounts/:id/recover-state', recoverAdminAccountState)
+  app.post('/api/v1/admin/accounts/:id/reset-quota', resetAdminAccountQuota)
   app.post('/api/v1/admin/accounts/batch-refresh', batchRefreshAdminAccountCredentials)
+  app.post('/api/v1/admin/accounts/batch-update-credentials', batchUpdateAdminAccountCredentials)
+  app.post('/api/v1/admin/accounts/batch', batchCreateAdminAccounts)
   app.post('/api/v1/admin/accounts/batch-delete', batchDeleteAdminAccounts)
   app.post('/api/v1/admin/accounts/batch-clear-error', resetAdminAccountStatuses)
+  app.post('/api/v1/admin/accounts/:id/schedulable', updateAdminAccount)
   app.post('/api/v1/admin/accounts/bulk-update', bulkUpdateAdminAccounts)
   app.post('/api/v1/admin/accounts/health-probes', queueAdminAccountHealthProbes)
   app.post('/api/v1/admin/accounts/synthetic-probes', queueAdminAccountSyntheticProbes)
   app.get('/api/v1/admin/accounts/synthetic-probes/history', listAdminAccountSyntheticProbeHistory)
+  app.post('/api/v1/admin/accounts/today-stats/batch', getAdminAccountsTodayStats)
+  app.get('/api/v1/admin/accounts/:id/today-stats', getAdminAccountTodayStats)
+  app.get('/api/v1/admin/accounts/:id/models', getAdminAccountModels)
+  app.post('/api/v1/admin/accounts/:id/models/sync-upstream', syncAdminAccountModels)
+  app.post('/api/v1/admin/accounts/models/sync-upstream-preview', previewAdminAccountModels)
+  app.post('/api/v1/admin/accounts/check-mixed-channel', checkAdminAccountMixedChannel)
+  app.get('/api/v1/admin/accounts/:id/usage', getAdminAccountUsage)
+  app.post('/api/v1/admin/accounts/import/codex-session', importAdminCodexSession)
+  app.get('/api/v1/admin/accounts/:id/scheduled-test-plans', listAccountScheduledTests)
+  app.post('/api/v1/admin/scheduled-test-plans', createScheduledTest)
+  app.put('/api/v1/admin/scheduled-test-plans/:id', updateScheduledTest)
+  app.delete('/api/v1/admin/scheduled-test-plans/:id', deleteScheduledTest)
+  app.get('/api/v1/admin/scheduled-test-plans/:id/results', listScheduledTestResults)
+  app.post('/api/v1/admin/accounts/usage/batch', getBatchAdminAccountUsage)
   app.get('/api/v1/admin/accounts/:id/stats', getAdminAccountStats)
   app.get('/api/v1/admin/accounts/:id', getAdminAccount)
   app.put('/api/v1/admin/accounts/:id', updateAdminAccount)

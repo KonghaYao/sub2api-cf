@@ -7,7 +7,6 @@ import { apiClient } from '../client'
 import { getBrowserTimeZone } from '@/utils/format'
 import {
   isCloudflareWorkerContractActive,
-  sanitizeCloudflareAccountPayload,
 } from '@/utils/adminCapabilities'
 import type {
   Account,
@@ -53,6 +52,7 @@ const ACCOUNT_SECRET_FIELDS = new Set([
   'service_account_json',
   'service_account',
   'private_key',
+  'agent_private_key',
 ])
 
 function canonicalJson(value: unknown): string {
@@ -134,7 +134,7 @@ function adaptAccount(account: Account): Account {
     if (!Object.prototype.hasOwnProperty.call(adapted, key)) adapted[key] = fallbackValue
   }
 
-  fallback('type', 'apikey')
+  fallback('type', value.credential_kind === 'oauth' ? 'oauth' : value.credential_kind === 'setup_token' ? 'setup-token' : 'apikey')
   fallback('credentials', { base_url: typeof value.base_url === 'string' ? value.base_url : '' })
   fallback('provider_config', {})
   fallback('proxy_id', null)
@@ -312,7 +312,7 @@ export async function create(accountData: CreateAccountRequest): Promise<Account
   const payload = accountData
   const idempotencyKey = workerContract ? await workerCreateOperationKey(payload) : null
   const { data } = await apiClient.post<Account>('/admin/accounts', payload, idempotencyKey
-    ? { headers: { 'Idempotency-Key': idempotencyKey } }
+    ? { headers: { 'Idempotency-Key': idempotencyKey }, timeout: 60000 }
     : undefined)
   if (workerContract) pendingWorkerCreate = null
   return adaptAccount(data)
@@ -515,7 +515,7 @@ export async function refreshCredentials(
     ? await workerOperationKey('admin-account-oauth-refresh', { id: String(id), expected_control_version: expectedControlVersion })
     : null
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`, workerContract ? {} : undefined, workerContract
-    ? { headers: { 'If-Match': `"${expectedControlVersion}"`, 'Idempotency-Key': operation!.key } }
+    ? { headers: { 'If-Match': `"${expectedControlVersion}"`, 'Idempotency-Key': operation!.key }, timeout: 60000 }
     : undefined)
   if (operation) pendingWorkerOperationKeys.delete(operation.cacheKey)
   return adaptAccount(data)
@@ -531,7 +531,7 @@ export async function refreshCredentials(
  * - clears the account error and invalidates the token cache server-side
  */
 export async function applyOAuthCredentials(
-  id: number,
+  id: number | string,
   payload: {
     type: 'oauth' | 'setup-token'
     credentials: Record<string, unknown>
@@ -542,7 +542,7 @@ export async function applyOAuthCredentials(
     `/admin/accounts/${id}/apply-oauth-credentials`,
     payload
   )
-  return data
+  return adaptAccount(data)
 }
 
 /**
@@ -578,12 +578,13 @@ export async function clearError(id: number): Promise<Account> {
  * @param id - Account ID
  * @returns Account usage info
  */
-export async function getUsage(id: number, source?: 'passive' | 'active', force?: boolean): Promise<AccountUsageInfo> {
+export async function getUsage(id: number | string, source?: 'passive' | 'active', force?: boolean): Promise<AccountUsageInfo> {
   const params: Record<string, string> = {}
   if (source) params.source = source
   if (force) params.force = 'true'
   const { data } = await apiClient.get<AccountUsageInfo>(`/admin/accounts/${id}/usage`, {
-    params: Object.keys(params).length > 0 ? params : undefined
+    params: Object.keys(params).length > 0 ? params : undefined,
+    ...(isCloudflareWorkerContractActive() ? { timeout: 60000 } : {})
   })
   return data
 }
@@ -593,11 +594,11 @@ export interface BatchAccountUsageResponse {
   errors: Record<string, string>
 }
 
-export async function getBatchUsage(accountIds: number[], force?: boolean): Promise<BatchAccountUsageResponse> {
+export async function getBatchUsage(accountIds: Array<number | string>, force?: boolean): Promise<BatchAccountUsageResponse> {
   const { data } = await apiClient.post<BatchAccountUsageResponse>('/admin/accounts/usage/batch', {
     account_ids: accountIds,
     force: force === true
-  })
+  }, isCloudflareWorkerContractActive() ? { timeout: 180000 } : undefined)
   return data
 }
 
@@ -640,7 +641,7 @@ export async function resetAccountQuota(id: number): Promise<Account> {
  * @param id - Account ID
  * @returns Status with detail state if active
  */
-export async function getTempUnschedulableStatus(id: number): Promise<TempUnschedulableStatus> {
+export async function getTempUnschedulableStatus(id: number | string): Promise<TempUnschedulableStatus> {
   const { data } = await apiClient.get<TempUnschedulableStatus>(
     `/admin/accounts/${id}/temp-unschedulable`
   )
@@ -652,7 +653,7 @@ export async function getTempUnschedulableStatus(id: number): Promise<TempUnsche
  * @param id - Account ID
  * @returns Success confirmation
  */
-export async function resetTempUnschedulable(id: number): Promise<{ message: string }> {
+export async function resetTempUnschedulable(id: number | string): Promise<{ message: string }> {
   const { data } = await apiClient.delete<{ message: string }>(
     `/admin/accounts/${id}/temp-unschedulable`
   )
@@ -667,7 +668,7 @@ export async function resetTempUnschedulable(id: number): Promise<{ message: str
  */
 export async function generateAuthUrl(
   endpoint: string,
-  config: { proxy_id?: number }
+  config: { proxy_id?: number | string; redirect_uri?: string }
 ): Promise<{ auth_url: string; session_id: string }> {
   const { data } = await apiClient.post<{ auth_url: string; session_id: string }>(endpoint, config)
   return data
@@ -681,11 +682,12 @@ export async function generateAuthUrl(
  */
 export async function exchangeCode(
   endpoint: string,
-  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number }
+  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number | string; redirect_uri?: string }
 ): Promise<Record<string, unknown>> {
   const { data } = await apiClient.post<Record<string, unknown>>(
     endpoint,
-    sanitizeCloudflareAccountPayload(exchangeData)
+    exchangeData,
+    { timeout: 60000 }
   )
   return data
 }
@@ -698,13 +700,15 @@ export async function exchangeCode(
 export async function batchCreate(accounts: CreateAccountRequest[]): Promise<{
   success: number
   failed: number
-  results: Array<{ success: boolean; account?: Account; error?: string }>
+  results: Array<{ success: boolean; name?: string; id?: number | string; account?: Account; error?: string }>
 }> {
+  const operation = isCloudflareWorkerContractActive() ? await workerOperationKey('admin-account-batch-create', { accounts }) : null
   const { data } = await apiClient.post<{
     success: number
     failed: number
-    results: Array<{ success: boolean; account?: Account; error?: string }>
-  }>('/admin/accounts/batch', { accounts })
+    results: Array<{ success: boolean; name?: string; id?: number | string; account?: Account; error?: string }>
+  }>('/admin/accounts/batch', { accounts }, operation ? { headers: { 'Idempotency-Key': operation.key }, timeout: 120000 } : undefined)
+  if (operation) pendingWorkerOperationKeys.delete(operation.cacheKey)
   return {
     ...data,
     results: data.results.map((result) => result.account === undefined
@@ -768,11 +772,73 @@ export async function bulkUpdate(
         ...(updates ?? {})
       }
     : accountIdsOrPayload
+  if (isCloudflareWorkerContractActive()) return workerBulkEdit(payload)
   const { data } = await apiClient.post<BulkUpdateResult<number | string>>(
     '/admin/accounts/bulk-update',
     payload
   )
   return data
+}
+
+// Snapshot before any mutation so filtered edits cannot skip accounts as they
+// leave the filter. Keep uncertain attempts for retries with the same versions.
+const pendingBulkEditPlans = new Map<string, Array<WorkerAccountOperationTarget & { selection_error?: string }>>()
+async function workerBulkEdit(payload: Record<string, unknown>): Promise<BulkUpdateResult<number | string>> {
+  const { account_ids: ids, filters, ...updates } = payload
+  if (ids !== undefined && !Array.isArray(ids)) throw new Error('account_ids must be an array')
+  if (ids === undefined && (!filters || typeof filters !== 'object' || Array.isArray(filters))) throw new Error('Provide accounts or filters')
+  const operation = await workerOperationKey('admin-account-general-edit', payload)
+  let targets = pendingBulkEditPlans.get(operation.cacheKey)
+  if (!targets) {
+    targets = []
+    if (Array.isArray(ids)) {
+      for (const id of [...new Set(ids as Array<number | string>)]) {
+        try {
+          const account = await getById(id)
+          targets.push({ id, control_version: account.control_version! })
+        } catch (error) {
+          targets.push({ id, control_version: 0, selection_error: error instanceof Error ? error.message : 'Account could not be loaded' })
+        }
+      }
+    } else {
+      for (let page = 1; ; page += 1) {
+        const response = await list(page, 100, filters as Parameters<typeof list>[2])
+        targets.push(...response.items.map(account => ({ id: account.id, control_version: account.control_version! })))
+        if (page >= response.pages) break
+        if (!response.items.length) throw new Error('Account list changed while selecting bulk targets; retry')
+      }
+    }
+    targets = [...new Map(targets.map(target => [String(target.id), target])).values()]
+    for (const target of targets) workerOperationAccounts([target])
+    if (pendingBulkEditPlans.size >= 32) pendingBulkEditPlans.delete(pendingBulkEditPlans.keys().next().value!)
+    pendingBulkEditPlans.set(operation.cacheKey, targets)
+  }
+  const results: BulkUpdateResult<number | string>['results'] = []
+  let uncertain = false
+  // One account per invocation isolates D1 query budgets for group/credential edits.
+  // There is no UI selection cap, and the original partial-success result is retained.
+  for (const target of targets) {
+    if (target.selection_error) {
+      results.push({ account_id: target.id, success: false, error: target.selection_error })
+      continue
+    }
+    try {
+      const { data } = await apiClient.post<BulkUpdateResult<number | string>>('/admin/accounts/bulk-update',
+        { accounts: workerOperationAccounts([target]), updates }, { headers: { 'Idempotency-Key': operation.key } })
+      if (data.results.length !== 1 || String(data.results[0].account_id) !== String(target.id)) throw new Error('Invalid bulk edit result')
+      results.push(...data.results)
+    } catch (error) {
+      uncertain = true
+      results.push({ account_id: target.id, success: false, error: error instanceof Error ? error.message : 'Account update failed' })
+    }
+  }
+  if (!uncertain) {
+    pendingBulkEditPlans.delete(operation.cacheKey)
+    pendingWorkerOperationKeys.delete(operation.cacheKey)
+  }
+  const success_ids = results.filter(result => result.success).map(result => result.account_id)
+  const failed_ids = results.filter(result => !result.success).map(result => result.account_id)
+  return { success: success_ids.length, failed: failed_ids.length, success_ids, failed_ids, results }
 }
 
 export interface WorkerAccountOperationTarget {
@@ -796,6 +862,7 @@ export interface WorkerAccountBulkStatusResult {
     success: boolean
     control_version?: number
     enabled?: boolean
+    schedulable?: boolean
     error?: WorkerAccountOperationError
   }>
 }
@@ -917,6 +984,21 @@ export async function bulkSetEnabled(
   return data
 }
 
+export async function bulkSetSchedulable(
+  accounts: WorkerAccountOperationTarget[],
+  schedulable: boolean
+): Promise<WorkerAccountBulkStatusResult> {
+  const payload = { accounts: workerOperationAccounts(accounts), schedulable }
+  const operation = await workerOperationKey('admin-account-bulk-schedulable', payload)
+  const { data } = await apiClient.post<WorkerAccountBulkStatusResult>(
+    '/admin/accounts/bulk-update',
+    payload,
+    { headers: { 'Idempotency-Key': operation.key } }
+  )
+  pendingWorkerOperationKeys.delete(operation.cacheKey)
+  return data
+}
+
 export async function queueHealthProbes(
   accounts: WorkerAccountOperationTarget[]
 ): Promise<WorkerAccountHealthProbeBatchResult> {
@@ -991,7 +1073,7 @@ export async function listSyntheticProbeHistory(
  * @param id - Account ID
  * @returns Today's stats (requests, tokens, cost)
  */
-export async function getTodayStats(id: number): Promise<WindowStats> {
+export async function getTodayStats(id: number | string): Promise<WindowStats> {
   const { data } = await apiClient.get<WindowStats>(`/admin/accounts/${id}/today-stats`)
   return data
 }
@@ -1005,7 +1087,7 @@ export interface BatchTodayStatsResponse {
  * @param accountIds - 账号 ID 列表
  * @returns 以账号 ID（字符串）为键的统计映射
  */
-export async function getBatchTodayStats(accountIds: number[]): Promise<BatchTodayStatsResponse> {
+export async function getBatchTodayStats(accountIds: Array<number | string>): Promise<BatchTodayStatsResponse> {
   const { data } = await apiClient.post<BatchTodayStatsResponse>('/admin/accounts/today-stats/batch', {
     account_ids: accountIds
   })
@@ -1018,14 +1100,13 @@ export async function getBatchTodayStats(accountIds: number[]): Promise<BatchTod
  * @param schedulable - Whether the account should participate in scheduling
  * @returns Updated account
  */
-export async function setSchedulable(id: number, schedulable: boolean): Promise<Account> {
-  if (isCloudflareWorkerContractActive()) {
-    throw new Error('Per-account schedulable changes are not supported by the Worker contract')
-  }
-  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/schedulable`, {
-    schedulable
-  })
-  return data
+export async function setSchedulable(id: number | string, schedulable: boolean, expectedControlVersion?: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/schedulable`, { schedulable },
+    isCloudflareWorkerContractActive() && Number.isSafeInteger(expectedControlVersion)
+      ? { headers: { 'If-Match': `"${expectedControlVersion}"` } }
+      : undefined
+  )
+  return adaptAccount(data)
 }
 
 /**
@@ -1033,7 +1114,7 @@ export async function setSchedulable(id: number, schedulable: boolean): Promise<
  * @param id - Account ID
  * @returns List of available models for this account
  */
-export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
+export async function getAvailableModels(id: number | string): Promise<ClaudeModel[]> {
   const { data } = await apiClient.get<ClaudeModel[]>(`/admin/accounts/${id}/models`)
   return data
 }
@@ -1066,7 +1147,7 @@ export interface UpstreamModelMetadata {
  * @param id - Account ID
  * @returns List of model IDs returned by the upstream
  */
-export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
+export async function syncUpstreamModels(id: number | string): Promise<SyncUpstreamModelsResult> {
   const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
   return data
 }
@@ -1195,9 +1276,13 @@ export async function importData(payload: {
 }
 
 export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
+  const operation = isCloudflareWorkerContractActive()
+    ? await workerOperationKey('admin-codex-import', payload) : null
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
-    timeout: 120000 // 120s timeout for large session imports
+    timeout: 120000,
+    ...(operation ? { headers: { 'Idempotency-Key': operation.key } } : {})
   })
+  if (operation) pendingWorkerOperationKeys.delete(operation.cacheKey)
   return data
 }
 
@@ -1225,11 +1310,11 @@ export async function getAntigravityDefaultModelMapping(): Promise<Record<string
  */
 export async function refreshOpenAIToken(
   refreshToken: string,
-  proxyId?: number | null,
+  proxyId?: number | string | null,
   endpoint: string = '/admin/openai/refresh-token',
   clientId?: string
 ): Promise<Record<string, unknown>> {
-  const payload: { refresh_token: string; proxy_id?: number; client_id?: string } = {
+  const payload: { refresh_token: string; proxy_id?: number | string; client_id?: string } = {
     refresh_token: refreshToken
   }
   if (proxyId) {
@@ -1238,7 +1323,7 @@ export async function refreshOpenAIToken(
   if (clientId) {
     payload.client_id = clientId
   }
-  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
+  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload, { timeout: 60000 })
   return data
 }
 
@@ -1341,7 +1426,7 @@ export async function batchRefresh(
   const payload = { accounts: workerOperationAccounts(accountIds) }
   const operation = await workerOperationKey('admin-account-oauth-batch-refresh', payload)
   const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-refresh', payload, {
-    headers: { 'Idempotency-Key': operation.key }, timeout: 120000,
+    headers: { 'Idempotency-Key': operation.key }, timeout: 180000,
   })
   pendingWorkerOperationKeys.delete(operation.cacheKey)
   return data
@@ -1352,9 +1437,9 @@ export async function batchRefresh(
  * @param id - Account ID
  * @returns Updated account
  */
-export async function setPrivacy(id: number): Promise<Account> {
+export async function setPrivacy(id: number | string): Promise<Account> {
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/set-privacy`)
-  return data
+  return adaptAccount(data)
 }
 
 /**
@@ -1501,7 +1586,8 @@ export async function probeUpstreamBilling(id: number): Promise<UpstreamBillingP
 export async function probeUpstreamBillingBatch(accountIds: number[]): Promise<UpstreamBillingProbeResult[]> {
   const { data } = await apiClient.post<{ results: UpstreamBillingProbeResult[] }>(
     '/admin/accounts/upstream-billing-probe/batch',
-    { account_ids: accountIds }
+    { account_ids: accountIds },
+    { timeout: 90000 }
   )
   return data.results
 }
@@ -1586,6 +1672,7 @@ export const accountsAPI = {
   batchUpdateCredentials,
   bulkUpdate,
   bulkSetEnabled,
+  bulkSetSchedulable,
   queueHealthProbes,
   queueSyntheticProbes,
   listSyntheticProbeHistory,

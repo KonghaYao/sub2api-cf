@@ -139,6 +139,21 @@ afterEach(() => {
 })
 
 describe('account model synthetic probes', () => {
+  it('records failure without direct fallback when the bound proxy is unavailable', async () => {
+    const test = await fixture()
+    try {
+      await seedTarget(test)
+      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('probe-proxy','Probe','https','proxy.test',443,'active','','',1,1)")
+      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','probe-proxy')")
+      const direct = vi.fn().mockResolvedValue(Response.json({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }] }))
+      vi.stubGlobal('fetch', direct)
+      expect((await post(test, [target()], 'bound-proxy')).status).toBe(202)
+      await consumeAccountSyntheticProbe(test.queue.messages.at(-1) as AccountSyntheticProbeEvent, test.env, NOW + 1)
+      expect(test.raw.prepare('SELECT outcome, error_code FROM account_synthetic_probe_history').get()).toEqual({ outcome: 'failed', error_code: 'upstream_transport_failed' })
+      expect(direct).not.toHaveBeenCalled()
+    } finally { test.raw.close() }
+  })
+
   it('queues a credential-free canonical event and never calls upstream from HTTP', async () => {
     const test = await fixture()
     const fetch = vi.fn()

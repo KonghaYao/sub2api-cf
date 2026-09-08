@@ -15,7 +15,7 @@ const { getSnapshotV2, getUserUsageTrend, getUserSpendingRanking } = await vi.im
 
 const PEPPER = 'dashboard-browser-contract-pepper-at-least-32-bytes'
 let database: ReturnType<typeof createSqliteD1>['raw']
-afterEach(() => { database?.close(); vi.clearAllMocks() })
+afterEach(() => { database?.close(); vi.clearAllMocks(); vi.useRealTimers() })
 
 async function connectBrowserApiToWorker() {
   const { raw, d1 } = createSqliteD1()
@@ -82,7 +82,8 @@ describe('admin dashboard browser API against Worker routes', () => {
 
 
 describe('user dashboard browser API against Worker routes', () => {
-  it('loads owner statistics, charts, and recent usage using the actual browser API methods', async () => {
+  it.each(['2026-09-07T16:05:00Z', '2026-09-08T15:55:00Z'])('loads owner statistics, charts, and recent usage across Shanghai date boundaries at %s', async now => {
+    vi.setSystemTime(new Date(now))
     await connectBrowserApiToWorker()
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
     const results = await Promise.allSettled([
@@ -98,6 +99,7 @@ describe('user dashboard browser API against Worker routes', () => {
       Awaited<ReturnType<typeof getDashboardModels>>, Awaited<ReturnType<typeof getByDateRange>>]
     expect(stats).toMatchObject({ total_requests: 1, total_tokens: 150, total_actual_cost: 0.075 })
     expect(trend.trend).toEqual([expect.objectContaining({ requests: 1, total_tokens: 150 })])
+    expect(trend.trend[0].date).toMatch(new RegExp(`^${today}`))
     expect(models.models).toEqual([expect.objectContaining({ model: 'composer-2.5', requests: 1 })])
     expect(recent.items).toEqual([expect.objectContaining({ id: 'event', actual_cost: 0.075 })])
   })

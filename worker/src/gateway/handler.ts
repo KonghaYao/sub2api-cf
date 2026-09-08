@@ -1,4 +1,11 @@
+import { resolveAccountRequestAuthentication } from '../control/account-request-authentication'
+import { inspectAgentTaskResponse } from './agent-task-response'
+import { persistCodexUsageObservation } from './codex-usage-observation'
+import { persistAnthropicUsageObservation } from './anthropic-usage-observation'
+import { persistAccountTempUnschedulable } from './account-temp-unschedulable'
 import type { Context } from 'hono'
+import { fetchAccountProxy } from './proxy-fetch'
+import { persistOpenAIRateLimit } from './openai-rate-limit-persistence'
 import type { Env, UsageSettledPayload } from '../env'
 import { resolveAccountCostSnapshot } from './account-stats'
 import {
@@ -9,7 +16,7 @@ import {
 import type { RequestObservationHandle } from '../observability/types'
 import { bootstrapGateway } from './bootstrap'
 import { codexModelsResponse } from './codex-models'
-import { apiKeyDigest, decryptCredential } from './crypto'
+import { apiKeyDigest } from './crypto'
 import { asGatewayError, GatewayError, gatewayErrorResponse } from './errors'
 import { createUsageEvent } from './queue'
 import {
@@ -67,13 +74,13 @@ import {
 } from './recovery'
 import {
   authenticateGatewayRequest,
-  credentialAad,
   getAccountCredential,
   listModels,
   resolveGatewayRoute,
   resolveResponseModelPricing,
 } from './repository'
-import { buildProviderRequest, type ProviderOperation } from './providers'
+import { type ProviderOperation } from './providers'
+import { buildAccountProviderRequest } from './account-provider-request'
 import type { ProviderPlatform } from './providers'
 import { stringifyJsonPreservingIntegers } from './lossless-json'
 import { readGatewayJsonBody } from './request-body'
@@ -1126,6 +1133,7 @@ async function dispatchGateway(
         : prepared.protocolFallback === 'chat_to_responses'
           ? 'responses'
           : undefined,
+      prepared.protocolFallback !== undefined,
     )
     principal.platform_quota = route.platform_quota
     if (
@@ -1152,7 +1160,7 @@ async function dispatchGateway(
       model.model_id,
       upstreamEndpoint,
     )
-    const providerDispatch = prepared.resolveUpstream(model, upstreamEndpoint, provider)
+    let providerDispatch = prepared.resolveUpstream(model, (route.candidates[0]?.upstream_endpoint ?? upstreamEndpoint) as TextGatewayEndpoint, provider)
     observedUpstreamEndpoint = providerOperationPath(providerDispatch.operation, provider)
     const upstreamBody = providerDispatch.body
     const serviceTier = typeof upstreamBody.service_tier === 'string'
@@ -1216,10 +1224,24 @@ async function dispatchGateway(
       model.upstream_name,
       affinityKey,
       stream,
+      false,
+      prepared.protocolFallback ? (accountId: string) => {
+        const candidate = candidates.find(candidate => candidate.account_id === accountId)!
+        const selectedEndpoint = (candidate.upstream_endpoint ?? upstreamEndpoint) as TextGatewayEndpoint
+        return { endpoint: selectedEndpoint, dispatch: prepared.resolveUpstream(model, selectedEndpoint, candidate.platform) }
+      } : undefined,
     ).catch(async (error) => {
       await bestEffort(() => cancelGatewayReservations(context.env, principal, requestId))
       throw error
     })
+    if (acquired.providerDispatch) providerDispatch = acquired.providerDispatch
+    if (acquired.upstreamModel) model.upstream_name = acquired.upstreamModel
+    if (acquired.upstreamPath) observedUpstreamEndpoint = acquired.upstreamPath
+    if (acquired.chatFromResponses) {
+      providerDispatch.operation = 'responses'
+      providerDispatch.responseProtocol = 'chat_from_responses'
+      providerDispatch.includeUsage = true
+    }
     observedAccountId = acquired.accountId
 
     if (!acquired.response.ok) {
@@ -1248,11 +1270,13 @@ async function dispatchGateway(
     const contentType = acquired.response.headers.get('content-type') ?? ''
     if (
       !stream &&
-      providerDispatch.responseProtocol === 'chat_from_responses' &&
+      (providerDispatch.responseProtocol === 'chat_from_responses' ||
+        (endpoint === 'responses' && providerDispatch.responseProtocol === 'openai')) &&
       contentType.toLowerCase().includes('text/event-stream')
     ) {
       admissionHandedOff = true
       return await createBufferedChatFromResponsesStream({
+        responseFormat: providerDispatch.responseProtocol === 'chat_from_responses' ? 'chat' : 'responses',
         env: context.env,
         endpoint,
         upstreamEndpoint,
@@ -1274,7 +1298,7 @@ async function dispatchGateway(
         providerPlatform: provider,
         nativeCompactionV2: prepared.nativeCompactionV2 === true,
         inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
-        upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
+        upstreamEndpointPath: acquired.upstreamPath ?? providerOperationPath(providerDispatch.operation, provider),
         serviceTier,
         observation,
         observationRequest,
@@ -1312,7 +1336,7 @@ async function dispatchGateway(
         providerPlatform: provider,
         nativeCompactionV2: prepared.nativeCompactionV2 === true,
         inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
-        upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
+        upstreamEndpointPath: acquired.upstreamPath ?? providerOperationPath(providerDispatch.operation, provider),
         serviceTier,
         responseProtocol: providerDispatch.responseProtocol,
         includeUsage: providerDispatch.includeUsage,
@@ -1346,7 +1370,7 @@ async function dispatchGateway(
       providerPlatform: provider,
       nativeCompactionV2: prepared.nativeCompactionV2 === true,
       inboundEndpointPath: canonicalGatewayInboundPath(context.req.path, endpoint),
-      upstreamEndpointPath: providerOperationPath(providerDispatch.operation, provider),
+      upstreamEndpointPath: acquired.upstreamPath ?? providerOperationPath(providerDispatch.operation, provider),
       serviceTier,
       observation,
       observationRequest,
@@ -1479,6 +1503,10 @@ function geminiErrorResponse(error: GatewayError, requestId?: string): Response 
 }
 
 interface AcquiredUpstream {
+  providerDispatch?: ProviderDispatch
+  upstreamPath?: string
+  chatFromResponses?: boolean
+  upstreamModel?: string
   response: Response
   accountId: string
   leaseId: string
@@ -1503,8 +1531,10 @@ async function acquireUpstream(
   affinityKey?: string,
   clientStream = true,
   locallyEstimateCustomInputTokens = false,
+  resolveAttempt?: (accountId: string) => { endpoint: TextGatewayEndpoint; dispatch: ProviderDispatch },
 ): Promise<AcquiredUpstream> {
   let lastError: GatewayError | null = null
+  let agentRecoveryTried=false
   const attempts = endpoint === 'embeddings'
     ? Math.min(4, candidateCount)
     : Math.min(4, candidateCount + 1)
@@ -1513,7 +1543,10 @@ async function acquireUpstream(
     let accountId: string | null = null
     try {
       accountId = await reservePoolAccount(pool, leaseId, affinityKey)
-      const account = await getAccountCredential(env, groupId, modelId, endpoint, accountId)
+      const attemptPlan = resolveAttempt?.(accountId)
+      const selectedOperation = attemptPlan?.dispatch.operation ?? operation
+      const selectedBody = attemptPlan?.dispatch.body ?? body
+      const account = await getAccountCredential(env, groupId, modelId, attemptPlan?.endpoint ?? endpoint, accountId, upstreamModel)
       if (
         locallyEstimateCustomInputTokens && operation === 'responses_input_tokens' &&
         account.platform === 'openai' &&
@@ -1532,35 +1565,62 @@ async function acquireUpstream(
       if (!env.CREDENTIALS_MASTER_KEY) {
         throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
       }
-      const credential = await decryptCredential(
-        account.nonce_b64,
-        account.ciphertext_b64,
-        env.CREDENTIALS_MASTER_KEY,
-        credentialAad(env.ENVIRONMENT, account.account_id, account.secret_id, account.key_version),
-      )
-      const plan = buildProviderRequest({
+      let authentication=await resolveAccountRequestAuthentication(env,account)
+      let credential=authentication.credential
+      let actualModel = account.upstream_model_name ?? upstreamModel
+      let mappedBody = actualModel && selectedBody && typeof selectedBody === 'object' && !Array.isArray(selectedBody) && 'model' in selectedBody
+        ? { ...selectedBody, model: actualModel } : selectedBody
+      const chatFromResponses = selectedOperation === 'chat_completions' && account.platform === 'openai' && account.credential_kind === 'oauth'
+      const wireOperation = chatFromResponses ? 'responses' : selectedOperation
+      if (chatFromResponses) mappedBody = chatCompletionsToResponsesRequest(mappedBody, actualModel)
+      let plan = buildAccountProviderRequest({
         account,
-        credential,
-        operation,
-        model: upstreamModel,
-        body,
+        ...authentication,
+        operation: wireOperation,
+        model: actualModel,
+        body: mappedBody,
         client_headers: inboundHeaders,
       })
-      let response = await fetchWithHeaderTimeout(new URL(plan.url), {
+      if (wireOperation === 'responses' && plan.body && typeof plan.body === 'object' && 'model' in plan.body && typeof plan.body.model === 'string') {
+        actualModel = plan.body.model
+      }
+      const send=()=>fetchWithHeaderTimeout(new URL(plan.url), {
         method: plan.method,
         headers: plan.headers,
         body: plan.body === undefined ? undefined : stringifyJsonPreservingIntegers(plan.body),
         redirect: 'manual',
-      }, clientSignal, plan.timeout_ms)
+      }, clientSignal, plan.timeout_ms, account.proxy_id
+        ? (url, init) => fetchAccountProxy(env, account.proxy_id!, url, init, clientSignal)
+        : undefined)
+      let response=await send()
+      if(authentication.authorization) {
+        let inspected=await inspectAgentTaskResponse(response,credential as unknown as Record<string,unknown>)
+        response=inspected.response
+        if(inspected.taskInvalid && !agentRecoveryTried) {
+          agentRecoveryTried=true
+          const task=(credential as unknown as Record<string,unknown>).task_id
+          authentication=await resolveAccountRequestAuthentication(env,account,typeof task==='string'?task:'')
+          credential=authentication.credential
+          plan=buildAccountProviderRequest({account,...authentication,operation:wireOperation,model:actualModel,body:mappedBody,client_headers:inboundHeaders})
+          response=await send()
+          inspected=await inspectAgentTaskResponse(response,credential as unknown as Record<string,unknown>)
+          response=inspected.response
+        }
+      }
       if (response.status >= 300 && response.status < 400) {
         await bestEffort(async () => response.body?.cancel())
         throw new GatewayError(502, 'upstream_redirect_rejected', 'Upstream redirect was rejected', 'server_error')
       }
-      const retryableFailure = !response.ok && (
+      await bestEffort(() => persistAnthropicUsageObservation(env, account, response))
+      await bestEffort(() => persistCodexUsageObservation(env, account, response))
+      let temporaryFailure = false
+      await bestEffort(async () => { temporaryFailure = await persistAccountTempUnschedulable(env, account, credential, response, actualModel) })
+      if (!temporaryFailure && response.status === 429) await bestEffort(() => persistOpenAIRateLimit(env, account, response))
+      const retryableFailure = !response.ok && (temporaryFailure || (
         endpoint === 'embeddings'
           ? await isRetryableEmbeddingsResponse(response)
           : isRetryableStatus(response.status)
-      )
+      ))
       if (retryableFailure && attempt + 1 < attempts) {
         lastError = mapUpstreamStatus(response)
         await bestEffort(async () => response.body?.cancel())
@@ -1569,7 +1629,7 @@ async function acquireUpstream(
         continue
       }
       if (
-        response.ok && operation === 'responses' &&
+        response.ok && wireOperation === 'responses' &&
         (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')
       ) {
         const inspected = await inspectResponsesSsePrelude(response, {
@@ -1596,12 +1656,17 @@ async function acquireUpstream(
             await bestEffort(() => releasePoolLease(pool, leaseId))
             continue
           }
-          return { response, accountId, leaseId, retryableFailure: semanticRetryable }
+          return { response, accountId, leaseId, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+            upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
+            chatFromResponses, retryableFailure: semanticRetryable }
         }
       }
-      return { response, accountId, leaseId, retryableFailure }
+      return { response, accountId, leaseId, upstreamModel: actualModel, providerDispatch: attemptPlan?.dispatch,
+        upstreamPath: attemptPlan || account.platform === 'openai' && account.credential_kind === 'oauth' ? new URL(plan.url).pathname : undefined,
+        chatFromResponses, retryableFailure }
     } catch (error) {
-      const currentError = asGatewayError(error)
+      const currentError = error instanceof ChatToResponsesError || error instanceof ResponsesBridgeError || error instanceof ProtocolValidationError
+        ? new GatewayError(400, 'invalid_request_error', error.message) : asGatewayError(error)
       if (currentError.code === 'no_capacity' && lastError !== null) break
       if (!isRetryableAttemptError(currentError, endpoint)) {
         await bestEffort(() => releasePoolLease(pool, leaseId))
@@ -1651,6 +1716,7 @@ async function createBufferedChatFromResponsesStream(
   input: FinalizeInput & {
     response: Response
     clientSignal: AbortSignal
+    responseFormat?: 'chat' | 'responses'
   },
 ): Promise<Response> {
   const accounting = new SseEventTransformer(input.model.upstream_name, input.requestedModel)
@@ -1749,7 +1815,9 @@ async function createBufferedChatFromResponsesStream(
     if (terminal === 'missing') {
       throw new ResponsesToChatError('Upstream stream ended before a terminal response event')
     }
-    const downstream = accumulator.response()
+    const downstream = input.responseFormat === 'responses'
+      ? { ...accumulator.responsesDocument(), object: 'response', model: input.requestedModel }
+      : accumulator.response()
     const usage = accounting.usage() ?? estimatedUsage(input.inputBytes, totalBytes)
     upstreamResponseValid = true
     await settleOnce(usage, 'completed')
@@ -3299,6 +3367,7 @@ async function fetchWithHeaderTimeout(
   init: RequestInit,
   clientSignal: AbortSignal,
   timeoutMs = HEADER_TIMEOUT_MS,
+  fetcher: (url: URL, init: RequestInit) => Promise<Response> = fetch,
 ): Promise<Response> {
   const controller = new AbortController()
   const onClientAbort = () => controller.abort()
@@ -3306,7 +3375,7 @@ async function fetchWithHeaderTimeout(
   else clientSignal.addEventListener('abort', onClientAbort, { once: true })
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetcher(url, { ...init, signal: controller.signal })
   } catch (error) {
     if (controller.signal.aborted) {
       if (clientSignal.aborted) {
@@ -3512,6 +3581,7 @@ async function isRetryableEmbeddingsResponse(response: Response): Promise<boolea
 }
 
 function isRetryableAttemptError(error: GatewayError, endpoint: TextGatewayEndpoint): boolean {
+  if (error.status === 400 && error.code === 'invalid_request_error') return false
   if (error.code === 'no_capacity') return true
   if (endpoint !== 'embeddings') return true
   return error.code === 'credential_unavailable' ||

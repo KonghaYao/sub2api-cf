@@ -163,6 +163,7 @@ export interface ModelRoute {
 }
 
 export interface AccountCandidate {
+  upstream_endpoint?: GatewayEndpoint
   account_id: string
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind
@@ -172,6 +173,7 @@ export interface AccountCandidate {
   provider_config: ProviderConfig
   base_url: string
   max_concurrency: number
+  load_factor?: number
   priority: number
   weight: number
   config_version: number
@@ -184,6 +186,10 @@ export type AccountImageAdapter = 'direct_images' | 'responses_image_tool'
 export type AccountCredentialKind = 'api_key' | 'oauth' | 'setup_token'
 
 export interface AccountCredential {
+  runtime_snapshot?: { config_version: number; control_version: number; ui_config_json: string }
+  anthropic_auth_scheme?: 'authorization_bearer'
+  upstream_model_name?: string
+  proxy_id?: string
   account_id: string
   image_adapter: AccountImageAdapter
   credential_kind: AccountCredentialKind

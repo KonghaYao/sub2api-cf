@@ -1,3 +1,9 @@
+import { accountModelRateLimited } from '../gateway/account-model-rate-limit'
+import { accountQuotaExceeded } from '../gateway/account-quota-policy'
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
+import { accountNotExpiredSql } from '../gateway/account-expiry'
+import { fetchAccountProxy } from '../gateway/proxy-fetch'
+import { accountModelPolicy, accountModelAllowedSql } from '../gateway/account-model-policy'
 import { decryptCredential } from '../gateway/crypto'
 import { GatewayError } from '../gateway/errors'
 import { buildProviderRequest, type ProviderConfig } from '../gateway/providers'
@@ -17,11 +23,13 @@ const MAX_PROVIDER_RESPONSE_BYTES = 48 * 1024 * 1024
 const PROVIDER_ERROR_MESSAGE_LIMIT = 240
 
 interface GeminiMediaAccountRow {
+  credential_kind?: string
   account_id: string
   base_url: string
   protocol: string
   auth_scheme: string
   provider_config_json: string
+  ui_config_json?: string
   secret_id: string
   key_version: number
   nonce_b64: string
@@ -52,7 +60,7 @@ export function createGeminiMediaProvider(fetcher: Fetcher = fetch): MediaProvid
       )
       const items: MediaProviderItemResult[] = []
       for (const item of input.manifest.items) {
-        items.push(await generateItem(fetcher, account, input.manifest, item))
+        items.push(await generateItem(mediaAccountFetcher(input.env, account, fetcher), account, input.manifest, item))
       }
       return { accountId: account.id, items }
     },
@@ -68,45 +76,48 @@ export async function resolveGeminiMediaAccount(
   publicModel: string,
   upstreamModel: string,
 ): Promise<GeminiMediaAccount> {
-  const row = await env.DB.prepare(
-    `SELECT a.id AS account_id, a.base_url, a.protocol, a.auth_scheme,
-            a.provider_config_json, secret.id AS secret_id, secret.key_version,
-            secret.nonce_b64, secret.ciphertext_b64
-       FROM account_groups AS account_group
-       JOIN accounts AS a ON a.id = account_group.account_id
-       JOIN account_models AS account_model ON account_model.account_id = a.id
-       JOIN models AS model ON model.id = account_model.model_id
-       JOIN group_models AS group_model
-         ON group_model.group_id = account_group.group_id
-        AND group_model.model_id = model.id
-       JOIN "groups" AS group_row ON group_row.id = account_group.group_id
-       JOIN account_secrets AS secret
-         ON secret.id = a.credential_ref AND secret.account_id = a.id
-      WHERE account_group.group_id = ?
-        AND model.public_name = ?
-        AND COALESCE(group_model.upstream_name_override, model.upstream_name) = ?
-        AND group_row.enabled = 1 AND group_row.platform = 'gemini'
-        AND group_row.allow_image_generation = 1
-        AND group_row.allow_batch_image_generation = 1
-        AND group_model.enabled = 1 AND model.enabled = 1
-        AND model.platform = 'gemini'
-        AND a.platform = 'gemini' AND a.protocol = 'gemini'
-        AND a.auth_scheme = 'x-goog-api-key'
-        AND a.base_url IS NOT NULL AND trim(a.base_url) <> ''
-        AND a.enabled = 1 AND a.max_concurrency > 0
-        AND a.health_status <> 'unhealthy'
-      ORDER BY account_group.priority ASC, account_group.weight DESC, a.id ASC
-      LIMIT 1`,
-  ).bind(groupId, publicModel, upstreamModel).first<GeminiMediaAccountRow>()
-  if (row === null) {
-    throw new GatewayError(
-      503,
-      'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT',
-      'No schedulable Gemini image account is configured',
-      'server_error',
-    )
+  for (let offset = 0; ; offset += 100) {
+    const rows = await env.DB.prepare(
+      `SELECT a.id AS account_id, a.base_url, a.protocol, a.auth_scheme, a.credential_kind,
+              a.provider_config_json, a.ui_config_json, secret.id AS secret_id, secret.key_version,
+              secret.nonce_b64, secret.ciphertext_b64
+         FROM account_groups AS account_group
+         JOIN accounts AS a ON a.id = account_group.account_id
+         JOIN models AS model ON model.platform = a.platform
+         LEFT JOIN account_models AS account_model ON account_model.account_id = a.id AND account_model.model_id = model.id
+         JOIN group_models AS group_model
+           ON group_model.group_id = account_group.group_id
+          AND group_model.model_id = model.id
+         JOIN "groups" AS group_row ON group_row.id = account_group.group_id
+         JOIN account_secrets AS secret
+           ON secret.id = a.credential_ref AND secret.account_id = a.id
+        WHERE account_group.group_id = ?
+          AND model.public_name = ?
+          AND (account_model.model_id IS NOT NULL OR json_extract(a.ui_config_json, '$.original_model_routing') = 1)
+          AND ${accountModelAllowedSql('COALESCE(group_model.upstream_name_override, model.upstream_name)')}
+          AND COALESCE(group_model.upstream_name_override, model.upstream_name) = ?
+          AND group_row.enabled = 1 AND group_row.platform = 'gemini'
+          AND group_row.allow_image_generation = 1
+          AND group_row.allow_batch_image_generation = 1
+          AND group_model.enabled = 1 AND model.enabled = 1
+          AND model.platform = 'gemini'
+          AND a.platform = 'gemini' AND a.protocol = 'gemini'
+          AND a.auth_scheme = 'x-goog-api-key'
+          AND a.base_url IS NOT NULL AND trim(a.base_url) <> ''
+          AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND a.max_concurrency > 0
+          AND a.health_status <> 'unhealthy'
+        ORDER BY account_group.priority ASC, account_group.weight DESC, a.id ASC
+        LIMIT 100 OFFSET ?`,
+    ).bind(groupId, publicModel, upstreamModel, offset).all<GeminiMediaAccountRow>()
+    for (const row of rows.results) {
+      if (accountQuotaExceeded(row.ui_config_json, row.credential_kind ?? 'api_key')) continue
+      const policy = accountModelPolicy(row.ui_config_json, upstreamModel, 'gemini')
+      if (!policy.allowed || accountModelRateLimited(row.ui_config_json, upstreamModel, 'gemini', row.credential_kind ?? 'api_key')) continue
+      return materializeGeminiMediaAccount(env, row, policy.upstream || upstreamModel)
+    }
+    if (rows.results.length < 100) break
   }
-  return materializeGeminiMediaAccount(env, row, upstreamModel)
+  throw new GatewayError(503, 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT', 'No schedulable Gemini image account is configured', 'server_error')
 }
 
 export async function resolveExactGeminiMediaAccount(
@@ -115,7 +126,7 @@ export async function resolveExactGeminiMediaAccount(
 ): Promise<GeminiMediaAccount> {
   const row = await env.DB.prepare(
     `SELECT a.id AS account_id, a.base_url, a.protocol, a.auth_scheme,
-            a.provider_config_json, secret.id AS secret_id, secret.key_version,
+            a.provider_config_json, a.ui_config_json, secret.id AS secret_id, secret.key_version,
             secret.nonce_b64, secret.ciphertext_b64
        FROM accounts AS a
        JOIN account_secrets AS secret
@@ -179,11 +190,24 @@ async function materializeGeminiMediaAccount(
     model: upstreamModel,
     body: {},
   })
+  const proxyId = row.ui_config_json ? (JSON.parse(row.ui_config_json) as { proxy_id?: unknown }).proxy_id : undefined
   return {
     id: row.account_id,
+    ...(proxyId == null || String(proxyId) === '0' ? {} : { proxyId: String(proxyId) }),
     baseUrl: row.base_url,
     providerConfig,
     apiKey: credential.api_key,
+    upstreamModel,
+  }
+}
+
+export function mediaAccountFetcher(env: MediaEnv, account: MediaProviderJobAccount, fallback: Fetcher = fetch): Fetcher {
+  if (!account.proxyId) return fallback
+  return (input, init) => {
+    const request = input instanceof Request ? input : undefined
+    const options = request ? { method: request.method, headers: request.headers, body: request.body, signal: request.signal, ...init } : init ?? {}
+    return fetchAccountProxy(env, account.proxyId!, new URL(request?.url ?? String(input)), options,
+      options.signal ?? new AbortController().signal)
   }
 }
 
@@ -193,7 +217,7 @@ async function generateItem(
   manifest: MediaManifest,
   item: MediaSubmitItem,
 ): Promise<MediaProviderItemResult> {
-  const validationError = validateItem(manifest.upstream_model, item)
+  const validationError = validateItem(account.upstreamModel ?? manifest.upstream_model, item)
   if (validationError !== null) return { customId: item.custom_id, error: validationError }
   const outputs: MediaProviderOutput[] = []
   for (let imageIndex = 0; imageIndex < item.output_count; imageIndex += 1) {
@@ -208,7 +232,7 @@ async function generateItem(
         },
         credential: { api_key: account.apiKey },
         operation: 'generate_content',
-        model: manifest.upstream_model,
+        model: account.upstreamModel ?? manifest.upstream_model,
         body: geminiImageRequest(manifest, item),
       })
       const response = await fetchWithTimeout(fetcher, plan.url, {

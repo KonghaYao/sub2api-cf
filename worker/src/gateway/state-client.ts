@@ -612,6 +612,7 @@ export async function syncPoolAccounts(
       config_fingerprint: await sha256Hex(JSON.stringify(candidates.map((account) => ({
         account_id: account.account_id,
         max_concurrency: account.max_concurrency,
+        load_factor: account.load_factor,
         priority: account.priority,
         weight: account.weight,
         recovery_revision: account.recovery_revision,
@@ -619,6 +620,7 @@ export async function syncPoolAccounts(
       accounts: candidates.map((account) => ({
         account_id: account.account_id,
         max_concurrency: account.max_concurrency,
+        load_factor: account.load_factor,
         priority: account.priority,
         weight: account.weight,
         recovery_revision: account.recovery_revision,

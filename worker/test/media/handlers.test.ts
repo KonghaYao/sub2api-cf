@@ -1,7 +1,9 @@
 import { Hono } from 'hono'
 import { describe, expect, it, vi } from 'vitest'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
-import { apiKeyDigest } from '../../src/gateway/crypto'
+import { apiKeyDigest, encryptCredential } from '../../src/gateway/crypto'
+import { resolveGeminiMediaAccount } from '../../src/media/provider'
+import { listAvailableMediaModels } from '../../src/media/repository'
 import {
   cancelGatewayMediaTask,
   cancelUserMediaTask,
@@ -344,6 +346,47 @@ describe('media task handlers', () => {
     })
   })
 
+  it('lists and selects original-form accounts using the group-resolved model whitelist', async () => {
+    const test = await fixture()
+    test.env.CREDENTIALS_MASTER_KEY = 'media-mapping-test-master-key-'.repeat(2)
+    const encrypted = await encryptCredential({ api_key: 'mapped-secret' }, test.env.CREDENTIALS_MASTER_KEY,
+      `${test.env.ENVIRONMENT}/account-1/secret-1/1`)
+    test.raw.prepare('UPDATE account_secrets SET nonce_b64=?, ciphertext_b64=? WHERE id=?')
+      .run(encrypted.nonce_b64, encrypted.ciphertext_b64, 'secret-1')
+    test.raw.exec("DELETE FROM account_models; UPDATE group_models SET upstream_name_override='gemini-3.1-flash-image'")
+    const config = { original_model_routing: true, schedulable: true, expires_at: 0,
+      credentials: { model_mapping: { 'gemini-3.1-flash-image': 'gemini-3.1-pro-image' } } }
+    const save = () => test.raw.prepare('UPDATE accounts SET ui_config_json=? WHERE id=?')
+      .run(JSON.stringify(config), 'account-1')
+    const select = () => resolveGeminiMediaAccount(test.env, 'group-1', 'gemini-image', 'gemini-3.1-flash-image')
+    save()
+    expect(await listAvailableMediaModels(test.env, 'group-1')).toEqual([
+      { id: 'gemini-image', object: 'model', provider: 'gemini_api' },
+    ])
+    await expect(select()).resolves.toMatchObject({ id: 'account-1', upstreamModel: 'gemini-3.1-pro-image', apiKey: 'mapped-secret' })
+    config.schedulable = false
+    save()
+    expect(await listAvailableMediaModels(test.env, 'group-1')).toEqual([])
+    await expect(select()).rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    config.schedulable = true
+    config.expires_at = 1
+    save()
+    expect(await listAvailableMediaModels(test.env, 'group-1')).toEqual([])
+    await expect(select()).rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    config.expires_at = 0
+    config.original_model_routing = false
+    save()
+    expect(await listAvailableMediaModels(test.env, 'group-1')).toEqual([])
+    await expect(select()).rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    config.original_model_routing = true
+    save()
+    test.raw.exec("UPDATE group_models SET upstream_name_override='gemini-2.5-flash-image'")
+    expect(await listAvailableMediaModels(test.env, 'group-1')).toEqual([])
+    await expect(resolveGeminiMediaAccount(test.env, 'group-1', 'gemini-image', 'gemini-2.5-flash-image'))
+      .rejects.toMatchObject({ code: 'BATCH_IMAGE_NO_UPSTREAM_ACCOUNT' })
+    test.raw.close()
+  })
+
   it('executes one bounded output per queue event, settles successes, and serves R2 artifacts', async () => {
     const test = await fixture()
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
@@ -428,10 +471,10 @@ describe('media task handlers', () => {
     test.env.BATCH_PROVIDER_JOBS_ENABLED = 'true'
     test.env.MEDIA_PROVIDER_JOB_ACCOUNT_RESOLVER = {
       select: vi.fn(async () => ({
-        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret',
+        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret', upstreamModel: 'mapped-at-creation',
       })),
       exact: vi.fn(async () => ({
-        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret',
+        id: 'account-1', baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret', upstreamModel: 'changed-after-queue',
       })),
     }
     const submitBatch = vi.fn(async () => ({
@@ -462,6 +505,9 @@ describe('media task handlers', () => {
 
     const submitted = await submit(test)
     const id = String(submitted.id)
+    expect(test.raw.prepare('SELECT provider_model FROM media_provider_jobs WHERE task_id=?').get(id)).toEqual({ provider_model: 'mapped-at-creation' })
+    expect(() => test.raw.prepare('UPDATE media_provider_jobs SET provider_model=? WHERE task_id=?').run('changed', id)).toThrow('media_provider_model_immutable')
+
     const first = test.queued.shift()
     expect(first).toMatchObject({
       event_type: 'media.provider_job.advance.v1',
@@ -486,6 +532,7 @@ describe('media task handlers', () => {
     expect(await consumeMediaProviderJobAdvance(first, test.env)).toBe(true)
     expect(await consumeMediaProviderJobAdvance(first, test.env)).toBe(true)
     expect(submitBatch).toHaveBeenCalledTimes(1)
+    expect(submitBatch).toHaveBeenCalledWith(expect.objectContaining({ upstreamModel: 'mapped-at-creation' }))
     expect(await consumeMediaProviderJobAdvance(test.queued.shift(), test.env)).toBe(true)
     const originalBatch = test.env.DB.batch.bind(test.env.DB)
     let rejectedResultCommit = false

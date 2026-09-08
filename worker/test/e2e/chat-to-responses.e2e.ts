@@ -185,7 +185,8 @@ describe('Chat Completions to Responses binding bridge', () => {
       `group:${bootstrapped.group_id}`,
       'platform:openai',
       `model:${routeModel!.id}`,
-      'endpoint:responses',
+      // The logical request pool contains both Chat and Responses candidates.
+      'endpoint:chat_completions',
       'shard:0',
     ].join(':')
     const pool = env.POOL_STATE.get(env.POOL_STATE.idFromName(poolName))
@@ -349,7 +350,8 @@ describe('Chat Completions to Responses binding bridge', () => {
       `group:${bootstrapped.group_id}`,
       'platform:openai',
       `model:${routeModel!.id}`,
-      'endpoint:responses',
+      // The logical request pool contains both Chat and Responses candidates.
+      'endpoint:chat_completions',
       'shard:0',
     ].join(':')
     const pool = env.POOL_STATE.get(env.POOL_STATE.idFromName(poolName))
@@ -477,7 +479,8 @@ describe('Chat Completions to Responses binding bridge', () => {
       `group:${bootstrapped.group_id}`,
       'platform:openai',
       `model:${routeModel!.id}`,
-      'endpoint:responses',
+      // The logical request pool contains both Chat and Responses candidates.
+      'endpoint:chat_completions',
       'shard:0',
     ].join(':')
     const pool = env.POOL_STATE.get(env.POOL_STATE.idFromName(poolName))

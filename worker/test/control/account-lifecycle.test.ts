@@ -284,6 +284,21 @@ afterEach(() => {
 })
 
 describe('scheduled account health lifecycle', () => {
+  it('records failure without direct fallback when the bound proxy is unavailable', async () => {
+    const test = fixture()
+    try {
+      await seedAccount(test, 'openai')
+      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('probe-proxy','Probe','https','proxy.test',443,'active','','',1,1)")
+      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','probe-proxy')")
+      const direct = vi.fn().mockResolvedValue(new Response('{}'))
+      vi.stubGlobal('fetch', direct)
+      await scheduleAccountHealthLifecycle(test.env, NOW)
+      await consumeAccountHealthProbe(test.queue.messages[0] as AccountHealthProbeEvent, test.env, NOW)
+      expect(account(test, 'account-openai')).toMatchObject({ health_status: 'unhealthy', last_health_error: 'Upstream probe failed' })
+      expect(direct).not.toHaveBeenCalled()
+    } finally { test.raw.close() }
+  })
+
   it('drops a non-canonical Queue job identity without changing the referenced job', async () => {
     const test = fixture()
     const accountId = await seedAccount(test, 'openai', 'canonical-job')

@@ -1660,8 +1660,8 @@ export interface CodexSessionImportRequest {
   contents?: string[]
   name?: string
   notes?: string | null
-  group_ids?: number[]
-  proxy_id?: number | null
+  group_ids?: Array<number | string>
+  proxy_id?: number | string | null
   concurrency?: number
   priority?: number
   rate_multiplier?: number
@@ -1703,7 +1703,7 @@ export interface CodexSessionImportItem {
   index: number
   name?: string
   action: 'created' | 'updated' | 'skipped' | 'failed'
-  account_id?: number
+  account_id?: number | string
   message?: string
 }
 
@@ -2466,7 +2466,7 @@ export type TotpLogin2FARequest =
 
 export interface ScheduledTestPlan {
   id: number
-  account_id: number
+  account_id: number | string
   model_id: string
   cron_expression: string
   enabled: boolean
@@ -2491,7 +2491,7 @@ export interface ScheduledTestResult {
 }
 
 export interface CreateScheduledTestPlanRequest {
-  account_id: number
+  account_id: number | string
   model_id: string
   cron_expression: string
   enabled?: boolean

@@ -1,0 +1,125 @@
+{
+  "pageErrors": [],
+  "requestFailures": [],
+  "apiFailures": [
+    {
+      "route": "/admin/ops",
+      "method": "GET",
+      "url": "/api/v1/admin/settings/email-templates",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/ops",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/s3-config",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/ops",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/image-storage",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/ops",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/schedule",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/ops",
+      "method": "GET",
+      "url": "/api/v1/admin/backups",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/plugins",
+      "method": "GET",
+      "url": "/api/v1/admin/plugins",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/channels/monitor",
+      "method": "GET",
+      "url": "/api/v1/admin/channel-monitors",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/risk-control",
+      "method": "GET",
+      "url": "/api/v1/admin/risk-control/config",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/risk-control",
+      "method": "GET",
+      "url": "/api/v1/admin/risk-control/status",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/prompt-audit",
+      "method": "GET",
+      "url": "/api/v1/admin/prompt-audit/config",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/prompt-audit",
+      "method": "GET",
+      "url": "/api/v1/admin/prompt-audit/runtime",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/prompt-audit",
+      "method": "GET",
+      "url": "/api/v1/admin/prompt-audit/events",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/settings",
+      "method": "GET",
+      "url": "/api/v1/admin/settings/email-templates",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/settings",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/s3-config",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/settings",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/image-storage",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/settings",
+      "method": "GET",
+      "url": "/api/v1/admin/backups/schedule",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    },
+    {
+      "route": "/admin/settings",
+      "method": "GET",
+      "url": "/api/v1/admin/backups",
+      "status": 404,
+      "body": "{\"code\":-1,\"message\":\"Route not migrated to Cloudflare Workers yet\"}"
+    }
+  ]
+}

@@ -4,7 +4,7 @@ import { consumeEvents, createUsageEvent } from '../../src/gateway/queue'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
 
 describe('account-cost D1 projection', () => {
-  it('persists the complete immutable snapshot with the usage row', async () => {
+  it.each([false, true])('persists account quota atomically with the immutable usage snapshot (rollback=%s)', async rollback => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)
     raw.exec(`
@@ -25,6 +25,7 @@ describe('account-cost D1 projection', () => {
          cache_read_micros_per_million,per_request_micros,minimum_reservation_micros,effective_at_ms,created_at_ms)
       VALUES ('price-1','group-1','model-1',1,1,2000000,4000000,500000,0,1,1,1);
     `)
+    raw.prepare("UPDATE accounts SET ui_config_json=?").run(JSON.stringify({ extra: { quota_limit: 100, quota_used: 7, quota_daily_limit: 10, quota_daily_used: 3, quota_daily_start: '2000-01-01T00:00:00Z', quota_daily_reset_mode: 'fixed', quota_reset_timezone: 'UTC', quota_weekly_limit: 20, quota_weekly_used: 2, quota_weekly_start: new Date().toISOString() } }))
     const payload: UsageSettledPayload = {
       request_id: 'request-1', user_id: 'user-1', api_key_id: 'key-1', group_id: 'group-1',
       billing_type: 'balance', subscription_id: null, account_id: 'account-1', price_id: 'price-1',
@@ -48,6 +49,16 @@ describe('account-cost D1 projection', () => {
       ack: vi.fn(), retry: vi.fn(),
     }
 
+    if (rollback) {
+      raw.exec("CREATE TRIGGER fail_rollup BEFORE INSERT ON account_usage_15m_rollup BEGIN SELECT RAISE(ABORT,'injected failure'); END")
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      await consumeEvents({ queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>, { DB: d1 } as Env)
+      log.mockRestore()
+      expect(item.retry).toHaveBeenCalledOnce(); item.retry.mockClear()
+      expect(raw.prepare('SELECT COUNT(*) AS total FROM inbox').get()).toEqual({ total: 0 })
+      expect(JSON.parse((raw.prepare('SELECT ui_config_json FROM accounts').get() as any).ui_config_json).extra.quota_used).toBe(7)
+      raw.exec('DROP TRIGGER fail_rollup')
+    }
     await consumeEvents(
       { queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>,
       { DB: d1 } as Env,
@@ -81,6 +92,12 @@ describe('account-cost D1 projection', () => {
       standard_cost_micros: 50, account_cost_micros: 40, user_cost_micros: 40,
       duration_total_ms: 12, duration_count: 1,
     })
+    const quota = JSON.parse((raw.prepare('SELECT ui_config_json FROM accounts').get() as any).ui_config_json).extra
+    expect(quota).toMatchObject({ quota_used: 7.000063, quota_daily_used: 0.000063, quota_weekly_used: 2.000063, quota_limit: 100 })
+    expect(Date.parse(quota.quota_daily_reset_at)).toBeGreaterThan(Date.now())
+    await consumeEvents({ queue: 'events', messages: [item] } as unknown as MessageBatch<unknown>, { DB: d1 } as Env)
+    expect(item.ack).toHaveBeenCalledTimes(2)
+    expect(JSON.parse((raw.prepare('SELECT ui_config_json FROM accounts').get() as any).ui_config_json).extra).toEqual(quota)
     raw.close()
   })
 })

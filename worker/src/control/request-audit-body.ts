@@ -43,6 +43,7 @@ const SENSITIVE_KEYS = new Set([
 ])
 
 const SENSITIVE_ROUTES = [
+  /^\/api\/v1\/admin\/openai\/(?:generate-auth-url|exchange-code|refresh-token)$/,
   /^\/api\/v1\/admin\/accounts(?:\/|$)/,
   /^\/api\/v1\/admin\/oauth-providers(?:\/|$)/,
   /^\/api\/v1\/admin\/settings$/,

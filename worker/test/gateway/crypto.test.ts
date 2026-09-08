@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apiKeyDigest, decryptCredential, encryptCredential } from '../../src/gateway/crypto'
+import { apiKeyDigest, decryptCredential, decryptCredentialPayload, encryptCredential } from '../../src/gateway/crypto'
 import { GatewayError } from '../../src/gateway/errors'
 
 describe('gateway secrets', () => {
@@ -35,4 +35,13 @@ describe('gateway secrets', () => {
       ),
     ).rejects.toBeInstanceOf(GatewayError)
   })
+})
+
+it('stores key-only credential payloads without weakening the token executor contract',async()=>{
+  const key='master-key'.repeat(4),aad='test/account/secret/1'
+  const payload={auth_mode:'agentIdentity',agent_runtime_id:'runtime',agent_private_key:'private-key'}
+  const sealed=await encryptCredential(payload,key,aad)
+  expect(await decryptCredentialPayload(sealed.nonce_b64,sealed.ciphertext_b64,key,aad)).toEqual(payload)
+  await expect(decryptCredential(sealed.nonce_b64,sealed.ciphertext_b64,key,aad)).rejects.toMatchObject({code:'credential_unavailable'})
+  await expect(decryptCredentialPayload(sealed.nonce_b64,sealed.ciphertext_b64,key,'other-account')).rejects.toMatchObject({code:'credential_unavailable'})
 })

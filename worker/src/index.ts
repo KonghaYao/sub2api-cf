@@ -1,5 +1,10 @@
+import { runDueScheduledTests } from './control/scheduled-test-runner'
+import { dispatchAccountInitializations } from './control/account-initialization'
+import { renewDueAccountTokens } from './control/account-token-renewal'
+import { runDueUpstreamBillingProbes } from './control/upstream-billing-settings'
 import { app } from './app'
 import { recoverPendingSubscriptionState } from './control/subscriptions'
+import { sweepExpiredProxies } from './control/proxy-expiry'
 import { scheduleAccountHealthLifecycle } from './control/account-lifecycle'
 import { recoverAccountSyntheticProbes } from './control/account-synthetic-probes'
 import type { Env } from './env'
@@ -47,6 +52,11 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
     recoverImageTasks(env),
     recoverAccountStatsRollups(env),
     runAdminRequestAuditRetention(env, now),
+    sweepExpiredProxies(env, now),
+    runDueUpstreamBillingProbes(env, now),
+    dispatchAccountInitializations(env),
+    renewDueAccountTokens(env, now),
+    runDueScheduledTests(env, now),
   ])
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
@@ -71,6 +81,11 @@ export async function runScheduledRecovery(env: Env): Promise<void> {
           'image_tasks',
           'account_stats_rollups',
           'admin_request_audit_retention',
+          'proxy_expiry',
+          'upstream_billing_probes',
+          'account_initialization',
+          'account_token_renewal',
+          'scheduled_account_tests',
         ][index],
         name: result.reason instanceof Error ? result.reason.name : 'unknown',
       })

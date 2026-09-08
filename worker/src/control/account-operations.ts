@@ -2,6 +2,7 @@ import type { Context } from 'hono'
 
 import type { Env } from '../env'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { executeAccountUpdate } from './accounts'
 import { dispatchAccountHealthProbeJobs } from './account-lifecycle'
 import { authenticateAdminSession, type AdminActor } from './admin-auth'
 import {
@@ -56,6 +57,7 @@ interface StatusResult {
   success: boolean
   control_version?: number
   enabled?: boolean
+  schedulable?: boolean
   error?: OperationError
 }
 
@@ -68,18 +70,63 @@ interface ProbeResult {
   error?: OperationError
 }
 
+interface EditResult { account_id: string; success: boolean; control_version?: number; error?: string; code?: string }
+async function editAccountBatch(env: Env, key: string, body: Record<string, unknown>) {
+  rejectUnknownKeys(body, ['accounts', 'updates'])
+  const targets = parseAccounts(body.accounts)
+  if (targets.length > 5) throw new GatewayError(400, 'batch_too_large', 'Send general edits in chunks of at most five accounts')
+  if (!body.updates || typeof body.updates !== 'object' || Array.isArray(body.updates)) {
+    throw new GatewayError(400, 'invalid_updates', 'updates must be an object')
+  }
+  const updates = body.updates as Record<string, unknown>
+  rejectUnknownKeys(updates, ['name', 'proxy_id', 'concurrency', 'priority', 'rate_multiplier', 'load_factor',
+    'status', 'schedulable', 'group_ids', 'credentials', 'extra', 'upstream_billing_probe_enabled', 'confirm_mixed_channel_risk'])
+  if (!Object.keys(updates).length) throw new GatewayError(400, 'empty_account_update', 'Provide account fields to update')
+  const results: EditResult[] = []
+  // Each account commits its edit and replay receipt in one D1 transaction.
+  for (const target of targets) {
+    const idempotency = await controlIdempotency('admin.accounts.bulk-edit.v1', `${key}:${target.id}`, { target, updates })
+    try {
+      const previous = await findControlIdempotency(env, idempotency)
+      if (previous) { results.push(parseIdempotentResponse<EditResult>(previous, 'account_bulk_edit')); continue }
+      const updated = await executeAccountUpdate(env, target.id, updates, target.expected_control_version, idempotency, { mergeExtra: true })
+      results.push({ account_id: target.id, success: true, control_version: updated.control_version })
+    } catch (error) {
+      // A concurrent retry may have committed the same transaction first.
+      try {
+        const recovered = await findControlIdempotency(env, idempotency)
+        if (recovered) { results.push(parseIdempotentResponse<EditResult>(recovered, 'account_bulk_edit')); continue }
+      } catch (conflict) { error = conflict }
+      const failure = asGatewayError(error)
+      results.push({ account_id: target.id, success: false, error: failure.message, code: failure.code })
+    }
+  }
+  const success_ids = results.filter(result => result.success).map(result => result.account_id)
+  const failed_ids = results.filter(result => !result.success).map(result => result.account_id)
+  return { success: success_ids.length, failed: failed_ids.length, success_ids, failed_ids, results }
+}
+
 export async function bulkUpdateAdminAccounts(context: Context<Bindings>): Promise<Response> {
   try {
     const actor = await authenticateAdminSession(context.req.raw, context.env)
     const key = requireIdempotencyKey(context.req.raw)
-    const body = await readJsonObject(context.req.raw, MAX_BODY_BYTES)
-    rejectUnknownKeys(body, ['accounts', 'enabled'])
-    if (typeof body.enabled !== 'boolean') {
-      throw new GatewayError(400, 'invalid_enabled', 'enabled must be a boolean')
+    const body = await readJsonObject(context.req.raw, 256 * 1024)
+    if (body.updates !== undefined) return controlSuccess(await editAccountBatch(context.env, key, body))
+    if (new TextEncoder().encode(JSON.stringify(body)).byteLength > MAX_BODY_BYTES) {
+      throw new GatewayError(413, 'request_too_large', 'Account status request exceeds the body limit')
+    }
+    rejectUnknownKeys(body, ['accounts', 'enabled', 'schedulable'])
+    const field = body.schedulable === undefined ? 'enabled' : 'schedulable'
+    if (body.enabled !== undefined && body.schedulable !== undefined) {
+      throw new GatewayError(400, 'ambiguous_status', 'Provide enabled or schedulable, not both')
+    }
+    const value = body[field]
+    if (typeof value !== 'boolean') {
+      throw new GatewayError(400, `invalid_${field}`, `${field} must be a boolean`)
     }
     const accounts = parseAccounts(body.accounts)
-    const requestValue = { accounts, enabled: body.enabled }
-    const idempotency = await controlIdempotency('admin.accounts.bulk-status.v1', key, requestValue)
+    const requestValue = { accounts, [field]: value }
+    const idempotency = await controlIdempotency(`admin.accounts.bulk-${field === 'enabled' ? 'status' : 'schedulable'}.v1`, key, requestValue)
     const replay = await findControlIdempotency(context.env, idempotency)
     if (replay !== null) {
       return controlSuccess(parseIdempotentResponse(replay, 'account_bulk_status'))
@@ -88,10 +135,10 @@ export async function bulkUpdateAdminAccounts(context: Context<Bindings>): Promi
     const results: StatusResult[] = []
     for (const [index, shard] of shards(accounts).entries()) {
       const shardIdempotency = await childIdempotency(idempotency, index, {
-        operation: 'bulk-status', accounts: shard, enabled: body.enabled,
+        operation: 'bulk-status', accounts: shard, [field]: value,
       })
       results.push(...await applyStatusShard(
-        context.env, actor, shardIdempotency, shard, body.enabled, Date.now(),
+        context.env, actor, shardIdempotency, shard, value, Date.now(), field,
       ))
     }
     const response = statusResponse(results)
@@ -285,10 +332,13 @@ async function applyStatusShard(
   accounts: AccountOperationInput[],
   enabled: boolean,
   now: number,
+  field: 'enabled' | 'schedulable' = 'enabled',
 ): Promise<StatusResult[]> {
   const replay = await findControlIdempotency(env, idempotency)
   if (replay !== null) return parseIdempotentResponse(replay, 'account_bulk_status_shard')
-  const action = enabled ? 'account.enable' : 'account.disable'
+  const action = field === 'schedulable'
+    ? 'account.schedulable'
+    : enabled ? 'account.enable' : 'account.disable'
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
     const rows = await loadAccounts(env, accounts)
     const results: StatusResult[] = accounts.map((input) => {
@@ -304,7 +354,7 @@ async function applyStatusShard(
         account_id: row.id,
         success: true,
         control_version: row.control_version + 1,
-        enabled,
+        [field]: enabled,
       }
     })
     const successful = results.filter((result): result is StatusResult & { control_version: number } =>
@@ -315,13 +365,13 @@ async function applyStatusShard(
     ]
     if (successful.length > 0) {
       statements.push(
-        statusShardUpdate(env, idempotency, successful, enabled, now),
+        statusShardUpdate(env, idempotency, successful, enabled, now, field),
         accountAuditBatchInsert(
           env, actor, idempotency, action,
           successful.map((result) => ({
             accountId: result.account_id,
             version: result.control_version,
-            metadata: { enabled },
+            metadata: { [field]: enabled },
           })),
           now,
         ),
@@ -448,8 +498,19 @@ function statusShardUpdate(
   results: Array<StatusResult & { control_version: number }>,
   enabled: boolean,
   now: number,
+  field: 'enabled' | 'schedulable' = 'enabled',
 ): D1PreparedStatement {
   const ids = results.map(() => '?').join(', ')
+  if (field === 'schedulable') {
+    return env.DB.prepare(
+      `UPDATE accounts
+          SET ui_config_json = json_set(ui_config_json, '$.schedulable', json(?)),
+              config_version = config_version + 1, control_version = control_version + 1, updated_at_ms = ?
+        WHERE id IN (${ids}) AND EXISTS (
+          SELECT 1 FROM admin_account_operation_guards WHERE scope = ? AND idempotency_key_hash = ?
+        )`,
+    ).bind(JSON.stringify(enabled), now, ...results.map(result => result.account_id), idempotency.scope, idempotency.key_hash)
+  }
   return env.DB.prepare(
     `UPDATE accounts
         SET enabled = ?, config_version = config_version + 1,
@@ -479,7 +540,8 @@ function resetStatusUpdate(
   const ids = results.map(() => '?').join(', ')
   return env.DB.prepare(
     `UPDATE accounts
-        SET config_version = config_version + 1,
+        SET ui_config_json = json_remove(ui_config_json, '$.rate_limited_at', '$.rate_limit_reset_at'),
+            config_version = config_version + 1,
             control_version = control_version + 1,
             health_status = 'unknown', last_checked_at_ms = NULL,
             last_latency_ms = NULL, last_health_error = NULL,

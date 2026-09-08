@@ -111,6 +111,30 @@ function seedCatalog(raw: any): void {
 }
 
 describe('model plaza HTTP contract', () => {
+  it('reflects original-form model routing, whitelist changes and explicit closure without exposing private configuration', async () => {
+    const test = await fixture()
+    try {
+      setSettings(test.raw, true, false)
+      test.raw.exec("DELETE FROM account_models WHERE account_id='account-public'")
+      const set = (value: unknown) => test.raw.prepare("UPDATE accounts SET ui_config_json=? WHERE id='account-public'").run(JSON.stringify(value))
+      const read = async () => (await (await app().request('/model-plaza', undefined, test.env)).json() as any).data
+      set({ original_model_routing: true, credentials: { model_mapping: { 'secret-upstream-model': 'mapped-private-name' } } })
+      const available = await read()
+      expect(available.groups).toHaveLength(1)
+      expect(available.groups[0].models[0].name).toBe('friendly-alias')
+      expect(JSON.stringify(available)).not.toContain('mapped-private-name')
+      set({ original_model_routing: true, credentials: { model_mapping: { excluded: 'other' } } })
+      expect((await read()).groups).toEqual([])
+      set({ original_model_routing: true, credentials: { model_mapping: {} }, schedulable: false })
+      expect((await read()).groups).toEqual([])
+      set({ original_model_routing: false, credentials: { model_mapping: {} } })
+      expect((await read()).groups).toEqual([])
+      set({ original_model_routing: true, credentials: { model_mapping: { 'group-override': 'private-target' } } })
+      test.raw.exec("UPDATE group_models SET upstream_name_override='group-override' WHERE group_id='public-group'")
+      expect((await read()).groups).toHaveLength(1)
+    } finally { test.raw.close() }
+  })
+
   it('fails closed when settings are missing/disabled and requires auth when configured', async () => {
     const test = await fixture()
     expect((await app().request('/model-plaza', undefined, test.env)).status).toBe(404)

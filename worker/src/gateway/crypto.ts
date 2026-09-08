@@ -16,7 +16,7 @@ export async function apiKeyDigest(rawKey: string, pepper: string): Promise<stri
 }
 
 export async function encryptCredential(
-  credential: UpstreamCredential,
+  credential: UpstreamCredential | Record<string, unknown>,
   masterKey: string,
   aad: string,
 ): Promise<{ nonce_b64: string; ciphertext_b64: string }> {
@@ -31,12 +31,12 @@ export async function encryptCredential(
   return { nonce_b64: toBase64(nonce), ciphertext_b64: toBase64(new Uint8Array(ciphertext)) }
 }
 
-export async function decryptCredential(
+export async function decryptCredentialPayload(
   nonceB64: string,
   ciphertextB64: string,
   masterKey: string,
   aad: string,
-): Promise<UpstreamCredential> {
+): Promise<Record<string, unknown>> {
   try {
     const key = await deriveEncryptionKey(masterKey)
     const plaintext = await crypto.subtle.decrypt(
@@ -51,13 +51,11 @@ export async function decryptCredential(
     const parsed: unknown = JSON.parse(decoder.decode(plaintext))
     if (
       parsed === null ||
-      typeof parsed !== 'object' ||
-      typeof (parsed as { api_key?: unknown }).api_key !== 'string' ||
-      (parsed as { api_key: string }).api_key.length === 0
+      typeof parsed !== 'object' || Array.isArray(parsed)
     ) {
       throw new Error('credential payload is invalid')
     }
-    return parsed as UpstreamCredential
+    return parsed as Record<string, unknown>
   } catch (error) {
     console.error('failed to decrypt upstream credential', {
       name: error instanceof Error ? error.name : 'unknown',
@@ -69,6 +67,16 @@ export async function decryptCredential(
       'server_error',
     )
   }
+}
+
+/** Token-based executors keep their existing required API-key contract. Other
+ * credential kinds must explicitly validate the generic decrypted payload. */
+export async function decryptCredential(nonceB64:string,ciphertextB64:string,masterKey:string,aad:string):Promise<UpstreamCredential> {
+  const parsed=await decryptCredentialPayload(nonceB64,ciphertextB64,masterKey,aad)
+  if(typeof parsed.api_key!=='string' || !parsed.api_key.length) {
+    throw new GatewayError(503,'credential_unavailable','Upstream account credential is unavailable','server_error')
+  }
+  return parsed as unknown as UpstreamCredential
 }
 
 export async function sha256Hex(value: string): Promise<string> {

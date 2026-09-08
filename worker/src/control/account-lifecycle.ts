@@ -1,3 +1,6 @@
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
+import { fetchAccountProxy } from '../gateway/proxy-fetch'
+import { accountNotExpiredSql } from '../gateway/account-expiry'
 import type { Env, PlatformEvent } from '../env'
 import { decryptCredential, sha256Hex } from '../gateway/crypto'
 import {
@@ -81,6 +84,7 @@ interface ProbeJobRow {
 }
 
 interface ProbeAccountRow {
+  proxy_id: string | null
   id: string
   platform: ProviderPlatform
   protocol: ProviderProtocol
@@ -508,7 +512,7 @@ async function dispatchJob(env: Env, job: DispatchJobRow | ProbeJobRow, nowMs: n
 async function loadProbeAccount(env: Env, jobId: string, runToken: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT a.id, a.platform, a.protocol, a.auth_scheme, a.base_url,
-            a.provider_config_json, a.config_version, a.credential_ref,
+            a.provider_config_json, CAST(json_extract(a.ui_config_json, '$.proxy_id') AS TEXT) AS proxy_id, a.config_version, a.credential_ref,
             a.health_probe_generation, a.consecutive_health_failures,
             secret.id AS secret_id, secret.key_version,
             secret.nonce_b64, secret.ciphertext_b64
@@ -558,13 +562,16 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
   let healthStatus: ProbeResult['healthStatus'] = 'unhealthy'
   let healthError: string | null = null
   try {
-    const response = await fetch(plan.url, {
+    const init: RequestInit = {
       method: plan.method,
       headers: plan.headers,
       redirect: 'manual',
       cache: 'no-store',
       signal: controller.signal,
-    })
+    }
+    const response = account.proxy_id && account.proxy_id !== '0'
+      ? await fetchAccountProxy(env, account.proxy_id, new URL(plan.url), init, controller.signal)
+      : await fetch(plan.url, init)
     if (response.ok) healthStatus = 'healthy'
     else healthError = `Upstream returned HTTP ${response.status}`
     try {
@@ -573,7 +580,7 @@ async function runProviderProbe(env: Env, account: ProbeAccountRow, startedAtMs:
       // Body cleanup must never replace the already observed health result.
     }
   } catch (error) {
-    healthError = error instanceof DOMException && error.name === 'AbortError'
+    healthError = controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
       ? 'Upstream probe timed out'
       : 'Upstream probe failed'
   } finally {
@@ -913,7 +920,7 @@ function poolMembersStatement(env: Env, target: PoolTargetRow): D1PreparedStatem
        JOIN models m ON m.id = am.model_id AND m.platform = a.platform
        JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = am.model_id
        CROSS JOIN system_settings settings
-      WHERE ag.group_id = ? AND a.enabled = 1 AND a.health_status <> 'unhealthy'
+      WHERE ag.group_id = ? AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()} AND a.health_status <> 'unhealthy'
         AND (g.platform = a.platform OR g.platform = 'composite')
         AND g.enabled = 1 AND m.enabled = 1 AND gm.enabled = 1 AND ${capability} = 1
       ORDER BY priority ASC, a.id ASC`,

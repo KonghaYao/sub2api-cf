@@ -743,9 +743,9 @@ function adaptWorkerFinancialEvent(event: WorkerFinancialEvent): BalanceHistoryI
  * @returns Number of migrated keys
  */
 export async function replaceGroup(
-  userId: number,
-  oldGroupId: number,
-  newGroupId: number
+  userId: number | string,
+  oldGroupId: number | string,
+  newGroupId: number | string
 ): Promise<{ migrated_keys: number }> {
   const { data } = await apiClient.post<{ migrated_keys: number }>(
     `/admin/users/${userId}/replace-group`,

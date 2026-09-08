@@ -39,6 +39,43 @@ function poolWithTwoAccounts() {
 }
 
 describe("pool state machine", () => {
+  it("preserves configured load factor on partial account updates and clears it on authoritative sync", () => {
+    const configured = applyPoolCommand(poolWithAccount(2), {
+      schema_version: 1, type: "upsert_account", account_id: "account-1",
+      enabled: true, max_concurrency: 2, load_factor: 10,
+    }, 1100).state;
+    const updated = applyPoolCommand(configured, {
+      schema_version: 1, type: "upsert_account", account_id: "account-1",
+      enabled: true, max_concurrency: 3,
+    }, 1200).state;
+    expect(updated.accounts["account-1"]).toMatchObject({ max_concurrency: 3, load_factor: 10 });
+    const cleared = applyPoolCommand(updated, {
+      schema_version: 1, type: "sync_accounts", config_revision: 1, config_fingerprint: "1".repeat(64),
+      accounts: [{ account_id: "account-1", max_concurrency: 3, priority: 0, weight: 1 }],
+    }, 1300).state;
+    expect(cleared.accounts["account-1"].load_factor).toBeUndefined();
+  });
+
+  it("uses load factor for relative load without increasing actual concurrency slots", () => {
+    let state = applyPoolCommand(createPoolMachineState(), {
+      schema_version: 1, type: "sync_accounts", config_revision: 1, config_fingerprint: "1".repeat(64),
+      accounts: [
+        { account_id: "a", max_concurrency: 2, priority: 0, weight: 1, load_factor: 1 },
+        { account_id: "b", max_concurrency: 2, priority: 0, weight: 1, load_factor: 10 },
+      ],
+    }, 1000).state;
+    const selected: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const result = applyPoolCommand(state, { schema_version: 1, type: "reserve", request_id: `factor-${i}`, lease_ttl_ms: 5000 }, 1100);
+      state = result.state;
+      selected.push(result.lease!.account_id);
+    }
+    // Both have one active request before reservation three. b's relative load
+    // is lower, but its third slot remains unavailable regardless of factor.
+    expect(selected).toEqual(["a", "b", "b", "a"]);
+    expect(() => applyPoolCommand(state, { schema_version: 1, type: "reserve", request_id: "full", lease_ttl_ms: 5000 }, 1100)).toThrow();
+  });
+
   it("omits accounts excluded by the caller from a reservation", () => {
     const result = applyPoolCommand(
       poolWithTwoAccounts(),

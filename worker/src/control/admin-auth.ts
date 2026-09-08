@@ -1,3 +1,4 @@
+import { isAdminPostQuery } from './read-routes'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../env'
 import { authenticateUserRequest } from '../auth/handler'
@@ -68,6 +69,10 @@ export const requireAdminMutationSecurity: MiddlewareHandler<AdminBindings> = as
   }
   try {
     requireTrustedAdminOrigin(context.req.raw)
+    if (isAdminPostQuery(new URL(context.req.url).pathname, context.req.method)) {
+      await next()
+      return
+    }
     // Clearing the request-audit log has its own mandatory fresh-TOTP check. Do
     // not allow the generic step-up window (or recovery-session bypass) to stand
     // in for that per-request proof, while retaining the origin boundary above.

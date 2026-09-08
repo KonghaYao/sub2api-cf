@@ -564,11 +564,10 @@ export async function getStats(id: number): Promise<{
  * @returns Paginated list of API keys in the group
  */
 export async function getGroupApiKeys(
-  id: number,
+  id: number | string,
   page: number = 1,
   pageSize: number = 20
 ): Promise<PaginatedResponse<any>> {
-  requireLegacyGroupFeature('Group API key listing')
   const { data } = await apiClient.get<PaginatedResponse<any>>(`/admin/groups/${id}/api-keys`, {
     params: { page, page_size: pageSize }
   })

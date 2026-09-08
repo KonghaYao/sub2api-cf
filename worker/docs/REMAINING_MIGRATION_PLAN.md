@@ -1,3 +1,7 @@
+> Current work: [Admin core reimplementation](ADMIN_CORE_REIMPLEMENTATION.md).
+> The 2026-09-07 user requirement preserves all original frontend capabilities;
+> historical removal/hiding/defer-as-complete decisions below are superseded.
+
 # Remaining Cloudflare migration plan
 
 This plan orders the remaining work by whether the Go service can be safely

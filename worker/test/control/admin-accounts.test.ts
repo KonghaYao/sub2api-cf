@@ -24,6 +24,10 @@ class Statement {
   bind(...values: unknown[]) { this.values = values; return this }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes('SET health_status = ?') && this.sql.includes('RETURNING id')) {
+      const updated = await this.run()
+      return updated.meta.changes === 1 ? { id: this.values[4] } as T : null
+    }
     if (this.sql.includes('FROM control_idempotency')) {
       return (this.db.idempotency.get(`${this.values[0]}:${this.values[1]}`) ?? null) as T | null
     }
@@ -31,7 +35,8 @@ class Statement {
       return this.db.project(String(this.values[0])) as T | null
     }
     if (this.sql.includes('SELECT COUNT(*) AS total') && this.sql.includes('FROM "groups"')) {
-      const [expectedPlatform, ...ids] = this.values
+      const [expectedPlatform, rawIds] = this.values
+      const ids = JSON.parse(String(rawIds)) as string[]
       const platforms = ids
         .map((id) => this.db.groups.get(String(id)))
         .filter((platform): platform is string => platform !== undefined)
@@ -142,6 +147,13 @@ class Statement {
       if (row.key_version !== expected) throw new Error('CHECK constraint failed: key_version > 0')
       Object.assign(row, { key_version, nonce_b64, ciphertext_b64, updated_at_ms }); return result()
     }
+    if (this.sql.includes('INSERT INTO account_groups') && this.sql.includes('json_each')) {
+      const [account_id, created_at_ms, updated_at_ms, rawLinks] = this.values
+      for (const link of JSON.parse(String(rawLinks))) {
+        this.db.groupLinks.set(`${account_id}:${link.group_id}`, { account_id, ...link, created_at_ms, updated_at_ms, control_version: 0 })
+      }
+      return result()
+    }
     if (this.sql.includes('INSERT INTO account_groups')) {
       const [account_id, group_id, priority, weight, created_at_ms, updated_at_ms] = this.values
       const key = `${account_id}:${group_id}`; const old = this.db.groupLinks.get(key)
@@ -163,6 +175,15 @@ class Statement {
     if (this.sql.includes('DELETE FROM account_models')) {
       this.deleteRelations(this.db.modelCaps); return result()
     }
+    if (this.sql.includes('INSERT INTO account_initialization_jobs')) {
+      const reset = this.sql.includes('ON CONFLICT')
+      const [id, first, second, third] = this.values
+      if (!reset && this.db.initialization.has(String(id))) throw new Error('UNIQUE constraint failed')
+      this.db.initialization.set(String(id), { account_id: id, credential_key_version: reset ? first : 1,
+        created_at_ms: reset ? second : first, updated_at_ms: reset ? third : second,
+        kind: reset ? 'openai_responses' : third, status: 'pending', lease_token: null, lease_until_ms: 0 })
+      return result()
+    }
     if (this.sql.includes('INSERT INTO control_idempotency')) {
       const [scope, keyHash, requestHash, resourceType, resourceId, responseJson, createdAt, expiresAt] = this.values
       this.db.idempotency.set(`${scope}:${keyHash}`, { scope, key_hash: keyHash, request_hash: requestHash, resource_type: resourceType, resource_id: resourceId, response_json: responseJson, created_at_ms: createdAt, expires_at_ms: expiresAt })
@@ -183,17 +204,18 @@ class MemoryDb {
   groupLinks = new Map<string, Row>()
   modelCaps = new Map<string, Row>()
   idempotency = new Map<string, Row>()
+  initialization = new Map<string, Row>()
   groups = new Map([['group-a', 'openai'], ['group-b', 'openai']])
   models = new Map([['model-a', 'openai'], ['model-b', 'openai']])
   failOn?: string
   beforeHealth?: () => void
   prepare(sql: string) { return new Statement(sql, this) }
   async batch(statements: Statement[]) {
-    const snapshot = structuredClone({ accounts: this.accounts, secrets: this.secrets, groupLinks: this.groupLinks, modelCaps: this.modelCaps, idempotency: this.idempotency })
+    const snapshot = structuredClone({ accounts: this.accounts, secrets: this.secrets, groupLinks: this.groupLinks, modelCaps: this.modelCaps, idempotency: this.idempotency, initialization: this.initialization })
     try { return await Promise.all(statements.map((statement) => statement.run())) }
     catch (error) {
       this.accounts = snapshot.accounts; this.secrets = snapshot.secrets; this.groupLinks = snapshot.groupLinks
-      this.modelCaps = snapshot.modelCaps; this.idempotency = snapshot.idempotency; throw error
+      this.modelCaps = snapshot.modelCaps; this.idempotency = snapshot.idempotency; this.initialization = snapshot.initialization; throw error
     }
   }
   project(id: string): Row | null {

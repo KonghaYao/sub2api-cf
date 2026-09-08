@@ -1826,12 +1826,16 @@ const cols = computed(() =>
 )
 
 const handleEdit = (a: Account) => { edAcc.value = a; showEdit.value = true }
+let menuAnchor: HTMLElement | null = null
+let menuAnchorPosition = { top: 0, left: 0 }
 const openMenu = (a: Account, e: MouseEvent) => {
   menu.acc = a
 
   const target = e.currentTarget as HTMLElement
+  menuAnchor = target
   if (target) {
     const rect = target.getBoundingClientRect()
+    menuAnchorPosition = { top: rect.top, left: rect.left }
     const menuWidth = 200
     const menuHeight = 240
     const padding = 8
@@ -2105,7 +2109,7 @@ const handleBulkToggleSchedulable = async (schedulable: boolean) => {
   const accountIds = [...selIds.value]
   try {
     if (cloudflareWorkerContract.value) {
-      const result = await adminAPI.accounts.bulkSetEnabled(
+      const result = await adminAPI.accounts.bulkSetSchedulable(
         selectedWorkerOperationAccounts(), schedulable
       )
       const successful = new Map(result.results
@@ -2115,9 +2119,7 @@ const handleBulkToggleSchedulable = async (schedulable: boolean) => {
         const updated = successful.get(String(account.id))
         return updated === undefined ? account : {
           ...account,
-          enabled: schedulable,
           schedulable,
-          status: schedulable ? 'active' : 'inactive',
           control_version: updated.control_version
         } as Account
       })
@@ -2583,8 +2585,9 @@ const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
   togglingSchedulable.value = a.id
   try {
-    const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable)
-    updateSchedulableInList([a.id], updated?.schedulable ?? nextSchedulable)
+    const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable,
+      (a as Account & { control_version?: number }).control_version)
+    patchAccountInList(updated)
     enterAutoRefreshSilentWindow()
   } catch (error) {
     console.error('Failed to toggle schedulable:', error)
@@ -2627,8 +2630,16 @@ const proxyExpiryText = (p: AccountProxy): string => {
 }
 
 // 表格滚动时关闭行操作菜单，并让顶部工具菜单继续贴紧触发按钮。
-const handleScroll = () => {
-  menu.show = false
+const handleScroll = (event?: Event) => {
+  if (event?.target instanceof Element && event.target.closest('.action-menu-content')) return
+  // A scroll queued before the click may arrive after opening the menu. Close
+  // only when scrolling actually moves the anchor from its opening position.
+  if (menu.show) {
+    const rect = menuAnchor?.isConnected ? menuAnchor.getBoundingClientRect() : null
+    if (!rect || Math.abs(rect.top - menuAnchorPosition.top) > 0.5 || Math.abs(rect.left - menuAnchorPosition.left) > 0.5) {
+      menu.show = false
+    }
+  }
   if (showAccountToolsDropdown.value) updateAccountToolsDropdownPosition()
 }
 

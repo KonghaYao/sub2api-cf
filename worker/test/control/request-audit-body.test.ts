@@ -40,6 +40,9 @@ describe('admin request audit body capture', () => {
   })
 
   it.each([
+    ['/api/v1/admin/openai/generate-auth-url', '{"redirect_uri":"https://callback.test"}'],
+    ['/api/v1/admin/openai/exchange-code', '{"code":"one-use-secret","state":"private-state"}'],
+    ['/api/v1/admin/openai/refresh-token', '{"rt":"refresh-secret"}'],
     ['/api/v1/admin/accounts', '{"label":"safe"}'],
     ['/api/v1/admin/accounts/account-one/credentials', '{"value":"secret"}'],
     ['/api/v1/admin/oauth-providers/github', '{"client_id":"id"}'],

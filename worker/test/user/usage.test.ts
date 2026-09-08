@@ -17,7 +17,7 @@ afterEach(() => {
 })
 
 async function fixture() {
-  const {raw,d1}=createSqliteD1(); applyMigrations(raw); const now=TEST_NOW
+  const {raw,d1}=createSqliteD1(); applyMigrations(raw); const now=Date.now()
   for(const id of ['alice','bob']) raw.prepare(`INSERT INTO users(id,email,display_name,created_at_ms,updated_at_ms)VALUES(?,?,?, ?,?)`).run(id,`${id}@test.local`,id,now,now)
   raw.prepare(`INSERT INTO api_keys(id,user_id,key_hash,created_at_ms,updated_at_ms)VALUES('alice-key','alice',?, ?,?)`).run('a'.repeat(64),now,now)
   raw.prepare(`INSERT INTO api_keys(id,user_id,key_hash,created_at_ms,updated_at_ms)VALUES('bob-key','bob',?, ?,?)`).run('b'.repeat(64),now,now)
@@ -28,6 +28,23 @@ async function fixture() {
   return {env,headers:{authorization:`Bearer ${access}`}}
 }
 describe('user usage HTTP contract',()=>{
+ it.each([
+  ['Asia/Shanghai', '2026-09-07T16:05:00Z', '2026-09-08', '2026-09-07T16:00:00Z', '2026-09-08T16:00:00Z'],
+  ['America/New_York', '2026-03-08T16:00:00Z', '2026-03-08', '2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z'],
+  ['America/New_York', '2026-11-01T17:00:00Z', '2026-11-01', '2026-11-01T04:00:00Z', '2026-11-02T05:00:00Z'],
+ ])('aligns key history with local calendar boundaries in %s at %s',async(timezone,now,date,start,end)=>{
+  vi.setSystemTime(new Date(now))
+  const t=await fixture(), app=createApp()
+  await t.env.DB.prepare("DELETE FROM usage_projection WHERE user_id='alice'").run()
+  for(const [id,at] of [['before',Date.parse(start)-1],['start',Date.parse(start)],['last',Date.parse(end)-1],['next',Date.parse(end)]] as const){
+   await t.env.DB.prepare(`INSERT INTO usage_projection(event_id,request_id,user_id,api_key_id,model,input_tokens,output_tokens,amount_micros,occurred_at_ms,projected_at_ms) VALUES(?,?,'alice','alice-key','gpt-test',1,1,1000000,?,?)`).bind(id,id,at,at).run()
+  }
+  const response=await app.request(`/api/v1/user/api-keys/alice-key/usage/daily?days=1&timezone=${encodeURIComponent(timezone)}`,{headers:t.headers},t.env)
+  expect(response.status,await response.clone().text()).toBe(200)
+  expect(await response.json()).toMatchObject({data:{start_date:date,end_date:date,items:[{date,requests:2,actual_cost:2}]}})
+  const trend=await app.request(`/api/v1/usage/dashboard/trend?start_date=${date}&end_date=${date}&timezone=${encodeURIComponent(timezone)}`,{headers:t.headers},t.env)
+  expect(await trend.json()).toMatchObject({data:{trend:[{date,requests:2,actual_cost:2}]}})
+ })
  it('isolates logs/details and converts micros for dashboard aggregates',async()=>{const t=await fixture(),app=createApp(); const list=await app.request('/api/v1/usage?page=1&page_size=20&model=gpt-test',{headers:t.headers},t.env); expect((await list.json() as any).data).toMatchObject({total:1,items:[{id:'alice-event',actual_cost:1.5,input_tokens:10}]}); expect((await app.request('/api/v1/usage/bob-event',{headers:t.headers},t.env)).status).toBe(404); const stats=await app.request('/api/v1/usage/dashboard/stats',{headers:t.headers},t.env); await expect(stats.json()).resolves.toMatchObject({data:{total_requests:1,total_actual_cost:1.5,total_tokens:15,total_api_keys:1}}); expect((await app.request('/api/v1/usage/stats?period=quarter',{headers:t.headers},t.env)).status).toBe(400) })
  it('returns UTC snapshot flags, owner-scoped key data, and honest empty errors',async()=>{const t=await fixture(),app=createApp(); await expect((await app.request('/api/v1/usage/dashboard/trend?start_date=2026-09-04&end_date=2026-09-04',{headers:t.headers},t.env)).json()).resolves.toMatchObject({data:{granularity:'day',trend:[{date:'2026-09-04',actual_cost:1.5}]}}); await expect((await app.request('/api/v1/usage/dashboard/models',{headers:t.headers},t.env)).json()).resolves.toMatchObject({data:{models:[{model:'gpt-test',actual_cost:1.5}]}}); const snapshot=await app.request('/api/v1/usage/dashboard/snapshot-v2?include_trend=false&include_model_stats=true&include_group_stats=true',{headers:t.headers},t.env); const snapshotJson=await snapshot.json() as any; expect(snapshotJson.data).toMatchObject({models:[{model:'gpt-test'}],groups:[{group_id:'group-a'}]}); expect(snapshotJson.data).not.toHaveProperty('trend'); const daily=await app.request('/api/v1/user/api-keys/alice-key/usage/daily?days=1',{headers:t.headers},t.env); await expect(daily.json()).resolves.toMatchObject({data:{days:1,items:[{actual_cost:1.5}]}}); expect((await app.request('/api/v1/user/api-keys/bob-key/usage/daily',{headers:t.headers},t.env)).status).toBe(404); const batch=await app.request('/api/v1/usage/dashboard/api-keys-usage',{method:'POST',headers:{...t.headers,'content-type':'application/json'},body:JSON.stringify({api_key_ids:['alice-key']})},t.env); await expect(batch.json()).resolves.toMatchObject({data:{stats:{'alice-key':{total_actual_cost:1.5}}}}); await expect((await app.request('/api/v1/usage/errors',{headers:t.headers},t.env)).json()).resolves.toMatchObject({data:{items:[],has_more:false,next_cursor:null}}) })
  it('offers stable bounded cursor pagination and rejects unbounded legacy pages',async()=>{

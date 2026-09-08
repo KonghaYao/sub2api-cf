@@ -1,3 +1,6 @@
+import { accountNotRateLimitedSql } from '../gateway/account-rate-limit'
+import { accountNotExpiredSql } from '../gateway/account-expiry'
+import { accountModelAllowedSql } from '../gateway/account-model-policy'
 import { deterministicUuid } from '../control/http'
 import { sha256Hex } from '../gateway/crypto'
 import { GatewayError } from '../gateway/errors'
@@ -52,6 +55,7 @@ export interface NewMediaTask {
   now: number
   providerJob?: {
     accountId: string
+    upstreamModel?: string
     submissionKey: string
     deadlineAtMs: number
   }
@@ -134,17 +138,19 @@ export async function listAvailableMediaModels(
         )
         AND EXISTS (
           SELECT 1 FROM account_groups
-          JOIN accounts ON accounts.id = account_groups.account_id
+          JOIN accounts a ON a.id = account_groups.account_id
           JOIN account_secrets
-            ON account_secrets.account_id = accounts.id
-           AND account_secrets.id = accounts.credential_ref
-          JOIN account_models
-            ON account_models.account_id = accounts.id AND account_models.model_id = model.id
-          WHERE account_groups.group_id = group_row.id
-            AND accounts.enabled = 1 AND accounts.platform = 'gemini'
-            AND accounts.protocol = 'gemini' AND accounts.auth_scheme = 'x-goog-api-key'
-            AND accounts.base_url IS NOT NULL AND trim(accounts.base_url) <> ''
-            AND accounts.max_concurrency > 0 AND accounts.health_status <> 'unhealthy'
+            ON account_secrets.account_id = a.id
+           AND account_secrets.id = a.credential_ref
+          LEFT JOIN account_models
+            ON account_models.account_id = a.id AND account_models.model_id = model.id
+          WHERE (account_models.model_id IS NOT NULL OR json_extract(a.ui_config_json, '$.original_model_routing') = 1)
+            AND ${accountModelAllowedSql('COALESCE(group_model.upstream_name_override, model.upstream_name)')}
+            AND account_groups.group_id = group_row.id
+            AND a.enabled = 1 AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1 AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND a.platform = 'gemini'
+            AND a.protocol = 'gemini' AND a.auth_scheme = 'x-goog-api-key'
+            AND a.base_url IS NOT NULL AND trim(a.base_url) <> ''
+            AND a.max_concurrency > 0 AND a.health_status <> 'unhealthy'
         )
       ORDER BY model.public_name`,
   ).bind(groupId).all<{ id: string }>()
@@ -211,12 +217,13 @@ export async function createMediaTask(env: MediaEnv, input: NewMediaTask): Promi
     ),
     ...(input.providerJob === undefined ? [] : [env.DB.prepare(
       `INSERT INTO media_provider_jobs (
-         task_id, provider_account_id, submission_key, phase,
+         task_id, provider_account_id, provider_model, submission_key, phase,
          next_action_at_ms, deadline_at_ms, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, 'submit_pending', ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, 'submit_pending', ?, ?, ?, ?)`,
     ).bind(
       input.id,
       input.providerJob.accountId,
+      input.providerJob.upstreamModel ?? input.manifest.upstream_model,
       input.providerJob.submissionKey,
       input.now,
       input.providerJob.deadlineAtMs,

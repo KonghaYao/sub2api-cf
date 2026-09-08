@@ -252,22 +252,30 @@ export async function createAdminApiKey(context: Context<ControlBindings>): Prom
 }
 
 export async function listAdminApiKeys(context: Context<ControlBindings>): Promise<Response> {
+  return listScopedAdminApiKeys(context, 'user')
+}
+
+export async function listAdminGroupApiKeys(context: Context<ControlBindings>): Promise<Response> {
+  return listScopedAdminApiKeys(context, 'group')
+}
+
+async function listScopedAdminApiKeys(context: Context<ControlBindings>, scope: 'user' | 'group'): Promise<Response> {
   try {
-    const userId = requireResourceId(context.req.param('id'), 'user')
+    const userId = requireResourceId(context.req.param('id'), scope)
     const page = queryInteger(context.req.query('page'), 'page', 1, 1, 1_000_000)
     const pageSize = queryInteger(context.req.query('page_size'), 'page_size', 20, 1, 100)
-    const user = await context.env.DB.prepare('SELECT id, status FROM users WHERE id = ?')
+    const user = await context.env.DB.prepare(scope === 'user' ? 'SELECT id, status FROM users WHERE id = ?' : 'SELECT id FROM "groups" WHERE id = ?')
       .bind(userId)
       .first<{ id: string; status: string }>()
-    if (user === null) throw new GatewayError(404, 'user_not_found', 'User was not found')
+    if (user === null) throw new GatewayError(404, `${scope}_not_found`, `${scope === 'group' ? 'Group' : 'User'} was not found`)
 
     const [countResult, rowsResult] = await context.env.DB.batch([
       context.env.DB.prepare(
-        'SELECT COUNT(*) AS total FROM api_keys WHERE user_id = ? AND revoked_at_ms IS NULL',
+        `SELECT COUNT(*) AS total FROM api_keys WHERE ${scope}_id = ? AND revoked_at_ms IS NULL`,
       ).bind(userId),
       context.env.DB.prepare(
         `${apiKeySelect()}
-          WHERE k.user_id = ? AND k.revoked_at_ms IS NULL
+          WHERE k.${scope}_id = ? AND k.revoked_at_ms IS NULL
           ORDER BY k.created_at_ms DESC, k.id DESC
           LIMIT ? OFFSET ?`,
       ).bind(userId, pageSize, (page - 1) * pageSize),

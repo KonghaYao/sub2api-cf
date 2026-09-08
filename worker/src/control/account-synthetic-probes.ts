@@ -1,3 +1,4 @@
+import { fetchAccountProxy } from '../gateway/proxy-fetch'
 import type { Context } from 'hono'
 
 import type { Env, PlatformEvent } from '../env'
@@ -101,6 +102,7 @@ interface DispatchJobRow extends AccountSyntheticProbePayload {
 }
 
 interface ProbeAccountRow extends JobRow {
+  proxy_id: string | null
   platform: ProviderPlatform
   protocol: ProviderProtocol
   auth_scheme: ProviderAuthScheme
@@ -612,7 +614,7 @@ function createEvent(
 async function loadProbeAccount(env: Env, id: string, token: string): Promise<ProbeAccountRow | null> {
   return env.DB.prepare(
     `SELECT job.*, account.platform, account.protocol, account.auth_scheme,
-            account.base_url, account.provider_config_json,
+            account.base_url, account.provider_config_json, CAST(json_extract(account.ui_config_json, '$.proxy_id') AS TEXT) AS proxy_id,
             secret.id AS secret_id, secret.key_version, secret.nonce_b64, secret.ciphertext_b64,
             monitor.consecutive_failures, monitor.alert_state
        FROM account_synthetic_probe_jobs job
@@ -652,11 +654,14 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.min(plan.timeout_ms, 8_000))
   try {
-    const response = await fetch(plan.url, {
+    const init: RequestInit = {
       method: plan.method, headers: plan.headers,
       body: plan.body === undefined ? undefined : JSON.stringify(plan.body),
       redirect: 'manual', cache: 'no-store', signal: controller.signal,
-    })
+    }
+    const response = account.proxy_id && account.proxy_id !== '0'
+      ? await fetchAccountProxy(env, account.proxy_id, new URL(plan.url), init, controller.signal)
+      : await fetch(plan.url, init)
     if (response.ok) {
       const body = await readBoundedProviderJson(response)
       if (!validProviderResponse(account.platform, account.capability, body)) {
@@ -674,7 +679,7 @@ async function observeProvider(env: Env, account: ProbeAccountRow, startedAtMs: 
   } catch (error) {
     return observation(
       'failed',
-      error instanceof DOMException && error.name === 'AbortError'
+      controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
         ? 'upstream_timeout' : 'upstream_transport_failed',
       null,
       startedAtMs,

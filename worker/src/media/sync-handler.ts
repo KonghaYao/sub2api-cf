@@ -1,3 +1,4 @@
+import { fetchAccountProxy } from '../gateway/proxy-fetch'
 import type { Context } from 'hono'
 import type { Env } from '../env'
 import { decryptCredential } from '../gateway/crypto'
@@ -241,7 +242,15 @@ async function executeSyncImages(
           route.model.model_id,
           'images',
           accountId,
+          route.model.upstream_name,
         )
+        const selectedUpstreamModel = account.upstream_model_name ?? route.model.upstream_name
+        const upstreamFetcher: typeof fetch = account.proxy_id
+          ? (input, init) => fetchAccountProxy(context.env, account.proxy_id!,
+              new URL(input instanceof Request ? input.url : String(input)),
+              input instanceof Request ? { method: input.method, headers: input.headers, body: input.body, signal: input.signal, ...init } : init ?? {},
+              context.req.raw.signal)
+          : context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch
         if (!context.env.CREDENTIALS_MASTER_KEY) {
           throw new GatewayError(503, 'gateway_not_configured', 'Credential secret is not configured', 'server_error')
         }
@@ -261,9 +270,9 @@ async function executeSyncImages(
             account,
             credential,
             publicModel: manifest.model,
-            upstreamModel: route.model.upstream_name,
+            upstreamModel: selectedUpstreamModel,
             clientHeaders: context.req.raw.headers,
-            fetcher: context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch,
+            fetcher: upstreamFetcher,
             leaseSignal: renewal.signal,
             remainingAccounts: Math.max(0, attempts - attempt - 1),
             waitUntil: (task: Promise<unknown>) => registerExecutionTask(context, task),
@@ -358,7 +367,7 @@ async function executeSyncImages(
               accountId: ownedAccountId,
               priceId: route.model.price_id,
               requestedModel: manifest.model,
-              upstreamModel: route.model.upstream_name,
+              upstreamModel: selectedUpstreamModel,
               amountMicros: customerQuote?.cost.amount_micros ??
                 calculateSyncImageActualCost(pricing, outputBilling.tiers),
               standardCostMicros: calculateSyncImageStandardCost(pricing, outputBilling.tiers),
@@ -410,9 +419,9 @@ async function executeSyncImages(
               account,
               credential,
               publicModel: manifest.model,
-              upstreamModel: route.model.upstream_name,
+              upstreamModel: selectedUpstreamModel,
               clientHeaders: context.req.raw.headers,
-              fetcher: context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch,
+              fetcher: upstreamFetcher,
               leaseSignal: renewal.signal,
               remainingAccounts: Math.max(0, attempts - attempt - 1),
               requestId,
@@ -423,10 +432,10 @@ async function executeSyncImages(
               operation,
               account,
               credential,
-              upstreamModel: route.model.upstream_name,
+              upstreamModel: selectedUpstreamModel,
               enforceProviderModeration: context.env.SYNC_IMAGE_MODERATOR === undefined,
               clientHeaders: context.req.raw.headers,
-              fetcher: context.env.SYNC_IMAGE_UPSTREAM_FETCH ?? fetch,
+              fetcher: upstreamFetcher,
               leaseSignal: renewal.signal,
               requestId,
             })

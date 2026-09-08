@@ -68,7 +68,7 @@ describe('UpstreamBillingRateCell', () => {
     vi.useRealTimers()
   })
 
-  it('recomputes the current effective rate and keeps the icon-only probe action', async () => {
+  it.each(['09:00', '9:00'])('recomputes the current effective rate with peak start %s and keeps the icon-only probe action', async peakStart => {
     const wrapper = mount(UpstreamBillingRateCell, {
       props: {
         account: makeAccount({
@@ -76,7 +76,7 @@ describe('UpstreamBillingRateCell', () => {
             upstream_billing_probe_enabled: true,
             upstream_billing_probe: {
               status: 'ok',
-              data: billingData,
+              data: { ...billingData, peak_start: peakStart },
               received_at: '2026-07-13T00:00:00Z',
               fresh_until: '2026-07-14T00:00:00Z',
               last_attempt_at: '2026-07-13T00:00:00Z',

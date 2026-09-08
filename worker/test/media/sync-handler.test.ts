@@ -124,6 +124,47 @@ function configureCompositeOpenAiQuota(test: Awaited<ReturnType<typeof fixture>>
 }
 
 describe('synchronous image handler', () => {
+  it.each(['openai', 'codex'] as const)('does not bypass a failed account proxy for %s images or settle its hold', async platform => {
+    const test = await fixture(platform)
+    try {
+      test.raw.exec("INSERT INTO proxies(id,name,protocol,host,port,status,nonce_b64,ciphertext_b64,created_at_ms,updated_at_ms) VALUES('image-proxy','Images','https','proxy.test',443,'active','','',1,1)")
+      test.raw.exec("UPDATE accounts SET ui_config_json=json_set(ui_config_json,'$.proxy_id','image-proxy')")
+      const response = await app().request('/v1/images/generations', {
+        method: 'POST', headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'bound image' }),
+      }, test.env as never)
+      expect(response.status).toBeGreaterThanOrEqual(500)
+      expect(test.upstreamFetch).not.toHaveBeenCalled()
+      expect(test.cancel).toHaveBeenCalledOnce()
+      expect(test.settle).not.toHaveBeenCalled()
+    } finally { test.raw.close() }
+  })
+
+  it('executes an original-form image account mapping after the group override without manual capability rows', async () => {
+    const test = await fixture()
+    try {
+      test.raw.exec("DELETE FROM account_models; UPDATE group_models SET upstream_name_override='group-image-model'")
+      test.raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true,
+        credentials: { model_mapping: { 'group-image-model': 'account-image-model' } } }))
+      const response = await app().request('/v1/images/generations', { method: 'POST',
+        headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-image-2', prompt: 'draw a square', size: '1024x1024' }),
+      }, test.env as never)
+      expect(response.status, await response.clone().text()).toBe(200)
+      expect(test.upstreamBodies[0].body.model).toBe('account-image-model')
+      expect(test.settle).toHaveBeenCalledTimes(1)
+      expect(test.cancel).not.toHaveBeenCalled()
+      test.raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true,
+        credentials: { model_mapping: { other: 'denied' } } }))
+      const denied = await app().request('/v1/images/generations', { method: 'POST',
+        headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-image-2', prompt: 'draw another square' }),
+      }, test.env as never)
+      expect(denied.status).toBe(503)
+      expect(test.upstreamBodies).toHaveLength(1)
+    } finally { test.raw.close() }
+  })
+
   it.each(['/v1/images/generations', '/images/generations'])('serves %s through the image account pool', async (path) => {
     const test = await fixture()
     const response = await app().request(path, {

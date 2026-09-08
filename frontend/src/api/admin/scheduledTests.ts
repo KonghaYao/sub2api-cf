@@ -16,7 +16,7 @@ import type {
  * @param accountId - Account ID
  * @returns List of scheduled test plans
  */
-export async function listByAccount(accountId: number): Promise<ScheduledTestPlan[]> {
+export async function listByAccount(accountId: number | string): Promise<ScheduledTestPlan[]> {
   const { data } = await apiClient.get<ScheduledTestPlan[]>(
     `/admin/accounts/${accountId}/scheduled-test-plans`
   )

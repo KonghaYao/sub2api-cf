@@ -1,6 +1,22 @@
+import { resolveAccountRequestAuthentication } from './account-request-authentication'
+import { importAgentIdentitySigningKey } from '../gateway/openai-agent-assertion'
+import { claimAccountOAuthRefresh, releaseAccountOAuthRefresh, accountOAuthRefreshLeaseGuard } from './account-oauth-refresh-lock'
+import { refreshAnthropicOAuthToken } from './anthropic-oauth-refresh'
+import { accountInitializationInsert, accountInitializationReset, dispatchAccountInitializations, initializeAccountNow } from './account-initialization'
+import { applyOpenAIAccountPrivacy } from './account-privacy'
 import type { Context } from 'hono'
 import type { Env } from '../env'
-import { decryptCredential, encryptCredential } from '../gateway/crypto'
+import { decryptCredential, decryptCredentialPayload, encryptCredential } from '../gateway/crypto'
+import { fetchAccountProxy } from '../gateway/proxy-fetch'
+import { accountModelPolicy } from '../gateway/account-model-policy'
+import { diagnosticUsesResponses, accountTextDiagnostic } from './account-text-diagnostic'
+import { openAICompactDiagnostic } from './openai-compact-diagnostic'
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
+import { persistOpenAIRateLimit } from '../gateway/openai-rate-limit-persistence'
+import { accountQuotaProjection } from './account-quota-projection'
+import { OPENAI_OAUTH_CLIENT_ID, OpenAITokenEndpointError, requestOpenAITokens } from './openai-oauth-http'
+import { enrichOpenAITokenInfo, openAITokenInfo, type OpenAITokenInfo } from './openai-oauth-profile'
+import { normalizeHeaderOverrideCredentials } from '../gateway/account-header-overrides'
 import { asGatewayError, GatewayError } from '../gateway/errors'
 import {
   buildProviderHealthRequest,
@@ -18,6 +34,7 @@ import {
   controlIdempotencyInsert,
   findControlIdempotency,
   parseIdempotentResponse,
+  type ControlIdempotency,
 } from './idempotency'
 import {
   controlError,
@@ -25,6 +42,7 @@ import {
   deterministicUuid,
   queryInteger,
   readJsonObject,
+  readOptionalJsonObject,
   requireExpectedControlVersion,
   requireIdempotencyKey,
   requireResourceId,
@@ -57,6 +75,8 @@ interface AccountRow {
   updated_at_ms: number
   billing_rate_multiplier_ppm: number
   ui_config_json: string
+  proxy_summary_json?: string | null
+  proxy_fallback_origin_name?: string | null
   secret_id: string
   key_version: number
   nonce_b64: string
@@ -144,6 +164,13 @@ const ACCOUNT_PROJECTION = `
          a.last_checked_at_ms, a.last_latency_ms, a.last_health_error,
          a.created_at_ms, a.updated_at_ms, a.billing_rate_multiplier_ppm,
          a.ui_config_json,
+         (SELECT json_object('id', p.id, 'name', p.name, 'protocol', p.protocol,
+           'host', p.host, 'port', p.port, 'status', p.status,
+           'expires_at', CASE WHEN p.expires_at IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ', p.expires_at, 'unixepoch') END,
+           'fallback_mode', p.fallback_mode, 'backup_proxy_id', p.backup_proxy_id,
+           'expiry_warn_days', p.expiry_warn_days)
+          FROM proxies p WHERE p.id=CAST(json_extract(a.ui_config_json, '$.proxy_id') AS TEXT)) AS proxy_summary_json,
+         (SELECT p.name FROM proxies p WHERE p.id=CAST(json_extract(a.ui_config_json, '$.proxy_fallback_origin_id') AS TEXT)) AS proxy_fallback_origin_name,
          s.id AS secret_id, s.key_version, s.nonce_b64, s.ciphertext_b64,
          COALESCE((
            SELECT json_group_array(json_object(
@@ -255,8 +282,8 @@ export async function listAdminAccounts(context: Context<ControlBindings>): Prom
       status: 'a.enabled',
       rate_multiplier: 'a.billing_rate_multiplier_ppm',
       max_concurrency: 'a.max_concurrency',
-      schedulable: 'a.enabled',
-      priority: "COALESCE(json_extract(a.ui_config_json, '$.priority'), 0)",
+      schedulable: "COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1)",
+      priority: "COALESCE(json_extract(a.ui_config_json, '$.priority'), 50)",
       expires_at: "json_extract(a.ui_config_json, '$.expires_at')",
       created_at: 'a.created_at_ms',
       updated_at: 'a.updated_at_ms',
@@ -708,26 +735,33 @@ function microsToUsd(value: number): number {
 
 export async function createAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
-    const idempotencyKey = requireIdempotencyKey(context.req.raw)
-    const input = parseCreateAccount(await readJsonObject(context.req.raw))
+    const result = await executeAccountCreate(context.env, await readJsonObject(context.req.raw), requireIdempotencyKey(context.req.raw))
+    try { await dispatchAccountInitializations(context.env, result.account.id) } catch { /* Cron recovers pending initialization. */ }
+    return controlSuccess(result.account, result.created ? 201 : 200)
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function executeAccountCreate(env: Env, body: Record<string, unknown>, idempotencyKey: string, initializeAccount = false, receipt?: (id: string) => D1PreparedStatement) {
+    const input = parseCreateAccount(body)
+    if(input.credential.auth_mode==='agentIdentity') await importAgentIdentitySigningKey(input.credential.agent_private_key as string)
     const idempotency = await controlIdempotency('admin.accounts.create.v1', idempotencyKey, input)
-    const previous = await findControlIdempotency(context.env, idempotency)
+    const previous = await findControlIdempotency(env, idempotency)
     if (previous !== null) {
       const replay = safeIdempotentAccount(previous)
-      return controlSuccess(replay)
+      return { account: replay, created: false }
     }
 
     const accountId = await deterministicUuid('admin.accounts.create.v1', idempotencyKey)
     const secretId = await deterministicUuid('admin.account-secrets.create.v1', idempotencyKey)
-    if ((await findAccount(context.env, accountId)) !== null) {
+    if ((await findAccount(env, accountId)) !== null) {
       throw new GatewayError(409, 'idempotency_record_missing', 'Account exists without its idempotency record')
     }
-    await validateLinks(context.env, input.platform, input.group_links, input.model_capabilities)
-    const masterKey = requireCredentialsMasterKey(context.env)
+    await validateLinks(env, input.platform, input.group_links, input.model_capabilities)
+    const masterKey = requireCredentialsMasterKey(env)
     const encrypted = await encryptCredential(
       input.credential,
       masterKey,
-      credentialAad(context.env.ENVIRONMENT, accountId, secretId, 1),
+      credentialAad(env.ENVIRONMENT, accountId, secretId, 1),
     )
     const now = Date.now()
     const safe = accountResponse({
@@ -762,7 +796,7 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
       })),
     })
     const statements: D1PreparedStatement[] = [
-      context.env.DB.prepare(
+      env.DB.prepare(
         `INSERT INTO accounts (
            id, platform, name, credential_ref, enabled, max_concurrency,
            created_at_ms, updated_at_ms, protocol, base_url, auth_scheme,
@@ -787,40 +821,187 @@ export async function createAdminAccount(context: Context<ControlBindings>): Pro
         input.billing_rate_multiplier_ppm,
         JSON.stringify(input.ui_config),
       ),
-      context.env.DB.prepare(
+      env.DB.prepare(
         `INSERT INTO account_secrets (
            id, account_id, key_version, nonce_b64, ciphertext_b64, created_at_ms, updated_at_ms
          ) VALUES (?, ?, 1, ?, ?, ?, ?)`,
       ).bind(secretId, accountId, encrypted.nonce_b64, encrypted.ciphertext_b64, now, now),
-      ...groupInsertStatements(context.env, accountId, input.group_links, now),
-      ...capabilityInsertStatements(context.env, accountId, input.model_capabilities, now),
-      controlIdempotencyInsert(context.env, idempotency, 'account', accountId, safe, now),
+      ...groupInsertStatements(env, accountId, input.group_links, now),
+      ...capabilityInsertStatements(env, accountId, input.model_capabilities, now),
+      ...(input.platform === 'openai' && (input.credential_kind === 'api_key' || input.credential_kind === 'oauth') ? [accountInitializationInsert(env, accountId, now, input.credential_kind === 'oauth' ? 'openai_privacy' : 'openai_responses')] : []),
+      controlIdempotencyInsert(env, idempotency, 'account', accountId, safe, now),
+      ...(receipt ? [receipt(accountId)] : []),
     ]
     try {
-      await context.env.DB.batch(statements)
+      await env.DB.batch(statements)
     } catch (error) {
-      const recovered = await findControlIdempotency(context.env, idempotency)
+      const recovered = await findControlIdempotency(env, idempotency)
       if (recovered !== null) {
         const replay = safeIdempotentAccount(recovered)
-        return controlSuccess(replay)
+        return { account: replay, created: false }
       }
       throw mapAccountWriteError(error)
     }
-    return controlSuccess(safe, 201)
-  } catch (error) {
-    return controlError(asGatewayError(error))
-  }
+    if (!initializeAccount && input.platform === 'openai' && input.credential_kind === 'oauth') {
+      try { await initializeAccountNow(env, accountId, false) } catch { /* The durable job recovers an interrupted initialization. */ }
+      const initialized = publicAccount(await requireAccount(env, accountId))
+      await env.DB.prepare('UPDATE control_idempotency SET response_json=? WHERE scope=? AND key_hash=?')
+        .bind(JSON.stringify(initialized), idempotency.scope, idempotency.key_hash).run()
+      return { account: initialized, created: true }
+    }
+    return { account: safe, created: true }
+ }
+
+export async function batchCreateAdminAccounts(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    if (!Array.isArray(body.accounts) || body.accounts.length === 0 || body.accounts.some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+      throw new GatewayError(400, 'invalid_accounts', 'accounts must be a non-empty array of account objects')
+    }
+    const items = body.accounts as Record<string, unknown>[]
+    // Original validation happens before creating any account, including later rows.
+    for (const item of items) {
+      const extra = item.extra
+      if (item.platform === 'openai' && extra && typeof extra === 'object' && !Array.isArray(extra) &&
+          Object.hasOwn(extra, 'openai_long_context_billing_enabled') && typeof (extra as Record<string, unknown>).openai_long_context_billing_enabled !== 'boolean') {
+        throw new GatewayError(400, 'OPENAI_LONG_CONTEXT_BILLING_INVALID', 'openai_long_context_billing_enabled must be a boolean')
+      }
+    }
+    const key = context.req.header('idempotency-key') === undefined ? crypto.randomUUID() : requireIdempotencyKey(context.req.raw)
+    const idempotency = await controlIdempotency('admin.accounts.batch-create.v1', key, { accounts: items })
+    let previous = await findControlIdempotency(context.env, idempotency)
+    if (previous === null) {
+      try { await controlIdempotencyInsert(context.env, idempotency, 'account_batch_pending', idempotency.key_hash, {}, Date.now()).run() }
+      catch (error) { if (!await findControlIdempotency(context.env, idempotency)) throw error }
+      previous = await findControlIdempotency(context.env, idempotency)
+    }
+    if (previous?.resource_type === 'account_batch') return controlSuccess(parseIdempotentResponse(previous, 'account_batch'))
+    const results: Array<{ name: string; id?: string; success: boolean; error?: string }> = []
+    for (const [index, item] of items.entries()) {
+      const name = typeof item.name === 'string' ? item.name : ''
+      try {
+        let input = item
+        const extra = item.extra
+        if (extra && typeof extra === 'object' && !Array.isArray(extra) && Object.hasOwn(extra, 'base_rpm')) {
+          const raw = (extra as Record<string, unknown>).base_rpm
+          const rpm = typeof raw === 'number' && Number.isFinite(raw) ? Math.trunc(raw)
+            : typeof raw === 'string' && /^[+-]?\d+$/.test(raw.trim()) ? Number(raw.trim()) : 0
+          input = { ...item, extra: { ...extra, base_rpm: Math.min(10000, Math.max(0, rpm)) } }
+        }
+        const result = await executeAccountCreate(context.env, input, `batch-account-${idempotency.key_hash}-${index}`, true)
+        results.push({ name, id: result.account.id, success: true })
+        try { await dispatchAccountInitializations(context.env, result.account.id) } catch { /* Cron recovers the committed outbox. */ }
+      } catch (error) { results.push({ name, success: false, error: asGatewayError(error).message }) }
+    }
+    const result = { success: results.filter(row => row.success).length, failed: results.filter(row => !row.success).length, results }
+    await context.env.DB.prepare(`UPDATE control_idempotency SET resource_type = 'account_batch', response_json = ?
+      WHERE scope = ? AND key_hash = ? AND request_hash = ? AND resource_type = 'account_batch_pending'`)
+      .bind(JSON.stringify(result), idempotency.scope, idempotency.key_hash, idempotency.request_hash).run()
+    const completed = await findControlIdempotency(context.env, idempotency)
+    return controlSuccess(completed?.resource_type === 'account_batch' ? parseIdempotentResponse(completed, 'account_batch') : result)
+  } catch (error) { return controlError(asGatewayError(error)) }
 }
 
 export async function updateAdminAccount(context: Context<ControlBindings>): Promise<Response> {
   try {
     const body = await readJsonObject(context.req.raw)
+    if (new URL(context.req.url).pathname.endsWith('/schedulable')) {
+      rejectUnknownFields(body, new Set(['schedulable', 'control_version']))
+      if (typeof body.schedulable !== 'boolean') {
+        throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+      }
+    }
     const expectedVersion = requireExpectedControlVersion(context.req.raw, body)
+    const initializeResponses = !new URL(context.req.url).pathname.endsWith('/schedulable')
+    const updated = await executeAccountUpdate(context.env, context.req.param('id')!, body, expectedVersion, undefined, { initializeResponses })
+    if (initializeResponses) try { await dispatchAccountInitializations(context.env, updated.id) } catch { /* Durable edit outbox. */ }
+    return controlSuccess(updated)
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+/** Persist tokens returned by the original re-authorization modal. */
+export async function applyAdminAccountOAuthCredentials(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    rejectUnknownFields(body, new Set(['type', 'credentials', 'extra']))
+    if (body.type !== 'oauth' && body.type !== 'setup-token') {
+      throw new GatewayError(400, 'invalid_oauth_type', 'type must be oauth or setup-token')
+    }
+    const credentials = requireCredentialObject(body.credentials, 'credentials', false)
+    if (body.extra != null && (typeof body.extra !== 'object' || Array.isArray(body.extra))) {
+      throw new GatewayError(400, 'invalid_extra', 'extra must be an object')
+    }
     const account = await requireAccount(context.env, context.req.param('id'))
+    if (account.credential_kind !== 'oauth' && account.credential_kind !== 'setup_token') {
+      throw new GatewayError(400, 'NOT_OAUTH', 'Cannot apply OAuth credentials to a non-OAuth account')
+    }
+    if (parseUiConfig(account.ui_config_json).parent_account_id != null) {
+      throw new GatewayError(400, 'SPARK_SHADOW_CREDENTIALS_READ_ONLY', 'Re-authorize the parent account instead')
+    }
+    const extra = body.extra as Record<string, unknown> | null | undefined
+    if (account.platform === 'openai' && extra && Object.hasOwn(extra, 'openai_long_context_billing_enabled') &&
+        typeof extra.openai_long_context_billing_enabled !== 'boolean') {
+      throw new GatewayError(400, 'OPENAI_LONG_CONTEXT_BILLING_INVALID', 'openai_long_context_billing_enabled must be a boolean')
+    }
+    const expected = context.req.header('if-match') === undefined ? account.control_version
+      : requireExpectedControlVersion(context.req.raw, {})
+    return controlSuccess(await executeAccountUpdate(context.env, account.id, {
+      credentials, credential_kind: body.type === 'oauth' ? 'oauth' : 'setup_token',
+      ...(extra == null ? {} : { extra }),
+    }, expected, undefined, { mergeExtra: true, reauthorize: true }))
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+/** Original batch-field update: validate every account before writing; report individual write failures. */
+export async function batchUpdateAdminAccountCredentials(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const body = await readJsonObject(context.req.raw)
+    if (!Array.isArray(body.account_ids) || body.account_ids.length === 0) {
+      throw new GatewayError(400, 'invalid_account_ids', 'account_ids must be a non-empty array')
+    }
+    const field = body.field
+    if (typeof field !== 'string' || !['account_uuid', 'org_uuid', 'intercept_warmup_requests'].includes(field)) {
+      throw new GatewayError(400, 'invalid_credential_field', 'field must be account_uuid, org_uuid or intercept_warmup_requests')
+    }
+    const value = body.value ?? null
+    if (field === 'intercept_warmup_requests' ? typeof value !== 'boolean' : value !== null && typeof value !== 'string') {
+      throw new GatewayError(400, 'invalid_credential_value', field === 'intercept_warmup_requests' ? 'intercept_warmup_requests must be boolean' : `${field} must be string or null`)
+    }
+    const ids = body.account_ids.map(id => requireResourceId(typeof id === 'number' ? String(id) : id, 'account'))
+    const versions = new Map<string, number>()
+    for (const id of ids) if (!versions.has(id)) versions.set(id, (await requireAccount(context.env, id)).control_version)
+    const results: Array<{ account_id: string; success: boolean; error?: string }> = []
+    const successIds: string[] = [], failedIds: string[] = []
+    for (const id of ids) {
+      try {
+        const updated = await executeAccountUpdate(context.env, id, { credentials: { [field]: value } }, versions.get(id)!, undefined, { fieldUpdate: true })
+        versions.set(id, updated.control_version)
+        successIds.push(id); results.push({ account_id: id, success: true })
+      } catch (error) {
+        failedIds.push(id); results.push({ account_id: id, success: false, error: asGatewayError(error).message })
+      }
+    }
+    return controlSuccess({ success: successIds.length, failed: failedIds.length, success_ids: successIds, failed_ids: failedIds, results })
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function executeAccountUpdate(env: Env, id: string, body: Record<string, unknown>, expectedVersion: number,
+  idempotency?: ControlIdempotency, options: { mergeExtra?: boolean; reauthorize?: boolean; fieldUpdate?: boolean; initializeResponses?: boolean; receipt?: (id: string) => D1PreparedStatement } = {}) {
+    const { mergeExtra = false, reauthorize = false, fieldUpdate = false, initializeResponses = false } = options
+    const account = await requireAccount(env, id)
     assertVersion(account, expectedVersion)
+    if (fieldUpdate && parseUiConfig(account.ui_config_json).parent_account_id != null) {
+      throw new GatewayError(400, 'SPARK_SHADOW_NO_CREDENTIALS', 'Update credential fields on the parent account instead')
+    }
+    if (mergeExtra && body.extra && typeof body.extra === 'object' && !Array.isArray(body.extra)) {
+      const previous = parseUiConfig(account.ui_config_json).extra
+      body = { ...body, extra: { ...(previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {}), ...body.extra } }
+    }
     const patch = parseAccountPatch(body, account)
     await validateLinks(
-      context.env,
+      env,
       account.platform,
       patch.group_links ?? [],
       patch.model_capabilities ?? [],
@@ -835,21 +1016,34 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
       account.platform,
       patch.credential_kind ?? account.credential_kind,
     )
-    const resetHealth = patch.base_url !== undefined ||
+    const resetHealth = !fieldUpdate && (patch.base_url !== undefined ||
       patch.credential_patch !== undefined ||
       patch.provider_config !== undefined ||
       patch.image_adapter !== undefined ||
-      patch.credential_kind !== undefined
+      patch.credential_kind !== undefined)
     let nextUiConfig = patch.ui_config ?? parseUiConfig(account.ui_config_json)
     let nextCredential: StoredAccountCredential | undefined
+    let credentialIdentityChanged = false
     if (patch.credential_patch !== undefined) {
-      const currentCredential = await decryptCredential(
+      const currentCredential = await decryptCredentialPayload(
         account.nonce_b64,
         account.ciphertext_b64,
-        requireCredentialsMasterKey(context.env),
-        credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+        requireCredentialsMasterKey(env),
+        credentialAad(env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
       )
-      nextCredential = mergeCredentialPatch(currentCredential as StoredAccountCredential, patch.credential_patch)
+      nextCredential = reauthorize
+        ? mergeReauthorizedCredential(currentCredential as StoredAccountCredential, patch.credential_patch)
+        : mergeCredentialPatch(currentCredential as StoredAccountCredential, patch.credential_patch)
+      // Original batch field assignment preserves explicit null/empty non-secret values.
+      if (fieldUpdate) Object.assign(nextCredential, patch.credential_patch)
+      if(String(nextCredential.auth_mode).trim().toLowerCase()==='agentidentity') {
+        if(account.platform!=='openai' || (patch.credential_kind??account.credential_kind)!=='oauth') throw new GatewayError(400,'invalid_agent_identity','Agent Identity requires an OpenAI OAuth account')
+        for(const field of ['agent_runtime_id','agent_private_key','chatgpt_account_id','chatgpt_user_id']) requireString(nextCredential,field,field==='agent_private_key'?16384:2048)
+        await importAgentIdentitySigningKey(nextCredential.agent_private_key as string)
+        nextCredential.auth_mode='agentIdentity'
+      }
+
+      credentialIdentityChanged = JSON.stringify(nextCredential) !== JSON.stringify(currentCredential)
       const nextCredentialStatus = credentialStatus(nextCredential)
       const previousCredentialStatus = nextUiConfig.credentials_status
       if (previousCredentialStatus !== null && typeof previousCredentialStatus === 'object' && !Array.isArray(previousCredentialStatus)) {
@@ -863,8 +1057,26 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
         credentials_status: nextCredentialStatus,
       }
     }
+    if (reauthorize) {
+      nextUiConfig = { ...nextUiConfig, type: patch.credential_kind === 'setup_token' ? 'setup-token' : 'oauth' }
+      delete nextUiConfig.rate_limited_at
+      delete nextUiConfig.rate_limit_reset_at
+    }
+    const oldUiConfig = parseUiConfig(account.ui_config_json)
+    const proxyIdentity = (value: unknown) => value == null || String(value) === '0' ? null : String(value)
+    if (baseUrl !== account.base_url || credentialIdentityChanged ||
+        (patch.credential_kind !== undefined && patch.credential_kind !== account.credential_kind) ||
+        proxyIdentity(nextUiConfig.proxy_id) !== proxyIdentity(oldUiConfig.proxy_id) ||
+        JSON.stringify(providerConfig) !== JSON.stringify(parseProviderConfigProjection(account.provider_config_json))) {
+      const extra = nextUiConfig.extra
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+        const cleaned = { ...extra } as Record<string, unknown>
+        delete cleaned.upstream_billing_probe
+        nextUiConfig = { ...nextUiConfig, extra: cleaned }
+      }
+    }
     const statements: D1PreparedStatement[] = [
-      accountCasStatement(context.env, account.id, account.control_version, {
+      accountCasStatement(env, account.id, account.control_version, {
         name: patch.name ?? account.name,
         enabled: patch.enabled ?? account.enabled === 1,
         max_concurrency: patch.max_concurrency ?? account.max_concurrency,
@@ -881,15 +1093,20 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
       }),
     ]
     let nextKeyVersion = account.key_version
+    if (reauthorize) {
+      statements.push(env.DB.prepare(`UPDATE accounts SET consecutive_health_failures = 0,
+        health_probe_generation = health_probe_generation + 1, health_probe_lease_until_ms = NULL,
+        next_health_probe_at_ms = ?, recovery_revision = recovery_revision + 1 WHERE id = ?`).bind(now, account.id))
+    }
     if (nextCredential !== undefined) {
       nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
       const encrypted = await encryptCredential(
         nextCredential,
-        requireCredentialsMasterKey(context.env),
-        credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
+        requireCredentialsMasterKey(env),
+        credentialAad(env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
       )
       statements.push(
-        context.env.DB.prepare(
+        env.DB.prepare(
           `UPDATE account_secrets
               SET key_version = CASE WHEN key_version = ? THEN ? ELSE 0 END,
                   nonce_b64 = ?, ciphertext_b64 = ?, updated_at_ms = ?
@@ -905,30 +1122,38 @@ export async function updateAdminAccount(context: Context<ControlBindings>): Pro
         ),
       )
     }
+    if (body.priority !== undefined && patch.group_links === undefined) {
+      statements.push(env.DB.prepare(`UPDATE account_groups SET priority = ?,
+        control_version = control_version + 1, updated_at_ms = ? WHERE account_id = ?`)
+        .bind(requireSafeInteger(body, 'priority', -1000, 1000), now, account.id))
+    }
     if (patch.group_links !== undefined) {
       statements.push(
-        context.env.DB.prepare('DELETE FROM account_groups WHERE account_id = ?').bind(account.id),
-        ...groupInsertStatements(context.env, account.id, patch.group_links, now),
+        env.DB.prepare('DELETE FROM account_groups WHERE account_id = ?').bind(account.id),
+        ...groupInsertStatements(env, account.id, patch.group_links, now),
       )
     }
     if (patch.model_capabilities !== undefined) {
       statements.push(
-        context.env.DB.prepare('DELETE FROM account_models WHERE account_id = ?').bind(account.id),
-        ...capabilityInsertStatements(context.env, account.id, patch.model_capabilities, now),
+        env.DB.prepare('DELETE FROM account_models WHERE account_id = ?').bind(account.id),
+        ...capabilityInsertStatements(env, account.id, patch.model_capabilities, now),
       )
     }
-    await runAccountBatch(context.env, statements, account.id, account.control_version)
-    const updated = await requireAccount(context.env, account.id)
+    if (initializeResponses && account.platform === 'openai' && (patch.credential_kind ?? account.credential_kind) === 'api_key') {
+      statements.push(accountInitializationReset(env, account.id, nextKeyVersion, now))
+    }
+    if (options.receipt) statements.push(options.receipt(account.id))
+    if (idempotency) statements.push(controlIdempotencyInsert(env, idempotency, 'account_bulk_edit', account.id,
+      { account_id: account.id, success: true, control_version: nextControlVersion }, now))
+    await runAccountBatch(env, statements, account.id, account.control_version)
+    const updated = await requireAccount(env, account.id)
     if (updated.control_version !== nextControlVersion || updated.config_version !== nextConfigVersion) {
       throw new GatewayError(503, 'account_projection_failed', 'Account update could not be read', 'server_error')
     }
     if (updated.key_version !== nextKeyVersion) {
       throw new GatewayError(503, 'account_projection_failed', 'Credential update could not be read', 'server_error')
     }
-    return controlSuccess(publicAccount(updated))
-  } catch (error) {
-    return controlError(asGatewayError(error))
-  }
+    return publicAccount(updated)
 }
 
 export async function refreshAdminAccountCredentials(context: Context<ControlBindings>): Promise<Response> {
@@ -942,7 +1167,7 @@ export async function refreshAdminAccountCredentials(context: Context<ControlBin
     const idempotency = await controlIdempotency('admin.accounts.oauth-refresh.v1', requireIdempotencyKey(context.req.raw), {
       account_id: accountId, expected_control_version: expectedVersion,
     })
-    return controlSuccess(await refreshOpenAIOAuthAccount(
+    return controlSuccess(await refreshOAuthAccount(
       context.env, accountId, expectedVersion, idempotency,
     ))
   } catch (error) {
@@ -981,7 +1206,7 @@ export async function batchRefreshAdminAccountCredentials(context: Context<Contr
         { parent_request_hash: idempotency.request_hash, target },
       )
       try {
-        const account = await refreshOpenAIOAuthAccount(
+        const account = await refreshOAuthAccount(
           context.env, target.id, target.expected_control_version, itemIdempotency,
         )
         return { account_id: target.id, success: true, control_version: account.control_version }
@@ -1017,18 +1242,42 @@ export async function batchRefreshAdminAccountCredentials(context: Context<Contr
   }
 }
 
-async function refreshOpenAIOAuthAccount(
+export async function refreshOAuthAccount(
+  env: Env, accountId: string, expectedVersion: number,
+  idempotency: Awaited<ReturnType<typeof controlIdempotency>>,
+): Promise<ReturnType<typeof accountResponse>> {
+  const existing = await findControlIdempotency(env, idempotency)
+  if (existing !== null) return parseIdempotentResponse(existing, 'account')
+  assertVersion(await requireAccount(env, accountId), expectedVersion)
+  const lease = await claimAccountOAuthRefresh(env, accountId, expectedVersion)
+  let errorCode: string | null = null
+  try { return await executeOAuthAccountRefresh(env, accountId, expectedVersion, idempotency, lease) }
+  catch (error) { errorCode = asGatewayError(error).code; throw error }
+  finally {
+    // A release outage cannot turn a committed rotation into an apparent failure.
+    // The durable lease expires and remains fenced at credential commit time.
+    try { await releaseAccountOAuthRefresh(env, accountId, lease, errorCode) } catch { /* recovered by lease expiry */ }
+  }
+}
+
+async function executeOAuthAccountRefresh(
   env: Env,
   accountId: string,
   expectedVersion: number,
   idempotency: Awaited<ReturnType<typeof controlIdempotency>>,
+  leaseToken: string,
 ): Promise<ReturnType<typeof accountResponse>> {
     const existing = await findControlIdempotency(env, idempotency)
     if (existing !== null) return parseIdempotentResponse(existing, 'account')
-    const account = await requireAccount(env, accountId)
+    let account = await requireAccount(env, accountId)
     assertVersion(account, expectedVersion)
-    if (account.platform !== 'openai' || account.credential_kind !== 'oauth') {
-      throw new GatewayError(409, 'oauth_refresh_not_supported', 'Credential refresh is currently supported only for OpenAI OAuth accounts')
+    const refreshable = account.platform === 'openai' && account.credential_kind === 'oauth' ||
+      account.platform === 'anthropic' && ['oauth', 'setup_token'].includes(account.credential_kind)
+    if (!refreshable) {
+      throw new GatewayError(409, 'oauth_refresh_not_supported', 'Credential refresh is currently supported for OpenAI and Claude OAuth accounts')
+    }
+    if (parseUiConfig(account.ui_config_json).parent_account_id != null) {
+      throw new GatewayError(400, 'SPARK_SHADOW_NO_REFRESH', 'Refresh the parent account instead')
     }
     const currentCredential = await decryptCredential(
       account.nonce_b64, account.ciphertext_b64, requireCredentialsMasterKey(env),
@@ -1036,55 +1285,87 @@ async function refreshOpenAIOAuthAccount(
     ) as StoredAccountCredential
     const refreshToken = typeof currentCredential.refresh_token === 'string' ? currentCredential.refresh_token.trim() : ''
     if (!refreshToken) {
-      throw new GatewayError(409, 'oauth_refresh_token_missing', 'OpenAI OAuth account has no refresh token; re-authorize the account')
+      throw new GatewayError(409, 'oauth_refresh_token_missing', 'OAuth account has no refresh token; re-authorize the account')
     }
-    const refreshed = await refreshOpenAIOAuthToken(refreshToken, currentCredential.client_id)
-    const nextCredential = mergeOpenAIRefreshCredential(currentCredential, refreshed)
-    const nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
-    const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
-    const nextControlVersion = incrementVersion(account.control_version, 'control_version')
-    const now = Date.now()
-    const encrypted = await encryptCredential(
-      nextCredential, requireCredentialsMasterKey(env),
-      credentialAad(env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
-    )
-    const uiConfig = {
-      ...parseUiConfig(account.ui_config_json),
-      credentials: publicCredentials(nextCredential),
-      credentials_status: credentialStatus(nextCredential),
+    const proxyId = parseUiConfig(account.ui_config_json).proxy_id
+    const refreshed = account.platform === 'anthropic' ? null
+      : await refreshOpenAIOAuthToken(env, refreshToken, currentCredential.client_id, proxyId)
+    const claude = account.platform === 'anthropic' ? await refreshAnthropicOAuthToken(env, refreshToken, proxyId) : null
+    const nextCredential: StoredAccountCredential = claude ? {
+      ...currentCredential, api_key: claude.access_token, access_token: claude.access_token,
+      token_type: claude.token_type, expires_in: String(claude.expires_in), expires_at: String(claude.expires_at),
+      ...(claude.refresh_token?.trim() ? { refresh_token: claude.refresh_token } : {}),
+      ...(claude.scope.trim() ? { scope: claude.scope } : {}),
+    } : mergeOpenAIRefreshCredential(currentCredential, refreshed!)
+    // Refresh tokens can rotate upstream: retry only the local transaction, never
+    // the provider request, when ordinary usage observations advance config_version.
+    const originalSecretId = account.secret_id
+    const originalKeyVersion = account.key_version
+    for (let attempt = 0; attempt < 3; attempt++) {
+      account = await requireAccount(env, accountId)
+      assertVersion(account, expectedVersion)
+      if (account.secret_id !== originalSecretId || account.key_version !== originalKeyVersion) {
+        throw new GatewayError(412, 'control_version_conflict', 'Account credentials changed during refresh')
+      }
+      const nextKeyVersion = incrementVersion(account.key_version, 'credential_key_version')
+      const nextConfigVersion = incrementVersion(account.config_version, 'config_version')
+      const nextControlVersion = incrementVersion(account.control_version, 'control_version')
+      const now = Date.now()
+      const encrypted = await encryptCredential(
+        nextCredential, requireCredentialsMasterKey(env),
+        credentialAad(env.ENVIRONMENT, account.id, account.secret_id, nextKeyVersion),
+      )
+      const previousUi = parseUiConfig(account.ui_config_json)
+      const previousExtra = previousUi.extra && typeof previousUi.extra === 'object' && !Array.isArray(previousUi.extra)
+        ? previousUi.extra as Record<string, unknown> : {}
+      const previousPrivacy = typeof previousExtra.privacy_mode === 'string' ? previousExtra.privacy_mode.trim() : ''
+      const ensurePrivacy = !Object.hasOwn(previousExtra, 'privacy_mode') ||
+        previousPrivacy === 'training_set_failed' || previousPrivacy === 'training_set_cf_blocked'
+      const uiConfig = {
+        ...previousUi,
+        extra: { ...previousExtra, ...(ensurePrivacy && refreshed?.privacy_mode ? { privacy_mode: refreshed.privacy_mode } : {}) },
+        credentials: publicCredentials(nextCredential),
+        credentials_status: credentialStatus(nextCredential),
+      }
+      const safe = accountResponse({
+        id: account.id, platform: account.platform, name: account.name, enabled: account.enabled === 1,
+        max_concurrency: account.max_concurrency, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+        protocol: account.protocol, base_url: account.base_url, auth_scheme: account.auth_scheme,
+        image_adapter: account.image_adapter, credential_kind: account.credential_kind,
+        provider_config: accountProviderConfig(account), config_version: nextConfigVersion,
+        control_version: nextControlVersion, health_status: 'unknown', last_checked_at_ms: null,
+        last_latency_ms: null, last_health_error: null, created_at_ms: account.created_at_ms,
+        updated_at_ms: now, credential_key_version: nextKeyVersion, ui_config: uiConfig,
+        group_links: parseGroupLinksProjection(account.group_links_json),
+        model_capabilities: parseModelCapabilitiesProjection(account.model_capabilities_json),
+      })
+      try {
+        await runAccountBatch(env, [
+          accountOAuthRefreshLeaseGuard(env, account.id, leaseToken, nextKeyVersion),
+          accountCasStatement(env, account.id, account.control_version, {
+            name: account.name, enabled: account.enabled === 1, max_concurrency: account.max_concurrency,
+            base_url: account.base_url, provider_config: accountProviderConfig(account), image_adapter: account.image_adapter,
+            credential_kind: account.credential_kind, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
+            ui_config: uiConfig, config_version: nextConfigVersion, control_version: nextControlVersion, now, reset_health: true,
+            expected_config_version: account.config_version,
+          }),
+          env.DB.prepare(
+            `UPDATE account_secrets SET key_version = CASE WHEN key_version = ? THEN ? ELSE 0 END,
+               nonce_b64 = ?, ciphertext_b64 = ?, updated_at_ms = ? WHERE id = ? AND account_id = ?`,
+          ).bind(account.key_version, nextKeyVersion, encrypted.nonce_b64, encrypted.ciphertext_b64, now, account.secret_id, account.id),
+          controlIdempotencyInsert(env, idempotency, 'account', account.id, safe, now),
+        ], account.id, account.control_version)
+      } catch (error) {
+        const recovered = await findControlIdempotency(env, idempotency)
+        if (recovered !== null) return parseIdempotentResponse(recovered, 'account')
+        const latest = await requireAccount(env, accountId)
+        if (attempt < 2 && latest.control_version === expectedVersion && latest.secret_id === originalSecretId &&
+          latest.key_version === originalKeyVersion && latest.config_version !== account.config_version) continue
+        throw mapAccountWriteError(error)
+      }
+      return safe
     }
-    const safe = accountResponse({
-      id: account.id, platform: account.platform, name: account.name, enabled: account.enabled === 1,
-      max_concurrency: account.max_concurrency, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
-      protocol: account.protocol, base_url: account.base_url, auth_scheme: account.auth_scheme,
-      image_adapter: account.image_adapter, credential_kind: account.credential_kind,
-      provider_config: accountProviderConfig(account), config_version: nextConfigVersion,
-      control_version: nextControlVersion, health_status: 'unknown', last_checked_at_ms: null,
-      last_latency_ms: null, last_health_error: null, created_at_ms: account.created_at_ms,
-      updated_at_ms: now, credential_key_version: nextKeyVersion, ui_config: uiConfig,
-      group_links: parseGroupLinksProjection(account.group_links_json),
-      model_capabilities: parseModelCapabilitiesProjection(account.model_capabilities_json),
-    })
-    try {
-      await runAccountBatch(env, [
-        accountCasStatement(env, account.id, account.control_version, {
-          name: account.name, enabled: account.enabled === 1, max_concurrency: account.max_concurrency,
-          base_url: account.base_url, provider_config: accountProviderConfig(account), image_adapter: account.image_adapter,
-          credential_kind: account.credential_kind, billing_rate_multiplier_ppm: account.billing_rate_multiplier_ppm,
-          ui_config: uiConfig, config_version: nextConfigVersion, control_version: nextControlVersion, now, reset_health: true,
-        }),
-        env.DB.prepare(
-          `UPDATE account_secrets SET key_version = CASE WHEN key_version = ? THEN ? ELSE 0 END,
-             nonce_b64 = ?, ciphertext_b64 = ?, updated_at_ms = ? WHERE id = ? AND account_id = ?`,
-        ).bind(account.key_version, nextKeyVersion, encrypted.nonce_b64, encrypted.ciphertext_b64, now, account.secret_id, account.id),
-        controlIdempotencyInsert(env, idempotency, 'account', account.id, safe, now),
-      ], account.id, account.control_version)
-    } catch (error) {
-      const recovered = await findControlIdempotency(env, idempotency)
-      if (recovered !== null) return parseIdempotentResponse(recovered, 'account')
-      throw mapAccountWriteError(error)
-    }
-    return safe
+    throw new GatewayError(412, 'control_version_conflict', 'Account changed during refresh')
 }
 
 function parseOAuthRefreshTargets(value: unknown): OAuthRefreshTarget[] {
@@ -1343,16 +1624,179 @@ export async function deleteAdminAccountModelCapability(context: Context<Control
   return deleteRelation(context, 'model')
 }
 
-export async function testAdminAccount(context: Context<ControlBindings>): Promise<Response> {
+export async function clearAdminAccountRateLimit(context: Context<ControlBindings>): Promise<Response> {
   try {
     const account = await requireAccount(context.env, context.req.param('id'))
+    const saved = await context.env.DB.prepare(`UPDATE accounts
+      SET ui_config_json = json_remove(ui_config_json, '$.rate_limited_at', '$.rate_limit_reset_at'),
+          config_version = config_version + 1, control_version = control_version + 1,
+          recovery_revision = recovery_revision + 1, updated_at_ms = ?
+      WHERE id = ? AND config_version = ? AND control_version = ? AND ui_config_json = ? RETURNING id`)
+      .bind(Date.now(), account.id, account.config_version, account.control_version, account.ui_config_json).first()
+    if (!saved) throw new GatewayError(409, 'account_version_conflict', 'Account changed; reload it and retry')
+    return getAdminAccount(context)
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+/** Original quota reset preserves unrelated scheduling blockers. */
+export async function resetAdminAccountQuota(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    const ui = parseUiConfig(account.ui_config_json)
+    if (ui.parent_account_id != null) {
+      throw new GatewayError(400, 'SPARK_SHADOW_NO_QUOTA_RESET', 'Cannot reset quota for a shadow account; manage it on the parent account')
+    }
+    const extra = ui.extra && typeof ui.extra === 'object' && !Array.isArray(ui.extra) ? { ...ui.extra } as Record<string, unknown> : {}
+    for (const key of ['quota_used', 'quota_daily_used', 'quota_weekly_used']) extra[key] = 0
+    for (const key of ['quota_daily_start', 'quota_weekly_start', 'quota_daily_reset_at', 'quota_weekly_reset_at']) delete extra[key]
+    ui.extra = extra
+    ui._worker_account_quota_reset_at_ms = Date.now()
+    delete ui.rate_limited_at; delete ui.rate_limit_reset_at
+    const saved = await context.env.DB.prepare(`UPDATE accounts SET ui_config_json = ?,
+      config_version = config_version + 1, control_version = control_version + 1, updated_at_ms = ?
+      WHERE id = ? AND config_version = ? AND control_version = ? AND ui_config_json = ? RETURNING id`)
+      .bind(JSON.stringify(ui), Date.now(), account.id, account.config_version, account.control_version, account.ui_config_json).first()
+    if (!saved) throw new GatewayError(409, 'account_version_conflict', 'Account changed; reload it and retry')
+    return getAdminAccount(context)
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+/** Original single-account recovery action; invalidate stale probes and pool failures. */
+export async function recoverAdminAccountState(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    const now = Date.now()
+    const saved = await context.env.DB.prepare(`UPDATE accounts SET
+      ui_config_json = json_remove(ui_config_json, '$.rate_limited_at', '$.rate_limit_reset_at',
+        '$.overload_until', '$.temp_unschedulable_until', '$.temp_unschedulable_reason', '$.extra.model_rate_limits', '$.extra.antigravity_quota_scopes'),
+      health_status = 'unknown', last_checked_at_ms = NULL, last_latency_ms = NULL, last_health_error = NULL,
+      consecutive_health_failures = 0, health_probe_generation = health_probe_generation + 1,
+      health_probe_lease_until_ms = NULL, next_health_probe_at_ms = ?,
+      config_version = config_version + 1, control_version = control_version + 1,
+      recovery_revision = recovery_revision + 1, updated_at_ms = ?
+      WHERE id = ? AND config_version = ? AND control_version = ? AND ui_config_json = ? RETURNING id`)
+      .bind(now, now, account.id, account.config_version, account.control_version, account.ui_config_json).first()
+    if (!saved) throw new GatewayError(409, 'account_version_conflict', 'Account changed; reload it and retry')
+    return getAdminAccount(context)
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+/** The original detail endpoint reports account-wide state, not model-scoped cooldowns. */
+export async function getAdminAccountTempUnschedulable(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    const ui = parseUiConfig(account.ui_config_json)
+    const until = typeof ui.temp_unschedulable_until === 'string' ? Math.floor(Date.parse(ui.temp_unschedulable_until) / 1000) : 0
+    const now = Math.floor(Date.now() / 1000)
+    if (!Number.isFinite(until) || until <= now) return controlSuccess({ active: false })
+    const reason = typeof ui.temp_unschedulable_reason === 'string' ? ui.temp_unschedulable_reason : ''
+    const state: Record<string, unknown> = { until_unix: until, triggered_at_unix: 0, status_code: 0, matched_keyword: '', rule_index: 0, error_message: '' }
+    try {
+      const parsed = JSON.parse(reason) ?? {}
+      if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid reason')
+      const integerKeys = ['until_unix', 'triggered_at_unix', 'status_code', 'rule_index', 'trigger_count', 'trigger_threshold', 'trigger_window_minutes']
+      for (const key of [...Object.keys(state), 'trigger_count', 'trigger_threshold', 'trigger_window_minutes']) {
+        if (parsed[key] == null) continue
+        if (integerKeys.includes(key) ? !Number.isSafeInteger(parsed[key]) : typeof parsed[key] !== 'string') throw new Error('invalid state field')
+      }
+      for (const key of [...Object.keys(state), 'trigger_count', 'trigger_threshold', 'trigger_window_minutes']) {
+        if (parsed[key] != null) state[key] = parsed[key]
+      }
+      if (!state.until_unix) state.until_unix = until
+    } catch { state.error_message = reason }
+    return controlSuccess(Number(state.until_unix) > now ? { active: true, state } : { active: false })
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function clearAdminAccountTempUnschedulable(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    const saved = await context.env.DB.prepare(`UPDATE accounts SET
+      ui_config_json = json_remove(ui_config_json, '$.temp_unschedulable_until', '$.temp_unschedulable_reason', '$.extra.model_rate_limits'),
+      config_version = config_version + 1, control_version = control_version + 1,
+      recovery_revision = recovery_revision + 1, updated_at_ms = ?
+      WHERE id = ? AND config_version = ? AND control_version = ? AND ui_config_json = ? RETURNING id`)
+      .bind(Date.now(), account.id, account.config_version, account.control_version, account.ui_config_json).first()
+    if (!saved) throw new GatewayError(409, 'account_version_conflict', 'Account changed; reload it and retry')
+    return controlSuccess({ message: 'Temp unschedulable cleared successfully' })
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function setAdminAccountPrivacy(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const account = await requireAccount(context.env, context.req.param('id'))
+    await applyOpenAIAccountPrivacy(context.env, account)
+    return controlSuccess(publicAccount(await requireAccount(context.env, account.id)))
+  } catch (error) { return controlError(asGatewayError(error)) }
+}
+
+export async function testAdminAccount(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const input = await readOptionalJsonObject(context.req.raw, 128 * 1024)
+    let account = await requireAccount(context.env, context.req.param('id'))
     requireSupportedAccount(account)
-    const credential = await decryptCredential(
-      account.nonce_b64,
-      account.ciphertext_b64,
-      requireCredentialsMasterKey(context.env),
-      credentialAad(context.env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
-    )
+    const authentication=await resolveAccountRequestAuthentication(context.env,{...account,account_id:account.id})
+    const credential=authentication.credential
+    if(authentication.authorization) account=await requireAccount(context.env,account.id)
+    if(authentication.authorization && (typeof input.model_id!=='string' || !input.model_id.trim())) input.model_id='gpt-5.4'
+    const recoverAgent=authentication.authorization ? async(taskId:string)=>{
+      const fresh=await resolveAccountRequestAuthentication(context.env,{...account,account_id:account.id},taskId)
+      if(!fresh.authorization) throw new GatewayError(409,'agent_identity_changed','Agent Identity credentials changed during diagnostic')
+      account=await requireAccount(context.env,account.id)
+      return {credential:fresh.credential,authorization:fresh.authorization}
+    } : undefined
+
+    if ((account.platform === 'openai' || account.platform === 'codex' || account.platform === 'anthropic' || (account.platform === 'gemini' && account.credential_kind === 'api_key')) &&
+        typeof input.model_id === 'string' && input.model_id.trim() &&
+        (input.mode === undefined || input.mode === '' || input.mode === 'default' ||
+          (input.mode === 'compact' && ['openai', 'codex'].includes(account.platform)))) {
+      const model = accountModelPolicy(account.ui_config_json, input.model_id.trim(), account.platform, account.credential_kind)
+      if (!model.allowed) throw new GatewayError(400, 'model_not_supported', 'The account does not support this model')
+      if (input.mode === 'compact') {
+        return openAICompactDiagnostic(context.env, providerAccount(account), credential, model.upstream || input.model_id.trim(),
+          account.credential_kind !== 'api_key', account.id, parseUiConfig(account.ui_config_json).proxy_id, context.req.raw.signal,
+          async (updates, rateLimitReset) => {
+            const ui = parseUiConfig(account.ui_config_json)
+            const extra = ui.extra && typeof ui.extra === 'object' && !Array.isArray(ui.extra) ? ui.extra : {}
+            const authenticationFailed = updates.openai_compact_last_status === 401
+            const rateLimited = rateLimitReset !== null
+            if (rateLimited) {
+              ui.rate_limited_at = new Date().toISOString()
+              ui.rate_limit_reset_at = new Date(rateLimitReset).toISOString()
+            }
+            const saved = await context.env.DB.prepare(`UPDATE accounts SET ui_config_json = ?,
+              config_version = config_version + 1, control_version = control_version + 1, updated_at_ms = ?
+              , health_status = CASE WHEN ? THEN 'unhealthy' WHEN ? THEN 'unknown' ELSE health_status END
+              , last_health_error = CASE WHEN ? THEN 'Authentication failed (401)' WHEN ? THEN NULL ELSE last_health_error END
+              , last_checked_at_ms = CASE WHEN ? THEN ? ELSE last_checked_at_ms END
+              WHERE id = ? AND credential_ref = ? AND config_version = ? AND control_version = ?
+                AND ui_config_json = ? RETURNING id`).bind(
+              JSON.stringify({ ...ui, extra: { ...extra, ...updates } }), Date.now(),
+              authenticationFailed ? 1 : 0, rateLimited ? 1 : 0, authenticationFailed ? 1 : 0, rateLimited ? 1 : 0,
+              authenticationFailed ? 1 : 0, Date.now(), account.id, account.credential_ref,
+              account.config_version, account.control_version, account.ui_config_json,
+            ).first()
+            return saved !== null
+          },authentication.authorization,recoverAgent)
+      }
+      return accountTextDiagnostic(context.env, providerAccount(account), credential, model.upstream || input.model_id.trim(),
+        parseUiConfig(account.ui_config_json).proxy_id, context.req.raw.signal, {
+          authorization:authentication.authorization,
+          recoverAgent,
+          responses: diagnosticUsesResponses(parseUiConfig(account.ui_config_json).extra),
+          onResponse: async response => {
+            if (response.status !== 429) return
+            try {
+              await persistOpenAIRateLimit(context.env, { account_id: account.id, secret_id: account.secret_id, platform: account.platform,
+                runtime_snapshot: { config_version: account.config_version, control_version: account.control_version, ui_config_json: account.ui_config_json } }, response)
+            } catch { /* Preserve the provider's failure result if runtime persistence is unavailable. */ }
+          },
+          prompt: typeof input.prompt === 'string' ? input.prompt : undefined,
+          oauth: account.credential_kind !== 'api_key',
+          anthropicCredentialKind: account.platform === 'anthropic' ? account.credential_kind : undefined,
+          anthropicBearer: (parseUiConfig(account.ui_config_json).extra as Record<string, unknown> | undefined)?.anthropic_apikey_auth_scheme === 'authorization_bearer',
+        })
+    }
     const plan = buildProviderHealthRequest({
       account: providerAccount(account),
       credential,
@@ -1363,13 +1807,17 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
     let status: 'healthy' | 'unhealthy' = 'unhealthy'
     let healthError: string | null = null
     try {
-      const response = await fetch(plan.url, {
+      const init: RequestInit = {
         method: plan.method,
         headers: plan.headers,
         redirect: 'manual',
         cache: 'no-store',
         signal: controller.signal,
-      })
+      }
+      const proxyId = parseUiConfig(account.ui_config_json).proxy_id
+      const response = proxyId != null && String(proxyId) !== '0'
+        ? await fetchAccountProxy(context.env, String(proxyId), new URL(plan.url), init, context.req.raw.signal)
+        : await fetch(plan.url, init)
       if (response.ok) status = 'healthy'
       else healthError = `Upstream returned HTTP ${response.status}`
       try {
@@ -1378,7 +1826,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
         // The result has already been observed; body cleanup is best effort.
       }
     } catch (error) {
-      healthError = error instanceof DOMException && error.name === 'AbortError'
+      healthError = controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
         ? 'Upstream probe timed out'
         : 'Upstream probe failed'
     } finally {
@@ -1389,7 +1837,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
     const result = await context.env.DB.prepare(
       `UPDATE accounts
           SET health_status = ?, last_checked_at_ms = ?, last_latency_ms = ?, last_health_error = ?
-        WHERE id = ? AND config_version = ? AND credential_ref = ?`,
+        WHERE id = ? AND config_version = ? AND credential_ref = ? RETURNING id`,
     ).bind(
       status,
       checkedAt,
@@ -1398,7 +1846,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       account.id,
       account.config_version,
       account.credential_ref,
-    ).run()
+    ).first<{ id: string }>()
     return controlSuccess({
       id: account.id,
       health_status: status,
@@ -1407,7 +1855,7 @@ export async function testAdminAccount(context: Context<ControlBindings>): Promi
       last_health_error: healthError,
       config_version: account.config_version,
       control_version: account.control_version,
-      persisted: result.meta.changes === 1,
+      persisted: result?.id === account.id,
     })
   } catch (error) {
     return controlError(asGatewayError(error))
@@ -1486,6 +1934,7 @@ function accountCasStatement(
     config_version: number
     control_version: number
     now: number
+    expected_config_version?: number
     reset_health: boolean
   },
 ): D1PreparedStatement {
@@ -1495,7 +1944,7 @@ function accountCasStatement(
             image_adapter = ?, credential_kind = ?, billing_rate_multiplier_ppm = ?,
             ui_config_json = ?,
             config_version = ?,
-            control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
+            control_version = CASE WHEN control_version = ?${value.expected_config_version === undefined ? '' : ' AND config_version = ?'} THEN ? ELSE -1 END,
             health_status = CASE WHEN ? = 1 THEN 'unknown' ELSE health_status END,
             last_checked_at_ms = CASE WHEN ? = 1 THEN NULL ELSE last_checked_at_ms END,
             last_latency_ms = CASE WHEN ? = 1 THEN NULL ELSE last_latency_ms END,
@@ -1514,6 +1963,7 @@ function accountCasStatement(
     JSON.stringify(value.ui_config),
     value.config_version,
     expectedControlVersion,
+    ...(value.expected_config_version === undefined ? [] : [value.expected_config_version]),
     value.control_version,
     value.reset_health ? 1 : 0,
     value.reset_health ? 1 : 0,
@@ -1561,24 +2011,33 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
   const submittedCredentials = body.credentials === undefined
     ? {}
     : requireCredentialObject(body.credentials, 'credentials', true)
-  const rawBaseUrl = body.base_url ?? submittedCredentials.base_url
+  const credentialKind = body.credential_kind === undefined
+    ? credentialKindForType(body.type, platform)
+    : requireAccountCredentialKind(body.credential_kind)
+  const oauth = credentialKind === 'oauth' || credentialKind === 'setup_token'
+  const rawBaseUrl = body.base_url ?? submittedCredentials.base_url ??
+    (oauth && platform === 'openai' ? 'https://api.openai.com' : oauth && platform === 'codex' ? 'https://chatgpt.com' : oauth && platform === 'anthropic' ? 'https://api.anthropic.com' : undefined)
   const baseUrl = normalizeBaseUrl(requireString({ base_url: rawBaseUrl }, 'base_url', 2_048))
   const enabled = parseEnabledBody(body, true)
   const imageAdapter = body.image_adapter === undefined
     ? defaultImageAdapter(platform)
     : requireAccountImageAdapter(body.image_adapter)
-  const credentialKind = body.credential_kind === undefined
-    ? credentialKindForType(body.type, platform)
-    : requireAccountCredentialKind(body.credential_kind)
   validateAccountExecution(platform, imageAdapter, credentialKind)
   validateAccountType(body, platform, credentialKind)
-  const rawApiKey = body.api_key ?? submittedCredentials.api_key
-  const apiKey = requireProviderCredential({ api_key: rawApiKey }, 'api_key')
+  const rawApiKey = body.api_key ?? submittedCredentials.api_key ?? (oauth ? submittedCredentials.access_token : undefined)
+  const agentIdentity=platform==='openai' && credentialKind==='oauth' && String(submittedCredentials.auth_mode).trim().toLowerCase()==='agentidentity'
+  if(agentIdentity) {
+    for(const field of ['agent_runtime_id','agent_private_key','chatgpt_account_id','chatgpt_user_id']) requireString(submittedCredentials,field,field==='agent_private_key'?16384:2048)
+  }
+  const apiKey = agentIdentity ? undefined : requireProviderCredential({ api_key: rawApiKey }, 'api_key')
   const credential = {
     ...submittedCredentials,
     ...(body.credentials === undefined ? {} : { base_url: baseUrl }),
-    api_key: apiKey,
+    ...(agentIdentity ? {auth_mode:'agentIdentity'} : {api_key:apiKey}),
   } as StoredAccountCredential
+  if (oauth) {
+    for (const key of ['password', 'sso_token', 'sso', 'sso-rw', 'clearTextPassword', 'cookie']) delete credential[key]
+  }
   const maxConcurrencyField = body.max_concurrency === undefined ? 'concurrency' : 'max_concurrency'
   const maxConcurrencyValue = body.max_concurrency ?? body.concurrency
   const priority = body.priority === undefined ? 0 : requireSafeInteger(body, 'priority', -1_000, 1_000)
@@ -1664,14 +2123,11 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (patch.provider_config?.subscription_plan !== undefined) {
     assertSubscriptionPlanEligible(account.platform, patch.credential_kind ?? account.credential_kind)
   }
-  if (body.enabled !== undefined || body.status !== undefined || body.schedulable !== undefined) {
+  if (body.enabled !== undefined || body.status !== undefined) {
     if (body.status === 'error') {
       throw new GatewayError(409, 'status_not_supported', 'Worker accounts cannot be placed in error status manually')
     }
-    const enabledBody = body.enabled === undefined && body.schedulable !== undefined
-      ? { ...body, enabled: body.schedulable }
-      : body
-    patch.enabled = parseEnabledBody(enabledBody, true)
+    patch.enabled = parseEnabledBody(body, true)
   }
   if (body.max_concurrency !== undefined || body.concurrency !== undefined) {
     const field = body.max_concurrency === undefined ? 'concurrency' : 'max_concurrency'
@@ -1690,6 +2146,7 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.model_capabilities !== undefined) {
     patch.model_capabilities = parseModelCapabilities(body.model_capabilities)
   }
+  if (body.priority !== undefined) requireSafeInteger(body, 'priority', -1000, 1000)
   const uiPatch = updateUiConfig(currentUiConfig, body)
   if (uiPatch !== undefined) patch.ui_config = uiPatch
   if (Object.keys(patch).length === 0) {
@@ -1808,7 +2265,7 @@ function validateAccountType(
   const expected = credentialKind === 'api_key'
     ? 'apikey'
     : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'
-  if (body.type !== expected || (platform !== 'codex' && platform !== 'openai' && body.type !== 'apikey')) {
+  if (body.type !== expected || (platform !== 'codex' && platform !== 'openai' && platform !== 'anthropic' && body.type !== 'apikey')) {
     throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
   }
 }
@@ -1816,16 +2273,29 @@ function validateAccountType(
 function credentialKindForType(value: unknown, platform: ProviderPlatform): AccountCredentialKind {
   if (value === undefined) return defaultCredentialKind(platform)
   if (value === 'apikey') return 'api_key'
-  if ((platform === 'codex' || platform === 'openai') && value === 'oauth') return 'oauth'
-  if (platform === 'codex' && value === 'setup-token') return 'setup_token'
+  if ((platform === 'codex' || platform === 'openai' || platform === 'anthropic') && value === 'oauth') return 'oauth'
+  if ((platform === 'codex' || platform === 'anthropic') && value === 'setup-token') return 'setup_token'
   throw new GatewayError(409, 'type_not_supported', 'Account type does not select a supported Worker executor')
 }
 
 const UI_CONFIG_VERSION = 1
+function validateAccountSchedulingFields(body: Record<string, unknown>): void {
+  if (body.load_factor !== undefined && body.load_factor !== null &&
+      (typeof body.load_factor !== 'number' || !Number.isSafeInteger(body.load_factor) || body.load_factor > 10000)) {
+    throw new GatewayError(400, 'invalid_load_factor', 'load_factor must be an integer at most 10000 or null; nonpositive values clear it')
+  }
+  if (body.auto_pause_on_expired !== undefined && typeof body.auto_pause_on_expired !== 'boolean') {
+    throw new GatewayError(400, 'invalid_auto_pause_on_expired', 'auto_pause_on_expired must be a boolean')
+  }
+  if (body.expires_at !== undefined && body.expires_at !== null &&
+      (typeof body.expires_at !== 'number' || !Number.isSafeInteger(body.expires_at))) {
+    throw new GatewayError(400, 'invalid_expires_at', 'expires_at must be an integer Unix timestamp in seconds or null')
+  }
+}
 const UI_COMPAT_FIELDS = [
   'notes', 'extra', 'proxy_id', 'load_factor', 'priority', 'expires_at',
   'auto_pause_on_expired', 'upstream_billing_probe_enabled',
-  'upstream_billing_rate_sync_enabled',
+  'upstream_billing_rate_sync_enabled', 'schedulable',
 ] as const
 const SECRET_CREDENTIAL_FIELDS = new Set([
   'api_key', 'access_token', 'refresh_token', 'id_token', 'session_key', 'cookie',
@@ -1847,6 +2317,7 @@ function requireCredentialObject(value: unknown, field: string, requireApiKeySha
     throw new GatewayError(400, `invalid_${field}`, `${field} must not exceed 65536 characters`)
   }
   const result = JSON.parse(serialized) as Record<string, unknown>
+  normalizeHeaderOverrideCredentials(result)
   if (requireApiKeyShape && result.api_key !== undefined && typeof result.api_key !== 'string') {
     throw new GatewayError(400, 'invalid_api_key', 'api_key must be a string')
   }
@@ -1870,8 +2341,11 @@ function createUiConfig(
   credential: StoredAccountCredential,
   credentialKind: AccountCredentialKind,
 ): Record<string, unknown> {
+  validateAccountSchedulingFields(body)
   const config: Record<string, unknown> = {
     schema_version: UI_CONFIG_VERSION,
+    auto_pause_on_expired: true,
+    original_model_routing: body.credentials !== undefined && body.model_capabilities === undefined,
     type: body.type ?? (credentialKind === 'api_key'
       ? 'apikey'
       : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'),
@@ -1880,8 +2354,12 @@ function createUiConfig(
   }
   for (const field of UI_COMPAT_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(body, field)) {
+      if (field === 'schedulable' && typeof body[field] !== 'boolean') {
+        throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+      }
       assertNoSensitiveUiFields(body[field], field)
-      config[field] = cloneJsonValue(body[field])
+      config[field] = (field === 'expires_at' || field === 'load_factor') && typeof body[field] === 'number' && body[field] <= 0
+        ? null : cloneJsonValue(body[field])
     }
   }
   return config
@@ -1891,14 +2369,38 @@ function updateUiConfig(
   current: Record<string, unknown>,
   body: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
+  validateAccountSchedulingFields(body)
   let changed = false
   const next: Record<string, unknown> = { ...current, schema_version: UI_CONFIG_VERSION }
+  if (body.model_capabilities !== undefined) { next.original_model_routing = false; changed = true }
+  else if (body.credentials && typeof body.credentials === 'object' && Object.hasOwn(body.credentials, 'model_mapping')) {
+    next.original_model_routing = true
+    changed = true
+  }
+
   for (const field of UI_COMPAT_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(body, field)) {
+      if (field === 'schedulable' && typeof body[field] !== 'boolean') {
+        throw new GatewayError(400, 'invalid_schedulable', 'schedulable must be a boolean')
+      }
       assertNoSensitiveUiFields(body[field], field)
-      next[field] = cloneJsonValue(body[field])
+      next[field] = (field === 'expires_at' || field === 'load_factor') && typeof body[field] === 'number' && body[field] <= 0
+        ? null : cloneJsonValue(body[field])
       changed = true
     }
+  }
+  // Operational snapshots belong to their writers, not an already-open editor.
+  // Do not let stale forms replace newer observations or resurrect cleared ones.
+  if (changed) {
+    const currentExtra = current.extra && typeof current.extra === 'object' && !Array.isArray(current.extra)
+      ? current.extra as Record<string, unknown> : {}
+    const submittedExtra = next.extra && typeof next.extra === 'object' && !Array.isArray(next.extra)
+      ? { ...next.extra } as Record<string, unknown> : {}
+    for (const key of ['upstream_model_metadata', 'upstream_billing_probe']) {
+      if (Object.hasOwn(currentExtra, key)) submittedExtra[key] = currentExtra[key]
+      else delete submittedExtra[key]
+    }
+    if (next.extra !== undefined || Object.keys(submittedExtra).length) next.extra = submittedExtra
   }
   return changed ? next : undefined
 }
@@ -1977,8 +2479,23 @@ function mergeCredentialPatch(
     if (value === null || value === '') delete next[key]
     else next[key] = value
   }
-  const apiKey = requireProviderCredential({ api_key: next.api_key }, 'api_key')
-  next.api_key = apiKey
+  if(String(next.auth_mode).trim().toLowerCase()!=='agentidentity') next.api_key = requireProviderCredential({api_key:next.api_key},'api_key')
+  return next as StoredAccountCredential
+}
+
+function mergeReauthorizedCredential(current: StoredAccountCredential, incoming: Record<string, unknown>): StoredAccountCredential {
+  // Go MergePreservingSensitiveCreds replaces non-secret metadata while keeping
+  // omitted secrets. Sanitize both incoming and legacy stored SSO residue.
+  const next: Record<string, unknown> = Object.keys(incoming).length ? { ...incoming } : { ...current }
+  for (const key of Object.keys(current)) {
+    if (isSensitiveCredentialField(key) && !Object.hasOwn(incoming, key)) next[key] = current[key]
+  }
+  for (const key of ['password', 'sso_token', 'sso', 'sso-rw', 'clearTextPassword', 'cookie']) delete next[key]
+  if (Object.hasOwn(incoming, 'access_token') && typeof incoming.access_token === 'string' && incoming.access_token.length) {
+    next.api_key = requireProviderCredential(incoming, 'access_token')
+  }
+  if(String(next.auth_mode).trim().toLowerCase()!=='agentidentity') next.api_key = requireProviderCredential(next, 'api_key')
+  normalizeHeaderOverrideCredentials(next)
   return next as StoredAccountCredential
 }
 
@@ -2045,6 +2562,7 @@ function validateAccountExecution(
       (credentialKind === 'oauth' || credentialKind === 'setup_token')
     : platform === 'openai'
       ? imageAdapter === 'direct_images' && (credentialKind === 'api_key' || credentialKind === 'oauth')
+      : platform === 'anthropic' ? imageAdapter === 'direct_images' && ['api_key','oauth','setup_token'].includes(credentialKind)
       : imageAdapter === 'direct_images' && credentialKind === 'api_key'
   if (!supported) {
     throw new GatewayError(
@@ -2140,125 +2658,41 @@ function applySubscriptionPlan(
   return next
 }
 
-const OPENAI_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token'
-const OPENAI_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
-const OPENAI_OAUTH_REFRESH_SCOPE = 'openid profile email'
-
-interface OpenAIRefreshResponse {
-  access_token: string
-  refresh_token?: string
-  id_token?: string
-  expires_in?: number
-  token_type?: string
-}
-
-async function refreshOpenAIOAuthToken(refreshToken: string, clientId: unknown): Promise<OpenAIRefreshResponse> {
-  const form = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: typeof clientId === 'string' && clientId.trim() ? clientId.trim() : OPENAI_OAUTH_CLIENT_ID,
-    scope: OPENAI_OAUTH_REFRESH_SCOPE,
-  })
-  let response: Response
+async function refreshOpenAIOAuthToken(env: Env, refreshToken: string, clientId: unknown, proxyId: unknown): Promise<OpenAITokenInfo> {
+  const client = typeof clientId === 'string' && clientId.trim() ? clientId.trim() : OPENAI_OAUTH_CLIENT_ID
+  const proxy = proxyId != null && String(proxyId) !== '0' ? String(proxyId) : null
+  let tokens
   try {
-    response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': 'codex_cli_rs/0.82.0',
-        originator: 'codex_cli_rs',
-      },
-      body: form.toString(),
-      signal: AbortSignal.timeout(20_000),
-    })
+    tokens = await requestOpenAITokens(env, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken,
+      client_id: client, scope: 'openid profile email' }), proxy)
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') {
-      throw new GatewayError(504, 'oauth_refresh_timeout', 'OpenAI OAuth token refresh timed out', 'api_error')
+    if (error instanceof OpenAITokenEndpointError) {
+      throw new GatewayError(error.upstreamStatus >= 500 ? 502 : 401,
+        error.upstreamStatus >= 500 ? 'oauth_refresh_upstream_error' : 'oauth_refresh_rejected',
+        'OpenAI OAuth token refresh was rejected by the provider', 'api_error')
     }
+    const code = error instanceof GatewayError ? error.code : ''
+    if (code === 'OPENAI_OAUTH_TIMEOUT') throw new GatewayError(504, 'oauth_refresh_timeout', 'OpenAI OAuth token refresh timed out', 'api_error')
+    if (code === 'OPENAI_OAUTH_INVALID_RESPONSE') throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned invalid token data', 'api_error')
     throw new GatewayError(502, 'oauth_refresh_transport_failed', 'OpenAI OAuth token refresh could not reach the provider', 'api_error')
   }
-  if (!response.ok) {
-    const code = response.status >= 500 ? 'oauth_refresh_upstream_error' : 'oauth_refresh_rejected'
-    const status = response.status >= 500 ? 502 : 401
-    throw new GatewayError(status, code, 'OpenAI OAuth token refresh was rejected by the provider', 'api_error')
-  }
-  let value: unknown
-  try {
-    value = await response.json()
-  } catch {
-    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned invalid JSON', 'api_error')
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>).access_token !== 'string') {
-    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned no access token', 'api_error')
-  }
-  const result = value as Record<string, unknown>
-  const expiresIn = result.expires_in
-  if (expiresIn !== undefined && (typeof expiresIn !== 'number' || !Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > 31_536_000)) {
-    throw new GatewayError(502, 'oauth_refresh_invalid_response', 'OpenAI OAuth token refresh returned an invalid expiry', 'api_error')
-  }
-  return {
-    access_token: result.access_token as string,
-    ...(typeof result.refresh_token === 'string' && result.refresh_token.trim() ? { refresh_token: result.refresh_token } : {}),
-    ...(typeof result.id_token === 'string' && result.id_token.trim() ? { id_token: result.id_token } : {}),
-    ...(typeof expiresIn === 'number' ? { expires_in: expiresIn } : {}),
-    ...(typeof result.token_type === 'string' ? { token_type: result.token_type } : {}),
-  }
+  const info = openAITokenInfo(tokens, client)
+  await enrichOpenAITokenInfo(env, info, proxy)
+  return info
 }
 
-function mergeOpenAIRefreshCredential(
-  current: StoredAccountCredential,
-  refreshed: OpenAIRefreshResponse,
-): StoredAccountCredential {
-  const next: StoredAccountCredential = { ...current, access_token: refreshed.access_token }
-  if (refreshed.refresh_token !== undefined) next.refresh_token = refreshed.refresh_token
-  if (refreshed.id_token !== undefined) {
-    next.id_token = refreshed.id_token
-    enrichOpenAIOAuthCredentialFromIdToken(next, refreshed.id_token)
+function mergeOpenAIRefreshCredential(current: StoredAccountCredential, refreshed: OpenAITokenInfo): StoredAccountCredential {
+  // Original BuildAccountCredentials overwrites newly returned identity fields,
+  // then preserves every existing key absent from the refresh result.
+  const next: StoredAccountCredential = { ...current, api_key: refreshed.access_token, access_token: refreshed.access_token }
+  for (const key of ['refresh_token', 'id_token', 'email', 'chatgpt_account_id', 'chatgpt_user_id',
+    'organization_id', 'plan_type', 'subscription_expires_at', 'client_id', 'token_type'] as const) {
+    const value = refreshed[key]
+    if (typeof value === 'string' && value.trim()) next[key] = value
   }
-  if (refreshed.expires_in !== undefined) next.expires_at = new Date(Date.now() + refreshed.expires_in * 1_000).toISOString()
-  if (refreshed.token_type !== undefined) next.token_type = refreshed.token_type
+  if (refreshed.expires_at > 0) next.expires_at = new Date(refreshed.expires_at * 1000).toISOString()
+  for (const key of ['password', 'sso_token', 'sso', 'sso-rw', 'clearTextPassword', 'cookie']) delete next[key]
   return next
-}
-
-/**
- * The token endpoint does not separately return the account profile.  Keep this
- * best-effort and non-authoritative: these claims only complete missing display
- * and routing metadata, and a malformed token must never make a credential
- * refresh fail or replace a user-maintained value.
- */
-function enrichOpenAIOAuthCredentialFromIdToken(credential: StoredAccountCredential, idToken: string): void {
-  try {
-    const payload = idToken.split('.')[1]
-    if (!payload) return
-    const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '='))
-    const claims: unknown = JSON.parse(decoded)
-    if (claims === null || typeof claims !== 'object' || Array.isArray(claims)) return
-    const values = claims as Record<string, unknown>
-    const auth = values['https://api.openai.com/auth']
-    const authValues = auth !== null && typeof auth === 'object' && !Array.isArray(auth)
-      ? auth as Record<string, unknown>
-      : {}
-    setMissingCredentialString(credential, 'email', values.email)
-    setMissingCredentialString(credential, 'chatgpt_account_id', authValues.chatgpt_account_id)
-    setMissingCredentialString(credential, 'chatgpt_user_id', authValues.chatgpt_user_id)
-    setMissingCredentialString(credential, 'plan_type', authValues.chatgpt_plan_type)
-    const organizations = authValues.organizations
-    if (Array.isArray(organizations)) {
-      const selected = organizations.find((organization) => organization !== null && typeof organization === 'object'
-        && !Array.isArray(organization) && (organization as Record<string, unknown>).is_default === true) ?? organizations[0]
-      if (selected !== null && typeof selected === 'object' && !Array.isArray(selected)) {
-        setMissingCredentialString(credential, 'organization_id', (selected as Record<string, unknown>).id)
-      }
-    }
-  } catch {
-    // ID-token claims are metadata only. The newly issued tokens remain valid.
-  }
-}
-
-function setMissingCredentialString(credential: StoredAccountCredential, key: string, value: unknown): void {
-  if (typeof credential[key] !== 'string' || !credential[key].trim()) {
-    if (typeof value === 'string' && value.trim()) credential[key] = value.trim()
-  }
 }
 
 function parseEnabledBody(body: Record<string, unknown>, fallback: boolean): boolean {
@@ -2299,7 +2733,8 @@ function appendAccountStatusCondition(
   }
   if (status === undefined) return
   if (status === 'active') {
-    conditions.push("a.enabled = 1 AND a.health_status <> 'unhealthy'")
+    conditions.push("a.enabled = 1 AND a.health_status <> 'unhealthy' AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1")
+    conditions.push(accountNotRateLimitedSql(), accountNotTemporarilyBlockedSql())
     return
   }
   if (status === 'inactive') {
@@ -2310,12 +2745,17 @@ function appendAccountStatusCondition(
     conditions.push("a.health_status = 'unhealthy'")
     return
   }
-  if (status === 'rate_limited' || status === 'temp_unschedulable' || status === 'unschedulable') {
-    throw new GatewayError(
-      422,
-      'unsupported_account_status_filter',
-      `Account status filter ${status} is not available in the Worker projection`,
-    )
+  if (status === 'unschedulable') {
+    conditions.push("a.enabled = 1 AND a.health_status <> 'unhealthy' AND json_extract(a.ui_config_json, '$.schedulable') = 0")
+    return
+  }
+  if (status === 'rate_limited') {
+    conditions.push(`a.enabled = 1 AND a.health_status <> 'unhealthy' AND NOT ${accountNotRateLimitedSql()}`)
+    return
+  }
+  if (status === 'temp_unschedulable') {
+    conditions.push("a.enabled = 1 AND a.health_status <> 'unhealthy' AND COALESCE(unixepoch(json_extract(a.ui_config_json, '$.temp_unschedulable_until'), 'subsec'), 0) > unixepoch('subsec')")
+    return
   }
   throw new GatewayError(400, 'invalid_status', 'status is invalid')
 }
@@ -2404,8 +2844,8 @@ async function validateLinks(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(CASE WHEN platform = ? THEN 0 ELSE 1 END), 0) AS mismatched
            FROM "groups"
-          WHERE id IN (${groups.map(() => '?').join(', ')})`,
-      ).bind(platform, ...groups).first<{ total: number; mismatched: number }>(),
+          WHERE id IN (SELECT value FROM json_each(?))`,
+      ).bind(platform, JSON.stringify(groups)).first<{ total: number; mismatched: number }>(),
     models.length === 0
       ? null
       : env.DB.prepare(
@@ -2437,11 +2877,13 @@ function assertLinkCheck(
 }
 
 function groupInsertStatements(env: Env, accountId: string, links: GroupLinkInput[], now: number): D1PreparedStatement[] {
-  return links.map((link) => env.DB.prepare(
+  if (!links.length) return []
+  return [env.DB.prepare(
     `INSERT INTO account_groups (
        account_id, group_id, priority, weight, created_at_ms, updated_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?)`,
-  ).bind(accountId, link.group_id, link.priority, link.weight, now, now))
+     ) SELECT ?, json_extract(value, '$.group_id'), json_extract(value, '$.priority'),
+              json_extract(value, '$.weight'), ?, ? FROM json_each(?)`,
+  ).bind(accountId, now, now, JSON.stringify(links))]
 }
 
 function capabilityInsertStatements(
@@ -2523,7 +2965,7 @@ function publicAccount(row: AccountRow) {
       image_generation: Number(value.image_generation) === 1,
       control_version: Number(value.control_version),
     }))
-  return accountResponse({
+  return { ...accountResponse({
     id: row.id,
     platform: row.platform,
     name: row.name,
@@ -2548,7 +2990,8 @@ function publicAccount(row: AccountRow) {
     ui_config: parseUiConfig(row.ui_config_json),
     group_links: groups,
     model_capabilities: capabilities,
-  })
+  }), proxy: row.proxy_summary_json ? JSON.parse(row.proxy_summary_json) as Record<string, unknown> : null,
+    proxy_fallback_origin_name: row.proxy_fallback_origin_name ?? null }
 }
 
 function accountResponse(value: {
@@ -2579,11 +3022,17 @@ function accountResponse(value: {
 }) {
   const { billing_rate_multiplier_ppm: multiplierPpm, ui_config: uiConfig, ...publicValue } = value
   const compatibility = compatibilityProjection(uiConfig, value)
+  const quotaExtra = uiConfig.extra && typeof uiConfig.extra === 'object' && !Array.isArray(uiConfig.extra) ? uiConfig.extra as Record<string, unknown> : {}
+  const quotaFields = value.credential_kind === 'api_key' || uiConfig.type === 'bedrock' ? accountQuotaProjection(quotaExtra) : {}
   return {
     ...publicValue,
     ...compatibility,
+    ...quotaFields,
     rate_multiplier: multiplierPpm / 1_000_000,
     enabled: value.enabled,
+    schedulable: uiConfig.schedulable !== false,
+    auto_pause_on_expired: uiConfig.auto_pause_on_expired !== false,
+    error_message: value.last_health_error ?? '',
     status: !value.enabled
       ? 'inactive' as const
       : value.health_status === 'unhealthy'
@@ -2625,7 +3074,7 @@ function compatibilityProjection(
     group_links: GroupLink[]
   },
 ): Record<string, unknown> {
-  const { schema_version: _schemaVersion, credentials: storedCredentials, ...stored } = uiConfig
+  const { schema_version: _schemaVersion, credentials: storedCredentials, _worker_account_quota_reset_at_ms: _quotaResetAt, ...stored } = uiConfig
   const credentials = storedCredentials !== null && typeof storedCredentials === 'object' && !Array.isArray(storedCredentials)
     ? storedCredentials as Record<string, unknown>
     : {}
@@ -2636,6 +3085,9 @@ function compatibilityProjection(
       : value.credential_kind === 'setup_token' ? 'setup-token' : 'oauth'),
     credentials: { ...credentials, base_url: value.base_url },
     concurrency: value.max_concurrency,
+    // Account priority is distinct from group membership priority. The original
+    // account schema defaults to 50; a missing field must not become form-invalid 0.
+    priority: uiConfig.priority ?? 50,
     group_ids: value.group_links.map((link) => link.group_id),
   }
 }
@@ -2738,11 +3190,17 @@ function normalizeBaseUrl(value: string): string {
 function mapAccountWriteError(error: unknown): GatewayError {
   if (error instanceof GatewayError) return error
   const message = error instanceof Error ? error.message : String(error)
+  if (message.includes('account_group_oauth_only')) {
+    return new GatewayError(400, 'account_group_oauth_only', 'Selected group only allows OAuth accounts; API key accounts cannot be associated')
+  }
   if (/UNIQUE constraint failed: accounts\.platform, accounts\.name/i.test(message)) {
     return new GatewayError(409, 'account_name_exists', 'An account with this name already exists')
   }
-  if (/FOREIGN KEY constraint failed|invalid_account_(?:group|model)/i.test(message)) {
+  if (/FOREIGN KEY constraint failed|invalid_account_(?:group|model|proxy)/i.test(message)) {
     return new GatewayError(409, 'account_link_conflict', 'Account links changed or are incompatible')
+  }
+  if (/CHECK constraint failed:.*lease_until_ms/i.test(message)) {
+    return new GatewayError(412, 'oauth_refresh_lease_lost', 'Account token refresh lease expired or changed; reload the account')
   }
   if (/CHECK constraint failed:.*control_version/i.test(message)) {
     return new GatewayError(412, 'account_version_conflict', 'Account changed; reload it and retry')

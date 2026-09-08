@@ -1,3 +1,5 @@
+import { persistAccountTempUnschedulable } from '../../src/gateway/account-temp-unschedulable'
+import { accountModelRateLimited } from '../../src/gateway/account-model-rate-limit'
 import { describe, expect, it } from 'vitest'
 import type { Env } from '../../src/env'
 import {
@@ -7,8 +9,375 @@ import {
   resolveResponseModelPricing,
 } from '../../src/gateway/repository'
 import { applyMigrations, createSqliteD1 } from '../helpers/sqlite-d1'
+import { persistOpenAIRateLimit } from '../../src/gateway/openai-rate-limit-persistence'
 
 describe('gateway repository embeddings routing', () => {
+  it('enforces the same privacy gate through external channel aliases', async () => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}'); seedChannel(raw, { restrictModels: false })
+    try {
+      raw.exec(`INSERT INTO channel_model_mappings(channel_id,platform,source_pattern,target_pattern,source_is_wildcard,target_is_wildcard,sort_order,created_at_ms)
+        VALUES('channel-openai','openai','privacy-alias','openai-public',0,0,0,1);
+        UPDATE "groups" SET ui_config_json='{"require_privacy_set":true}' WHERE id='group-openai'`)
+      const route = () => resolveGatewayRoute({ DB: d1 } as Env, 'group-openai', 'privacy-alias', 'responses', 'user-1')
+      await expect(route()).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      raw.exec(`UPDATE accounts SET ui_config_json='{"extra":{"privacy_mode":"training_off"}}' WHERE platform='openai'`)
+      await expect(route()).resolves.toMatchObject({ candidates: [{ platform: 'openai' }] })
+    } finally { raw.close() }
+  })
+
+  it('does not invent privacy requirements for Gemini accounts', async () => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
+    seedProviderRoute(raw, 'gemini', 'gemini', 'x-goog-api-key', '{}')
+    try {
+      raw.exec(`UPDATE "groups" SET ui_config_json='{"require_privacy_set":true}' WHERE id='group-gemini'`)
+      await expect(resolveGatewayRoute({ DB: d1 } as Env, 'group-gemini', 'gemini-public', 'responses', 'user-1'))
+        .resolves.toMatchObject({ candidates: [{ platform: 'gemini' }] })
+    } finally { raw.close() }
+  })
+
+  it('applies privacy per group at selection and final read without poisoning the shared account', async () => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const route = () => resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      raw.exec(`UPDATE "groups" SET ui_config_json='{"require_privacy_set":true}' WHERE id='group-1'`)
+      await expect(route()).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      for (const privacy of ['training_set_failed', 'training_set_cf_blocked', 'training_off ', null]) {
+        raw.prepare('UPDATE accounts SET ui_config_json=? WHERE id=?').run(JSON.stringify({ extra: { privacy_mode: privacy } }), 'account-1')
+        await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      }
+      raw.exec(`UPDATE accounts SET ui_config_json='{"extra":{"privacy_mode":"training_off"}}' WHERE id='account-1'`)
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+      raw.exec(`UPDATE accounts SET ui_config_json='{}' WHERE id='account-1'; UPDATE "groups" SET ui_config_json='{"require_privacy_set":false}' WHERE id='group-1'`)
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      expect(raw.prepare('SELECT health_status FROM accounts WHERE id=?').get('account-1').health_status).toBe('unknown')
+    } finally { raw.close() }
+  })
+
+  it.each(['total', 'daily', 'weekly'])('blocks final credential reads when %s account quota reaches its limit', async dimension => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const prefix = dimension === 'total' ? 'quota' : `quota_${dimension}`
+      const extra = { [`${prefix}_limit`]: 10, [`${prefix}_used`]: 9, [`${prefix}_start`]: new Date().toISOString() }
+      const configure = () => raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ extra }))
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      configure()
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+      // A quota update after route selection must invalidate the final read.
+      extra[`${prefix}_used`] = 10; configure()
+      await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable', status: 503 })
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      if (dimension === 'total') extra[`${prefix}_used`] = 0
+      else extra[`${prefix}_start`] = '2000-01-01T00:00:00Z'
+      configure()
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+    } finally { raw.close() }
+  })
+
+  it.each(['header', 'body', 'unknown', 'race', 'oversized'])('persists actual upstream 429 against the selected credential snapshot: %s', async source => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      const account = await credential()
+      expect(account.runtime_snapshot).toBeDefined()
+      if (source === 'race') raw.exec('UPDATE accounts SET config_version=config_version+1,control_version=control_version+1')
+      const body = source === 'unknown' ? '{}' : source === 'oversized' ? 'x'.repeat(65537)
+        : JSON.stringify({ error: { type: 'usage_limit_reached', resets_in_seconds: 120 } })
+      const response = new Response(body, { status: 429, headers: source === 'header' ? { 'x-codex-primary-reset-after-seconds': '300' } : {} })
+      const saved = await persistOpenAIRateLimit(env, account, response)
+      expect(await response.text()).toBe(body)
+      expect(saved).toBe(source === 'header' || source === 'body')
+      const row = raw.prepare('SELECT * FROM accounts WHERE id=?').get('account-1') as any
+      if (saved) {
+        const reset = Date.parse(JSON.parse(row.ui_config_json).rate_limit_reset_at)
+        expect(reset).toBeGreaterThan(Date.now() + (source === 'header' ? 290000 : 110000))
+        expect(row.control_version).toBe(account.runtime_snapshot!.control_version + 1)
+        await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      } else {
+        expect(JSON.parse(row.ui_config_json)).not.toHaveProperty('rate_limit_reset_at')
+        await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+      }
+    } finally { raw.close() }
+  })
+
+  it.each(['temp_unschedulable_until', 'overload_until'])('honors %s at discovery, selection and final reads until expiry', async field => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const route = () => resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ [field]: new Date(Date.now() + 60000).toISOString() }))
+      expect(await listModels(env, 'group-1')).toEqual([])
+      await expect(route()).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ [field]: new Date(Date.now() - 1000).toISOString() }))
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+    } finally { raw.close() }
+  })
+
+  it.each(['model', 'account', 'expired', 'unmatched', 'disabled', 'custom', 'pool401', 'race', 'repeat401'])('applies original temporary error rules without widening model failures: %s', async scenario => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const model = 'mapped-embed'
+      const ui = { credentials: { model_mapping: { 'text-embedding-test': model } }, extra: { keep: true },
+        ...(scenario === 'repeat401' ? { temp_unschedulable_until: '2000-01-01T00:00:00Z', temp_unschedulable_reason: JSON.stringify({ status_code: 401 }) } : {}) }
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify(ui))
+      const account = await getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1', 'text-embedding-test')
+      if (scenario === 'race') raw.exec('UPDATE accounts SET control_version=control_version+1')
+      const code = ['account', 'pool401', 'repeat401'].includes(scenario) ? 401 : 400
+      const credential = { api_key: 'test', temp_unschedulable_enabled: scenario !== 'disabled', custom_error_codes_enabled: scenario === 'custom', pool_mode: scenario === 'pool401',
+        temp_unschedulable_rules: [{ error_code: code, keywords: [' Maintenance '], duration_minutes: '2' }] }
+      const response = new Response(scenario === 'unmatched' ? 'other error' : 'MODEL MAINTENANCE', { status: code })
+      const matched = await persistAccountTempUnschedulable(env, account, credential, response, model)
+      expect(await response.text()).toBe(scenario === 'unmatched' ? 'other error' : 'MODEL MAINTENANCE')
+      expect(matched).toBe(!['unmatched', 'disabled', 'custom', 'pool401'].includes(scenario))
+      let row = raw.prepare('SELECT * FROM accounts WHERE id=?').get('account-1') as any
+      const after = JSON.parse(row.ui_config_json)
+      expect(after.extra.keep).toBe(true)
+      if (scenario === 'repeat401') expect(row.health_status).toBe('unhealthy')
+      else expect(row.health_status).toBe('unknown')
+      if (scenario === 'account') expect(Date.parse(after.temp_unschedulable_until)).toBeGreaterThan(Date.now())
+      if (['model', 'expired'].includes(scenario)) {
+        expect(after).not.toHaveProperty('temp_unschedulable_until')
+        expect(accountModelRateLimited(after, 'text-embedding-test', 'openai')).toBe(true)
+        expect(accountModelRateLimited(after, 'unrelated-model', 'openai')).toBe(false)
+        await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1', 'text-embedding-test')).rejects.toMatchObject({ code: 'credential_unavailable' })
+        if (scenario === 'expired') {
+          after.extra.model_rate_limits[model].rate_limit_reset_at = '2000-01-01T00:00:00Z'
+          raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify(after))
+          await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1', 'text-embedding-test')).resolves.toMatchObject({ account_id: 'account-1' })
+        }
+      }
+      if (['unmatched', 'disabled', 'custom', 'pool401', 'race'].includes(scenario)) expect(after).toEqual(ui)
+    } finally { raw.close() }
+  })
+
+  it('filters model cooldowns from normal and alias candidate selection', async () => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw)
+    seedProviderRoute(raw, 'openai', 'openai', 'bearer', '{}'); seedChannel(raw, { restrictModels: false })
+    try {
+      raw.exec(`INSERT INTO channel_model_mappings(channel_id,platform,source_pattern,target_pattern,source_is_wildcard,target_is_wildcard,sort_order,created_at_ms)
+        VALUES('channel-openai','openai','temp-alias','openai-public',0,0,0,1)`)
+      const env = { DB: d1 } as Env
+      const route = (name: string) => resolveGatewayRoute(env, 'group-openai', name, 'responses', 'user-1')
+      await expect(route('openai-public')).resolves.toBeDefined()
+      const row = raw.prepare('SELECT upstream_name FROM models WHERE platform=?').get('openai') as any
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ extra: { model_rate_limits: { [row.upstream_name]: { rate_limit_reset_at: '2099-01-01T00:00:00Z' } } } }))
+      await expect(route('openai-public')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(route('temp-alias')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+    } finally { raw.close() }
+  })
+
+  it.each(['pool', 'pool-rule', 'custom-skip', 'custom-match', 'custom-empty', 'custom-string', 'custom-pool-match', 'oauth', 'setup-token'])('honors original error policy before persisting a 429 cooldown: %s', async scenario => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const custom = scenario.startsWith('custom')
+      const credentials = { pool_mode: scenario.startsWith('pool') || scenario === 'custom-pool-match' || scenario === 'oauth' || scenario === 'setup-token',
+        custom_error_codes_enabled: custom || scenario === 'oauth' || scenario === 'setup-token',
+        custom_error_codes: scenario === 'custom-empty' ? [] : scenario === 'custom-string' ? ['503'] : ['custom-match', 'custom-pool-match'].includes(scenario) ? [429] : [503],
+        temp_unschedulable_enabled: scenario === 'pool-rule', temp_unschedulable_rules: [{ error_code: 429, keywords: ['quota'], duration_minutes: 2 }] }
+      const ui = { type: ['oauth', 'setup-token'].includes(scenario) ? scenario : 'apikey', credentials, extra: { quota_used: 3, keep: true } }
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify(ui))
+      const account = await getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      const response = new Response('quota unavailable', { status: 429, headers: { 'x-codex-primary-reset-after-seconds': '300' } })
+      const saved = await persistOpenAIRateLimit(env, account, response)
+      expect(saved).toBe(!['pool', 'pool-rule', 'custom-skip'].includes(scenario))
+      expect(await response.text()).toBe('quota unavailable')
+      const row = raw.prepare('SELECT * FROM accounts WHERE id=?').get('account-1') as any
+      const after = JSON.parse(row.ui_config_json)
+      expect(after.extra).toEqual(ui.extra)
+      if (saved) await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).rejects.toMatchObject({ code: 'credential_unavailable' })
+      else { expect(after).toEqual(ui); expect(row.control_version).toBe(account.runtime_snapshot!.control_version) }
+      if (scenario === 'pool-rule') {
+        expect(await persistAccountTempUnschedulable(env, account, { api_key: 'test', ...credentials }, new Response('quota unavailable', { status: 429 }), 'model')).toBe(true)
+        expect(JSON.parse(raw.prepare('SELECT ui_config_json FROM accounts WHERE id=?').get('account-1').ui_config_json).extra.model_rate_limits.model).toBeDefined()
+      }
+    } finally { raw.close() }
+  })
+
+  it.each(['temporary', '429'])('merges a %s observation across automatic probe metadata without losing either result', async kind => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const account = await getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      raw.exec("UPDATE accounts SET config_version=config_version+1,ui_config_json=json_set(ui_config_json,'$.extra.openai_responses_supported',json('true'))")
+      const response = new Response('maintenance', { status: kind === '429' ? 429 : 400, headers: { 'x-codex-primary-reset-after-seconds': '120' } })
+      const saved = kind === '429' ? await persistOpenAIRateLimit(env, account, response) : await persistAccountTempUnschedulable(env, account,
+        { api_key: 'test', temp_unschedulable_enabled: true, temp_unschedulable_rules: [{ error_code: 400, keywords: ['maintenance'], duration_minutes: 2 }] } as any, response, 'model')
+      expect(saved).toBe(true)
+      const ui = JSON.parse(raw.prepare('SELECT ui_config_json FROM accounts').get().ui_config_json)
+      expect(ui.extra.openai_responses_supported).toBe(true)
+      if (kind === '429') expect(Date.parse(ui.rate_limit_reset_at)).toBeGreaterThan(Date.now())
+      else expect(ui.extra.model_rate_limits.model).toBeDefined()
+    } finally { raw.close() }
+  })
+
+  it('applies persisted cooldown at discovery, route selection and cached-route credential reads until expiry', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const route = () => resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ rate_limit_reset_at: new Date(Date.now() + 60000).toISOString() }))
+      expect(await listModels(env, 'group-1')).toEqual([])
+      await expect(route()).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ rate_limit_reset_at: new Date(Date.now() - 1000).toISOString() }))
+      expect(await listModels(env, 'group-1')).toHaveLength(1)
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+    } finally { raw.close() }
+  })
+
+  it('enforces account expiry at discovery, selection and final credential reads, with explicit opt-out', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const configure = (value: object) => raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify(value))
+      const route = () => resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')
+      const credential = () => getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')
+      configure({ expires_at: Math.floor(Date.now() / 1000) + 60, load_factor: 7 })
+      await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1', load_factor: 7 }] })
+      await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+      // Simulate expiration after a route was selected: credential access must
+      // reject it even when the caller still holds the old candidate snapshot.
+      configure({ expires_at: Math.floor(Date.now() / 1000) })
+      expect(await listModels(env, 'group-1')).toEqual([])
+      await expect(route()).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(credential()).rejects.toMatchObject({ code: 'credential_unavailable' })
+      for (const config of [{ expires_at: 1, auto_pause_on_expired: false }, { expires_at: 0 }, { expires_at: null }]) {
+        configure(config)
+        expect(await listModels(env, 'group-1')).toHaveLength(1)
+        await expect(route()).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+        await expect(credential()).resolves.toMatchObject({ account_id: 'account-1' })
+      }
+    } finally { raw.close() }
+  })
+
+  it('excludes incompatible empty-mapping OAuth accounts consistently and permits explicit mappings', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      raw.exec("UPDATE accounts SET credential_kind='oauth'; UPDATE models SET upstream_name='namespace/DeepSeek-V4'")
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      expect(await listModels(env, 'group-1')).toEqual([])
+      await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).rejects.toMatchObject({ code: 'credential_unavailable' })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ credentials: { model_mapping: { 'namespace/DeepSeek-V4': 'gpt-5' } } }))
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      expect(await listModels(env, 'group-1')).toHaveLength(1)
+      await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).resolves.toMatchObject({ upstream_model_name: 'gpt-5' })
+      raw.exec("UPDATE accounts SET ui_config_json='{}'; UPDATE group_models SET upstream_name_override='gpt-5'")
+      // Listing must evaluate the group's overridden name, just like dispatch.
+      expect(await listModels(env, 'group-1')).toHaveLength(1)
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1', 'gpt-5')).resolves.toMatchObject({ upstream_model_name: 'gpt-5' })
+    } finally { raw.close() }
+  })
+
+  it.each(['responses', 'chat_completions'] as const)('combines mixed-protocol candidates by account priority for %s', async endpoint => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw); seedAlternateEmbeddingAccount(raw)
+    const env = { DB: d1 } as Env
+    try {
+      raw.exec('DELETE FROM account_models')
+      for (const [id, mode, priority] of [['account-1', 'force_chat_completions', 50], ['account-2', 'force_responses', 5]] as const) {
+        raw.prepare('UPDATE accounts SET ui_config_json=? WHERE id=?').run(JSON.stringify({ original_model_routing: true, extra: { openai_responses_mode: mode } }), id)
+        raw.prepare('UPDATE account_groups SET priority=? WHERE account_id=?').run(priority, id)
+      }
+      const route = await resolveGatewayRoute(env, 'group-1', 'embed-public', endpoint, 'user-1', endpoint === 'responses' ? 'chat_completions' : 'responses', true)
+      expect(route.upstream_endpoint).toBe(endpoint)
+      expect(route.candidates.map(candidate => [candidate.account_id, candidate.upstream_endpoint])).toEqual([
+        ['account-2', 'responses'], ['account-1', 'chat_completions'],
+      ])
+    } finally { raw.close() }
+  })
+
+  it.each([
+    [{}, 'responses'],
+    [{ openai_responses_supported: false }, 'chat_completions'],
+    [{ openai_responses_supported: true, openai_responses_mode: 'force_chat_completions' }, 'chat_completions'],
+    [{ openai_responses_supported: false, openai_responses_mode: 'force_responses' }, 'responses'],
+  ] as const)('uses original account protocol policy %j for both public endpoints', async (extra, expected) => {
+    const { raw, d1 } = createSqliteD1(); applyMigrations(raw); seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      raw.exec('DELETE FROM account_models')
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true, extra }))
+      for (const endpoint of ['responses', 'chat_completions'] as const) {
+        const fallback = endpoint === 'responses' ? 'chat_completions' : 'responses'
+        await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', endpoint, 'user-1', fallback))
+          .resolves.toMatchObject({ upstream_endpoint: expected, candidates: [{ account_id: 'account-1' }] })
+      }
+      await expect(getAccountCredential(env, 'group-1', 'model-1', expected, 'account-1')).resolves.toMatchObject({ account_id: 'account-1' })
+      raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true,
+        extra: { openai_responses_mode: expected === 'responses' ? 'force_chat_completions' : 'force_responses' } }))
+      await expect(getAccountCredential(env, 'group-1', 'model-1', expected, 'account-1')).rejects.toMatchObject({ code: 'credential_unavailable' })
+    } finally { raw.close() }
+  })
+
+  it('routes original form accounts without manual capability rows and rechecks whitelist before loading credentials', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    const env = { DB: d1 } as Env
+    try {
+      const upstream = raw.prepare("SELECT upstream_name FROM models WHERE id='model-1'").get() as any
+      raw.exec('DELETE FROM account_models')
+      const configure = (mapping: Record<string, string>) => raw.prepare('UPDATE accounts SET ui_config_json=?').run(JSON.stringify({ original_model_routing: true, credentials: { model_mapping: mapping } }))
+      configure({ [upstream.upstream_name]: 'mapped-embedding' })
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      expect(await listModels(env, 'group-1')).toHaveLength(1)
+      await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).resolves.toMatchObject({ upstream_model_name: 'mapped-embedding' })
+      configure({ forbidden: 'other' })
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      expect(await listModels(env, 'group-1')).toEqual([])
+      await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).rejects.toMatchObject({ code: 'credential_unavailable' })
+      configure({})
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+      raw.exec("UPDATE accounts SET ui_config_json='{}'")
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+    } finally { raw.close() }
+  })
+
+  it('excludes unschedulable accounts from routing and discovery without enabling disabled accounts', async () => {
+    const { raw, d1 } = createSqliteD1()
+    applyMigrations(raw)
+    seedEmbeddingRoute(raw)
+    seedAlternateEmbeddingAccount(raw)
+    const env = { DB: d1 } as Env
+    try {
+      raw.exec(`UPDATE accounts SET ui_config_json = '{"schedulable":false}' WHERE id = 'account-1'`)
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1'))
+        .resolves.toMatchObject({ candidates: [{ account_id: 'account-2' }] })
+      raw.exec(`UPDATE accounts SET ui_config_json = '{"schedulable":false}' WHERE id = 'account-2'`)
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1'))
+        .rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      expect(await listModels(env, 'group-1')).toEqual([])
+      raw.exec(`UPDATE accounts SET enabled = 0, ui_config_json = '{"schedulable":true}' WHERE id = 'account-1'`)
+      expect(await listModels(env, 'group-1')).toEqual([])
+      raw.exec(`UPDATE accounts SET enabled = 1 WHERE id = 'account-1'`)
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1'))
+        .resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
+    } finally { raw.close() }
+  })
+
   it('routes a matching model only to its configured accounts, with exact patterns first', async () => {
     const { raw, d1 } = createSqliteD1()
     applyMigrations(raw)

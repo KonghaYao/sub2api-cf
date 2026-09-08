@@ -34,7 +34,9 @@
     "node": ">=22"
   },
   "dependencies": {
-    "hono": "^4.13.5"
+    "blakejs": "1.2.1",
+    "hono": "^4.13.5",
+    "tweetnacl": "1.0.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.1.4",

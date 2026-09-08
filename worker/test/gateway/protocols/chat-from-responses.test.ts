@@ -6,6 +6,15 @@ import {
 } from '../../../src/gateway/protocols/chat-from-responses'
 
 describe('Responses to Chat Completions output bridge', () => {
+  it.each([false, true])('fills terminal-only content without duplicating streamed text (deltas=%s)', deltas => {
+    const codec = new ResponsesToChatCompletionsEventCodec('public-model')
+    const chunks = deltas ? codec.push({ type: 'response.output_text.delta', delta: 'Hello' }) : []
+    chunks.push(...codec.push({ type: 'response.completed', response: { status: 'completed', output: [
+      { type: 'message', content: [{ type: 'output_text', text: 'Hello' }] },
+    ] } }))
+    expect(chunks.flatMap(chunk => chunk.choices).map(choice => choice.delta.content ?? '').join('')).toBe('Hello')
+  })
+
   it('converts buffered text, reasoning, tools, usage details and service tier', () => {
     expect(responsesToChatCompletionsResponse({
       id: 'resp_buffered',

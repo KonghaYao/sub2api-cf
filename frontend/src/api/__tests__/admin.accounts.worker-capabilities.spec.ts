@@ -12,6 +12,70 @@ vi.mock('@/api/client', () => ({
 }))
 
 describe('admin accounts Worker transport capabilities', () => {
+  it('preserves opaque account usage IDs, refresh flags and bounded provider query time', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { getUsage, getBatchUsage } = await import('@/api/admin/accounts')
+    get.mockResolvedValueOnce({ data: { five_hour: { utilization: 25 } } })
+    post.mockResolvedValueOnce({ data: { usage: {}, errors: {} } })
+    await getUsage('opaque-usage','active',true)
+    expect(get).toHaveBeenCalledWith('/admin/accounts/opaque-usage/usage', { params: { source: 'active', force: 'true' }, timeout: 60000 })
+    await getBatchUsage(['opaque-usage'],true)
+    expect(post).toHaveBeenCalledWith('/admin/accounts/usage/batch', { account_ids: ['opaque-usage'], force: true }, { timeout: 180000 })
+  })
+
+  it('preserves the selected opaque proxy and callback when exchanging OAuth tokens with sufficient request time', async () => {
+    const { exchangeCode, refreshOpenAIToken } = await import('@/api/admin/accounts')
+    const payload = { session_id: 'oauth-session', code: 'one-use-code', state: 'oauth-state', proxy_id: 'opaque-proxy', redirect_uri: 'https://panel.test/callback' }
+    await exchangeCode('/admin/openai/exchange-code', payload)
+    expect(post).toHaveBeenCalledWith('/admin/openai/exchange-code', payload, { timeout: 60000 })
+    await refreshOpenAIToken('refresh-token', 'opaque-proxy', '/admin/openai/refresh-token', 'custom-client')
+    expect(post).toHaveBeenCalledWith('/admin/openai/refresh-token', { refresh_token: 'refresh-token', proxy_id: 'opaque-proxy', client_id: 'custom-client' }, { timeout: 60000 })
+  })
+
+  it('preserves opaque IDs and original temporary scheduling status and clear responses', async () => {
+    const status = { active: true, state: { until_unix: 4102444800, status_code: 401, error_message: 'expired token' } }
+    get.mockResolvedValueOnce({ data: status })
+    deleteRequest.mockResolvedValueOnce({ data: { message: 'Temp unschedulable cleared successfully' } })
+    const { getTempUnschedulableStatus, resetTempUnschedulable } = await import('@/api/admin/accounts')
+    expect(await getTempUnschedulableStatus('opaque-account')).toEqual(status)
+    expect(await resetTempUnschedulable('opaque-account')).toEqual({ message: 'Temp unschedulable cleared successfully' })
+    expect(get).toHaveBeenCalledWith('/admin/accounts/opaque-account/temp-unschedulable')
+    expect(deleteRequest).toHaveBeenCalledWith('/admin/accounts/opaque-account/temp-unschedulable')
+  })
+
+  it('adapts manual privacy results without losing opaque IDs or failed modes', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    post.mockResolvedValueOnce({ data: { id: 'opaque-oauth', platform: 'openai', enabled: true, credential_kind: 'oauth',
+      max_concurrency: 7, extra: { privacy_mode: 'training_set_cf_blocked' } } })
+    const { setPrivacy } = await import('@/api/admin/accounts')
+    expect(await setPrivacy('opaque-oauth')).toMatchObject({ id: 'opaque-oauth', type: 'oauth', concurrency: 7, extra: { privacy_mode: 'training_set_cf_blocked' } })
+    expect(post).toHaveBeenCalledWith('/admin/accounts/opaque-oauth/set-privacy')
+  })
+
+  it('applies reauthorization using opaque account IDs and adapts the returned account for the original modal', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    post.mockResolvedValueOnce({ data: { id: 'opaque-oauth', platform: 'openai', enabled: true,
+      credential_kind: 'oauth', max_concurrency: 7, group_links: [{ group_id: 'opaque-group', priority: 3 }],
+      credentials: { email: 'new@example.test' }, extra: { base_rpm: 22 }, control_version: 9 } })
+    const { applyOAuthCredentials } = await import('@/api/admin/accounts')
+    const payload = { type: 'oauth' as const, credentials: { access_token: 'fresh-token' }, extra: { email: 'new@example.test' } }
+    const account = await applyOAuthCredentials('opaque-oauth', payload)
+    expect(post).toHaveBeenCalledWith('/admin/accounts/opaque-oauth/apply-oauth-credentials', payload)
+    expect(account).toMatchObject({ id: 'opaque-oauth', concurrency: 7, type: 'oauth', group_ids: ['opaque-group'], extra: { base_rpm: 22 }, control_version: 9 })
+  })
+
+  it('preserves opaque billing batch IDs and partial results with enough time for five probe waves', async () => {
+    const results = [{ account_id: 'opaque-a', snapshot: { status: 'ok' } }, { account_id: 'opaque-b', error: 'Unavailable' }]
+    post.mockResolvedValueOnce({ data: { results } })
+    const { probeUpstreamBillingBatch } = await import('@/api/admin/accounts')
+    const ids = ['opaque-a', 'opaque-b'] as unknown as number[]
+    expect(await probeUpstreamBillingBatch(ids)).toEqual(results)
+    expect(post).toHaveBeenCalledWith('/admin/accounts/upstream-billing-probe/batch', { account_ids: ids }, { timeout: 90000 })
+  })
+
   beforeEach(() => {
     vi.resetModules()
     post.mockReset()
@@ -273,6 +337,7 @@ describe('admin accounts Worker transport capabilities', () => {
       headers: {
         'Idempotency-Key': 'admin-account-create-33333333-3333-4333-8333-333333333333',
       },
+      timeout: 60000,
     })
     expect(account.id).toBe('account-uuid')
     expect(account.type).toBe('apikey')
@@ -388,6 +453,50 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(put).toHaveBeenCalledWith('/admin/accounts/7', request, undefined)
   })
 
+  it('redacts Agent Identity private keys from Worker account responses', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { getById } = await import('@/api/admin/accounts')
+    get.mockResolvedValueOnce({ data: { id: 'agent-account', name: 'Agent', platform: 'openai', type: 'oauth',
+      credentials: { auth_mode: 'agentIdentity', task_id: 'task', agent_private_key: 'must-not-reach-ui' } } })
+    const account = await getById('agent-account')
+    expect(account.credentials).toMatchObject({ auth_mode: 'agentIdentity', task_id: 'task' })
+    expect(account.credentials).not.toHaveProperty('agent_private_key')
+  })
+
+  it('reuses Codex import keys after response loss and starts a fresh operation after success', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { importCodexSession } = await import('@/api/admin/accounts')
+    vi.mocked(globalThis.crypto.randomUUID)
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000002')
+    const payload = { content: 'private-import-token', group_ids: ['opaque-import-group'], proxy_id: 'opaque-import-proxy' }
+    post.mockRejectedValueOnce(new Error('network lost'))
+    await expect(importCodexSession(payload)).rejects.toThrow('network lost')
+    post.mockResolvedValue({ data: { total: 1, created: 1, updated: 0, failed: 0, skipped: 0, items: [] } })
+    await importCodexSession(payload)
+    expect(post.mock.calls[1]![1]).toEqual(payload)
+    expect(post.mock.calls[1]![2]).toEqual(post.mock.calls[0]![2])
+    await importCodexSession(payload)
+    expect(post.mock.calls[2]![2].headers).not.toEqual(post.mock.calls[0]![2].headers)
+    setCloudflareWorkerContractActive(false)
+    await importCodexSession(payload)
+    expect(post.mock.calls[3]![2]).toEqual({ timeout: 120000 })
+  })
+
+  it('reuses the batch creation idempotency key after a network failure and preserves original ID results', async () => {
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { batchCreate } = await import('@/api/admin/accounts')
+    const payload = [{ name: 'Batch retry', platform: 'openai', type: 'oauth', credentials: { access_token: 'private-token' } }] as never
+    post.mockRejectedValueOnce(new Error('network lost'))
+    await expect(batchCreate(payload)).rejects.toThrow('network lost')
+    post.mockResolvedValueOnce({ data: { success: 1, failed: 0, results: [{ name: 'Batch retry', id: 'opaque-created-id', success: true }] } })
+    expect((await batchCreate(payload)).results[0]).toEqual({ name: 'Batch retry', id: 'opaque-created-id', success: true })
+    expect(post.mock.calls[1]![2]).toEqual(post.mock.calls[0]![2])
+  })
+
   it('forwards complete account DTOs through Worker batch create and redacts returned secrets', async () => {
     const request = [{
       name: 'batch account',
@@ -425,34 +534,62 @@ describe('admin accounts Worker transport capabilities', () => {
 
     const result = await batchCreate(request as never)
 
-    expect(post).toHaveBeenCalledWith('/admin/accounts/batch', { accounts: request })
+    expect(post).toHaveBeenCalledWith('/admin/accounts/batch', { accounts: request }, { headers: { 'Idempotency-Key': expect.any(String) }, timeout: 120000 })
     expect(result.results[0]?.account?.id).toBe('account-opaque-id')
     expect(JSON.stringify(result)).not.toContain('response-secret')
     expect(result.results[0]?.account?.credentials_status).toEqual({ has_api_key: true })
   })
 
-  it('forwards Worker bulk update fields and opaque account IDs unchanged', async () => {
-    const request = {
-      account_ids: ['account-a', 'account-b'],
-      notes: null,
-      proxy_id: null,
-      credentials: { api_key: '', organization: null },
-      extra: { ja3: '', retained: 'yes' },
-    }
-    post.mockResolvedValueOnce({ data: { success: 2, failed: 0, results: [] } })
+  it('snapshots Worker bulk edit versions and sends unchanged updates in bounded requests', async () => {
+    const updates = { concurrency: 8, proxy_id: null, credentials: { organization: null }, extra: { retained: 'yes' } }
+    get.mockImplementation(async (path: string) => ({ data: { id: path.split('/').pop(), platform: 'openai', control_version: 3 } }))
+    post.mockImplementation(async (_path: string, body: any) => ({ data: { results: [{ account_id: body.accounts[0].id, success: true }] } }))
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
     const { bulkUpdate } = await import('@/api/admin/accounts')
+    expect(await bulkUpdate(['account-a', 'account-b'], updates)).toMatchObject({ success: 2, failed: 0, success_ids: ['account-a', 'account-b'] })
+    expect(post).toHaveBeenNthCalledWith(1, '/admin/accounts/bulk-update', { accounts: [{ id: 'account-a', expected_control_version: 3 }], updates },
+      { headers: { 'Idempotency-Key': expect.any(String) } })
+    expect(get.mock.invocationCallOrder[1]).toBeLessThan(post.mock.invocationCallOrder[0])
+  })
 
-    await bulkUpdate(request)
+  it('reports a missing selected account while continuing the remaining bulk edits', async () => {
+    get.mockRejectedValueOnce(new Error('Account was removed')).mockResolvedValueOnce({ data: { id: 'account-b', platform: 'openai', control_version: 1 } })
+    post.mockResolvedValueOnce({ data: { results: [{ account_id: 'account-b', success: true }] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkUpdate } = await import('@/api/admin/accounts')
+    expect(await bulkUpdate(['account-a', 'account-b'], { concurrency: 6 })).toMatchObject({ success: 1, failed: 1, failed_ids: ['account-a'] })
+    expect(post).toHaveBeenCalledTimes(1)
+  })
 
-    expect(post).toHaveBeenCalledWith('/admin/accounts/bulk-update', request)
+  it('captures every filtered page before mutating accounts that may leave the filter', async () => {
+    get.mockImplementation(async (_path: string, config: any) => ({ data: { items: [{ id: `page-${config.params.page}`, platform: 'openai', control_version: 2 }], pages: 2, total: 2, page: config.params.page, page_size: 100 } }))
+    post.mockImplementation(async (_path: string, body: any) => ({ data: { results: [{ account_id: body.accounts[0].id, success: true }] } }))
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkUpdate } = await import('@/api/admin/accounts')
+    expect(await bulkUpdate({ filters: { status: 'active', platform: 'openai' }, status: 'inactive' })).toMatchObject({ success: 2 })
+    expect(get.mock.calls[1][1].params).toMatchObject({ page: 2, status: 'active', platform: 'openai' })
+    expect(get.mock.invocationCallOrder[1]).toBeLessThan(post.mock.invocationCallOrder[0])
+  })
+
+  it('retries ambiguous bulk edits with the same key and target versions', async () => {
+    get.mockResolvedValue({ data: { id: 'account-a', platform: 'openai', control_version: 3 } })
+    post.mockRejectedValueOnce(new Error('connection lost')).mockResolvedValueOnce({ data: { results: [{ account_id: 'account-a', success: true }] } })
+    const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
+    setCloudflareWorkerContractActive(true)
+    const { bulkUpdate } = await import('@/api/admin/accounts')
+    expect(await bulkUpdate(['account-a'], { priority: 90 })).toMatchObject({ failed: 1 })
+    expect(await bulkUpdate(['account-a'], { priority: 90 })).toMatchObject({ success: 1 })
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls[0]).toEqual(post.mock.calls[1])
   })
 
   it('keeps opaque account IDs and explicit credential clear values in batch updates', async () => {
     const request = {
       account_ids: ['account-a', 'account-b'],
-      field: 'api_key',
+      field: 'org_uuid',
       value: null,
     }
     post.mockResolvedValueOnce({ data: { success: 2, failed: 0, results: [] } })
@@ -465,13 +602,19 @@ describe('admin accounts Worker transport capabilities', () => {
     expect(post).toHaveBeenCalledWith('/admin/accounts/batch-update-credentials', request)
   })
 
-  it('does not expose the absent per-account schedulable route in Worker mode', async () => {
+  it('sends independent scheduling with the displayed version and preserves the returned status', async () => {
     const { setCloudflareWorkerContractActive } = await import('@/utils/adminCapabilities')
     setCloudflareWorkerContractActive(true)
-    const { setSchedulable } = await import('@/api/admin/accounts')
-
-    await expect(setSchedulable(7, false)).rejects.toThrow('not supported by the Worker contract')
-    expect(post).not.toHaveBeenCalled()
+    const { setSchedulable, bulkSetSchedulable } = await import('@/api/admin/accounts')
+    post.mockResolvedValueOnce({ data: { id: 'opaque-account', enabled: false, schedulable: true, control_version: 3 } })
+    expect(await setSchedulable('opaque-account', true, 2)).toMatchObject({ status: 'inactive', schedulable: true, control_version: 3 })
+    expect(post).toHaveBeenCalledWith('/admin/accounts/opaque-account/schedulable',
+      { schedulable: true }, { headers: { 'If-Match': '"2"' } })
+    post.mockResolvedValueOnce({ data: { results: [] } })
+    await bulkSetSchedulable([{ id: 'opaque-account', control_version: 3 }], false)
+    expect(post).toHaveBeenLastCalledWith('/admin/accounts/bulk-update', {
+      accounts: [{ id: 'opaque-account', expected_control_version: 3 }], schedulable: false,
+    }, { headers: { 'Idempotency-Key': expect.any(String) } })
   })
 
   it('sends versioned Worker bulk status and health probe operations with idempotency keys', async () => {
@@ -698,7 +841,7 @@ describe('admin accounts Worker transport capabilities', () => {
       { headers: {
         'If-Match': '"4"',
         'Idempotency-Key': 'admin-account-oauth-refresh-33333333-3333-4333-8333-333333333333',
-      } },
+      }, timeout: 60000 },
     )
   })
 
@@ -715,7 +858,7 @@ describe('admin accounts Worker transport capabilities', () => {
         { id: 'account-a', expected_control_version: 2 },
         { id: 'account-b', expected_control_version: 5 },
       ] },
-      { headers: { 'Idempotency-Key': 'admin-account-oauth-batch-refresh-33333333-3333-4333-8333-333333333333' }, timeout: 120000 },
+      { headers: { 'Idempotency-Key': 'admin-account-oauth-batch-refresh-33333333-3333-4333-8333-333333333333' }, timeout: 180000 },
     )
   })
 
