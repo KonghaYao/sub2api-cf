@@ -121,3 +121,20 @@ describe('HTTP through upstream TLS proxy tunnel', () => {
     expect(response.headers.has('content-length')).toBe(false)
   })
 })
+
+it('does not let a stalled upstream shutdown hold downstream cancellation', async () => {
+  const close = vi.fn(() => new Promise<void>(() => {}))
+  const cancel = vi.fn(() => new Promise<void>(() => {}))
+  const readable = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc')) },
+    cancel,
+  })
+  const writable = new WritableStream<Uint8Array>()
+  const response = await proxyHttpRequest({ readable, writable }, new URL('https://api.test/v1/responses'),
+    { method: 'POST', headers: {}, body: '{}' }, close)
+  await response.body!.cancel()
+  expect(close).toHaveBeenCalledOnce()
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(readable.locked).toBe(false)
+  expect(writable.locked).toBe(false)
+}, 1000)

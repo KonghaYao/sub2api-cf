@@ -25,8 +25,10 @@ export async function proxyHttpRequest(streams: TunnelStreams, url: URL, input: 
     ended = true
     input.signal?.removeEventListener('abort', onAbort)
     if (upload) void upload.cancel().catch(() => undefined)
-    await close().catch(() => undefined)
-    await reader.cancel().catch(() => undefined)
+    // Cleanup must not await an upstream close/cancel promise: an unresponsive
+    // proxy must not retain the downstream cancellation or gateway reservation.
+    void close().catch(() => undefined)
+    void reader.cancel().catch(() => undefined)
     try { reader.releaseLock() } catch { /* A pending read finishes on close. */ }
     try { writer.releaseLock() } catch { /* A pending write finishes on close. */ }
   }
