@@ -54,4 +54,4 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 
 按 output/content/summary 片段追踪文本和推理前缀，处理 text.done、content_part.done、reasoning_summary_part.done、output_item.done 和终态快照。只补发缺失后缀，避免曾收到部分 delta 后丢弃完整终态文本；共享流式和非流式汇聚逻辑。
 
-协议与网关专项 180 项通过。共享工作区另有未完成分组修改引用不存在的 deleted_at_ms，故在基于 0.45.4 的独立检出验证本轮转发修改；真实 workerd 29 文件、78 项全部通过，包含文本与推理补齐后的实际结算与预留释放。部署使用同一隔离检出，保留其他工作区修改。部署结果待追加。
+协议与网关专项 180 项通过。共享工作区另有未完成分组修改引用不存在的 deleted_at_ms，故在基于 0.45.4 的独立检出验证本轮转发修改；真实 workerd 29 文件、78 项全部通过，包含文本与推理补齐后的实际结算与预留释放。部署使用同一隔离检出，保留其他工作区修改。提交 `a2cf8a479` 从独立检出成功部署 0.45.5，Worker version `db211b25-338c-437c-9e3e-f2857db3dfbc`。
