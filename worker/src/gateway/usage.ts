@@ -180,6 +180,7 @@ export class SseEventTransformer {
   private latestUsage: TokenUsage | null = null
   private emittedBytes = 0
   private sawChatDone = false
+  private sawChatTerminalEvidence = false
   private sawEof = false
   private sawChatFailure = false
   private sawChatOutput = false
@@ -229,7 +230,7 @@ export class SseEventTransformer {
       // Compatible providers can send final usage after an error frame. Keep
       // reading until DONE or EOF so failure does not discard billable usage.
       if (this.sawChatFailure && (this.sawChatDone || this.sawEof)) return 'failed'
-      return this.sawChatDone ? 'completed' : 'missing'
+      return this.sawChatDone || (this.sawEof && this.sawChatTerminalEvidence) ? 'completed' : 'missing'
     }
     return this.responsesTerminal ?? 'missing'
   }
@@ -280,12 +281,17 @@ export class SseEventTransformer {
         if (usage !== null) this.latestUsage = usage
         const object = objectRecord(parsed)
         if (object !== null) {
+          // Original raw Chat accepts a final usage object or finish_reason at
+          // EOF. Wait for EOF so trailing usage/errors after finish are retained.
+          if (objectRecord(object.usage) !== null) this.sawChatTerminalEvidence = true
           if (objectRecord(object.error) !== null) {
             this.sawChatFailure = true
             this.responsesFailure = responsesFailureDetails(object)
           }
           if (Array.isArray(object.choices)) {
             for (const choice of object.choices) {
+              const finish = objectRecord(choice)?.finish_reason
+              if (typeof finish === 'string' && finish.trim()) this.sawChatTerminalEvidence = true
               const delta = objectRecord(objectRecord(choice)?.delta)
               if (delta !== null && (
                 (typeof delta.content === 'string' && delta.content.length > 0) ||

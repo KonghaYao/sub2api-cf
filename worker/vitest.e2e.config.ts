@@ -105,6 +105,14 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
+              if (typeof body.model === 'string' && body.model.startsWith('chat-eof-')) {
+                const mode=body.model.slice('chat-eof-'.length)
+                const events: unknown[]=[{choices:[{index:0,delta:{content:'Chat OK'}}]}]
+                if(mode==='finish')events.push({choices:[{index:0,delta:{},finish_reason:'stop'}]})
+                if(mode==='error')events.push({error:{code:'server_error',message:'fixture error'}})
+                if(mode==='usage'||mode==='error')events.push({choices:[],usage:{prompt_tokens:6,completion_tokens:2}})
+                return new Response(events.map(event=>'data: '+JSON.stringify(event)).join('\n\n')+'\n',{headers:{'content-type':'text/event-stream'}})
+              }
               if (body.model === 'composer-bridge-fixture' || body.model === 'composer-slow-fixture') {
                 if (!Array.isArray(body.messages) || 'input' in body) return Response.json({error:'expected chat bridge body'},{status:422})
                 const slow = body.model === 'composer-slow-fixture'

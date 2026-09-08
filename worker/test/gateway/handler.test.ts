@@ -2795,7 +2795,7 @@ describe('OpenAI-compatible gateway', () => {
     })
   })
 
-  it('marks a truncated SSE response failed and appends a protocol error event', async () => {
+  it.each([false, true])('classifies Chat EOF with a final usage signal = %s', async finalUsage => {
     const { env, user } = await harness()
     vi.stubGlobal(
       'fetch',
@@ -2805,7 +2805,7 @@ describe('OpenAI-compatible gateway', () => {
             start(controller) {
               controller.enqueue(
                 new TextEncoder().encode(
-                  'data: {"choices":[{"delta":{"content":"partial"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n',
+                  'data: '+JSON.stringify({choices:[{delta:{content:'partial'}}],...(finalUsage?{usage:{prompt_tokens:3,completion_tokens:1}}:{})})+'\n\n',
                 ),
               )
               controller.close()
@@ -2827,9 +2827,10 @@ describe('OpenAI-compatible gateway', () => {
     )
     const text = await response.text()
 
-    expect(text).toContain('upstream_stream_error')
+    if (finalUsage) expect(text).not.toContain('upstream_stream_error')
+    else expect(text).toContain('upstream_stream_error')
     expect(user.calls.find((call) => call.path === '/settle')?.body).toMatchObject({
-      usage_event: { payload: { outcome: 'failed' } },
+      usage_event: { payload: { outcome: finalUsage ? 'completed' : 'failed' } },
     })
   })
 

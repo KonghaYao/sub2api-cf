@@ -220,3 +220,25 @@ describe('gateway usage accounting', () => {
     }
   })
 })
+
+
+it.each([{choices:[{finish_reason:'stop'}]}, {choices:[{finish_reason:'length'}]}, {choices:[{finish_reason:'tool_calls'}]}, {usage:{prompt_tokens:6,completion_tokens:2}}])('accepts original Chat terminal evidence at EOF: %j', event => {
+ const tracker=new SseEventTransformer('upstream','public')
+ tracker.push(new TextEncoder().encode('data: '+JSON.stringify(event)+'\n\n'))
+ expect(tracker.terminal('chat_completions')).toBe('missing')
+ tracker.finish()
+ expect(tracker.terminal('chat_completions')).toBe('completed')
+})
+it.each([null, '', '   '])('does not accept an unfinished Chat choice %j', finish_reason => {
+ const tracker=new SseEventTransformer('upstream','public')
+ tracker.push(new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:'partial'},finish_reason}]})+'\n\n'))
+ tracker.finish()
+ expect(tracker.terminal('chat_completions')).toBe('missing')
+})
+it('keeps errors authoritative after a finish marker and retains late usage', () => {
+ const tracker=new SseEventTransformer('upstream','public')
+ for(const event of [{choices:[{finish_reason:'stop'}]},{error:{code:'server_error'}},{usage:{prompt_tokens:6,completion_tokens:2}}])tracker.push(new TextEncoder().encode('data: '+JSON.stringify(event)+'\n\n'))
+ tracker.finish()
+ expect(tracker.terminal('chat_completions')).toBe('failed')
+ expect(tracker.usage()).toMatchObject({input_tokens:6,output_tokens:2})
+})

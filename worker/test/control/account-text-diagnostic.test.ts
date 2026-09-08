@@ -98,3 +98,19 @@ it('uses the bound proxy and never retries its failure with a direct request', a
   expect(events(text).at(-1)).toMatchObject({ type: 'test_complete', success: false })
   expect(text).not.toContain('private proxy details')
 })
+
+
+it.each(['\n', ''])('accepts a final Chat finish event without a blank separator: %j', ending => {
+ vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"完成"}}]}\n\ndata: {"choices":[{"finish_reason":"stop"}]}'+ending)))
+ const response=accountTextDiagnostic({} as Env,account,{api_key:'private-key'},'composer-2.5',null,new AbortController().signal,{responses:false})
+ return response.text().then(text=>{
+  expect(events(text)).toContainEqual({type:'content',text:'完成'})
+  expect(events(text).at(-1)).toMatchObject({type:'test_complete',success:true})
+ })
+})
+
+it('closes the Chat diagnostic after completion even if upstream cancellation stays pending', async () => {
+ vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n'))},cancel(){return new Promise<void>(()=>{})}}))))
+ const response=accountTextDiagnostic({} as Env,account,{api_key:'private-key'},'composer-2.5',null,new AbortController().signal,{responses:false})
+ expect(events(await response.text()).at(-1)).toMatchObject({type:'test_complete',success:true})
+}, 1000)

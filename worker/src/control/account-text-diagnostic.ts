@@ -62,7 +62,7 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
           }
           if (options.onResponse) await options.onResponse(response)
           if (!response.ok || !response.body) {
-            await response.body?.cancel()
+            void response.body?.cancel().catch(() => undefined)
             throw new Error(`Upstream diagnostic returned HTTP ${response.status}`)
           }
           reader = response.body.getReader()
@@ -106,6 +106,7 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
               completed = true
             }
           }
+          const acceptFrame = (frame: string) => accept(frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n'))
           while (!completed) {
             const next = await reader.read()
             if (next.done) break
@@ -116,9 +117,15 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
             let end: number
             while ((end = buffer.indexOf('\n\n')) >= 0) {
               const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2)
-              accept(frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n'))
+              acceptFrame(frame)
               if (completed) break
             }
+          }
+          // Compatible Chat relays may close after the final data line without
+          // an extra blank separator. Process the residual frame before judging EOF.
+          if (!imageJson && !completed) {
+            buffer += decoder.decode()
+            if (buffer.trim()) acceptFrame(buffer)
           }
           if (imageJson) {
             acceptOpenAIImageDiagnosticResult(JSON.parse(buffer + decoder.decode()), emit)
@@ -133,7 +140,8 @@ export function accountTextDiagnostic(env: Env, account: ProviderAccount, creden
           if (!abort.signal.aborted && !clientSignal.aborted) emit({ type: 'test_complete', success: false,
             error: error instanceof Error && error.message.startsWith('Upstream diagnostic') ? error.message : 'Upstream diagnostic request failed' })
         } finally {
-          try { await reader?.cancel() } catch { /* Keep the diagnostic result. */ }
+          // A terminal diagnostic must close even if upstream cancellation never resolves.
+          try { void reader?.cancel().catch(() => undefined) } catch { /* Keep the diagnostic result. */ }
           reader?.releaseLock()
           try { controller.close() } catch { /* Consumer already cancelled. */ }
         }

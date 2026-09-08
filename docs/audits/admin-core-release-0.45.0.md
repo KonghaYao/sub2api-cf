@@ -99,3 +99,12 @@ Responses 转 Chat 及原生非流式 SSE 汇聚此前忽略 refusal 内容。�
 正式 Responses 失败文档保留原始状态和内容，按 failed 记录上游实际用量；cyber_policy 维持零用量、零费用，与既有桥接行为一致。合法 incomplete 部分结果继续按成功语义处理，未改写为普通错误。
 
 最终网关/用量 165 项、原生 Responses/计费生命周期/调度 27 项通过，类型检查通过。原生验证包括 400/429/502 的无扣费与预留/并发释放、故障样本分类、正式 failed 文档的实际费用及 cyber_policy 零费用和 failed 投影。提交 `d97f8405d` 已推送 origin/main 并部署 0.45.10，Worker version `60181ea4-a20e-40f5-a4b5-7f3595fe43ec`；线上 `/health` 确认 status=ok、version=0.45.10。
+
+
+## 0.45.11：优先恢复 Chat 正常 EOF 兼容及管理端测试
+
+按用户最新要求优先 Chat Completions。同步原版 `openai_raw_stream_truncation.go` 的终止信号：除 DONE 外，收到 finish_reason 或 usage 对象后正常 EOF 也可成功结束。继续读取到 EOF，保留 finish 之后的用量与错误；真正没有终止信号的断流仍失败，错误优先于完成标记。
+
+管理端账号 Chat 测试在 EOF 时解析最后未以空行分隔的 SSE 帧，对齐原版逐行读取行为；测试已完成时不再等待可能永不结束的上游取消 promise，及时关闭前端事件流。保留原始前端 TestEvent 协议。
+
+先复现诊断尾帧失败及取消挂起共 3 项，再修复。网关/用量/诊断 197 项通过，其他诊断适配专项合计 47 项通过。原生 Chat 场景验证 finish、usage、错误和真实截断，并通过真实管理员会话调用账号测试接口。最终全量原生 32 文件/94 项通过，类型检查通过。部署结果待追加。
