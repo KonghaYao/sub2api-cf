@@ -199,6 +199,62 @@ describe('admin provider account control plane on D1', () => {
     expect(JSON.stringify(account)).not.toContain('original-access')
   })
 
+  it('normalizes confirmed model mappings into global and account model records', async () => {
+    const test = fixture()
+    try {
+      const now = Date.now()
+      test.raw.prepare(
+        `INSERT INTO models (id,platform,public_name,upstream_name,endpoint,image_generation,enabled,created_at_ms,updated_at_ms)
+         VALUES ('existing-image','openai','gpt-image-2','admin-upstream','both',1,1,?,?)`,
+      ).run(now, now)
+      const response = await test.app.request('/accounts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'model-mapping-normalization' },
+        body: JSON.stringify({
+          name: 'Mapped image account',
+          platform: 'openai',
+          type: 'apikey',
+          ...providerInputs.openai,
+          api_key: 'secret-value',
+          credentials: { model_mapping: { 'gpt-image-2': 'gpt-image-2', 'chat-public': 'chat-upstream' } },
+          model_capabilities: [{ model_id: 'existing-image', chat_completions: false, responses: false, embeddings: false, image_generation: true }],
+          group_links: [],
+        }),
+      }, test.env)
+      expect(response.status, await response.clone().text()).toBe(201)
+      const account = (await response.json() as any).data
+      const models = test.raw.prepare(
+        `SELECT m.id,m.public_name,m.upstream_name,m.image_generation AS model_image_generation,
+                am.chat_completions,am.responses,am.embeddings,
+                am.image_generation AS account_image_generation,am.source
+           FROM models m JOIN account_models am ON am.model_id=m.id
+          WHERE am.account_id=? ORDER BY m.public_name`,
+      ).all(account.id)
+      expect(models).toEqual([
+        { id: expect.any(String), public_name: 'chat-public', upstream_name: 'chat-upstream', model_image_generation: 0, chat_completions: 1, responses: 1, embeddings: 0, account_image_generation: 0, source: 'mapping' },
+        { id: 'existing-image', public_name: 'gpt-image-2', upstream_name: 'admin-upstream', model_image_generation: 1, chat_completions: 0, responses: 0, embeddings: 0, account_image_generation: 1, source: 'explicit' },
+      ])
+      const imageModel = models[1]
+      const explicit = await test.app.request(`/accounts/${account.id}/models/${imageModel.id}`, {
+        method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': `"${account.control_version}"` },
+        body: JSON.stringify({ chat_completions: false, responses: false, embeddings: false, image_generation: true }),
+      }, test.env)
+      expect(explicit.status, await explicit.clone().text()).toBe(200)
+      const explicitlyConfigured = (await explicit.json() as any).data
+      expect(test.raw.prepare('SELECT source FROM account_models WHERE account_id=? AND model_id=?').get(account.id, imageModel.id))
+        .toEqual({ source: 'explicit' })
+
+      const update = await test.app.request(`/accounts/${account.id}`, {
+        method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': `"${explicitlyConfigured.control_version}"` },
+        body: JSON.stringify({ credentials: { model_mapping: {} } }),
+      }, test.env)
+      expect(update.status, await update.clone().text()).toBe(200)
+      expect(test.raw.prepare('SELECT model_id,source,image_generation FROM account_models WHERE account_id=?').all(account.id))
+        .toEqual([{ model_id: imageModel.id, source: 'explicit', image_generation: 1 }])
+      expect(test.raw.prepare("SELECT COUNT(*) AS count FROM models WHERE public_name='chat-public'").get()).toEqual({ count: 1 })
+    } finally { test.raw.close() }
+  })
+
   it.each(['openai', 'codex'] as const)('applies original %s re-authorization atomically with merged settings and sanitized token rotation', async platform => {
     const test = fixture()
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))

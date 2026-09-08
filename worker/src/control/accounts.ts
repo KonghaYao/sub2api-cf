@@ -848,7 +848,9 @@ export async function executeAccountCreate(env: Env, body: Record<string, unknow
          ) VALUES (?, ?, 1, ?, ?, ?, ?)`,
       ).bind(secretId, accountId, encrypted.nonce_b64, encrypted.ciphertext_b64, now, now),
       ...groupInsertStatements(env, accountId, input.group_links, now),
-      ...capabilityInsertStatements(env, accountId, input.model_capabilities, now),
+      ...(input.model_capabilities.length > 0 || (input.credential.model_mapping !== null && typeof input.credential.model_mapping === 'object' && !Array.isArray(input.credential.model_mapping))
+        ? await accountModelSyncStatements(env, accountId, input.platform, input.credential, input.ui_config, input.model_capabilities, true, now)
+        : []),
       ...(input.platform === 'openai' && (input.credential_kind === 'api_key' || input.credential_kind === 'oauth') ? [accountInitializationInsert(env, accountId, now, input.credential_kind === 'oauth' ? 'openai_privacy' : 'openai_responses')] : []),
       controlIdempotencyInsert(env, idempotency, 'account', accountId, safe, now),
       ...(receipt ? [receipt(accountId)] : []),
@@ -865,12 +867,11 @@ export async function executeAccountCreate(env: Env, body: Record<string, unknow
     }
     if (!initializeAccount && input.platform === 'openai' && input.credential_kind === 'oauth') {
       try { await initializeAccountNow(env, accountId, false) } catch { /* The durable job recovers an interrupted initialization. */ }
-      const initialized = publicAccount(await requireAccount(env, accountId))
-      await env.DB.prepare('UPDATE control_idempotency SET response_json=? WHERE scope=? AND key_hash=?')
-        .bind(JSON.stringify(initialized), idempotency.scope, idempotency.key_hash).run()
-      return { account: initialized, created: true }
     }
-    return { account: safe, created: true }
+    const created = publicAccount(await requireAccount(env, accountId))
+    await env.DB.prepare('UPDATE control_idempotency SET response_json=? WHERE scope=? AND key_hash=?')
+      .bind(JSON.stringify(created), idempotency.scope, idempotency.key_hash).run()
+    return { account: created, created: true }
  }
 
 export async function batchCreateAdminAccounts(context: Context<ControlBindings>): Promise<Response> {
@@ -1160,11 +1161,27 @@ export async function executeAccountUpdate(env: Env, id: string, body: Record<st
         ...groupInsertStatements(env, account.id, patch.group_links, now),
       )
     }
-    if (patch.model_capabilities !== undefined) {
-      statements.push(
-        env.DB.prepare('DELETE FROM account_models WHERE account_id = ?').bind(account.id),
-        ...capabilityInsertStatements(env, account.id, patch.model_capabilities, now),
-      )
+    const credentialCapabilityChanged = nextCredential !== undefined && (
+      Object.hasOwn(patch.credential_patch ?? {}, 'model_mapping') ||
+      Object.hasOwn(patch.credential_patch ?? {}, 'openai_capabilities')
+    )
+    if (patch.model_capabilities !== undefined || credentialCapabilityChanged) {
+      const credentialForModelSync = nextCredential ?? await decryptCredentialPayload(
+        account.nonce_b64,
+        account.ciphertext_b64,
+        requireCredentialsMasterKey(env),
+        credentialAad(env.ENVIRONMENT, account.id, account.secret_id, account.key_version),
+      ) as StoredAccountCredential
+      statements.push(...await accountModelSyncStatements(
+        env,
+        account.id,
+        account.platform,
+        credentialForModelSync,
+        nextUiConfig,
+        patch.model_capabilities ?? [],
+        patch.model_capabilities !== undefined,
+        now,
+      ))
     }
     if (initializeResponses && account.platform === 'openai' && (patch.credential_kind ?? account.credential_kind) === 'api_key') {
       statements.push(accountInitializationReset(env, account.id, nextKeyVersion, now))
@@ -1623,13 +1640,14 @@ export async function putAdminAccountModelCapability(context: Context<ControlBin
     await mutateAccountRelation(context.env, account, context.env.DB.prepare(
       `INSERT INTO account_models (
          account_id, model_id, chat_completions, responses, embeddings, image_generation,
-         created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         source, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, 'explicit', ?, ?)
        ON CONFLICT(account_id, model_id) DO UPDATE SET
          chat_completions = excluded.chat_completions,
          responses = excluded.responses,
          embeddings = excluded.embeddings,
          image_generation = excluded.image_generation,
+         source = 'explicit',
          control_version = account_models.control_version + 1,
          updated_at_ms = excluded.updated_at_ms`,
     ).bind(
@@ -2110,6 +2128,7 @@ function parseCreateAccount(body: Record<string, unknown>): CreateAccountInput {
     ...(body.credentials === undefined ? {} : { base_url: baseUrl }),
     ...(agentIdentity ? {auth_mode:'agentIdentity'} : {api_key:apiKey}),
   } as StoredAccountCredential
+  assertModelMappingLimit(credential.model_mapping)
   if (oauth) {
     for (const key of ['password', 'sso_token', 'sso', 'sso-rw', 'clearTextPassword', 'cookie']) delete credential[key]
   }
@@ -2167,6 +2186,7 @@ function parseAccountPatch(body: Record<string, unknown>, account: AccountRow): 
   if (body.base_url !== undefined) patch.base_url = ['grok','antigravity'].includes(account.platform) && body.base_url === '' ? (account.platform === 'grok' ? grokBaseURLs.cli : 'https://cloudcode-pa.googleapis.com') : normalizeBaseUrl(requireString(body, 'base_url', 2_048))
   if (body.credentials !== undefined) {
     patch.credential_patch = requireCredentialObject(body.credentials, 'credentials', false)
+    if (Object.hasOwn(patch.credential_patch, 'model_mapping')) assertModelMappingLimit(patch.credential_patch.model_mapping)
     if (['grok','antigravity'].includes(account.platform) && patch.credential_patch.access_token !== undefined) {
       if (patch.credential_patch.access_token === '') delete patch.credential_patch.access_token
       else patch.credential_patch.api_key = requireProviderCredential(patch.credential_patch, 'access_token')
@@ -2887,10 +2907,22 @@ function parseGroupLink(body: Record<string, unknown>, resourceId?: string): Gro
   }
 }
 
+const MAX_ACCOUNT_MODELS = 500
+
+function assertModelMappingLimit(value: unknown): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayError(400, 'invalid_model_mapping', 'model_mapping must be an object')
+  }
+  if (Object.keys(value).length > MAX_ACCOUNT_MODELS) {
+    throw new GatewayError(400, 'too_many_account_models', `model_mapping must contain at most ${MAX_ACCOUNT_MODELS} entries`)
+  }
+}
+
 function parseModelCapabilities(value: unknown): ModelCapabilityInput[] {
   if (value === undefined) return []
-  if (!Array.isArray(value) || value.length > 40) {
-    throw new GatewayError(400, 'invalid_model_capabilities', 'model_capabilities must be an array with at most 40 entries')
+  if (!Array.isArray(value) || value.length > MAX_ACCOUNT_MODELS) {
+    throw new GatewayError(400, 'invalid_model_capabilities', `model_capabilities must be an array with at most ${MAX_ACCOUNT_MODELS} entries`)
   }
   const seen = new Set<string>()
   return value.map((entry) => {
@@ -2987,6 +3019,123 @@ function groupInsertStatements(env: Env, accountId: string, links: GroupLinkInpu
   ).bind(accountId, now, now, JSON.stringify(links))]
 }
 
+async function accountModelSyncStatements(
+  env: Env,
+  accountId: string,
+  platform: ProviderPlatform,
+  credential: StoredAccountCredential | undefined,
+  uiConfig: Record<string, unknown>,
+  explicitCapabilities: ModelCapabilityInput[],
+  replaceExplicit: boolean,
+  now: number,
+): Promise<D1PreparedStatement[]> {
+  const rawMapping = credential?.model_mapping
+  assertModelMappingLimit(rawMapping)
+  const mappings = rawMapping !== null && typeof rawMapping === 'object' && !Array.isArray(rawMapping)
+    ? Object.entries(rawMapping as Record<string, unknown>)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      .map(([publicName, upstreamName]) => [publicName.trim(), upstreamName.trim()] as const)
+      .filter(([publicName, upstreamName]) => publicName !== '' && upstreamName !== '')
+    : []
+  const existing = mappings.length === 0 ? { results: [] } : await env.DB.prepare(
+    `SELECT id, public_name FROM models
+      WHERE platform = ? AND public_name IN (SELECT value FROM json_each(?))`,
+  ).bind(platform, JSON.stringify(mappings.map(([publicName]) => publicName))).all<{ id: string; public_name: string }>()
+  const existingIds = new Map(existing.results.map(row => [row.public_name, row.id]))
+  const extra = uiConfig.extra !== null && typeof uiConfig.extra === 'object' && !Array.isArray(uiConfig.extra)
+    ? uiConfig.extra as Record<string, unknown>
+    : {}
+  const rawCapabilities = credential?.openai_capabilities
+  const configured = Array.isArray(rawCapabilities)
+    ? new Set(rawCapabilities.filter((value): value is string => typeof value === 'string'))
+    : rawCapabilities !== null && typeof rawCapabilities === 'object'
+      ? new Set(Object.entries(rawCapabilities as Record<string, unknown>).filter(([, enabled]) => enabled === true).map(([name]) => name))
+      : null
+  const chatEnabled = configured === null || configured.has('chat_completions')
+  const embeddingsEnabled = configured === null || configured.has('embeddings')
+  const responsesEnabled = platform === 'openai' && chatEnabled && extra.openai_responses_mode !== 'force_chat_completions' &&
+    extra.openai_responses_supported !== false
+  const inferred = new Map<string, ModelCapabilityInput & { source: 'mapping'; model: {
+    public_name: string; upstream_name: string; endpoint: 'chat_completions' | 'responses' | 'both'; embeddings: boolean; image_generation: boolean
+  } }>()
+  for (const [publicName, upstreamName] of mappings) {
+    const lower = `${publicName} ${upstreamName}`.toLowerCase()
+    const imageGeneration = /(?:^|[ /])(gpt-image-|grok-imagine(?:-image|-edit)?(?:$|[ /]))/.test(lower)
+    const embeddings = !imageGeneration && /(?:^|[-_/ ])(?:embedding|embeddings|embed)(?:$|[-_/ ])/.test(lower)
+    const capability = {
+      model_id: existingIds.get(publicName) ?? await deterministicUuid('account.model-mapping.v1', `${platform}:${publicName}`),
+      chat_completions: !imageGeneration && !embeddings && chatEnabled,
+      responses: !imageGeneration && !embeddings && responsesEnabled,
+      embeddings: embeddings && embeddingsEnabled,
+      image_generation: imageGeneration,
+      source: 'mapping' as const,
+      model: {
+        public_name: publicName,
+        upstream_name: upstreamName,
+        endpoint: imageGeneration || embeddings ? 'both' as const : responsesEnabled && chatEnabled ? 'both' as const : responsesEnabled ? 'responses' as const : 'chat_completions' as const,
+        embeddings,
+        image_generation: imageGeneration,
+      },
+    }
+    if (capability.chat_completions || capability.responses || capability.embeddings || capability.image_generation) {
+      inferred.set(capability.model_id, capability)
+    }
+  }
+
+  const final = new Map<string, (ModelCapabilityInput & { source: 'mapping' | 'explicit'; model?: typeof inferred extends Map<string, infer V> ? V extends { model: infer M } ? M : never : never })>()
+  for (const capability of inferred.values()) final.set(capability.model_id, capability)
+  for (const capability of explicitCapabilities) final.set(capability.model_id, { ...capability, source: 'explicit' })
+  const mappingIds = [...inferred.keys()]
+  const explicitIds = explicitCapabilities.map(capability => capability.model_id)
+  const statements: D1PreparedStatement[] = []
+  if (credential !== undefined) {
+    statements.push(env.DB.prepare(
+      `DELETE FROM account_models WHERE account_id = ? AND source = 'mapping'
+         AND model_id NOT IN (SELECT value FROM json_each(?))`,
+    ).bind(accountId, JSON.stringify(mappingIds)))
+  }
+  if (replaceExplicit) {
+    statements.push(env.DB.prepare(
+      `DELETE FROM account_models WHERE account_id = ? AND source = 'explicit'
+         AND model_id NOT IN (SELECT value FROM json_each(?))`,
+    ).bind(accountId, JSON.stringify(explicitIds)))
+  }
+  for (const capability of final.values()) {
+    if (capability.model !== undefined) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO models (id, platform, public_name, upstream_name, endpoint, embeddings,
+           image_generation, enabled, created_at_ms, updated_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+         ON CONFLICT(platform, public_name) DO NOTHING`,
+      ).bind(
+        capability.model_id, platform, capability.model.public_name, capability.model.upstream_name,
+        capability.model.endpoint, capability.model.embeddings ? 1 : 0,
+        capability.model.image_generation ? 1 : 0, now, now,
+      ))
+    }
+    statements.push(env.DB.prepare(
+      `INSERT INTO account_models (
+         account_id, model_id, chat_completions, responses, embeddings, image_generation,
+         source, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(account_id, model_id) DO UPDATE SET
+         chat_completions = excluded.chat_completions,
+         responses = excluded.responses,
+         embeddings = excluded.embeddings,
+         image_generation = excluded.image_generation,
+         source = excluded.source,
+         control_version = account_models.control_version + 1,
+         updated_at_ms = excluded.updated_at_ms`,
+    ).bind(
+      accountId, capability.model_id,
+      capability.chat_completions ? 1 : 0, capability.responses ? 1 : 0,
+      capability.embeddings ? 1 : 0, capability.image_generation ? 1 : 0,
+      capability.source, now, now,
+    ))
+  }
+  return statements
+}
+
 function capabilityInsertStatements(
   env: Env,
   accountId: string,
@@ -2996,8 +3145,16 @@ function capabilityInsertStatements(
   return capabilities.map((capability) => env.DB.prepare(
     `INSERT INTO account_models (
        account_id, model_id, chat_completions, responses, embeddings, image_generation,
-       created_at_ms, updated_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       source, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, 'explicit', ?, ?)
+     ON CONFLICT(account_id, model_id) DO UPDATE SET
+       chat_completions = excluded.chat_completions,
+       responses = excluded.responses,
+       embeddings = excluded.embeddings,
+       image_generation = excluded.image_generation,
+       source = 'explicit',
+       control_version = account_models.control_version + 1,
+       updated_at_ms = excluded.updated_at_ms`,
   ).bind(
     accountId,
     capability.model_id,

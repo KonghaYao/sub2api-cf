@@ -778,113 +778,6 @@
           </div>
         </div>
 
-        <div class="border-t pt-4">
-          <div class="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                {{ t("admin.groups.modelsList.title") }}
-              </label>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {{ t("admin.groups.modelsList.hint") }}
-              </p>
-            </div>
-            <button
-              type="button"
-              @click="createModelsListState.enabled = !createModelsListState.enabled"
-              :class="[
-                'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
-                createModelsListState.enabled
-                  ? 'bg-primary-500'
-                  : 'bg-gray-300 dark:bg-dark-600',
-              ]"
-            >
-              <span
-                :class="[
-                  'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
-                  createModelsListState.enabled ? 'translate-x-6' : 'translate-x-1',
-                ]"
-              />
-            </button>
-          </div>
-          <div
-            v-if="createModelsListState.enabled"
-            class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
-          >
-            <div
-              v-if="!createModelsListLoading && createModelsListState.items.length > 0"
-              class="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
-            >
-              <span class="text-gray-500 dark:text-gray-400">
-                {{
-                  t("admin.groups.modelsList.selectedSummary", {
-                    selected: createModelsListSelectedCount,
-                    total: createModelsListState.items.length,
-                  })
-                }}
-              </span>
-              <div class="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  class="rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 dark:text-primary-400 dark:hover:bg-primary-900/20"
-                  @click="selectAllModelsListItems(createModelsListState)"
-                >
-                  {{ t("admin.groups.modelsList.selectAll") }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-700"
-                  @click="invertModelsListSelection(createModelsListState)"
-                >
-                  {{ t("admin.groups.modelsList.invertSelection") }}
-                </button>
-              </div>
-            </div>
-            <div
-              class="max-h-64 space-y-2 overflow-y-auto p-2"
-            >
-              <p v-if="createModelsListLoading" class="text-xs text-gray-500 dark:text-gray-400">
-                {{ t("admin.groups.modelsList.loading") }}
-              </p>
-              <p
-                v-else-if="createModelsListState.items.length === 0"
-                class="text-xs text-gray-500 dark:text-gray-400"
-              >
-                {{ t("admin.groups.modelsList.empty") }}
-              </p>
-              <div
-                v-for="(item, index) in createModelsListState.items"
-                :key="item.id"
-                class="flex items-center gap-2 rounded border border-gray-200 bg-white px-3 py-2 dark:border-dark-600 dark:bg-dark-800"
-              >
-                <input
-                  v-model="item.selected"
-                  type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
-                  {{ item.id }}
-                </span>
-                <button
-                  type="button"
-                  :disabled="index === 0"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
-                  @click="moveCreateModelsListItem(index, index - 1)"
-                >
-                  <Icon name="arrowUp" size="sm" />
-                </button>
-                <button
-                  type="button"
-                  :disabled="index === createModelsListState.items.length - 1"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
-                  @click="moveCreateModelsListItem(index, index + 1)"
-                >
-                  <Icon name="arrowDown" size="sm" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <!-- 图片生成计费配置 -->
         <div
           v-if="supportsImagePricingPlatform(createForm.platform)"
@@ -2575,113 +2468,6 @@
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
               />
-            </div>
-          </div>
-        </div>
-
-        <div class="border-t pt-4">
-          <div class="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                {{ t("admin.groups.modelsList.title") }}
-              </label>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {{ t("admin.groups.modelsList.hint") }}
-              </p>
-            </div>
-            <button
-              type="button"
-              @click="editModelsListState.enabled = !editModelsListState.enabled"
-              :class="[
-                'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
-                editModelsListState.enabled
-                  ? 'bg-primary-500'
-                  : 'bg-gray-300 dark:bg-dark-600',
-              ]"
-            >
-              <span
-                :class="[
-                  'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
-                  editModelsListState.enabled ? 'translate-x-6' : 'translate-x-1',
-                ]"
-              />
-            </button>
-          </div>
-          <div
-            v-if="editModelsListState.enabled"
-            class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
-          >
-            <div
-              v-if="!editModelsListLoading && editModelsListState.items.length > 0"
-              class="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
-            >
-              <span class="text-gray-500 dark:text-gray-400">
-                {{
-                  t("admin.groups.modelsList.selectedSummary", {
-                    selected: editModelsListSelectedCount,
-                    total: editModelsListState.items.length,
-                  })
-                }}
-              </span>
-              <div class="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  class="rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 dark:text-primary-400 dark:hover:bg-primary-900/20"
-                  @click="selectAllModelsListItems(editModelsListState)"
-                >
-                  {{ t("admin.groups.modelsList.selectAll") }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-700"
-                  @click="invertModelsListSelection(editModelsListState)"
-                >
-                  {{ t("admin.groups.modelsList.invertSelection") }}
-                </button>
-              </div>
-            </div>
-            <div
-              class="max-h-64 space-y-2 overflow-y-auto p-2"
-            >
-              <p v-if="editModelsListLoading" class="text-xs text-gray-500 dark:text-gray-400">
-                {{ t("admin.groups.modelsList.loading") }}
-              </p>
-              <p
-                v-else-if="editModelsListState.items.length === 0"
-                class="text-xs text-gray-500 dark:text-gray-400"
-              >
-                {{ t("admin.groups.modelsList.empty") }}
-              </p>
-              <div
-                v-for="(item, index) in editModelsListState.items"
-                :key="item.id"
-                class="flex items-center gap-2 rounded border border-gray-200 bg-white px-3 py-2 dark:border-dark-600 dark:bg-dark-800"
-              >
-                <input
-                  v-model="item.selected"
-                  type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
-                  {{ item.id }}
-                </span>
-                <button
-                  type="button"
-                  :disabled="index === 0"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
-                  @click="moveEditModelsListItem(index, index - 1)"
-                >
-                  <Icon name="arrowUp" size="sm" />
-                </button>
-                <button
-                  type="button"
-                  :disabled="index === editModelsListState.items.length - 1"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
-                  @click="moveEditModelsListItem(index, index + 1)"
-                >
-                  <Icon name="arrowDown" size="sm" />
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -4550,6 +4336,19 @@
       width="wide"
       @close="closeGroupModelsModal"
     >
+      <div class="mb-4 flex items-center justify-between gap-3">
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+          {{ t("admin.groups.groupModels.syncHint") }}
+        </p>
+        <button
+          type="button"
+          class="btn btn-primary flex-shrink-0"
+          :disabled="syncingGroupModels"
+          @click="syncGroupModels"
+        >
+          {{ syncingGroupModels ? t("common.saving") : t("admin.groups.groupModels.syncAccounts") }}
+        </button>
+      </div>
       <div v-if="groupModelsLoading" class="py-8 text-center text-gray-500">
         {{ t("common.loading") }}
       </div>
@@ -4562,8 +4361,20 @@
           :key="model.model_id"
           class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
         >
-          <div class="mb-3 font-medium text-gray-900 dark:text-gray-100">
-            {{ model.public_name }}
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div class="font-medium text-gray-900 dark:text-gray-100">
+              {{ model.public_name }}
+            </div>
+            <div class="flex items-center gap-2">
+              <span
+                v-if="!model.price"
+                class="rounded bg-amber-100 px-2 py-1 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+              >{{ t("admin.groups.groupModels.pendingPrice") }}</span>
+              <span
+                :class="model.enabled ? 'text-green-600 dark:text-green-400' : 'text-gray-500'"
+                class="text-xs"
+              >{{ model.enabled ? t("admin.groups.groupModels.enabled") : t("admin.groups.groupModels.disabled") }}</span>
+            </div>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
             <label class="space-y-1 text-sm">
@@ -4575,7 +4386,15 @@
               <input v-model.number="model.default_max_output_tokens" class="input" type="number" min="1" :max="model.max_output_tokens" />
             </label>
           </div>
-          <div class="mt-3 flex justify-end">
+          <div class="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="savingGroupModelId === model.model_id"
+              @click="toggleGroupModel(model)"
+            >
+              {{ model.enabled ? t("admin.groups.groupModels.disable") : t("admin.groups.groupModels.restore") }}
+            </button>
             <button
               type="button"
               class="btn btn-primary"
@@ -4671,15 +4490,6 @@ import {
   normalizeGroupOpenAIFast,
   supportsGroupOpenAIFast,
 } from "./groupsOpenAIFast";
-import {
-  buildModelsListConfig,
-  createModelsListState as createInitialModelsListState,
-  invertModelsListSelection,
-  moveModelsListItem,
-  selectAllModelsListItems,
-  setModelsListCandidates,
-} from "./groupsModelsList";
-import { createModelsListCandidatesTracker } from "./groupsModelsListCandidates";
 import { normalizeSupportedModelScopesForPlatform } from "./groupsSupportedModelScopes";
 import {
   isProfitControlPlatform,
@@ -5187,6 +4997,7 @@ const showGroupModelsModal = ref(false);
 const groupModelsGroup = ref<AdminGroup | null>(null);
 const groupModels = ref<GroupModelConfig[]>([]);
 const groupModelsLoading = ref(false);
+const syncingGroupModels = ref(false);
 const savingGroupModelId = ref<string | null>(null);
 const sortableGroups = ref<AdminGroup[]>([]);
 type ConcreteGroupPlatform = Exclude<GroupPlatform, "composite">;
@@ -5223,24 +5034,12 @@ const compositeRouteForm = reactive<CompositeRouteFormState>({
 });
 const createMessagesDispatchDefaults = createDefaultMessagesDispatchFormState();
 const editMessagesDispatchDefaults = createDefaultMessagesDispatchFormState();
-const createModelsListState = reactive(createInitialModelsListState());
-const editModelsListState = reactive(createInitialModelsListState());
-const createModelsListLoading = ref(false);
-const editModelsListLoading = ref(false);
 type ReasoningEffortPolicyFieldsExpose = {
   validate: () => boolean;
   resetValidation: () => void;
 };
 const createReasoningEffortPolicyRef = ref<ReasoningEffortPolicyFieldsExpose | null>(null);
 const editReasoningEffortPolicyRef = ref<ReasoningEffortPolicyFieldsExpose | null>(null);
-const modelsListCandidatesTracker = createModelsListCandidatesTracker();
-const createModelsListSelectedCount = computed(
-  () => createModelsListState.items.filter((item) => item.selected).length,
-);
-const editModelsListSelectedCount = computed(
-  () => editModelsListState.items.filter((item) => item.selected).length,
-);
-
 const createForm = reactive({
   name: "",
   description: "",
@@ -5510,52 +5309,6 @@ const removeEditRoutingRule = (rule: ModelRoutingRule) => {
   accountSearchRunner.clearKey(key);
   clearAccountSearchStateByKey(key);
   editModelRoutingRules.value.splice(index, 1);
-};
-
-const resetModelsListState = (
-  state: typeof createModelsListState,
-  config?: Parameters<typeof createInitialModelsListState>[0],
-) => {
-  const fresh = createInitialModelsListState(config);
-  state.enabled = fresh.enabled;
-  state.savedModels = fresh.savedModels;
-  state.items = fresh.items;
-};
-
-const loadModelsListCandidates = async (
-  mode: "create" | "edit",
-  groupID: number,
-  platform: GroupPlatform,
-) => {
-  const request = { mode, groupID, platform };
-  const requestID = modelsListCandidatesTracker.next(request);
-  const state = mode === "create" ? createModelsListState : editModelsListState;
-  const loadingRef = mode === "create" ? createModelsListLoading : editModelsListLoading;
-  loadingRef.value = true;
-  try {
-    const models = await adminAPI.groups.getModelsListCandidates(groupID, platform);
-    if (!modelsListCandidatesTracker.isCurrent(requestID, request)) {
-      return;
-    }
-    setModelsListCandidates(state, models);
-  } catch (error) {
-    if (!modelsListCandidatesTracker.isCurrent(requestID, request)) {
-      return;
-    }
-    console.error("Error loading group models list candidates:", error);
-  } finally {
-    if (modelsListCandidatesTracker.isCurrent(requestID, request)) {
-      loadingRef.value = false;
-    }
-  }
-};
-
-const moveCreateModelsListItem = (fromIndex: number, toIndex: number) => {
-  moveModelsListItem(createModelsListState, fromIndex, toIndex);
-};
-
-const moveEditModelsListItem = (fromIndex: number, toIndex: number) => {
-  moveModelsListItem(editModelsListState, fromIndex, toIndex);
 };
 
 // 将 UI 格式的路由规则转换为 API 格式
@@ -6060,7 +5813,6 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 
 const openCreateModal = () => {
   showCreateModal.value = true;
-  loadModelsListCandidates("create", 0, createForm.platform);
 };
 
 const closeCreateModal = () => {
@@ -6124,7 +5876,6 @@ const closeCreateModal = () => {
   createForm.max_reasoning_effort_over_limit = reasoningEffortOverLimitDowngrade;
   createForm.reasoning_effort_mappings = [];
   createReasoningEffortPolicyRef.value?.resetValidation();
-  resetModelsListState(createModelsListState);
   createModelRoutingRules.value = [];
 };
 
@@ -6224,7 +5975,6 @@ const handleCreateGroup = async () => {
       model_routing: convertRoutingRulesToApiFormat(
         createModelRoutingRules.value,
       ),
-      models_list_config: buildModelsListConfig(createModelsListState),
       supported_model_scopes: normalizeSupportedModelScopesForPlatform(
         createForm.platform,
         createForm.supported_model_scopes,
@@ -6409,12 +6159,10 @@ const handleEdit = async (group: AdminGroup) => {
     group.reasoning_effort_mappings,
     group.platform,
   );
-  resetModelsListState(editModelsListState, group.models_list_config);
   // 加载模型路由规则（异步加载账号名称）
   editModelRoutingRules.value = await convertApiFormatToRoutingRules(
     group.model_routing,
   );
-  loadModelsListCandidates("edit", group.id, group.platform);
   showEditModal.value = true;
 };
 
@@ -6455,7 +6203,6 @@ const closeEditModal = () => {
   editForm.audio_stt_price_per_hour = null;
   resetMessagesDispatchFormState(editForm);
   editForm.allow_live = false;
-  resetModelsListState(editModelsListState);
 };
 
 const handleUpdateGroup = async () => {
@@ -6513,7 +6260,6 @@ const handleUpdateGroup = async () => {
       model_routing: convertRoutingRulesToApiFormat(
         editModelRoutingRules.value,
       ),
-      models_list_config: buildModelsListConfig(editModelsListState),
       supported_model_scopes: normalizeSupportedModelScopesForPlatform(
         editForm.platform,
         editForm.supported_model_scopes,
@@ -6649,6 +6395,45 @@ const closeGroupModelsModal = () => {
   groupModels.value = [];
 };
 
+const syncGroupModels = async () => {
+  if (!groupModelsGroup.value || syncingGroupModels.value) return;
+  syncingGroupModels.value = true;
+  try {
+    const result = await adminAPI.groups.syncGroupModelsFromAccounts(groupModelsGroup.value.id);
+    groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id);
+    appStore.showSuccess(t("admin.groups.groupModels.syncSuccess", {
+      synchronized: result.synchronized,
+      pending_price: result.pending_price,
+    }));
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.syncFailed")));
+  } finally {
+    syncingGroupModels.value = false;
+  }
+};
+
+const toggleGroupModel = async (model: GroupModelConfig) => {
+  if (!groupModelsGroup.value || savingGroupModelId.value) return;
+  savingGroupModelId.value = model.model_id;
+  try {
+    if (model.enabled) {
+      await adminAPI.groups.disableGroupModel(groupModelsGroup.value.id, model);
+    } else {
+      await adminAPI.groups.updateGroupModel(groupModelsGroup.value.id, model, {
+        enabled: true,
+        catalog_visible: true,
+        max_output_tokens: model.max_output_tokens,
+        default_max_output_tokens: model.default_max_output_tokens,
+      });
+    }
+    groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id);
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.updateFailed")));
+  } finally {
+    savingGroupModelId.value = null;
+  }
+};
+
 const saveGroupModel = async (model: GroupModelConfig) => {
   if (!groupModelsGroup.value) return;
   if (model.default_max_output_tokens > model.max_output_tokens) {
@@ -6658,6 +6443,8 @@ const saveGroupModel = async (model: GroupModelConfig) => {
   savingGroupModelId.value = model.model_id;
   try {
     const updated = await adminAPI.groups.updateGroupModel(groupModelsGroup.value.id, model, {
+      enabled: model.enabled,
+      catalog_visible: model.catalog_visible,
       max_output_tokens: model.max_output_tokens,
       default_max_output_tokens: model.default_max_output_tokens,
     });
@@ -6970,8 +6757,6 @@ watch(
       createForm.require_privacy_set = false;
     }
     resetDisabledBatchImagePricing(createForm);
-    resetModelsListState(createModelsListState);
-    loadModelsListCandidates("create", 0, newVal);
   },
 );
 
@@ -7028,8 +6813,6 @@ watch(
     }
     resetDisabledBatchImagePricing(editForm);
     if (editingGroup.value) {
-      resetModelsListState(editModelsListState, editForm.platform === editingGroup.value.platform ? editingGroup.value.models_list_config : undefined);
-      loadModelsListCandidates("edit", editingGroup.value.id, newVal);
     }
   },
 );
@@ -7125,7 +6908,6 @@ const saveSortOrder = async () => {
 onMounted(() => {
   loadGroups();
   void loadLiveCapability();
-  loadModelsListCandidates("create", 0, createForm.platform);
   document.addEventListener("click", handleClickOutside);
 });
 

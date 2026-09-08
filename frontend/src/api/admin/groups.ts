@@ -853,12 +853,40 @@ export interface GroupModelConfig {
   sort_order: number
   max_output_tokens: number
   default_max_output_tokens: number
+  price?: {
+    id: string
+    version: number
+    per_request_micros: number
+  } | null
   control_version: number
 }
 
 export interface UpdateGroupModelConfig {
+  enabled?: boolean
+  catalog_visible?: boolean
   max_output_tokens: number
   default_max_output_tokens: number
+}
+
+export interface SyncGroupModelsResult {
+  synchronized: number
+  pending_price: number
+}
+
+export async function syncGroupModelsFromAccounts(id: string | number): Promise<SyncGroupModelsResult> {
+  const { data } = await apiClient.post<SyncGroupModelsResult>(
+    `/admin/groups/${id}/models/sync-accounts`,
+    {},
+    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-sync') } }
+  )
+  return data
+}
+
+export async function disableGroupModel(groupId: string | number, model: GroupModelConfig): Promise<void> {
+  await apiClient.delete(`/admin/groups/${groupId}/models/${model.model_id}`, {
+    data: { expected_control_version: model.control_version },
+    headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-disable') }
+  })
 }
 
 function adaptGroupModel(model: GroupModelConfig): GroupModelConfig {
@@ -920,6 +948,8 @@ export const groupsAPI = {
   getUsageSummary,
   getCapacitySummary,
   listGroupModels,
+  syncGroupModelsFromAccounts,
+  disableGroupModel,
   updateGroupModel
 }
 

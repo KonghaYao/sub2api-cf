@@ -168,6 +168,7 @@ import {
   listAdminGroupModels,
   listAdminGroups,
   listAdminModelPrices,
+  syncAdminGroupModelsFromAccounts,
   listAdminModels,
   publishAdminModelPrice,
   putAdminGroupModel,
@@ -892,6 +893,7 @@ export function createApp() {
   app.delete('/api/v1/admin/groups/:id/rpm-overrides', clearAdminGroupRpmOverrides)
   app.get('/api/v1/admin/groups/:id/models-list-candidates', getAdminModelCandidates)
   app.get('/api/v1/admin/groups/:id/models', listAdminGroupModels)
+  app.post('/api/v1/admin/groups/:id/models/sync-accounts', syncAdminGroupModelsFromAccounts)
   app.put('/api/v1/admin/groups/:id/models/:model_id', putAdminGroupModel)
   app.delete('/api/v1/admin/groups/:id/models/:model_id', deleteAdminGroupModel)
   app.get('/api/v1/admin/groups/:id/models/:model_id/prices', listAdminModelPrices)

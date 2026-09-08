@@ -3,6 +3,10 @@ import type { Env } from '../env'
 import { groupAccountCountColumnsSql } from './group-account-counts'
 import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
+import { accountNotExpiredSql } from '../gateway/account-expiry'
+import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
+import { accountGroupPrivacyAllowedSql } from '../gateway/account-group-policy'
+import { accountModelAllowedSql } from '../gateway/account-model-policy'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -651,6 +655,75 @@ export async function listAdminGroupModels(context: Context<ControlBindings>): P
       `${groupModelSelect()} WHERE gm.group_id = ? ORDER BY gm.sort_order ASC, m.public_name ASC`,
     ).bind(groupId).all<GroupModelRow>()
     return controlSuccess(result.results.map(publicGroupModel))
+  } catch (error) {
+    return controlError(asGatewayError(error))
+  }
+}
+
+export async function syncAdminGroupModelsFromAccounts(context: Context<ControlBindings>): Promise<Response> {
+  try {
+    const groupId = requireResourceId(context.req.param('id') || context.req.param('group_id'), 'group')
+    const key = requireIdempotencyKey(context.req.raw)
+    const group = await requireGroup(context.env, groupId)
+    const idem = await controlIdempotency('admin.group-models.sync-accounts.v1', key, { group_id: groupId })
+    const previous = await findControlIdempotency(context.env, idem)
+    if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group_model_sync'))
+    const candidates = await context.env.DB.prepare(
+      `SELECT DISTINCT m.id AS model_id,
+              CASE WHEN gm.model_id IS NULL THEN 'missing' WHEN gm.enabled = 0 THEN 'disabled' ELSE 'enabled' END AS state,
+              CASE WHEN p.id IS NULL THEN 1 ELSE 0 END AS pending_price
+         FROM account_groups ag
+         JOIN "groups" g ON g.id = ag.group_id
+         JOIN accounts a ON a.id = ag.account_id
+         JOIN account_models am ON am.account_id = a.id
+         JOIN models m ON m.id = am.model_id AND m.enabled = 1
+         LEFT JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = m.id
+         LEFT JOIN model_prices p ON p.group_id = ag.group_id AND p.model_id = m.id AND p.active = 1
+        WHERE ag.group_id = ? AND a.enabled = 1
+          AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
+          AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()}
+          AND ${accountGroupPrivacyAllowedSql()} AND a.base_url IS NOT NULL
+          AND a.health_status <> 'unhealthy'
+          AND ${accountModelAllowedSql()}
+          AND (am.chat_completions = 1 OR am.responses = 1 OR am.embeddings = 1 OR am.image_generation = 1)
+          AND (? = 'composite' OR m.platform = ?)
+        ORDER BY m.id
+        LIMIT 501`,
+    ).bind(groupId, group.platform, group.platform).all<{ model_id: string; state: 'missing' | 'disabled' | 'enabled'; pending_price: number }>()
+    if (candidates.results.length > 500) {
+      throw new GatewayError(400, 'too_many_group_account_models', 'A group can synchronize at most 500 account models')
+    }
+    const now = Date.now()
+    const writes: D1PreparedStatement[] = []
+    for (const row of candidates.results) {
+      if (row.state === 'missing') {
+        writes.push(context.env.DB.prepare(
+          `INSERT INTO group_models (group_id, model_id, enabled, catalog_visible, sort_order,
+             max_output_tokens, default_max_output_tokens, created_at_ms, updated_at_ms)
+           VALUES (?, ?, 1, 1, 0, 65536, 32768, ?, ?)
+           ON CONFLICT(group_id, model_id) DO NOTHING`,
+        ).bind(groupId, row.model_id, now, now))
+      } else if (row.state === 'disabled') {
+        writes.push(context.env.DB.prepare(
+          `UPDATE group_models SET enabled = 1,
+             control_version = control_version + 1, updated_at_ms = ?
+           WHERE group_id = ? AND model_id = ? AND enabled = 0`,
+        ).bind(now, groupId, row.model_id))
+      }
+    }
+    const response = {
+      synchronized: candidates.results.length,
+      pending_price: candidates.results.filter(row => row.pending_price === 1).length,
+    }
+    writes.push(controlIdempotencyInsert(context.env, idem, 'group_model_sync', groupId, response, now))
+    try {
+      await context.env.DB.batch(writes)
+    } catch (error) {
+      const recovered = await findControlIdempotency(context.env, idem)
+      if (recovered !== null) return controlSuccess(parseIdempotentResponse(recovered, 'group_model_sync'))
+      throw mapCatalogWriteError(error)
+    }
+    return controlSuccess(response)
   } catch (error) {
     return controlError(asGatewayError(error))
   }
