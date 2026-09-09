@@ -320,3 +320,10 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 - Typecheck passed. Broad gateway/control run: 909 passed, one outdated assertion expecting deleted OpenAI metadata failed. Corrected that assertion to original behavior; final handler/provider/settings suite:201 passed. Native Chat cache/JSON/SSE/EOF suites:9 passed. Frontend build passed.
 - Code `b978ae484` pushed and deployed; Worker Version `2bd3c803-ae2f-4993-8741-a3bfbc5b1dc4`; health confirms production0.45.34. No migration:0 applied/0 recovered,max0122. Main user changes (including untracked0123) excluded.
 - Original content-session fallback and nested-cached-token precedence inspected; no speculative cache algorithm introduced. Real Composer cache recovery remains unproven. Continue only OpenAI cache-chain investigation until the user's current priority is resolved; broader original core/frontend objective remains active.
+
+
+## OpenAI raw Chat two-account affinity verification after 0.45.34
+
+- Added native Worker tests with two independently registered OpenAI API-Key accounts. For content fallback, session header and explicit prompt_cache_key, the first request binds account A; reversing account priorities and appending a turn still settles against A. A new conversation selects now-preferred B, proving the priority update was actually effective. Tests exercise real Worker admission, PoolStateDO, outbound fixture, Queue and D1 usage account projection.
+- Chat-cache and pool-affinity native suites:9 passed (`/tmp/sub2api-openai-two-account-native.log`). Test commit `6262f72ed`. No runtime changes or new production deployment; production remains0.45.34.
+- Original scheduler permits concurrency-full escape by default; no speculative wait-policy change made. Content-session fallback and compatibility-key generation were inspected against their original Go functions. The tested stable-session scenarios do not show account switching; they do not prove actual Composer cache hit recovery. Continue OpenAI cache investigation; Anthropic work remains paused by user instruction.
