@@ -152,6 +152,7 @@ export default defineConfig(async () => {
             }
             if (url.pathname === '/v1/chat/completions') {
               const body = await request.clone().json() as Record<string, unknown>
+              if (body.model === 'gpt-5.4-cache-probe' && body.prompt_cache_key === 'raw-round-trip') return Response.json({id:'raw-round-trip',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:JSON.stringify({body,headers:{ua:request.headers.get('user-agent'),language:request.headers.get('accept-language'),session:request.headers.get('session_id')}})},finish_reason:'stop'}],usage:{prompt_tokens:100,completion_tokens:2,prompt_tokens_details:{cached_tokens:80}}})
               if (body.model === 'gpt-5.4-cache-probe') return Response.json({id:'raw-cache-probe',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:JSON.stringify({key:body.prompt_cache_key??null,session:request.headers.get('session_id')})},finish_reason:'stop'}],usage:{prompt_tokens:6,completion_tokens:2}})
               if (body.model === 'chat-json-cache-fixture' || body.model === 'chat-json-diagnostic-fixture') {
                 if (body.stream !== true || (body.model === 'chat-json-cache-fixture' && (body.stream_options as any)?.include_usage !== true)) return Response.json({ error: 'stream flag missing' }, { status: 422 })

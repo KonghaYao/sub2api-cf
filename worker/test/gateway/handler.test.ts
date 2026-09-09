@@ -547,7 +547,7 @@ describe('OpenAI-compatible gateway', () => {
     expect(upstream).not.toHaveBeenCalled()
     expect(user.calls.some(call=>call.path==='/reserve')).toBe(false)
   })
-  it('applies the configured metadata policy to the actual provider body', async () => {
+  it('preserves OpenAI client metadata independently of the Anthropic metadata policy', async () => {
     const {env,database}=await harness()
     database.gatewaySettings={enable_metadata_passthrough:false}
     const upstream=vi.fn(async(_url:unknown,_init?:RequestInit)=>Response.json({model:'gpt-upstream',choices:[],usage:{prompt_tokens:1,completion_tokens:1}}))
@@ -557,7 +557,7 @@ describe('OpenAI-compatible gateway', () => {
       body:JSON.stringify({model:'gpt-public',messages:[{role:'user',content:'hello'}],metadata:{user_id:'private'}}),
     },env)
     expect(response.status).toBe(200)
-    expect(JSON.parse(String(upstream.mock.calls[0][1]?.body)).metadata).toBeUndefined()
+    expect(JSON.parse(String(upstream.mock.calls[0][1]?.body)).metadata).toEqual({user_id:'private'})
   })
 
   beforeEach(() => vi.restoreAllMocks())

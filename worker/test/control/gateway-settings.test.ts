@@ -24,3 +24,8 @@ describe('gateway settings consumers', () => {
     expect(applyGatewayBodySettings(settings, source, 'openai').system).toBe('original system')
   })
 })
+
+it('preserves OpenAI metadata when the Anthropic metadata passthrough setting is disabled',()=>{
+ const body={metadata:{session:'client-session'},messages:[{role:'user',content:'hello'}],prompt_cache_key:'stable'}
+ expect(applyGatewayBodySettings(normalizeGatewaySettings({enable_metadata_passthrough:false}),body,'openai')).toEqual(body)
+})

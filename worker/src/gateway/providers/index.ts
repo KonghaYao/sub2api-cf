@@ -49,7 +49,8 @@ export interface BuildProviderRequestInput {
   /**
    * Deliberately accepted at the seam so callers cannot accidentally forward
    * client authentication, cookie, connection, or host headers. No inbound
-   * header is trusted by the provider layer; provider headers are rebuilt.
+   * header is trusted by default; raw OpenAI Chat only forwards the original
+   * accept-language/user-agent allowlist. Provider authentication is rebuilt.
    */
   client_headers?: HeadersInit
 }
@@ -106,14 +107,18 @@ export function providerContract(platform: ProviderPlatform): ProviderContract {
 export function buildProviderRequest(input: BuildProviderRequestInput): ProviderRequestPlan {
   assertAccountContract(input.account)
   const credential = requireCredential(input.credential)
-  // Read the value to make the security boundary intentional: no client header
-  // is copied. The provider layer is the sole authority for upstream headers.
-  void input.client_headers
 
   if (input.account.platform === 'antigravity') return buildAntigravityPlan(input)
   const url = operationUrl(input.account, input.operation, input.model)
   const stream = input.operation === 'stream_generate_content' || bodyStreams(input.body)
   const headers = providerHeaders(input.account, credential, true, stream)
+  if (input.account.platform === 'openai' && input.operation === 'chat_completions') {
+    const clientHeaders = new Headers(input.client_headers)
+    for (const name of ['accept-language', 'user-agent']) {
+      const value = clientHeaders.get(name)
+      if (value !== null) headers.set(name, value)
+    }
+  }
   const providerRequestBody = input.body === undefined
     ? undefined
     : providerBody(input.account, input.operation, input.body)

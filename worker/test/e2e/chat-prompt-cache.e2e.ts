@@ -43,3 +43,31 @@ it('preserves raw Chat forwarding without injecting cache identities', async () 
   expect(await chat(f)).toEqual({key:null,session:null})
   expect(await chat(f,{prompt_cache_key:'raw-explicit'})).toEqual({key:'raw-explicit',session:null})
 })
+
+it.each([false,true])('preserves raw OpenAI multi-turn context, explicit cache key and metadata (stream=%s)',async stream=>{
+ const f=await fixture('chat_completions')
+ await env.DB.prepare("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.enable_metadata_passthrough',json('false')) WHERE id='global'").run()
+ try{
+  const prefix=[{role:'system',content:'Stable project instructions. '.repeat(100)},{role:'user',content:'First question'}]
+  for(const messages of [prefix,[...prefix,{role:'assistant',content:'First answer'},{role:'user',content:'Follow-up'}]]){
+   const body={model:f.model,messages,stream,max_tokens:128,metadata:{session:'stable-client-context'},prompt_cache_key:'raw-round-trip',prompt_cache_retention:'24h'}
+   const response=await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json','user-agent':'OpenAI/Python fixture','accept-language':'zh-CN',session_id:'do-not-forward-codex-header'},body:JSON.stringify(body)}))
+   expect(response.status).toBe(200)
+   let content:string
+   if(stream){
+    const text=await response.text()
+    const events=text.split('\n').filter(line=>line.startsWith('data: ')&&line!=='data: [DONE]').map(line=>JSON.parse(line.slice(6)))
+    content=events.map(e=>e.choices?.[0]?.delta?.content??'').join('')
+    expect(events.find(e=>e.usage)?.usage.prompt_tokens_details.cached_tokens).toBe(80)
+    expect(text).toContain('data: [DONE]')
+   }else{
+    const json=await response.json() as any
+    content=json.choices[0].message.content
+    expect(json.usage.prompt_tokens_details.cached_tokens).toBe(80)
+   }
+   const forwarded=JSON.parse(content)
+   expect(forwarded.body).toEqual({...body,model:'gpt-5.4-cache-probe',...(stream?{stream_options:{include_usage:true}}:{})})
+   expect(forwarded.headers).toEqual({ua:'OpenAI/Python fixture',language:'zh-CN',session:null})
+  }
+ }finally{await env.DB.prepare("UPDATE system_settings SET gateway_json=json_remove(gateway_json,'$.enable_metadata_passthrough') WHERE id='global'").run()}
+})

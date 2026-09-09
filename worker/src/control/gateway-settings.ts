@@ -87,8 +87,8 @@ export function enforceGatewayClientVersion(settings: GatewaySettings, userAgent
     }
   }
 }
-export function applyGatewayBodySettings(settings: GatewaySettings, body: Record<string, unknown>, _provider: string): Record<string, unknown> {
+export function applyGatewayBodySettings(settings: GatewaySettings, body: Record<string, unknown>, provider: string): Record<string, unknown> {
   const output = structuredClone(body)
-  if (!settings.enable_metadata_passthrough) delete output.metadata
+  if (provider !== 'openai' && !settings.enable_metadata_passthrough) delete output.metadata
   return output
 }

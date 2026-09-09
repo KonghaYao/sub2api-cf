@@ -499,3 +499,10 @@ describe('provider request adapters', () => {
     for (const run of cases) expect(run).toThrowError(GatewayError)
   })
 })
+
+it('matches the original raw Chat header allowlist and preserves the cache-bearing body',()=>{
+ const body={model:'composer-2.5',messages:[{role:'system',content:'Stable prefix'},{role:'user',content:'Question'}],metadata:{session:'stable'},prompt_cache_key:'client-cache',prompt_cache_retention:'24h'}
+ const plan=buildProviderRequest({account:account('openai'),credential,operation:'chat_completions',body,client_headers:{'user-agent':'OpenAI/Python 1.0','accept-language':'zh-CN',authorization:'Bearer client-secret',cookie:'private',session_id:'codex-session',conversation_id:'codex-conversation',originator:'codex_cli_rs'}})
+ expect(plan.body).toEqual(body)
+ expect(Object.fromEntries(plan.headers)).toEqual({accept:'application/json',authorization:'Bearer provider-secret','content-type':'application/json','user-agent':'OpenAI/Python 1.0','accept-language':'zh-CN'})
+})
