@@ -148,6 +148,38 @@ describe('AccountTestModal', () => {
     })
   })
 
+  it('shows partial diagnostic content before completion across split UTF-8 chunks', async () => {
+    let upstream!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    global.fetch = vi.fn().mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) { upstream = controller }
+    }), { headers: { 'content-type': 'text/event-stream' } }))
+    const wrapper = mount(AccountTestModal, {
+      props: { show: true, account: buildAccount() },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    await flushPromises()
+    ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
+    const running = (wrapper.vm as any).startTest()
+    upstream.enqueue(encoder.encode('data: {"type":"test_start","model":"gpt-5.4"}\n\n'))
+    const content = encoder.encode('data: {"type":"content","text":"中文增量"}\n\n')
+    const split = content.findIndex(byte => byte >= 128) + 1
+    upstream.enqueue(content.slice(0, split))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('中文增量')
+    upstream.enqueue(content.slice(split))
+    await flushPromises()
+    expect(wrapper.text()).toContain('中文增量')
+    expect((wrapper.vm as any).status).not.toBe('success')
+    upstream.enqueue(encoder.encode('data: {"type":"content","text":"第二段"}\n\ndata: {"type":"test_complete","success":true}\n\n'))
+    upstream.close()
+    await running
+    await flushPromises()
+    expect(wrapper.text()).toContain('中文增量第二段')
+    expect((wrapper.vm as any).status).toBe('success')
+    wrapper.unmount()
+  })
+
   it('renders Chat Completions path status from test SSE', async () => {
     const encoder = new TextEncoder()
     const chunks = [
