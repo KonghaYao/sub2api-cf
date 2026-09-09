@@ -3,10 +3,6 @@ import type { Env } from '../env'
 import { groupAccountCountColumnsSql } from './group-account-counts'
 import { authenticateAdminSession } from './admin-auth'
 import { asGatewayError, GatewayError } from '../gateway/errors'
-import { accountNotExpiredSql } from '../gateway/account-expiry'
-import { accountNotRateLimitedSql, accountNotTemporarilyBlockedSql } from '../gateway/account-rate-limit'
-import { accountGroupPrivacyAllowedSql } from '../gateway/account-group-policy'
-import { accountModelAllowedSql } from '../gateway/account-model-policy'
 import {
   controlIdempotency,
   controlIdempotencyInsert,
@@ -263,18 +259,18 @@ export async function duplicateAdminGroup(context: Context<ControlBindings>): Pr
             .bind(source.control_version, sourceId),
           context.env.DB.prepare(`INSERT INTO "groups" (${GROUP_COLUMNS}) VALUES (${columns.map(() => '?').join(', ')})`)
             .bind(...columns.map(column => row[column])),
+          context.env.DB.prepare(`INSERT INTO group_models
+            (group_id, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
+             default_max_output_tokens, catalog_visible, disabled_by_account_sync, control_version, created_at_ms, updated_at_ms)
+            SELECT ?, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
+             default_max_output_tokens, catalog_visible, disabled_by_account_sync, 0, ?, ? FROM group_models WHERE group_id = ?`)
+            .bind(id, now, now, sourceId),
           context.env.DB.prepare(`INSERT INTO account_groups
             (account_id, group_id, priority, weight, control_version, created_at_ms, updated_at_ms)
             SELECT ag.account_id, ?, ag.priority, ag.weight, 0, ?, ? FROM account_groups ag
             JOIN accounts a ON a.id = ag.account_id WHERE ag.group_id = ?
             AND (? = 0 OR a.credential_kind <> 'api_key')`)
             .bind(id, now, now, sourceId, JSON.parse(source.ui_config_json).require_oauth_only === true ? 1 : 0),
-          context.env.DB.prepare(`INSERT INTO group_models
-            (group_id, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
-             default_max_output_tokens, catalog_visible, control_version, created_at_ms, updated_at_ms)
-            SELECT ?, model_id, upstream_name_override, enabled, sort_order, max_output_tokens,
-             default_max_output_tokens, catalog_visible, 0, ?, ? FROM group_models WHERE group_id = ?`)
-            .bind(id, now, now, sourceId),
           context.env.DB.prepare(`INSERT INTO model_prices
             (id, group_id, model_id, version, active, input_micros_per_million, output_micros_per_million,
              cache_read_micros_per_million, per_request_micros, minimum_reservation_micros, effective_at_ms, created_at_ms)
@@ -670,7 +666,9 @@ export async function syncAdminGroupModelsFromAccounts(context: Context<ControlB
     if (previous !== null) return controlSuccess(parseIdempotentResponse(previous, 'group_model_sync'))
     const candidates = await context.env.DB.prepare(
       `SELECT DISTINCT m.id AS model_id,
-              CASE WHEN gm.model_id IS NULL THEN 'missing' WHEN gm.enabled = 0 THEN 'disabled' ELSE 'enabled' END AS state,
+              CASE WHEN gm.model_id IS NULL THEN 'missing'
+                   WHEN gm.disabled_by_account_sync = 1 THEN 'auto_disabled'
+                   WHEN gm.enabled = 0 THEN 'disabled' ELSE 'enabled' END AS state,
               CASE WHEN p.id IS NULL THEN 1 ELSE 0 END AS pending_price
          FROM account_groups ag
          JOIN "groups" g ON g.id = ag.group_id
@@ -680,16 +678,15 @@ export async function syncAdminGroupModelsFromAccounts(context: Context<ControlB
          LEFT JOIN group_models gm ON gm.group_id = ag.group_id AND gm.model_id = m.id
          LEFT JOIN model_prices p ON p.group_id = ag.group_id AND p.model_id = m.id AND p.active = 1
         WHERE ag.group_id = ? AND a.enabled = 1
-          AND COALESCE(json_extract(a.ui_config_json, '$.schedulable'), 1) = 1
-          AND ${accountNotExpiredSql()} AND ${accountNotRateLimitedSql()} AND ${accountNotTemporarilyBlockedSql()}
-          AND ${accountGroupPrivacyAllowedSql()} AND a.base_url IS NOT NULL
-          AND a.health_status <> 'unhealthy'
-          AND ${accountModelAllowedSql()}
           AND (am.chat_completions = 1 OR am.responses = 1 OR am.embeddings = 1 OR am.image_generation = 1)
           AND (? = 'composite' OR m.platform = ?)
         ORDER BY m.id
         LIMIT 501`,
-    ).bind(groupId, group.platform, group.platform).all<{ model_id: string; state: 'missing' | 'disabled' | 'enabled'; pending_price: number }>()
+    ).bind(groupId, group.platform, group.platform).all<{
+      model_id: string
+      state: 'missing' | 'auto_disabled' | 'disabled' | 'enabled'
+      pending_price: number
+    }>()
     if (candidates.results.length > 500) {
       throw new GatewayError(400, 'too_many_group_account_models', 'A group can synchronize at most 500 account models')
     }
@@ -703,11 +700,11 @@ export async function syncAdminGroupModelsFromAccounts(context: Context<ControlB
            VALUES (?, ?, 1, 1, 0, 65536, 32768, ?, ?)
            ON CONFLICT(group_id, model_id) DO NOTHING`,
         ).bind(groupId, row.model_id, now, now))
-      } else if (row.state === 'disabled') {
+      } else if (row.state === 'auto_disabled') {
         writes.push(context.env.DB.prepare(
-          `UPDATE group_models SET enabled = 1,
+          `UPDATE group_models SET enabled = 1, disabled_by_account_sync = 0,
              control_version = control_version + 1, updated_at_ms = ?
-           WHERE group_id = ? AND model_id = ? AND enabled = 0`,
+           WHERE group_id = ? AND model_id = ? AND disabled_by_account_sync = 1`,
         ).bind(now, groupId, row.model_id))
       }
     }
@@ -768,8 +765,8 @@ export async function putAdminGroupModel(context: Context<ControlBindings>): Pro
       ? context.env.DB.prepare(
         `INSERT INTO group_models (
            group_id, model_id, upstream_name_override, enabled, catalog_visible,
-           sort_order, max_output_tokens, default_max_output_tokens, created_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           sort_order, max_output_tokens, default_max_output_tokens, disabled_by_account_sync, created_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       ).bind(
         groupId, modelId, patch.upstream_name_override, patch.enabled ? 1 : 0,
         patch.catalog_visible ? 1 : 0, patch.sort_order, patch.max_output_tokens,
@@ -777,7 +774,7 @@ export async function putAdminGroupModel(context: Context<ControlBindings>): Pro
       )
       : context.env.DB.prepare(
         `UPDATE group_models SET upstream_name_override = ?, enabled = ?, catalog_visible = ?,
-           sort_order = ?, max_output_tokens = ?, default_max_output_tokens = ?,
+           sort_order = ?, max_output_tokens = ?, default_max_output_tokens = ?, disabled_by_account_sync = 0,
            control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
            updated_at_ms = ? WHERE group_id = ? AND model_id = ?`,
       ).bind(
@@ -821,7 +818,7 @@ export async function deleteAdminGroupModel(context: Context<ControlBindings>): 
     try {
       await context.env.DB.batch([
         context.env.DB.prepare(
-          `UPDATE group_models SET enabled = 0,
+          `UPDATE group_models SET enabled = 0, disabled_by_account_sync = 0,
              control_version = CASE WHEN control_version = ? THEN ? ELSE -1 END,
              updated_at_ms = ? WHERE group_id = ? AND model_id = ?`,
         ).bind(expected, expected + 1, now, groupId, modelId),

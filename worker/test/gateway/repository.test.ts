@@ -369,7 +369,7 @@ describe('gateway repository embeddings routing', () => {
       configure({})
       await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).resolves.toMatchObject({ candidates: [{ account_id: 'account-1' }] })
       raw.exec("UPDATE accounts SET ui_config_json='{}'")
-      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'model_not_found' })
     } finally { raw.close() }
   })
 
@@ -492,8 +492,8 @@ describe('gateway repository embeddings routing', () => {
       'embeddings',
       'user-1',
     )).rejects.toMatchObject({
-      status: 503,
-      code: 'no_upstream_accounts',
+      status: 404,
+      code: 'model_not_found',
     })
     await expect(
       getAccountCredential(testEnv, 'group-1', 'model-1', 'embeddings', 'account-1'),
@@ -626,7 +626,7 @@ describe('gateway repository image routing', () => {
       'gpt-image-public',
       'images',
       'user-1',
-    )).rejects.toMatchObject({ status: 503, code: 'no_upstream_accounts' })
+    )).rejects.toMatchObject({ status: 404, code: 'model_not_found' })
     await expect(getAccountCredential(
       testEnv,
       'group-images',

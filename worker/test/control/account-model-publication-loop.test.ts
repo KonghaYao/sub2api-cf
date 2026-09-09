@@ -88,6 +88,151 @@ describe('account model mapping publication loop on createApp and SQLite', () =>
     } finally { test.raw.close() }
   })
 
+  it('keeps linked group models synchronized when an account model set changes', async () => {
+    const test = await fixture()
+    try {
+      test.raw.exec(`INSERT INTO models
+        (id,platform,public_name,upstream_name,endpoint,enabled,created_at_ms,updated_at_ms) VALUES
+        ('sync-model-a','openai','sync-public-a','sync-upstream-a','chat_completions',1,1,1),
+        ('sync-model-b','openai','sync-public-b','sync-upstream-b','chat_completions',1,1,1)`)
+      const create = await test.app.request('/api/v1/admin/accounts', {
+        method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'idempotency-key': 'automatic-group-sync-create' },
+        body: JSON.stringify({ name: 'Automatic sync account', platform: 'openai', type: 'apikey',
+          base_url: 'https://api.openai.test/v1', api_key: 'upstream-secret',
+          group_links: [{ group_id: 'sync-group', priority: 0, weight: 1 }],
+          model_capabilities: [{ model_id: 'sync-model-a', chat_completions: true, responses: false }] }),
+      }, test.env)
+      expect(create.status, await create.clone().text()).toBe(201)
+      const account = (await create.json() as any).data
+      expect(test.raw.prepare(`SELECT model_id,enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' ORDER BY model_id`).all()).toEqual([
+        { model_id: 'sync-model-a', enabled: 1, disabled_by_account_sync: 0 },
+      ])
+
+      const update = await test.app.request(`/api/v1/admin/accounts/${account.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': `"${account.control_version}"` },
+        body: JSON.stringify({ model_capabilities: [
+          { model_id: 'sync-model-b', chat_completions: true, responses: false },
+        ] }),
+      }, test.env)
+      expect(update.status, await update.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT model_id,enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' ORDER BY model_id`).all()).toEqual([
+        { model_id: 'sync-model-a', enabled: 0, disabled_by_account_sync: 1 },
+        { model_id: 'sync-model-b', enabled: 1, disabled_by_account_sync: 0 },
+      ])
+
+      const disableB = await test.app.request('/api/v1/admin/groups/sync-group/models/sync-model-b', {
+        method: 'DELETE', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'disable-sync-model-b', 'if-match': '"0"' }, body: '{}',
+      }, test.env)
+      expect(disableB.status, await disableB.clone().text()).toBe(200)
+      const sync = await test.app.request('/api/v1/admin/groups/sync-group/models/sync-accounts', {
+        method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'sync-models-after-disable' }, body: '{}',
+      }, test.env)
+      expect(sync.status, await sync.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='sync-model-b'`).get())
+        .toEqual({ enabled: 0, disabled_by_account_sync: 0 })
+    } finally { test.raw.close() }
+  })
+
+  it('keeps shared support active and suspends it after the last linked account is removed', async () => {
+    const test = await fixture()
+    try {
+      test.raw.exec(`INSERT INTO models
+        (id,platform,public_name,upstream_name,endpoint,enabled,created_at_ms,updated_at_ms)
+        VALUES ('shared-model','openai','shared-public','shared-upstream','chat_completions',1,1,1)`)
+      const accounts: Array<{ id: string; control_version: number }> = []
+      for (const key of ['first', 'second']) {
+        const created = await test.app.request('/api/v1/admin/accounts', {
+          method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+            'idempotency-key': `shared-${key}` },
+          body: JSON.stringify({ name: `Shared ${key}`, platform: 'openai', type: 'apikey',
+            base_url: 'https://api.openai.test/v1', api_key: `upstream-${key}`,
+            group_links: [{ group_id: 'sync-group', priority: 0, weight: 1 }],
+            model_capabilities: [{ model_id: 'shared-model', chat_completions: true, responses: false }] }),
+        }, test.env)
+        expect(created.status, await created.clone().text()).toBe(201)
+        accounts.push((await created.json() as any).data)
+      }
+
+      const firstDelete = await test.app.request(`/api/v1/admin/accounts/${accounts[0]!.id}`, {
+        method: 'DELETE', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'delete-first-shared', 'if-match': `"${accounts[0]!.control_version}"` }, body: '{}',
+      }, test.env)
+      expect(firstDelete.status, await firstDelete.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='shared-model'`).get())
+        .toEqual({ enabled: 1, disabled_by_account_sync: 0 })
+
+      const secondDelete = await test.app.request(`/api/v1/admin/accounts/${accounts[1]!.id}`, {
+        method: 'DELETE', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'delete-second-shared', 'if-match': `"${accounts[1]!.control_version}"` }, body: '{}',
+      }, test.env)
+      expect(secondDelete.status, await secondDelete.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='shared-model'`).get())
+        .toEqual({ enabled: 0, disabled_by_account_sync: 1 })
+    } finally { test.raw.close() }
+  })
+
+  it('synchronizes models when account group links and enabled state change', async () => {
+    const test = await fixture()
+    try {
+      test.raw.exec(`INSERT INTO models
+        (id,platform,public_name,upstream_name,endpoint,enabled,created_at_ms,updated_at_ms)
+        VALUES ('link-model','openai','link-public','link-upstream','chat_completions',1,1,1)`)
+      const created = await test.app.request('/api/v1/admin/accounts', {
+        method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'link-model-account' },
+        body: JSON.stringify({ name: 'Link model account', platform: 'openai', type: 'apikey',
+          base_url: 'https://api.openai.test/v1', api_key: 'upstream-link',
+          model_capabilities: [{ model_id: 'link-model', chat_completions: true, responses: false }] }),
+      }, test.env)
+      expect(created.status, await created.clone().text()).toBe(201)
+      const account = (await created.json() as any).data
+
+      const link = await test.app.request(`/api/v1/admin/accounts/${account.id}/groups/sync-group`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': '"0"' },
+        body: JSON.stringify({ priority: 0, weight: 1 }),
+      }, test.env)
+      expect(link.status, await link.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='link-model'`).get())
+        .toEqual({ enabled: 1, disabled_by_account_sync: 0 })
+
+      const disable = await test.app.request(`/api/v1/admin/accounts/${account.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'disable-link-account', 'if-match': '"1"' },
+        body: JSON.stringify({ enabled: false }),
+      }, test.env)
+      expect(disable.status, await disable.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='link-model'`).get())
+        .toEqual({ enabled: 0, disabled_by_account_sync: 1 })
+
+      const enable = await test.app.request(`/api/v1/admin/accounts/${account.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'enable-link-account', 'if-match': '"2"' },
+        body: JSON.stringify({ enabled: true }),
+      }, test.env)
+      expect(enable.status, await enable.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='link-model'`).get())
+        .toEqual({ enabled: 1, disabled_by_account_sync: 0 })
+
+      const unlink = await test.app.request(`/api/v1/admin/accounts/${account.id}/groups/sync-group`, {
+        method: 'DELETE', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': '"3"' }, body: '{}',
+      }, test.env)
+      expect(unlink.status, await unlink.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT enabled,disabled_by_account_sync FROM group_models
+        WHERE group_id='sync-group' AND model_id='link-model'`).get())
+        .toEqual({ enabled: 0, disabled_by_account_sync: 1 })
+    } finally { test.raw.close() }
+  })
+
   it('publishes a mapped image model only after group sync and active pricing, preserving explicit overlap', async () => {
     const test = await fixture()
     try {
@@ -123,9 +268,14 @@ describe('account model mapping publication loop on createApp and SQLite', () =>
       }, test.env)
       await expect(restore.json()).resolves.toMatchObject({ data: { synchronized: 1, pending_price: 1 } })
       expect(test.raw.prepare(`SELECT enabled,catalog_visible,sort_order,max_output_tokens,default_max_output_tokens,
-        upstream_name_override FROM group_models`).get()).toEqual({ enabled: 1, catalog_visible: 0, sort_order: 19,
+        upstream_name_override FROM group_models`).get()).toEqual({ enabled: 0, catalog_visible: 0, sort_order: 19,
         max_output_tokens: 12345, default_max_output_tokens: 6789, upstream_name_override: 'gpt-image-2' })
-      test.raw.prepare('UPDATE group_models SET catalog_visible=1').run()
+      const enable = await test.app.request(`/api/v1/admin/groups/sync-group/models/${model.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json',
+          'idempotency-key': 'group-model-enable', 'if-match': '"0"' },
+        body: JSON.stringify({ enabled: true, catalog_visible: true }),
+      }, test.env)
+      expect(enable.status, await enable.clone().text()).toBe(200)
       const pending = await test.app.request('/v1/models', { headers: { authorization: `Bearer ${USER_KEY}` } }, test.env)
       expect((await pending.json() as any).data).toEqual([])
 
