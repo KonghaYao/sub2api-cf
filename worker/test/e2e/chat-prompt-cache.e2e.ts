@@ -94,3 +94,14 @@ it.each(['content','header','body'] as const)('keeps raw OpenAI turns on the bou
  await send([{role:'system',content:'Stable project instructions'},{role:'user',content:'Different conversation'}],true)
  await expect.poll(async()=>(await env.DB.prepare('SELECT COUNT(*) AS n FROM usage_projection WHERE user_id=? AND account_id=?').bind(f.user_id,second.id).first<any>())?.n).toBe(1)
 })
+
+it('preserves the actual Responses-shaped body cache key across changing session headers',async()=>{
+ const f=await fixture('responses')
+ const body={messages:undefined,input:[{role:'user',content:'Stable input'}],prompt_cache_key:'client-body-cache'}
+ const first=await chat(f,body,{'session-id':'first-header'})
+ const next=await chat(f,{...body,input:[...body.input,{role:'assistant',content:'Answer'},{role:'user',content:'Next'}]},{'session-id':'second-header'})
+ expect(first.key).toBe('client-body-cache')
+ expect(next.key).toBe(first.key)
+ expect(next.session).not.toBe(first.session)
+ expect((await chat(f,{...body,prompt_cache_key:undefined},{'session-id':'fallback-header'})).key).toBe('fallback-header')
+})

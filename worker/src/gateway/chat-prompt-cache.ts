@@ -44,7 +44,11 @@ export async function chatPromptCacheIdentity(input: {
   const sessionSeed = isolated ? key : await isolate(input.apiKeyId, key)
   const hash = await sha256Hex(sessionSeed)
   const variant = (parseInt(hash[16]!, 16) & 3 | 8).toString(16)
-  return { promptCacheKey: key, sessionId: `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-${variant}${hash.slice(17,20)}-${hash.slice(20,32)}` }
+  // Original API-Key Responses-shaped passthrough fills only a missing body
+  // key; the explicit session signal still controls the isolated session header.
+  const promptCacheKey = responsesShape && !input.oauth && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim()
+    ? body.prompt_cache_key : key
+  return { promptCacheKey, sessionId: `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-${variant}${hash.slice(17,20)}-${hash.slice(20,32)}` }
 }
 
 // Worker API-key IDs are strings. Use an unambiguous tenant namespace rather

@@ -54,6 +54,16 @@ it('uses only leading Chat system/developer messages and the first user for sche
 it('preserves explicit Responses-shaped Chat identity without auto derivation', async () => {
   const shape={...input,body:{model:'public',input:'Hello',prompt_cache_key:'explicit-shape'}}
   expect((await chatPromptCacheIdentity(shape))?.promptCacheKey).toBe('explicit-shape')
-  expect((await chatPromptCacheIdentity({...shape,headers:new Headers({'session-id':'header-shape'})}))?.promptCacheKey).toBe('header-shape')
+  expect((await chatPromptCacheIdentity({...shape,headers:new Headers({'session-id':'header-shape'})}))?.promptCacheKey).toBe('explicit-shape')
   expect(await chatPromptCacheIdentity({...shape,body:{model:'public',input:'Hello'}})).toBeNull()
+})
+
+it('retains the API-Key Responses-shaped body cache key when session headers rotate',async()=>{
+ const request={body:{input:'Stable input',prompt_cache_key:'  explicit-body-cache  '},model:'gpt-5.4',apiKeyId:'tenant',oauth:false}
+ const first=await chatPromptCacheIdentity({...request,headers:new Headers({'session-id':'first-header'})})
+ const second=await chatPromptCacheIdentity({...request,headers:new Headers({'session-id':'second-header'})})
+ expect(first?.promptCacheKey).toBe('  explicit-body-cache  ')
+ expect(second?.promptCacheKey).toBe(first?.promptCacheKey)
+ expect(second?.sessionId).not.toBe(first?.sessionId)
+ expect((await chatPromptCacheIdentity({...request,body:{input:'Stable input',prompt_cache_key:'  '},headers:new Headers({'session-id':'fallback'})}))?.promptCacheKey).toBe('fallback')
 })
