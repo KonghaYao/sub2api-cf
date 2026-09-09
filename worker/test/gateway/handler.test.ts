@@ -544,7 +544,10 @@ describe('OpenAI-compatible gateway', () => {
     }}), {headers:{'content-type':'text/event-stream'}})))
     const response = await createApp().request('/v1/chat/completions', {method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages:[{role:'user',content:'x'.repeat(size)}]})},env)
     expect(response.status).toBe(200)
-    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(response.headers.get('content-type')).toBe('text/event-stream; charset=utf-8')
+    expect(response.headers.get('x-accel-buffering')).toBe('no')
+    expect(response.headers.get('cache-control')).toBe('no-cache')
+    expect(response.headers.has('content-length')).toBe(false)
     const reader=response.body!.getReader()
     // The upstream has neither emitted a finish marker nor closed. Reading here
     // must complete before the test permits the next upstream delta.
@@ -1827,7 +1830,17 @@ describe('OpenAI-compatible gateway', () => {
       expect(frames[2].choices[0].finish_reason).toBe('tool_calls')
       expect(frames.at(-1)).toMatchObject({ choices: [], usage: { prompt_tokens_details: { cached_tokens: 80 } } })
       expect(text.endsWith('data: [DONE]\n\n')).toBe(true)
-    } else expect(await response.json()).toMatchObject({ usage: { prompt_tokens_details: { cached_tokens: 80 } } })
+    } else {
+      expect(response.headers.get('content-type')).toContain('application/json')
+      expect(response.headers.has('x-accel-buffering')).toBe(false)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(await response.json()).toMatchObject({ usage: { prompt_tokens_details: { cached_tokens: 80 } } })
+    }
+    if (stream) {
+      expect(response.headers.get('x-accel-buffering')).toBe('no')
+      expect(response.headers.get('cache-control')).toBe('no-cache')
+      expect(response.headers.has('content-length')).toBe(false)
+    }
     expect(user.calls.filter(call => call.path === '/settle')).toHaveLength(1)
     expect(user.calls.find(call => call.path === '/settle')?.body).toMatchObject({
       amount_micros: 88, usage_event: { payload: { input_tokens: 100, cache_read_tokens: 80, output_tokens: 2, outcome: 'completed' } },

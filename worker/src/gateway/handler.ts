@@ -2306,11 +2306,8 @@ async function createSynchronousResponse(
       ))
     await settleAndProject(input, zeroCostFailure ? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, estimated: false } : usage,
       failedResponsesDocument ? 'failed' : 'completed', zeroCostFailure, extractTrustedResponseModel(parsed))
-    const headers = responseHeaders(input.response.headers, false)
-    if (chatStreamFallback) {
-      headers.set('content-type', 'text/event-stream; charset=utf-8')
-      headers.set('x-accel-buffering', 'no')
-    } else headers.set('content-length', String(output.byteLength))
+    const headers = responseHeaders(input.response.headers, chatStreamFallback)
+    if (!chatStreamFallback) headers.set('content-length', String(output.byteLength))
     return new Response(output.buffer as ArrayBuffer, { status: input.response.status, headers })
   } finally {
     await Promise.all([
@@ -4231,7 +4228,12 @@ function responseHeaders(upstream: Headers, streaming: boolean): Headers {
     'x-content-type-options': 'nosniff',
   })
   const contentType = upstream.get('content-type')
-  headers.set('content-type', contentType ?? (streaming ? 'text/event-stream; charset=utf-8' : 'application/json; charset=utf-8'))
+  headers.set('content-type', streaming ? 'text/event-stream; charset=utf-8' : contentType ?? 'application/json; charset=utf-8')
+  if (streaming) {
+    // Original newStreamHeaderWriter explicitly disables reverse-proxy buffering.
+    headers.set('cache-control', 'no-cache')
+    headers.set('x-accel-buffering', 'no')
+  }
   const upstreamRequestId = upstream.get('x-request-id')
   if (upstreamRequestId !== null && upstreamRequestId.length <= 256) {
     headers.set('x-upstream-request-id', upstreamRequestId)

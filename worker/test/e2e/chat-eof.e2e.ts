@@ -8,6 +8,9 @@ it.each(['finish','usage','error','truncated'])('handles original raw Chat EOF m
  const response=await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json'},body:JSON.stringify({model,messages:[{role:'user',content:'hi'}],stream:true,max_tokens:128})}))
  const content=await response.text()
  expect(response.status).toBe(200)
+ expect(response.headers.get('content-type')).toBe('text/event-stream; charset=utf-8')
+ expect(response.headers.get('x-accel-buffering')).toBe('no')
+ expect(response.headers.get('cache-control')).toBe('no-cache')
  expect(content).toContain('Chat OK')
  const failed=mode==='error'||mode==='truncated'
  if(!failed) {
