@@ -397,3 +397,11 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 ### 0.45.45 post-deployment health follow-up
 
 - A fresh proxy-route health request completed successfully: status ok, runtime cloudflare-workers, environment production, version0.45.45. This closes the previous release health-verification gap. It does not prove external client streaming display recovery; that issue and the wider original core/frontend goal remain open. No runtime change or new deployment in this follow-up.
+
+
+## 0.45.46 — measured latency in admin and user usage APIs
+
+- Both original-compatible usage DTOs hardcoded first_token_ms:null despite gateway request observations containing measured ttft_ms. Correlate the indexed observation by request ID, user ID and API-key ID, choosing the latest observation without multiplying usage rows. Expose measured latency in admin list and user offset/cursor list/detail contracts. Preserve0 and null; missing/expired observations remain null rather than inferred duration values. This does not add durable latency storage to the billing projection.
+- Typecheck and24 SQLite-backed user/observability HTTP tests passed. Coverage includes admin filters/page counts, user list/detail/cursor routes, zero/nonzero/null measurements and a newer same-request-ID observation belonging to another user that must not leak into the row.
+- Code `1ae7a2de1` pushed and deployed using the working direct Cloudflare API route. Production frontend build passed; migration reconciliation0 applied/0 recovered,122 already current,max0124. Worker Version `d76a39b4-12ab-4c26-9d2c-8970200f2787`; proxy-route health confirms0.45.46/statusok. No LLM forwarding or cache logic changed.
+- External client streaming display remains unresolved pending a reproducible client symptom. Latency display closes a concrete frontend API gap but does not establish complete admin/user usage parity or the broader original core/frontend objective.
