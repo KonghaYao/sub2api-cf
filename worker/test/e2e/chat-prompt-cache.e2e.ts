@@ -119,3 +119,14 @@ it('anchors actual OpenAI OAuth cache and session identity to the explicit body 
  expect(first.session).toMatch(/^[a-f0-9-]{36}$/)
  expect(next).toEqual(first)
 })
+
+it.each([false,true])('forwards native OpenAI Responses session context (stream=%s)',async stream=>{
+ const f=await fixture('responses')
+ const response=await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/responses',{method:'POST',headers:{authorization:'Bearer '+f.api_key,'content-type':'application/json',session_id:'native-session',conversation_id:'native-conversation','user-agent':'OpenAI/native','accept-language':'zh-CN','x-codex-turn-state':'opaque-turn-state',cookie:'must-not-forward'},body:JSON.stringify({model:f.model,input:'Stable context',prompt_cache_key:'native-header-probe',stream,max_output_tokens:128})}))
+ expect(response.status,await response.clone().text()).toBe(200)
+ let result:any
+ if(stream){const events=(await response.text()).split('\n').filter(line=>line.startsWith('data: ')&&line!=='data: [DONE]').map(line=>JSON.parse(line.slice(6)));result=events.find(e=>e.type==='response.completed').response}
+ else result=await response.json()
+ const actual=JSON.parse(result.output[0].content[0].text)
+ expect(actual).toEqual({key:'native-header-probe',session:'native-session',conversation:'native-conversation',ua:'OpenAI/native',language:'zh-CN',turn:'opaque-turn-state',cookie:null})
+})

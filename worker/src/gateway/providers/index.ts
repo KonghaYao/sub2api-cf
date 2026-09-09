@@ -49,8 +49,8 @@ export interface BuildProviderRequestInput {
   /**
    * Deliberately accepted at the seam so callers cannot accidentally forward
    * client authentication, cookie, connection, or host headers. No inbound
-   * header is trusted by default; raw OpenAI Chat only forwards the original
-   * accept-language/user-agent allowlist. Provider authentication is rebuilt.
+   * header is trusted by default; OpenAI Chat and Responses use their separate
+   * original allowlists. Provider authentication is rebuilt.
    */
   client_headers?: HeadersInit
 }
@@ -104,6 +104,9 @@ export function providerContract(platform: ProviderPlatform): ProviderContract {
   return CONTRACTS[platform]
 }
 
+// Match the original openaiAllowedHeaders. Raw Chat deliberately has a separate list.
+const OPENAI_RESPONSES_HEADERS = ['accept-language', 'content-type', 'conversation_id', 'user-agent', 'originator', 'session_id', 'x-codex-beta-features', 'x-codex-installation-id', 'x-codex-turn-state', 'x-codex-turn-metadata', 'x-codex-window-id', 'x-openai-internal-codex-responses-lite'] as const
+
 export function buildProviderRequest(input: BuildProviderRequestInput): ProviderRequestPlan {
   assertAccountContract(input.account)
   const credential = requireCredential(input.credential)
@@ -112,9 +115,11 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
   const url = operationUrl(input.account, input.operation, input.model)
   const stream = input.operation === 'stream_generate_content' || bodyStreams(input.body)
   const headers = providerHeaders(input.account, credential, true, stream)
-  if (input.account.platform === 'openai' && input.operation === 'chat_completions') {
+  if (input.account.platform === 'openai') {
     const clientHeaders = new Headers(input.client_headers)
-    for (const name of ['accept-language', 'user-agent']) {
+    const allowed = input.operation === 'chat_completions' ? ['accept-language', 'user-agent']
+      : input.operation === 'responses' || input.operation === 'responses_compact' ? OPENAI_RESPONSES_HEADERS : []
+    for (const name of allowed) {
       const value = clientHeaders.get(name)
       if (value !== null) headers.set(name, value)
     }

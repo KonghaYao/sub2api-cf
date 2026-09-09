@@ -506,3 +506,9 @@ it('matches the original raw Chat header allowlist and preserves the cache-beari
  expect(plan.body).toEqual(body)
  expect(Object.fromEntries(plan.headers)).toEqual({accept:'application/json',authorization:'Bearer provider-secret','content-type':'application/json','user-agent':'OpenAI/Python 1.0','accept-language':'zh-CN'})
 })
+
+it.each(['responses','responses_compact'] as const)('preserves the original API-Key %s session/header contract',operation=>{
+ const permitted={'accept-language':'zh-CN','content-type':'application/json','conversation_id':'conversation','user-agent':'OpenAI/client','originator':'client','session_id':'session','x-codex-beta-features':'feature','x-codex-installation-id':'installation','x-codex-turn-state':'turn-state','x-codex-turn-metadata':'{}','x-codex-window-id':'window','x-openai-internal-codex-responses-lite':'true'}
+ const plan=buildProviderRequest({account:account('openai'),credential,operation,body:{model:'gpt-5',input:'hello'},client_headers:{...permitted,authorization:'Bearer client-secret',cookie:'client-cookie',host:'wrong-host','x-api-key':'wrong-key','session-id':'alias-not-forwarded'}})
+ expect(Object.fromEntries(plan.headers)).toEqual({...permitted,accept:'application/json',authorization:'Bearer provider-secret'})
+})

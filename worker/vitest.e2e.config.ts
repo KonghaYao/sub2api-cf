@@ -147,7 +147,7 @@ export default defineConfig(async () => {
                 return body.stream ? new Response('data: '+JSON.stringify({type:'response.completed',response})+'\n\n',{headers:{'content-type':'text/event-stream'}}) : Response.json(response)
               }
               if (body.model === 'gpt-5.4-cache-probe') {
-                const text = JSON.stringify({ key: body.prompt_cache_key ?? null, session: request.headers.get('session_id') })
+                const text = JSON.stringify({ key: body.prompt_cache_key ?? null, session: request.headers.get('session_id'), ...(body.prompt_cache_key==='native-header-probe'?{conversation:request.headers.get('conversation_id'),ua:request.headers.get('user-agent'),language:request.headers.get('accept-language'),turn:request.headers.get('x-codex-turn-state'),cookie:request.headers.get('cookie')}: {}) })
                 return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'cache-probe',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
               }
               if (body.model === 'provider-forwarding-native') {
