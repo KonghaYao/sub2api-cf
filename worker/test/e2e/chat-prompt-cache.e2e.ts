@@ -1,6 +1,7 @@
 import { env, exports } from 'cloudflare:workers'
 import { expect, it } from 'vitest'
 
+let adminSession: string | undefined
 async function fixture(endpoint: 'responses' | 'chat_completions' = 'responses') {
   const model = 'cache-' + crypto.randomUUID()
   const res = await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/bootstrap', {
@@ -8,7 +9,9 @@ async function fixture(endpoint: 'responses' | 'chat_completions' = 'responses')
     body:JSON.stringify({user:{email:crypto.randomUUID()+'@cache.test',balance_micros:1000000},group:{name:crypto.randomUUID()},account:{name:crypto.randomUUID(),base_url:'https://upstream.e2e.invalid/v1',api_key:'fixture'},api_key:{name:'cache'},models:[{public_name:model,upstream_name:'gpt-5.4-cache-probe',endpoint,input_micros_per_million:1000000,output_micros_per_million:2000000,minimum_reservation_micros:100}]})
   }))
   expect(res.status).toBe(201)
-  return {model,...(await res.json() as any).data}
+  const data=(await res.json() as any).data
+  adminSession??=data.admin_session
+  return {model,...data,admin_session:adminSession}
 }
 async function chat(f: any, extra: Record<string,unknown> = {}, headers: Record<string,string> = {}) {
   const res = await exports.default.fetch(new Request('https://worker.e2e.invalid/v1/chat/completions', {
@@ -70,4 +73,24 @@ it.each([false,true])('preserves raw OpenAI multi-turn context, explicit cache k
    expect(forwarded.headers).toEqual({ua:'OpenAI/Python fixture',language:'zh-CN',session:null})
   }
  }finally{await env.DB.prepare("UPDATE system_settings SET gateway_json=json_remove(gateway_json,'$.enable_metadata_passthrough') WHERE id='global'").run()}
+})
+
+it.each(['content','header','body'] as const)('keeps raw OpenAI turns on the bound account despite changed priority (%s identity)',async identity=>{
+ const f=await fixture('chat_completions')
+ const model=await env.DB.prepare('SELECT id FROM models WHERE public_name=?').bind(f.model).first<any>()
+ const created=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/accounts',{method:'POST',headers:{authorization:'Bearer '+f.admin_session,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify({name:crypto.randomUUID(),platform:'openai',protocol:'openai',auth_scheme:'bearer',credential_kind:'api_key',base_url:'https://upstream.e2e.invalid/v1',api_key:'second-fixture',enabled:true,group_links:[{group_id:f.group_id,priority:10,weight:1}],model_capabilities:[{model_id:model.id,chat_completions:true,responses:false}]})}))
+ expect(created.status,await created.clone().text()).toBe(201)
+ const second=(await created.json() as any).data
+ const prefix=[{role:'system',content:'Stable project instructions'},{role:'user',content:'First question'}]
+ const send=async(messages:unknown[],fresh=false)=>chat(f,{messages,...(identity==='body'?{prompt_cache_key:fresh?'new-session':'same-session'}:{})},identity==='header'?{'session-id':fresh?'new-session':'same-session'}:{})
+ await send(prefix)
+ await expect.poll(async()=>(await env.DB.prepare('SELECT account_id FROM usage_projection WHERE user_id=?').bind(f.user_id).all<any>()).results.map(r=>r.account_id)).toEqual([f.account_id])
+ await env.DB.batch([
+  env.DB.prepare('UPDATE account_groups SET priority=CASE WHEN account_id=? THEN 20 ELSE 0 END WHERE group_id=?').bind(f.account_id,f.group_id),
+  env.DB.prepare('UPDATE gateway_config_revision SET revision=revision+1 WHERE singleton=1'),
+ ])
+ await send([...prefix,{role:'assistant',content:'Answer'},{role:'user',content:'Follow-up'}])
+ await expect.poll(async()=>(await env.DB.prepare('SELECT account_id FROM usage_projection WHERE user_id=?').bind(f.user_id).all<any>()).results.map(r=>r.account_id)).toEqual([f.account_id,f.account_id])
+ await send([{role:'system',content:'Stable project instructions'},{role:'user',content:'Different conversation'}],true)
+ await expect.poll(async()=>(await env.DB.prepare('SELECT COUNT(*) AS n FROM usage_projection WHERE user_id=? AND account_id=?').bind(f.user_id,second.id).first<any>())?.n).toBe(1)
 })
