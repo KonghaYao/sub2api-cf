@@ -87,24 +87,8 @@ export function enforceGatewayClientVersion(settings: GatewaySettings, userAgent
     }
   }
 }
-export function applyGatewayBodySettings(settings: GatewaySettings, body: Record<string, unknown>, provider: string): Record<string, unknown> {
+export function applyGatewayBodySettings(settings: GatewaySettings, body: Record<string, unknown>, _provider: string): Record<string, unknown> {
   const output = structuredClone(body)
   if (!settings.enable_metadata_passthrough) delete output.metadata
-  if (provider !== 'anthropic') return output
-  if (settings.rewrite_message_cache_control && Array.isArray(output.messages)) {
-    const messages = output.messages as Array<Record<string, unknown>>
-    for (const message of messages) if (Array.isArray(message.content)) {
-      for (const block of message.content) if (block && typeof block === 'object') delete block.cache_control
-    }
-    const inject = (message: Record<string, unknown> | undefined): void => {
-      if (!message) return
-      if (typeof message.content === 'string') message.content = [{ type: 'text', text: message.content }]
-      if (!Array.isArray(message.content) || message.content.length === 0) return
-      const block = message.content[message.content.length - 1]
-      if (block && typeof block === 'object') block.cache_control = { type: 'ephemeral', ttl: '5m' }
-    }
-    inject(messages[messages.length - 1])
-    if (messages.length >= 4) inject(messages.filter(message => message.role === 'user').at(-2))
-  }
   return output
 }

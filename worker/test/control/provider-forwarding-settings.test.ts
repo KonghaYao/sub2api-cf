@@ -1,3 +1,4 @@
+import {CLAUDE_SYSTEM_PROMPT} from '../../src/gateway/claude-prompt-defaults'
 import {afterEach,expect,it,vi} from 'vitest'
 import {normalizeProviderForwardingSettings,parseProviderForwardingSettings} from '../../src/control/provider-forwarding-settings'
 import {applyProviderBodySettings,applyProviderIdentity,codexHeaders} from '../../src/gateway/provider-forwarding'
@@ -80,4 +81,52 @@ it.each(['oauth','setup_token'])('preserves the last system cache breakpoint and
  expect(await applyProviderBodySettings(settings,'anthropic','api_key',body)).toEqual(before)
  const uncached=await applyProviderBodySettings(settings,'anthropic',kind,{system:'  Instructions  ',messages:body.messages}) as any
  expect(uncached.messages[0].content).toEqual([{type:'text',text:'[System Instructions]\nInstructions'}])
+})
+
+it('rewrites message breakpoints after system migration and only for OAuth preparation',async()=>{
+ const settings={...normalizeProviderForwardingSettings({}),rewrite_message_cache_control:true}
+ const body={system:[{type:'text',text:'Project instructions',cache_control:{type:'ephemeral',ttl:'1h'}}],messages:[
+  {role:'user',content:'First question'},
+  {role:'assistant',content:'First answer'},
+  {role:'user',content:[{type:'text',text:'Follow-up',cache_control:{type:'ephemeral',ttl:'1h'}}]},
+ ]}
+ const before=structuredClone(body)
+ for(const kind of ['oauth','setup_token']){
+  const output=await applyProviderBodySettings(settings,'anthropic',kind,body) as any
+  expect(output.messages).toHaveLength(5)
+  expect(output.messages[0].content[0]).not.toHaveProperty('cache_control')
+  expect(output.messages[2].content).toEqual([{type:'text',text:'First question',cache_control:{type:'ephemeral',ttl:'5m'}}])
+  expect(output.messages[4].content).toEqual([{type:'text',text:'Follow-up',cache_control:{type:'ephemeral',ttl:'5m'}}])
+  expect(output.messages[3].content).toBe('First answer')
+ }
+ expect(await applyProviderBodySettings(settings,'anthropic','api_key',body)).toEqual(before)
+ expect(await applyProviderBodySettings(settings,'openai','oauth',body)).toEqual(before)
+ expect(body).toEqual(before)
+ const disabled=await applyProviderBodySettings({...settings,enable_claude_oauth_system_prompt_injection:false},'anthropic','oauth',body) as any
+ expect(disabled.messages).toHaveLength(3)
+ expect(disabled.messages[0].content).toBe('First question')
+ expect(disabled.messages[2].content[0].cache_control.ttl).toBe('5m')
+})
+it('enforces the final four-breakpoint limit after configured system injection',async()=>{
+ const settings=normalizeProviderForwardingSettings({claude_oauth_system_prompt_blocks:JSON.stringify(Array.from({length:5},(_,i)=>({text:'Configured '+i,cache_control:true})))})
+ const body={system:[{type:'text',text:'Client instructions',cache_control:{type:'ephemeral',ttl:'1h'}}],messages:[{role:'user',content:[{type:'text',text:'hello',cache_control:{type:'ephemeral',ttl:'1h'}}]}],tools:[{name:'lookup',input_schema:{type:'object'},cache_control:{type:'ephemeral',ttl:'1h'}}]}
+ const output=await applyProviderBodySettings(settings,'anthropic','oauth',body) as any
+ expect(output.system.map((b:any)=>!!b.cache_control)).toEqual([true,true,true,true,false])
+ expect(output.messages[0].content[0]).not.toHaveProperty('cache_control')
+ expect(output.messages[2].content[0]).not.toHaveProperty('cache_control')
+ expect(output.tools[0]).not.toHaveProperty('cache_control')
+ expect(output.messages[2].content[0].text).toBe('hello')
+ expect(body.tools[0].cache_control.ttl).toBe('1h')
+})
+it('does not put a cache breakpoint on trailing thinking content',async()=>{
+ const settings={...normalizeProviderForwardingSettings({}),rewrite_message_cache_control:true,enable_claude_oauth_system_prompt_injection:false}
+ const body={messages:[{role:'user',content:'Question'},{role:'assistant',content:[{type:'thinking',thinking:'reasoning',signature:'signed'}]}]}
+ const output=await applyProviderBodySettings(settings,'anthropic','oauth',body) as any
+ expect(output.messages).toEqual(body.messages)
+})
+
+it('preserves existing Claude Code message breakpoints when rewrite is enabled',async()=>{
+ const settings={...normalizeProviderForwardingSettings({}),rewrite_message_cache_control:true}
+ const body={system:[{type:'text',text:CLAUDE_SYSTEM_PROMPT,cache_control:{type:'ephemeral',ttl:'1h'}}],messages:[{role:'user',content:[{type:'text',text:'Client-controlled prefix',cache_control:{type:'ephemeral',ttl:'1h'}}]}]}
+ expect(await applyProviderBodySettings(settings,'anthropic','oauth',body)).toEqual(body)
 })

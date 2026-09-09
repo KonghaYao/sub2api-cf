@@ -1,3 +1,4 @@
+import {finalizeAnthropicMessageCache} from './anthropic-message-cache'
 import type {Env} from '../env'
 import {promptBlocks,type ProviderForwardingSettings} from '../control/provider-forwarding-settings'
 import {CLAUDE_SYSTEM_PROMPT,CLAUDE_EXPANSION_PROMPT} from './claude-prompt-defaults'
@@ -32,7 +33,7 @@ export async function applyProviderIdentity(env:Env,settings:ProviderForwardingS
 }
 function dateline(text:string):string{return text.replace(/Today['’ʼʹ]s date is (\d{4})([-/])(\d{2})\2(\d{2})\./g,"Today's date is $1-$3-$4.")}
 function mapContent(value:unknown,fn:(text:string)=>string):unknown {if(typeof value==='string')return fn(value);if(Array.isArray(value))return value.map(block=>block&&typeof block==='object'&&block.type==='text'&&typeof block.text==='string'?{...block,text:fn(block.text)}:block);return value}
-export async function applyProviderBodySettings(settings:ProviderForwardingSettings,platform:string,kind:string,body:Record<string,unknown>):Promise<Record<string,unknown>>{
+export async function applyProviderBodySettings(settings:ProviderForwardingSettings & {rewrite_message_cache_control?:boolean},platform:string,kind:string,body:Record<string,unknown>):Promise<Record<string,unknown>>{
  if(platform!=='anthropic'||!['oauth','setup_token'].includes(kind))return body
  const output=structuredClone(body)
  if(settings.enable_client_dateline_normalization){
@@ -44,7 +45,8 @@ export async function applyProviderBodySettings(settings:ProviderForwardingSetti
  const original=typeof output.system==='string'?output.system.trim():systemBlocks.map(b=>b.text).join('\n\n')
  const originalCacheControl=systemBlocks.filter(b=>b.cache_control!=null).at(-1)?.cache_control
  // Existing Claude Code system blocks already have the intended identity and must not be injected twice.
- if(!settings.enable_claude_oauth_system_prompt_injection||original.includes(CLAUDE_SYSTEM_PROMPT))return output
+ if(original.includes(CLAUDE_SYSTEM_PROMPT))return finalizeAnthropicMessageCache(output,false)
+ if(!settings.enable_claude_oauth_system_prompt_injection)return finalizeAnthropicMessageCache(output,settings.rewrite_message_cache_control===true)
  const first=Array.isArray(output.messages)?output.messages.find(m=>m?.role==='user'):undefined
  const text=typeof first?.content==='string'?first.content:first?.content?.find((b:any)=>b?.type==='text')?.text??''
  const bytes=new TextEncoder().encode(text),salt=new TextEncoder().encode('59cf53e54c78'),version=new TextEncoder().encode(CLAUDE_VERSION),fingerprintInput=new Uint8Array(salt.length+3+version.length)
@@ -54,5 +56,5 @@ export async function applyProviderBodySettings(settings:ProviderForwardingSetti
  const configured=promptBlocks(settings.claude_oauth_system_prompt_blocks),blocks=configured.length?configured:[{text:'{billing_header}'},{text:'{claude_code_system_prompt}'},{text:'{claude_code_expansion_prompt}',cache_control:true}]
  output.system=blocks.filter(b=>b.enabled!==false).map(b=>({type:'text',text:b.text.replace(/\{([a-z_]+)\}/g,(match,key)=>substitutions[key]??match),...(b.cache_control?{cache_control:b.cache_control===true?{type:'ephemeral',ttl:'5m'}:b.cache_control}:{})})).filter(b=>b.text.trim())
  if(original.trim())output.messages=[{role:'user',content:[{type:'text',text:'[System Instructions]\n'+original,...(originalCacheControl!=null?{cache_control:originalCacheControl}:{})}]},{role:'assistant',content:[{type:'text',text:'Understood. I will follow these instructions.'}]},...(Array.isArray(output.messages)?output.messages:[])]
- return output
+ return finalizeAnthropicMessageCache(output,settings.rewrite_message_cache_control===true)
 }

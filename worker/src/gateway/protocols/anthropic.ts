@@ -1309,7 +1309,7 @@ function optionalCacheControl(
   }
 }
 
-function capAnthropicCacheBreakpoints(
+export function capAnthropicCacheBreakpoints(
   system: AnthropicSystem | undefined,
   messages: AnthropicMessage[],
   tools: AnthropicTool[] | undefined,

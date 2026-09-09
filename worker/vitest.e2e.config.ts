@@ -105,9 +105,15 @@ export default defineConfig(async () => {
                 if(body.model === 'native-buffer-cancel')return new Response(new ReadableStream({start(controller){controller.enqueue(bytes)}}),{headers:{'content-type':'text/event-stream'}})
                 return new Response(bytes,{headers:{'content-type':'text/event-stream'}})
               }
-              if (body.model === 'provider-forwarding-anthropic') {
-                const valid=request.headers.get('authorization')==='Bearer local-fixture-key' && !request.headers.has('x-api-key') && request.headers.get('user-agent')?.startsWith('claude-cli/') && request.headers.get('x-stainless-runtime')==='node' && body.system.some((b:any)=>b.text==='Custom fixture expansion') && body.messages[0].content[0].text.includes('Original client instructions') && body.messages[0].content[0].cache_control?.type==='ephemeral' && body.messages[0].content[0].cache_control?.ttl==='1h'
-                if (!valid) return Response.json({error:'anthropic provider settings mismatch'},{status:422})
+              if (body.model.startsWith('provider-forwarding-anthropic')) {
+                const valid=request.headers.get('authorization')==='Bearer local-fixture-key' && !request.headers.has('x-api-key') && request.headers.get('user-agent')?.startsWith('claude-cli/') && request.headers.get('x-stainless-runtime')==='node' && body.system.some((b:any)=>b.text==='Custom fixture expansion') && body.messages[0].content[0].text.includes('Original client instructions')
+                const breakpoints=[...body.system,...body.messages.flatMap((m:any)=>Array.isArray(m.content)?m.content:[]),...(body.tools??[])].filter((b:any)=>b.cache_control)
+                const cacheValid=body.model.endsWith('-rewrite')
+                  ? !body.messages[0].content[0].cache_control && body.messages[2].content[0].cache_control?.ttl==='5m' && body.messages[4].content[0].cache_control?.ttl==='5m'
+                  : body.model.endsWith('-limit')
+                    ? breakpoints.length===4 && body.system.slice(0,4).every((b:any)=>b.cache_control) && !body.system[4].cache_control && !body.messages[0].content[0].cache_control
+                    : body.messages[0].content[0].cache_control?.type==='ephemeral' && body.messages[0].content[0].cache_control?.ttl==='1h'
+                if (!valid || !cacheValid || breakpoints.length>4) return Response.json({error:'anthropic provider settings mismatch'},{status:422})
                 return Response.json({id:'provider',type:'message',role:'assistant',model:body.model,content:[{type:'text',text:'provider-settings-verified'}],stop_reason:'end_turn',usage:{input_tokens:10,output_tokens:5}})
               }
               if (body.model === 'responses-empty-completed-fixture') {

@@ -1702,7 +1702,7 @@ async function acquireUpstream(
   fastPolicy?: OpenAIFastPolicy,
   reservedTiers?: Array<string | undefined>,
   cyberContext?: { settings: typeof securityDefaults; request: CyberRequest },
-  providerForwarding?: {settings:ProviderForwardingSettings & {enable_anthropic_cache_ttl_1h_injection?:boolean};bodies:Record<string,Record<string,unknown>>},
+  providerForwarding?: {settings:ProviderForwardingSettings & {enable_anthropic_cache_ttl_1h_injection?:boolean;rewrite_message_cache_control?:boolean};bodies:Record<string,Record<string,unknown>>},
   accountThresholds?: AccountSchedulingThresholds,
   resolveAttempt?: (accountId: string) => { endpoint: TextGatewayEndpoint; dispatch: ProviderDispatch },
   headerAdmission: ApiKeyAdmissionLease | null = null,
