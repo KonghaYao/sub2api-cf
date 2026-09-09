@@ -533,6 +533,36 @@ function expectZeroCostBillingLifecycle(user: FakeStateStub): void {
 }
 
 describe('OpenAI-compatible gateway', () => {
+  it.each([32,180_000])('streams OAuth Responses-to-Chat deltas before completion for a %i-byte prompt', async size => {
+    const {env,database,user}=await harness()
+    Object.assign(database.credential,{credential_kind:'oauth',...await encryptCredential({api_key:'unused',access_token:'incremental-oauth'},masterKey,`test/${accountId}/${secretId}/1`)})
+    let upstream!: ReadableStreamDefaultController<Uint8Array>
+    const encoder=new TextEncoder(), decoder=new TextDecoder()
+    const event=(value:unknown)=>encoder.encode(`data: ${JSON.stringify(value)}\n\n`)
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(controller){
+      upstream=controller
+      controller.enqueue(event({type:'response.created',response:{id:'resp_incremental',model:'gpt-upstream',status:'in_progress',output:[]}}))
+      controller.enqueue(event({type:'response.output_text.delta',item_id:'message_1',output_index:0,content_index:0,delta:'第一段'}))
+    }}),{headers:{'content-type':'text/event-stream'}})))
+    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages:[{role:'user',content:'x'.repeat(size)}]})},env)
+    expect(response.status).toBe(200)
+    const reader=response.body!.getReader()
+    let wire=''
+    const readUntil=async(text:string)=>{while(!wire.includes(text)){const next=await reader.read();expect(next.done).toBe(false);wire+=decoder.decode(next.value,{stream:true})}}
+    await readUntil('第一段')
+    expect(user.calls.filter(call=>call.path==='/settle')).toHaveLength(0)
+    upstream.enqueue(event({type:'response.output_text.delta',item_id:'message_1',output_index:0,content_index:0,delta:'第二段'}))
+    await readUntil('第二段')
+    expect(wire).not.toContain('[DONE]')
+    upstream.enqueue(event({type:'response.completed',response:{id:'resp_incremental',model:'gpt-upstream',status:'completed',output:[{type:'message',id:'message_1',role:'assistant',content:[{type:'output_text',text:'第一段第二段'}]}],usage:{input_tokens:10,output_tokens:2}}}))
+    for(;;){const next=await reader.read();if(next.done)break;wire+=decoder.decode(next.value,{stream:true})}
+    const chunks=wire.split('\n\n').filter(line=>line.startsWith('data: {')).map(line=>JSON.parse(line.slice(6)))
+    expect(chunks.every(chunk=>chunk.object==='chat.completion.chunk'&&chunk.model==='gpt-public')).toBe(true)
+    expect(chunks.flatMap(chunk=>chunk.choices).map(choice=>choice.delta?.content??'').join('')).toBe('第一段第二段')
+    expect(wire.match(/data: \[DONE\]/g)).toHaveLength(1)
+    expect(user.calls.filter(call=>call.path==='/settle')).toHaveLength(1)
+  })
+
   it.each([32, 180_000])('delivers raw Chat deltas before upstream EOF for a %i-byte prompt', async size => {
     const { env } = await harness()
     let source!: ReadableStreamDefaultController<Uint8Array>
