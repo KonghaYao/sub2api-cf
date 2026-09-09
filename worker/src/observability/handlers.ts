@@ -412,7 +412,9 @@ async function listFor(
   }
 }
 
-const ADMIN_USAGE_COLUMNS = `u.event_id,u.request_id,u.user_id,u.api_key_id,u.account_id,
+const ADMIN_USAGE_COLUMNS = `(SELECT o.ttft_ms FROM request_observations o
+    WHERE o.request_id=u.request_id AND o.user_id=u.user_id AND o.api_key_id IS u.api_key_id
+    ORDER BY o.occurred_at_ms DESC,o.id DESC LIMIT 1) first_token_ms,u.event_id,u.request_id,u.user_id,u.api_key_id,u.account_id,
   COALESCE(u.requested_model,u.model) model,u.upstream_model,u.group_id,u.subscription_id,
   u.input_tokens,u.output_tokens,u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,u.cache_ttl_overridden,u.input_amount_micros,u.output_amount_micros,
   u.cache_amount_micros,u.cache_write_amount_micros,u.customer_pricing_snapshot_json,u.base_amount_micros,u.amount_micros,u.billing_type,u.outcome,u.stream,
@@ -588,7 +590,7 @@ function adminUsageRow(value: unknown): Record<string, unknown> {
     stream: row.stream === 1,
     native_compaction_v2: row.native_compaction_v2 === 1,
     duration_ms: row.duration_ms,
-    first_token_ms: null,
+    first_token_ms: row.first_token_ms ?? null,
     image_count: safeInteger(row.image_count),
     image_size: nullableText(row.image_size),
     image_input_size: nullableText(row.image_input_size),

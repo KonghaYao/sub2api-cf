@@ -1,3 +1,4 @@
+import { recordRequestStart } from '../../src/observability/recorder'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
 import { createOpaqueToken, tokenDigest } from '../../src/auth/tokens'
@@ -28,6 +29,20 @@ async function fixture() {
   return {env,headers:{authorization:`Bearer ${access}`}}
 }
 describe('user usage HTTP contract',()=>{
+ it.each([0,1234,null])('returns measured first-token latency %s without cross-user request correlation',async latency=>{
+  const t=await fixture(),app=createApp()
+  const own=await recordRequestStart(t.env,{requestId:'alice-event',userId:'alice',apiKeyId:'alice-key',method:'POST',requestPath:'/v1/chat/completions',occurredAtMs:TEST_NOW})
+  const other=await recordRequestStart(t.env,{requestId:'alice-event',userId:'bob',apiKeyId:'bob-key',method:'POST',requestPath:'/v1/chat/completions',occurredAtMs:TEST_NOW+1})
+  await t.env.DB.prepare('UPDATE request_observations SET ttft_ms=? WHERE id=?').bind(latency,own!.id).run()
+  await t.env.DB.prepare('UPDATE request_observations SET ttft_ms=9999 WHERE id=?').bind(other!.id).run()
+  for(const path of ['/api/v1/usage','/api/v1/usage?limit=10','/api/v1/usage/alice-event']){
+   const response=await app.request(path,{headers:t.headers},t.env)
+   expect(response.status).toBe(200)
+   const data=(await response.json() as any).data
+   expect(data.items?.[0]??data).toMatchObject({first_token_ms:latency})
+  }
+ })
+
  it('returns reported cache TTL details in user list and detail APIs',async()=>{
   const t=await fixture(),app=createApp()
   await t.env.DB.prepare("UPDATE usage_projection SET cache_write_tokens=5,cache_write_5m_tokens=2,cache_write_1h_tokens=3 WHERE event_id='alice-event'").run()

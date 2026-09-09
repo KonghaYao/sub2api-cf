@@ -142,6 +142,10 @@ describe('request explorer HTTP contracts', () => {
       'group-a',1,2,0,100,200,0,0,300,'balance','completed',0,25,
       now,now,'openai',1,'/v1/chat/completions','/chat/completions','token',0,1,300,300,1000000,300)
 
+    const observed=await seed(test,{requestId:'request-z',userId:'alice',at:now,status:200})
+    test.raw.prepare('UPDATE request_observations SET ttft_ms=1234 WHERE id=?').run(observed.id)
+    const foreign=await seed(test,{requestId:'request-z',userId:'bob',at:now+1,status:200})
+    test.raw.prepare('UPDATE request_observations SET ttft_ms=9999 WHERE id=?').run(foreign.id)
     const response = await app().request(
       '/admin/usage?page=1&page_size=1&sort_by=model&sort_order=desc&user_id=alice&api_key_id=key-alice&account_id=account-a&group_id=group-a&model=zeta&request_type=stream&native_compaction_v2=true&billing_type=1&billing_mode=image',
       { headers: { authorization: test.auth.admin! } },
@@ -152,7 +156,7 @@ describe('request explorer HTTP contracts', () => {
       data: {
         total: 1, page: 1, page_size: 1, pages: 1,
         items: [{
-          id: 'usage-z', user_id: 'alice', model: 'zeta', upstream_model: 'zeta-upstream',
+          id: 'usage-z', user_id: 'alice', first_token_ms:1234, model: 'zeta', upstream_model: 'zeta-upstream',
           input_tokens: 7, cache_read_tokens: 3, total_cost: 0.0006, actual_cost: 0.0009,
           rate_multiplier: 1.5, upstream_model_mismatch: null, upstream_response_model: null,
           account_stats_cost: 0.0007, account_rate_multiplier: 1.25,
