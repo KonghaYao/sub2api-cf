@@ -392,3 +392,8 @@ HTTP接口新增off/merge回归先证实错误的OK回复被判正常，再修�
 - Code `799058416` pushed. Typecheck and179 handler regressions passed, including400/401/429/500 upstream-to-downstream mappings and absent upstream status for local validation. Production frontend build passed.
 - Proxy-based migration checks repeatedly failed on network fetch. Independent connectivity checks confirmed proxy TLS timeout to the Cloudflare API while direct API access returned HTTP. The same verified build deployed successfully with proxy environment variables removed only for the deployment commands. No user proxy configuration changed. Migrations0 applied/0 recovered,122 already current,max0124. Worker Version `ca2a6cc2-d8e6-4e96-86e3-f21e44ad821b`; schedule, queue producer and consumer completed.
 - Post-deployment Worker health could not be verified: direct domain connection timed out; proxy checks failed TLS including a retry. CLI deployment success is authoritative for publication but not application health. Follow-up health verification remains required. External client streaming display issue and broader original core/frontend parity remain unresolved.
+
+
+### 0.45.45 post-deployment health follow-up
+
+- A fresh proxy-route health request completed successfully: status ok, runtime cloudflare-workers, environment production, version0.45.45. This closes the previous release health-verification gap. It does not prove external client streaming display recovery; that issue and the wider original core/frontend goal remain open. No runtime change or new deployment in this follow-up.
