@@ -20,6 +20,11 @@ export default defineConfig(async () => {
               if (url.pathname === '/backend-api/codex/responses') return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'quota-fixture',status:'completed',output:[],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
               return Response.json({error:'unexpected quota fixture path'},{status:502})
             }
+            if (url.origin === 'https://chatgpt.com' && url.pathname === '/backend-api/codex/responses' && request.headers.get('authorization') === 'Bearer oauth-cache-local-fixture') {
+              const body=await request.json() as any
+              const text=JSON.stringify({key:body.prompt_cache_key,session:request.headers.get('session_id')})
+              return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'oauth-cache',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+            }
             if (
               url.origin !== 'https://upstream.e2e.invalid' &&
               url.origin !== 'https://upstream-fallback.e2e.invalid'

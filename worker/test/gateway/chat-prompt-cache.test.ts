@@ -67,3 +67,13 @@ it('retains the API-Key Responses-shaped body cache key when session headers rot
  expect(second?.sessionId).not.toBe(first?.sessionId)
  expect((await chatPromptCacheIdentity({...request,body:{input:'Stable input',prompt_cache_key:'  '},headers:new Headers({'session-id':'fallback'})}))?.promptCacheKey).toBe('fallback')
 })
+
+it('keeps OAuth Responses-shaped cache and session identity anchored to the body key',async()=>{
+ const request={body:{input:'Stable input',prompt_cache_key:'  oauth-body-cache  '},model:'gpt-5.4',apiKeyId:'tenant',oauth:true}
+ const first=await chatPromptCacheIdentity({...request,headers:new Headers({'session-id':'first-header'})})
+ const next=await chatPromptCacheIdentity({...request,headers:new Headers({'session-id':'second-header'})})
+ expect(first?.promptCacheKey).toBe('  oauth-body-cache  ')
+ expect(next).toEqual(first)
+ expect((await chatPromptCacheIdentity({...request,apiKeyId:'other',headers:new Headers()}))?.sessionId).not.toBe(first?.sessionId)
+ expect((await chatPromptCacheIdentity({...request,body:{input:'Stable input',prompt_cache_key:'  '},headers:new Headers({'session-id':'fallback'})}))?.promptCacheKey).toBe('fallback')
+})

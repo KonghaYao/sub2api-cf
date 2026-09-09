@@ -105,3 +105,17 @@ it('preserves the actual Responses-shaped body cache key across changing session
  expect(next.session).not.toBe(first.session)
  expect((await chat(f,{...body,prompt_cache_key:undefined},{'session-id':'fallback-header'})).key).toBe('fallback-header')
 })
+
+it('anchors actual OpenAI OAuth cache and session identity to the explicit body key',async()=>{
+ const f=await fixture('responses')
+ const model=await env.DB.prepare('SELECT id FROM models WHERE public_name=?').bind(f.model).first<any>()
+ const created=await exports.default.fetch(new Request('https://worker.e2e.invalid/api/v1/admin/accounts',{method:'POST',headers:{authorization:'Bearer '+f.admin_session,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify({name:crypto.randomUUID(),platform:'openai',protocol:'openai',auth_scheme:'bearer',credential_kind:'oauth',base_url:'https://chatgpt.com',api_key:'unused',credentials:{access_token:'oauth-cache-local-fixture'},enabled:true,group_links:[{group_id:f.group_id,priority:0,weight:1}],model_capabilities:[{model_id:model.id,chat_completions:false,responses:true}]})}))
+ expect(created.status,await created.clone().text()).toBe(201)
+ await env.DB.batch([env.DB.prepare('UPDATE accounts SET enabled=0 WHERE id=?').bind(f.account_id),env.DB.prepare('UPDATE gateway_config_revision SET revision=revision+1 WHERE singleton=1')])
+ const body={messages:undefined,input:'Stable input',prompt_cache_key:'oauth-body-cache'}
+ const first=await chat(f,body,{'session-id':'first-header'})
+ const next=await chat(f,body,{'session-id':'second-header'})
+ expect(first.key).toBe('oauth-body-cache')
+ expect(first.session).toMatch(/^[a-f0-9-]{36}$/)
+ expect(next).toEqual(first)
+})

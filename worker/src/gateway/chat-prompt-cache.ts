@@ -31,6 +31,9 @@ export async function chatPromptCacheIdentity(input: {
   if (!responsesShape && !Array.isArray(body.messages)) return null
   let key = SESSION_HEADERS.map(header => input.headers.get(header)?.trim()).find(Boolean)
     || (typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key.trim() : '')
+  // Original Codex transform resolves a nonblank body key before deriving
+  // the upstream session identity for Responses-shaped Chat requests.
+  if (responsesShape && input.oauth && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim()) key = body.prompt_cache_key.trim()
   let isolated = false
   if (!key) {
     if (responsesShape) return null
@@ -44,9 +47,9 @@ export async function chatPromptCacheIdentity(input: {
   const sessionSeed = isolated ? key : await isolate(input.apiKeyId, key)
   const hash = await sha256Hex(sessionSeed)
   const variant = (parseInt(hash[16]!, 16) & 3 | 8).toString(16)
-  // Original API-Key Responses-shaped passthrough fills only a missing body
-  // key; the explicit session signal still controls the isolated session header.
-  const promptCacheKey = responsesShape && !input.oauth && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim()
+  // Preserve the existing Responses body key verbatim. API-Key passthrough
+  // keeps header-derived session identity; OAuth uses the body key above.
+  const promptCacheKey = responsesShape && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim()
     ? body.prompt_cache_key : key
   return { promptCacheKey, sessionId: `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-${variant}${hash.slice(17,20)}-${hash.slice(20,32)}` }
 }

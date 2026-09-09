@@ -1853,7 +1853,7 @@ describe('OpenAI-compatible gateway', () => {
     Object.assign(database.credential,{credential_kind:'oauth',...await encryptCredential({api_key:'unused',access_token:'shape-oauth'},masterKey,`test/${accountId}/${secretId}/1`)})
     const upstream=vi.fn(async (_url:RequestInfo|URL,_init?:RequestInit)=>new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'shape',status:'completed',model:'gpt-upstream',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Shape OK'}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}}))
     vi.stubGlobal('fetch',upstream)
-    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',input:'Original input',stream,prompt_cache_key:'shape-cache',metadata:{client:'cursor'},stream_options:{include_usage:true}})},env)
+    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json','session-id':'conflicting-header-cache'},body:JSON.stringify({model:'gpt-public',input:'Original input',stream,prompt_cache_key:'shape-cache',metadata:{client:'cursor'},stream_options:{include_usage:true}})},env)
     expect(response.status).toBe(200)
     expect(await readStreamToTextWithin(response)).toContain('Shape OK')
     const [url,init]=upstream.mock.calls[0]
