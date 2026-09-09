@@ -252,3 +252,19 @@ it('keeps errors authoritative after a finish marker and retains late usage', ()
  expect(tracker.terminal('chat_completions')).toBe('failed')
  expect(tracker.usage()).toMatchObject({input_tokens:6,output_tokens:2})
 })
+
+
+it('preserves streamed tool identity while later chunks append arguments', () => {
+  const transformer = new SseEventTransformer('upstream','public')
+  const decoder = new TextDecoder()
+  const emit = (value: unknown) => JSON.parse(decoder.decode(transformer.push(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`))[0]).slice(6))
+  const first = emit({choices:[{index:0,delta:{tool_calls:[{index:0,id:'call_1',type:'function',function:{name:'lookup',arguments:''}}]}}]})
+  const later = emit({choices:[{index:0,delta:{tool_calls:[{index:0,id:'',type:'function',function:{name:'',arguments:'{}'}},{index:1,id:null,function:{name:' ',arguments:''}}]}},{index:1,delta:{tool_calls:[{index:0,id:'',function:{name:''}}]},message:{tool_calls:[{id:'',function:{name:''}}]}}]})
+  const merged = first.choices[0].delta.tool_calls[0]
+  const delta = later.choices[0].delta.tool_calls[0]
+  Object.assign(merged,{...delta,function:{...merged.function,...delta.function}})
+  expect(merged).toEqual({index:0,id:'call_1',type:'function',function:{name:'lookup',arguments:'{}'}})
+  expect(later.choices[0].delta.tool_calls[1]).toEqual({index:1,id:null,function:{name:' ',arguments:''}})
+  expect(later.choices[1].delta.tool_calls[0]).toEqual({index:0,function:{}})
+  expect(later.choices[1].message.tool_calls[0]).toEqual({id:'',function:{name:''}})
+})

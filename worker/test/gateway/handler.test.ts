@@ -533,6 +533,32 @@ function expectZeroCostBillingLifecycle(user: FakeStateStub): void {
 }
 
 describe('OpenAI-compatible gateway', () => {
+  it.each([32, 180_000])('delivers raw Chat deltas before upstream EOF for a %i-byte prompt', async size => {
+    const { env } = await harness()
+    let source!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder(), decoder = new TextDecoder()
+    const frame = (content: string) => encoder.encode(`data: ${JSON.stringify({id:'chat-live',object:'chat.completion.chunk',model:'gpt-upstream',choices:[{index:0,delta:{content},finish_reason:null}]})}\n\n`)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({start(controller) {
+      source = controller
+      controller.enqueue(frame('first'))
+    }}), {headers:{'content-type':'text/event-stream'}})))
+    const response = await createApp().request('/v1/chat/completions', {method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',stream:true,messages:[{role:'user',content:'x'.repeat(size)}]})},env)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const reader=response.body!.getReader()
+    // The upstream has neither emitted a finish marker nor closed. Reading here
+    // must complete before the test permits the next upstream delta.
+    expect(decoder.decode((await reader.read()).value)).toContain('"content":"first"')
+    source.enqueue(frame('second'))
+    expect(decoder.decode((await reader.read()).value)).toContain('"content":"second"')
+    source.enqueue(encoder.encode('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}\n\ndata: [DONE]\n\n'))
+    source.close()
+    let tail=''
+    for (;;) {const next=await reader.read();if(next.done)break;tail+=decoder.decode(next.value)}
+    expect(tail).toContain('data: [DONE]')
+    expect(tail).not.toContain('upstream_stream_error')
+  })
+
   it('applies persisted client policy before reserving credit or contacting an upstream', async () => {
     const { env, database, user } = await harness()
     database.gatewaySettings = { min_codex_version:'0.100.0' }

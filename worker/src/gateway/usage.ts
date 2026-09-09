@@ -294,6 +294,15 @@ export class SseEventTransformer {
           }
           if (Array.isArray(object.choices)) {
             for (const choice of object.choices) {
+              // Match original stripEmptyChatToolCallIdentity: later argument
+              // deltas must not erase the client's first nonempty tool identity.
+              const calls = objectRecord(objectRecord(choice)?.delta)?.tool_calls
+              if (Array.isArray(calls)) for (const value of calls) {
+                const call = objectRecord(value)
+                if (call?.id === '') delete call.id
+                const fn = objectRecord(call?.function)
+                if (fn?.name === '') delete fn.name
+              }
               const finish = objectRecord(choice)?.finish_reason
               if (typeof finish === 'string' && finish.trim()) this.sawChatTerminalEvidence = true
               const delta = objectRecord(objectRecord(choice)?.delta)
