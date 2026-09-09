@@ -533,6 +533,24 @@ function expectZeroCostBillingLifecycle(user: FakeStateStub): void {
 }
 
 describe('OpenAI-compatible gateway', () => {
+  it.each([[400,400],[401,502],[429,429],[500,502]])('records upstream HTTP %i separately from downstream %i', async (upstreamStatus, downstreamStatus) => {
+    const {env,database}=await harness()
+    vi.stubGlobal('fetch',vi.fn(async()=>Response.json({error:{message:'Rejected request',type:'invalid_request_error'}},{status:upstreamStatus})))
+    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',messages:[{role:'user',content:'hi'}],stream:true})},env)
+    expect(response.status).toBe(downstreamStatus)
+    const outcome=database.bindings.find(({query})=>query.includes('UPDATE request_observations')&&query.includes('error_owner = ?'))
+    expect(outcome?.values[17]).toBe(upstreamStatus)
+  })
+  it('does not invent upstream status for client validation failures', async () => {
+    const {env,database}=await harness()
+    const upstream=vi.fn();vi.stubGlobal('fetch',upstream)
+    const response=await createApp().request('/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer sk-customer','content-type':'application/json'},body:JSON.stringify({model:'gpt-public',messages:[],stream:'yes'})},env)
+    expect(response.status).toBe(400)
+    expect(upstream).not.toHaveBeenCalled()
+    const outcome=database.bindings.find(({query})=>query.includes('UPDATE request_observations')&&query.includes('error_owner = ?'))
+    expect(outcome?.values[17]).toBeNull()
+  })
+
   it.each([32,180_000])('streams OAuth Responses-to-Chat deltas before completion for a %i-byte prompt', async size => {
     const {env,database,user}=await harness()
     Object.assign(database.credential,{credential_kind:'oauth',...await encryptCredential({api_key:'unused',access_token:'incremental-oauth'},masterKey,`test/${accountId}/${secretId}/1`)})

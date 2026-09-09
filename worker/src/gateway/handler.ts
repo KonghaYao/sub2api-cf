@@ -1614,6 +1614,7 @@ function observationError(error: GatewayError): NonNullable<Parameters<typeof re
     source: upstream ? 'upstream' : 'worker',
     severity: error.status >= 500 ? 'error' : 'warning',
     message: error.message,
+    upstreamStatusCode: error.upstreamStatusCode ?? error.upstreamDiagnostic?.status,
     isBusinessLimited: error.status === 429 || error.code.includes('quota') || error.code.includes('balance'),
   }
 }
@@ -3851,6 +3852,12 @@ function normalizeOpenAiServiceTier(body: Record<string, unknown>): Record<strin
 
 
 function mapUpstreamStatus(response: Response): GatewayError {
+  const error = mapUpstreamStatusValue(response)
+  error.upstreamStatusCode = response.status
+  return error
+}
+
+function mapUpstreamStatusValue(response: Response): GatewayError {
   const retryAfter = safeRetryAfter(response.headers.get('retry-after'))
   if (response.status === 401 || response.status === 403) {
     return new GatewayError(502, 'upstream_auth_error', 'Upstream authentication failed', 'server_error')
@@ -3900,7 +3907,9 @@ async function mapOpenAiUpstreamStatus(response: Response): Promise<GatewayError
     const param = typeof error.param === 'string' && error.param.trim() !== ''
       ? error.param.trim()
       : undefined
-    return new GatewayError(400, code, error.message.trim(), type, undefined, param, true, publicCode)
+    const mapped = new GatewayError(400, code, error.message.trim(), type, undefined, param, true, publicCode)
+    mapped.upstreamStatusCode = response.status
+    return mapped
   } catch {
     return fallback
   }
