@@ -39,7 +39,10 @@ export async function applyProviderBodySettings(settings:ProviderForwardingSetti
   output.system=mapContent(output.system,dateline)
   if(Array.isArray(output.messages))output.messages=output.messages.map(message=>({...message,content:mapContent(message.content,text=>text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g,dateline))}))
  }
- const original=typeof output.system==='string'?output.system:Array.isArray(output.system)?output.system.filter(b=>b?.type==='text').map(b=>b.text).join('\n\n'):''
+ // Collapsing system blocks must preserve the last client breakpoint and its TTL.
+ const systemBlocks=Array.isArray(output.system)?output.system.filter(b=>b&&typeof b.text==='string'&&b.text.trim()):[]
+ const original=typeof output.system==='string'?output.system.trim():systemBlocks.map(b=>b.text).join('\n\n')
+ const originalCacheControl=systemBlocks.filter(b=>b.cache_control!=null).at(-1)?.cache_control
  // Existing Claude Code system blocks already have the intended identity and must not be injected twice.
  if(!settings.enable_claude_oauth_system_prompt_injection||original.includes(CLAUDE_SYSTEM_PROMPT))return output
  const first=Array.isArray(output.messages)?output.messages.find(m=>m?.role==='user'):undefined
@@ -50,6 +53,6 @@ export async function applyProviderBodySettings(settings:ProviderForwardingSetti
  const substitutions:Record<string,string>={billing_header:`x-anthropic-billing-header: cc_version=${CLAUDE_VERSION}.${fp}; cc_entrypoint=cli;`,cc_version:CLAUDE_VERSION,fp,claude_code_system_prompt:CLAUDE_SYSTEM_PROMPT,claude_code_expansion_prompt:settings.claude_oauth_system_prompt.trim()||CLAUDE_EXPANSION_PROMPT}
  const configured=promptBlocks(settings.claude_oauth_system_prompt_blocks),blocks=configured.length?configured:[{text:'{billing_header}'},{text:'{claude_code_system_prompt}'},{text:'{claude_code_expansion_prompt}',cache_control:true}]
  output.system=blocks.filter(b=>b.enabled!==false).map(b=>({type:'text',text:b.text.replace(/\{([a-z_]+)\}/g,(match,key)=>substitutions[key]??match),...(b.cache_control?{cache_control:b.cache_control===true?{type:'ephemeral',ttl:'5m'}:b.cache_control}:{})})).filter(b=>b.text.trim())
- if(original.trim())output.messages=[{role:'user',content:[{type:'text',text:'[System Instructions]\n'+original}]},{role:'assistant',content:[{type:'text',text:'Understood. I will follow these instructions.'}]},...(Array.isArray(output.messages)?output.messages:[])]
+ if(original.trim())output.messages=[{role:'user',content:[{type:'text',text:'[System Instructions]\n'+original,...(originalCacheControl!=null?{cache_control:originalCacheControl}:{})}]},{role:'assistant',content:[{type:'text',text:'Understood. I will follow these instructions.'}]},...(Array.isArray(output.messages)?output.messages:[])]
  return output
 }

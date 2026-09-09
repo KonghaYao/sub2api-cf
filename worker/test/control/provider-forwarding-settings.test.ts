@@ -61,3 +61,23 @@ it('distinguishes semantic events from visible first output without counting pre
  push({type:'response.output_item.added',item:{type:'reasoning'}},120);expect(semantic.firstTokenMs).toBe(20);expect(visible.firstTokenMs).toBeNull()
  push({type:'response.output_text.delta',delta:'hello'},180);expect(visible.firstTokenMs).toBe(80)
 })
+
+it.each(['oauth','setup_token'])('preserves the last system cache breakpoint and stable conversation prefix for %s',async kind=>{
+ const settings=normalizeProviderForwardingSettings({})
+ const body={system:[
+  {type:'text',text:'Project rules',cache_control:{type:'ephemeral',ttl:'5m'}},
+  {type:'text',text:'Stable project context',cache_control:{type:'ephemeral',ttl:'1h'}},
+  {type:'text',text:'Additional instructions'},
+  {type:'text',text:'  ',cache_control:{type:'ephemeral',ttl:'5m'}},
+ ],messages:[{role:'user',content:'First question'}]}
+ const before=structuredClone(body)
+ const first=await applyProviderBodySettings(settings,'anthropic',kind,body) as any
+ expect(first.messages[0].content).toEqual([{type:'text',text:'[System Instructions]\nProject rules\n\nStable project context\n\nAdditional instructions',cache_control:{type:'ephemeral',ttl:'1h'}}])
+ const next=await applyProviderBodySettings(settings,'anthropic',kind,{...body,messages:[...body.messages,{role:'assistant',content:'First answer'},{role:'user',content:'Follow-up question'}]}) as any
+ expect(next.system).toEqual(first.system)
+ expect(next.messages.slice(0,first.messages.length)).toEqual(first.messages)
+ expect(body).toEqual(before)
+ expect(await applyProviderBodySettings(settings,'anthropic','api_key',body)).toEqual(before)
+ const uncached=await applyProviderBodySettings(settings,'anthropic',kind,{system:'  Instructions  ',messages:body.messages}) as any
+ expect(uncached.messages[0].content).toEqual([{type:'text',text:'[System Instructions]\nInstructions'}])
+})

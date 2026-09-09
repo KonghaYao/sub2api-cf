@@ -25,7 +25,7 @@ it.each(['anthropic','codex'] as const)('applies persisted %s provider settings 
   env.DB.prepare("UPDATE system_settings SET gateway_json=json_set(gateway_json,'$.openai_codex_client_version','0.200.0','$.openai_codex_user_agent','codex-tui/0.100.0 (Linux)','$.claude_oauth_system_prompt','Custom fixture expansion') WHERE id='global'"),
  ])
  try{
-  const response=await request(platform==='codex'?'/v1/responses':'/v1/messages',f.api_key,platform==='codex'?{model,input:'hello',max_output_tokens:16,stream:false}:{model,system:'Original client instructions',messages:[{role:'user',content:'hello'}],max_tokens:16})
+  const response=await request(platform==='codex'?'/v1/responses':'/v1/messages',f.api_key,platform==='codex'?{model,input:'hello',max_output_tokens:16,stream:false}:{model,system:[{type:'text',text:'Original client instructions',cache_control:{type:'ephemeral',ttl:'1h'}}],messages:[{role:'user',content:'hello'}],max_tokens:16})
   expect(response.status,await response.clone().text()).toBe(200);expect(await response.text()).toContain('provider-settings-verified')
   const state=await (await env.USER_STATE.get(env.USER_STATE.idFromName(f.user_id)).fetch('https://state.test/snapshot')).json() as any
   expect(state.profile.reserved_micros).toBe(0);expect(state.requests).toHaveLength(1);expect(state.requests[0].settled_micros).toBe(27)
