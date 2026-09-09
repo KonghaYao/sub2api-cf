@@ -775,3 +775,22 @@ describe('admin UsageTable deleted-user badge', () => {
     expect(wrapper.text()).toContain('active@test.com')
   })
 })
+
+
+describe('usage table measured latency display', () => {
+  it.each([[0,'0ms'],[1234,'1.23s'],[null,'-']] as const)('renders first-token latency %s independently of total duration', (firstToken,expected) => {
+    const wrapper=mount(UsageTable,{
+      props:{data:[{...baseImageRow,first_token_ms:firstToken,duration_ms:8000}],loading:false,columns:[]},
+      global:{stubs:{
+        DataTable:{props:['data'],template:'<div><div v-for="row in data"><slot name="cell-latency" :row="row" /></div></div>'},
+        EmptyState:true,Icon:true,Teleport:true
+      }}
+    })
+    const labels=wrapper.findAll('span').map(span=>span.text())
+    expect(labels).toContain(expected)
+    expect(labels).toContain('8.00s')
+    expect(labels).toContain('usage.latencyFirstToken')
+    expect(labels).toContain('usage.latencyDuration')
+    wrapper.unmount()
+  })
+})
