@@ -22,7 +22,7 @@ export default defineConfig(async () => {
             }
             if (url.origin === 'https://chatgpt.com' && url.pathname === '/backend-api/codex/responses' && request.headers.get('authorization') === 'Bearer oauth-cache-local-fixture') {
               const body=await request.json() as any
-              const text=JSON.stringify({key:body.prompt_cache_key,session:request.headers.get('session_id')})
+              const text=JSON.stringify({key:body.prompt_cache_key,session:request.headers.get('session_id'),conversation:request.headers.get('conversation_id'),metadata:body.client_metadata})
               return new Response('data: '+JSON.stringify({type:'response.completed',response:{id:'oauth-cache',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text}]}],usage:{input_tokens:6,output_tokens:2}}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
             }
             if (

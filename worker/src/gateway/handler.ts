@@ -1,3 +1,4 @@
+import { applyNativeOpenAIOAuthCacheIdentity } from './openai-oauth-cache-identity'
 import { injectCacheTtl, resolveCacheTtlTarget, overrideCacheTtlUsage, rewriteCacheTtlJson, type CacheTtlTarget } from './anthropic-cache-ttl'
 import { emitContextCacheFingerprint } from './context-cache-diagnostics'
 import { chatPromptCacheIdentity, openAIContentSessionSeed } from './chat-prompt-cache'
@@ -1806,6 +1807,7 @@ async function acquireUpstream(
         client_headers: inboundHeaders,
       })
       if (chatCache) plan.headers.set('session_id', chatCache.sessionId)
+      if (inbound?.endpoint === 'responses' && wireOperation === 'responses' && responseOwner) await applyNativeOpenAIOAuthCacheIdentity(plan, account, credential as unknown as Record<string,unknown>, responseOwner.api_key_id)
       if (wireOperation === 'responses' && plan.body && typeof plan.body === 'object' && 'model' in plan.body && typeof plan.body.model === 'string') {
         actualModel = plan.body.model
       }
