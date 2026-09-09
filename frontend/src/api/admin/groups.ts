@@ -842,6 +842,16 @@ export async function getCapacitySummary(): Promise<
   return data
 }
 
+export interface GroupModelPrice {
+  id: string
+  version: number
+  input_micros_per_million: number
+  output_micros_per_million: number
+  cache_read_micros_per_million: number
+  per_request_micros: number
+  minimum_reservation_micros: number
+}
+
 export interface GroupModelConfig {
   group_id: string
   model_id: string
@@ -853,11 +863,7 @@ export interface GroupModelConfig {
   sort_order: number
   max_output_tokens: number
   default_max_output_tokens: number
-  price?: {
-    id: string
-    version: number
-    per_request_micros: number
-  } | null
+  price?: GroupModelPrice | null
   control_version: number
 }
 
@@ -866,6 +872,14 @@ export interface UpdateGroupModelConfig {
   catalog_visible?: boolean
   max_output_tokens: number
   default_max_output_tokens: number
+}
+
+export interface PublishGroupModelPriceInput {
+  input_micros_per_million: number
+  output_micros_per_million: number
+  cache_read_micros_per_million: number
+  per_request_micros: number
+  minimum_reservation_micros: number
 }
 
 export interface SyncGroupModelsResult {
@@ -918,6 +932,19 @@ export async function updateGroupModel(
   return adaptGroupModel(data)
 }
 
+export async function publishGroupModelPrice(
+  groupId: string | number,
+  model: GroupModelConfig,
+  input: PublishGroupModelPriceInput
+): Promise<GroupModelPrice> {
+  const { data } = await apiClient.post<GroupModelPrice>(
+    `/admin/groups/${groupId}/models/${model.model_id}/prices`,
+    { ...input, expected_control_version: model.control_version },
+    { headers: { 'Idempotency-Key': newControlOperationKey('admin-group-model-price-publish') } }
+  )
+  return data
+}
+
 export const groupsAPI = {
   list,
   getAll,
@@ -950,7 +977,8 @@ export const groupsAPI = {
   listGroupModels,
   syncGroupModelsFromAccounts,
   disableGroupModel,
-  updateGroupModel
+  updateGroupModel,
+  publishGroupModelPrice
 }
 
 export default groupsAPI

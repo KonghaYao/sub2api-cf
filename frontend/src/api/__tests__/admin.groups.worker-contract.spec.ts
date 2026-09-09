@@ -65,6 +65,44 @@ describe('admin groups Cloudflare Worker contract', () => {
     )
   })
 
+  it('publishes a group model price with the model concurrency version', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        id: 'price-1', group_id: '42', model_id: '7', version: 1, active: true,
+        input_micros_per_million: 1_000_000, output_micros_per_million: 2_000_000,
+        cache_read_micros_per_million: 100_000, per_request_micros: 0,
+        minimum_reservation_micros: 1
+      }
+    })
+    const { publishGroupModelPrice } = await import('@/api/admin/groups')
+    const model = {
+      group_id: '42', model_id: '7', public_name: 'gpt-test', upstream_name: 'gpt-test',
+      endpoint: 'responses', enabled: true, catalog_visible: true, sort_order: 0,
+      max_output_tokens: 65536, default_max_output_tokens: 32768, price: null, control_version: 3
+    }
+
+    await publishGroupModelPrice(42, model, {
+      input_micros_per_million: 1_000_000,
+      output_micros_per_million: 2_000_000,
+      cache_read_micros_per_million: 100_000,
+      per_request_micros: 0,
+      minimum_reservation_micros: 1
+    })
+
+    expect(post).toHaveBeenCalledWith(
+      '/admin/groups/42/models/7/prices',
+      {
+        input_micros_per_million: 1_000_000,
+        output_micros_per_million: 2_000_000,
+        cache_read_micros_per_million: 100_000,
+        per_request_micros: 0,
+        minimum_reservation_micros: 1,
+        expected_control_version: 3
+      },
+      { headers: { 'Idempotency-Key': expect.stringContaining('admin-group-model-price-publish-') } }
+    )
+  })
+
   it('preserves advanced fields and explicit clears in create and update payloads', async () => {
     const projection = { id: 'group-opaque', name: 'Full', control_version: 0 }
     post.mockResolvedValue({ data: projection })

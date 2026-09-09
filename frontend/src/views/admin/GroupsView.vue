@@ -4386,7 +4386,56 @@
               <input v-model.number="model.default_max_output_tokens" class="input" type="number" min="1" :max="model.max_output_tokens" />
             </label>
           </div>
+          <div
+            v-if="editingGroupModelPriceId === model.model_id"
+            class="mt-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-700"
+          >
+            <div class="mb-3 text-sm font-medium text-gray-900 dark:text-gray-100">
+              {{ t("admin.groups.groupModels.pricingTitle") }}
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <label class="space-y-1 text-sm">
+                <span>{{ t("admin.groups.groupModels.inputPrice") }}</span>
+                <input v-model.number="groupModelPriceForms[model.model_id].input" class="input" type="number" min="0" step="0.000001" />
+              </label>
+              <label class="space-y-1 text-sm">
+                <span>{{ t("admin.groups.groupModels.outputPrice") }}</span>
+                <input v-model.number="groupModelPriceForms[model.model_id].output" class="input" type="number" min="0" step="0.000001" />
+              </label>
+              <label class="space-y-1 text-sm">
+                <span>{{ t("admin.groups.groupModels.cacheReadPrice") }}</span>
+                <input v-model.number="groupModelPriceForms[model.model_id].cacheRead" class="input" type="number" min="0" step="0.000001" />
+              </label>
+              <label class="space-y-1 text-sm">
+                <span>{{ t("admin.groups.groupModels.perRequestPrice") }}</span>
+                <input v-model.number="groupModelPriceForms[model.model_id].perRequest" class="input" type="number" min="0" step="0.000001" />
+              </label>
+              <label class="space-y-1 text-sm">
+                <span>{{ t("admin.groups.groupModels.minimumReservation") }}</span>
+                <input v-model.number="groupModelPriceForms[model.model_id].minimumReservation" class="input" type="number" min="0.000001" step="0.000001" />
+              </label>
+            </div>
+            <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              {{ t("admin.groups.groupModels.priceHint") }}
+            </p>
+            <div class="mt-3 flex justify-end gap-2">
+              <button type="button" class="btn btn-secondary" :disabled="savingGroupModelPriceId === model.model_id" @click="editingGroupModelPriceId = null">
+                {{ t("common.cancel") }}
+              </button>
+              <button type="button" class="btn btn-primary" :disabled="savingGroupModelPriceId === model.model_id" @click="saveGroupModelPrice(model)">
+                {{ savingGroupModelPriceId === model.model_id ? t("common.saving") : t("admin.groups.groupModels.publishPrice") }}
+              </button>
+            </div>
+          </div>
           <div class="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="!model.enabled || savingGroupModelPriceId === model.model_id"
+              @click="editGroupModelPrice(model)"
+            >
+              {{ model.price ? t("admin.groups.groupModels.updatePrice") : t("admin.groups.groupModels.setPrice") }}
+            </button>
             <button
               type="button"
               class="btn btn-secondary"
@@ -4999,6 +5048,16 @@ const groupModels = ref<GroupModelConfig[]>([]);
 const groupModelsLoading = ref(false);
 const syncingGroupModels = ref(false);
 const savingGroupModelId = ref<string | null>(null);
+type GroupModelPriceForm = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  perRequest: number;
+  minimumReservation: number;
+};
+const groupModelPriceForms = reactive<Record<string, GroupModelPriceForm>>({});
+const editingGroupModelPriceId = ref<string | null>(null);
+const savingGroupModelPriceId = ref<string | null>(null);
 const sortableGroups = ref<AdminGroup[]>([]);
 type ConcreteGroupPlatform = Exclude<GroupPlatform, "composite">;
 type CompositeRouteFormState = {
@@ -6393,6 +6452,7 @@ const closeGroupModelsModal = () => {
   showGroupModelsModal.value = false;
   groupModelsGroup.value = null;
   groupModels.value = [];
+  editingGroupModelPriceId.value = null;
 };
 
 const syncGroupModels = async () => {
@@ -6409,6 +6469,50 @@ const syncGroupModels = async () => {
     appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.syncFailed")));
   } finally {
     syncingGroupModels.value = false;
+  }
+};
+
+const priceMicrosToUsd = (value: number | undefined) => (value ?? 0) / 1_000_000;
+
+const priceUsdToMicros = (value: number, minimum = 0) => {
+  const micros = value * 1_000_000;
+  if (!Number.isFinite(value) || !Number.isSafeInteger(micros) || micros < minimum) {
+    throw new Error(t("admin.groups.groupModels.invalidPrice"));
+  }
+  return micros;
+};
+
+const editGroupModelPrice = (model: GroupModelConfig) => {
+  groupModelPriceForms[model.model_id] = {
+    input: priceMicrosToUsd(model.price?.input_micros_per_million),
+    output: priceMicrosToUsd(model.price?.output_micros_per_million),
+    cacheRead: priceMicrosToUsd(model.price?.cache_read_micros_per_million),
+    perRequest: priceMicrosToUsd(model.price?.per_request_micros),
+    minimumReservation: priceMicrosToUsd(model.price?.minimum_reservation_micros ?? 1),
+  };
+  editingGroupModelPriceId.value = model.model_id;
+};
+
+const saveGroupModelPrice = async (model: GroupModelConfig) => {
+  if (!groupModelsGroup.value || savingGroupModelPriceId.value) return;
+  const form = groupModelPriceForms[model.model_id];
+  if (!form) return;
+  savingGroupModelPriceId.value = model.model_id;
+  try {
+    await adminAPI.groups.publishGroupModelPrice(groupModelsGroup.value.id, model, {
+      input_micros_per_million: priceUsdToMicros(form.input),
+      output_micros_per_million: priceUsdToMicros(form.output),
+      cache_read_micros_per_million: priceUsdToMicros(form.cacheRead),
+      per_request_micros: priceUsdToMicros(form.perRequest),
+      minimum_reservation_micros: priceUsdToMicros(form.minimumReservation, 1),
+    });
+    groupModels.value = await adminAPI.groups.listGroupModels(groupModelsGroup.value.id);
+    editingGroupModelPriceId.value = null;
+    appStore.showSuccess(t("admin.groups.groupModels.priceSuccess"));
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t("admin.groups.groupModels.priceFailed")));
+  } finally {
+    savingGroupModelPriceId.value = null;
   }
 };
 
