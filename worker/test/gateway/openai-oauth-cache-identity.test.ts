@@ -1,11 +1,11 @@
 import {expect,it} from 'vitest'
-import {applyNativeOpenAIOAuthCacheIdentity,openAIOAuthCredentialNamespace} from '../../src/gateway/openai-oauth-cache-identity'
+import {applyOpenAIOAuthCacheIdentity,openAIOAuthCredentialNamespace} from '../../src/gateway/openai-oauth-cache-identity'
 import type {ProviderRequestPlan} from '../../src/gateway/providers'
 const account={platform:'openai' as const,credential_kind:'oauth' as const,provider_config:{}}
 const body={input:[{role:'user',content:'Stable prompt'}],prompt_cache_key:'client-session',client_metadata:{session_id:'client-session',thread_id:'thread',turn_id:'turn','x-codex-turn-metadata':JSON.stringify({session_id:'client-session',turn_id:'turn'})}}
 async function prepare(credential:Record<string,unknown>,apiKeyId='tenant',override={}){
  const plan:ProviderRequestPlan={url:'https://chatgpt.com/backend-api/codex/responses',method:'POST',headers:new Headers({session_id:'untrusted',conversation_id:'untrusted'}),body,timeout_ms:30000}
- await applyNativeOpenAIOAuthCacheIdentity(plan,{...account,...override},credential,apiKeyId)
+ await applyOpenAIOAuthCacheIdentity(plan,{...account,...override},credential,apiKeyId)
  return plan
 }
 it('materializes stable native OAuth sessions and preserves the prompt across token refresh',async()=>{
@@ -36,7 +36,27 @@ it('leaves API-Key requests alone and does not manufacture a missing OAuth cache
  const plan=await prepare({},'tenant',{credential_kind:'api_key'})
  expect(plan.body).toBe(body);expect(plan.headers.get('session_id')).toBe('untrusted')
  const empty:ProviderRequestPlan={url:'https://chatgpt.com',method:'POST',body:{input:'hi'},headers:new Headers({session_id:'untrusted',conversation_id:'untrusted'}),timeout_ms:30000}
- await applyNativeOpenAIOAuthCacheIdentity(empty,account,{chatgpt_account_id:'upstream'},'tenant')
+ await applyOpenAIOAuthCacheIdentity(empty,account,{chatgpt_account_id:'upstream'},'tenant')
  expect(empty.headers.has('session_id')).toBe(false);expect(empty.headers.has('conversation_id')).toBe(false)
  expect(empty.body).toEqual({input:'hi'})
+})
+
+it('isolates Chat cache identities per upstream credential while retaining Chat UUID sessions',async()=>{
+ const build=async(upstream:string,token:string)=>{
+  const plan:ProviderRequestPlan={url:'https://chatgpt.com',method:'POST',headers:new Headers({session_id:'prior-session'}),body,timeout_ms:30000}
+  await applyOpenAIOAuthCacheIdentity(plan,account,{chatgpt_account_id:upstream,access_token:token},'tenant','chat')
+  return plan
+ }
+ const first=await build('account-a','old-token'),renewed=await build('account-a','new-token'),other=await build('account-b','other-token')
+ expect(first.body).toEqual(renewed.body)
+ expect([...first.headers]).toEqual([...renewed.headers])
+ expect(first.headers.get('session_id')).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+ expect(first.headers.get('conversation_id')).toMatch(/^[a-f0-9]{16}$/)
+ expect(other.headers.get('session_id')).not.toBe(first.headers.get('session_id'))
+ expect((other.body as any).prompt_cache_key).not.toBe((first.body as any).prompt_cache_key)
+ const unscoped:ProviderRequestPlan={...first,headers:new Headers({session_id:'existing-tenant-session'}),body}
+ await applyOpenAIOAuthCacheIdentity(unscoped,account,{},'tenant','chat')
+ expect(unscoped.headers.get('session_id')).toMatch(/^[a-f0-9-]{36}$/)
+ expect(unscoped.headers.get('conversation_id')).toMatch(/^[a-f0-9]{16}$/)
+ expect(unscoped.body).toBe(body)
 })

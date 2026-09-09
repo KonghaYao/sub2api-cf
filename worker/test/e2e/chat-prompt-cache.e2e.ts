@@ -115,7 +115,8 @@ it('anchors actual OpenAI OAuth cache and session identity to the explicit body 
  const body={messages:undefined,input:'Stable input',prompt_cache_key:'oauth-body-cache'}
  const first=await chat(f,body,{'session-id':'first-header'})
  const next=await chat(f,body,{'session-id':'second-header'})
- expect(first.key).toBe('oauth-body-cache')
+ expect(first.key).toMatch(/^[a-f0-9-]{36}$/)
+ expect(first.key).not.toBe('oauth-body-cache')
  expect(first.session).toMatch(/^[a-f0-9-]{36}$/)
  expect(next).toEqual(first)
  const native=[]

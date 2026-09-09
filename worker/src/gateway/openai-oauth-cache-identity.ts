@@ -20,7 +20,7 @@ export async function openAIOAuthCredentialNamespace(account: Account, credentia
   return ''
 }
 
-export async function applyNativeOpenAIOAuthCacheIdentity(plan: ProviderRequestPlan, account: Account, credential: Record<string, unknown>, apiKeyId: string): Promise<void> {
+export async function applyOpenAIOAuthCacheIdentity(plan: ProviderRequestPlan, account: Account, credential: Record<string, unknown>, apiKeyId: string, mode: 'native' | 'chat' = 'native'): Promise<void> {
   const namespace = await openAIOAuthCredentialNamespace(account, credential)
   const source = record(plan.body)
   if (namespace === null || !source) return
@@ -30,7 +30,9 @@ export async function applyNativeOpenAIOAuthCacheIdentity(plan: ProviderRequestP
   if (key) {
     // Worker API-key identifiers are strings; encode the namespace unambiguously.
     const isolated = (await sha256Hex(JSON.stringify(['worker-openai-native-session-v1',apiKeyId,namespace,key]))).slice(0,16)
-    plan.headers.set('session_id',isolated)
+    const hash = mode === 'chat' ? await sha256Hex(isolated) : ''
+    const session = mode === 'chat' ? `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-${((parseInt(hash[16]!,16)&3)|8).toString(16)}${hash.slice(17,20)}-${hash.slice(20,32)}` : isolated
+    plan.headers.set('session_id',session)
     plan.headers.set('conversation_id',isolated)
   }
   if (!namespace) return
