@@ -3672,16 +3672,29 @@ const loadModelRestrictionFromMapping = (rawMapping?: Record<string, unknown>) =
 const buildModelRestrictionMapping = () =>
   buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
 
-const applyOpenAIModelMappingCredentials = (credentials: Record<string, unknown>) => {
+const applyModelRestrictionMapping = (
+  credentials: Record<string, unknown>,
+  currentCredentials: Record<string, unknown> = credentials
+) => {
+  const hadStoredMapping = Object.prototype.hasOwnProperty.call(currentCredentials, 'model_mapping')
+  const modelMapping = buildModelRestrictionMapping()
+  if (modelMapping) {
+    credentials.model_mapping = modelMapping
+  } else if (hadStoredMapping) {
+    credentials.model_mapping = {}
+  } else {
+    delete credentials.model_mapping
+  }
+}
+
+const applyOpenAIModelMappingCredentials = (
+  credentials: Record<string, unknown>,
+  currentCredentials: Record<string, unknown> = credentials
+) => {
   const shouldApplyModelMapping = !openaiPassthroughEnabled.value
 
   if (shouldApplyModelMapping) {
-    const modelMapping = buildModelRestrictionMapping()
-    if (modelMapping) {
-      credentials.model_mapping = modelMapping
-    } else {
-      delete credentials.model_mapping
-    }
+    applyModelRestrictionMapping(credentials, currentCredentials)
   } else if (!credentials.model_mapping) {
     delete credentials.model_mapping
   }
@@ -4746,12 +4759,7 @@ const handleSubmit = async () => {
 
       // Add model mapping if configured（OpenAI 开启自动透传时保留现有映射，不再编辑）
       if (shouldApplyModelMapping) {
-        const modelMapping = buildModelRestrictionMapping()
-        if (modelMapping) {
-          newCredentials.model_mapping = modelMapping
-        } else {
-          delete newCredentials.model_mapping
-        }
+        applyModelRestrictionMapping(newCredentials, currentCredentials)
       } else if (currentCredentials.model_mapping) {
         newCredentials.model_mapping = currentCredentials.model_mapping
       }
@@ -4864,12 +4872,7 @@ const handleSubmit = async () => {
       newCredentials.tier_id = 'vertex'
 
       // Add model mapping if configured
-      const modelMapping = buildModelRestrictionMapping()
-      if (modelMapping) {
-        newCredentials.model_mapping = modelMapping
-      } else {
-        delete newCredentials.model_mapping
-      }
+      applyModelRestrictionMapping(newCredentials, currentCredentials)
 
       applyInterceptWarmup(newCredentials, interceptWarmupRequests.value, 'edit')
       applyAccountSchedulingThresholdOverridePatch(newCredentials, currentCredentials)
@@ -4922,12 +4925,7 @@ const handleSubmit = async () => {
       }
 
       // Model mapping
-      const modelMapping = buildModelRestrictionMapping()
-      if (modelMapping) {
-        newCredentials.model_mapping = modelMapping
-      } else {
-        delete newCredentials.model_mapping
-      }
+      applyModelRestrictionMapping(newCredentials, currentCredentials)
 
       applyInterceptWarmup(newCredentials, interceptWarmupRequests.value, 'edit')
       applyAccountSchedulingThresholdOverridePatch(newCredentials, currentCredentials)
@@ -4958,14 +4956,9 @@ const handleSubmit = async () => {
           ((props.account.credentials as Record<string, unknown>) || {})
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
       if (props.account.platform === 'openai') {
-        applyOpenAIModelMappingCredentials(newCredentials)
+        applyOpenAIModelMappingCredentials(newCredentials, currentCredentials)
       } else {
-        const modelMapping = buildModelRestrictionMapping()
-        if (modelMapping) {
-          newCredentials.model_mapping = modelMapping
-        } else {
-          delete newCredentials.model_mapping
-        }
+        applyModelRestrictionMapping(newCredentials, currentCredentials)
       }
 
       updatePayload.credentials = newCredentials
@@ -5034,6 +5027,7 @@ const handleSubmit = async () => {
       }
 
       // 移除旧字段
+      const hadStoredModelMapping = Object.prototype.hasOwnProperty.call(currentCredentials, 'model_mapping')
       delete newCredentials.model_whitelist
       delete newCredentials.model_mapping
 
@@ -5045,6 +5039,8 @@ const handleSubmit = async () => {
       )
       if (antigravityModelMapping) {
         newCredentials.model_mapping = antigravityModelMapping
+      } else if (hadStoredModelMapping) {
+        newCredentials.model_mapping = {}
       }
 
       updatePayload.credentials = newCredentials

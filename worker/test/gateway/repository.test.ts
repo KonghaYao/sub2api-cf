@@ -363,7 +363,7 @@ describe('gateway repository embeddings routing', () => {
       expect(await listModels(env, 'group-1')).toHaveLength(1)
       await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).resolves.toMatchObject({ upstream_model_name: 'mapped-embedding' })
       configure({ forbidden: 'other' })
-      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'no_upstream_accounts' })
+      await expect(resolveGatewayRoute(env, 'group-1', 'embed-public', 'embeddings', 'user-1')).rejects.toMatchObject({ code: 'model_not_found' })
       expect(await listModels(env, 'group-1')).toEqual([])
       await expect(getAccountCredential(env, 'group-1', 'model-1', 'embeddings', 'account-1')).rejects.toMatchObject({ code: 'credential_unavailable' })
       configure({})

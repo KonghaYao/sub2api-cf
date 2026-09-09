@@ -86,6 +86,20 @@ const ModelWhitelistSelectorStub = defineComponent({
       >
         rewrite
       </button>
+      <button
+        type="button"
+        data-testid="keep-one-model"
+        @click="$emit('update:modelValue', ['gpt-5.2'])"
+      >
+        keep one
+      </button>
+      <button
+        type="button"
+        data-testid="clear-model-whitelist"
+        @click="$emit('update:modelValue', [])"
+      >
+        clear
+      </button>
       <span data-testid="model-whitelist-value">
         {{ Array.isArray(modelValue) ? modelValue.join(',') : '' }}
       </span>
@@ -654,6 +668,52 @@ describe('EditAccountModal', () => {
       base_url: testCase.expectedBaseUrl,
       api_base_urls: testCase.expectedProtocolUrls
     })
+  })
+
+  it('submits the remaining mapping when account models are reduced', async () => {
+    const account = buildAccount()
+    account.credentials.model_mapping = {
+      'gpt-5.2': 'gpt-5.2',
+      'gpt-5.3': 'gpt-5.3'
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+
+    await wrapper.get('[data-testid="keep-one-model"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gpt-5.2': 'gpt-5.2'
+    })
+  })
+
+  it('keeps an unconfigured mapping absent when editing unrelated account fields', async () => {
+    const account = buildAccount()
+    delete account.credentials.model_mapping
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_mapping')
+  })
+
+  it('submits an explicit empty mapping when the last account model is removed', async () => {
+    const account = buildAccount()
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+
+    await wrapper.get('[data-testid="clear-model-whitelist"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toHaveProperty('model_mapping')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({})
   })
 
   it('preserves model mappings when editing the whitelist', async () => {

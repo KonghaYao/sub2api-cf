@@ -2455,7 +2455,8 @@ function createUiConfig(
   const config: Record<string, unknown> = {
     schema_version: UI_CONFIG_VERSION,
     auto_pause_on_expired: true,
-    original_model_routing: body.credentials !== undefined && body.model_capabilities === undefined,
+    original_model_routing: body.credentials !== undefined && body.model_capabilities === undefined &&
+      !(body.credentials && typeof body.credentials === 'object' && Object.hasOwn(body.credentials, 'model_mapping')),
     type: body.type ?? (credentialKind === 'api_key'
       ? 'apikey'
       : credentialKind === 'setup_token' ? 'setup-token' : 'oauth'),
@@ -2484,7 +2485,9 @@ function updateUiConfig(
   const next: Record<string, unknown> = { ...current, schema_version: UI_CONFIG_VERSION }
   if (body.model_capabilities !== undefined) { next.original_model_routing = false; changed = true }
   else if (body.credentials && typeof body.credentials === 'object' && Object.hasOwn(body.credentials, 'model_mapping')) {
-    next.original_model_routing = true
+    // An explicitly submitted mapping is materialized into account_models. In
+    // particular, {} means no supported models rather than legacy unrestricted routing.
+    next.original_model_routing = false
     changed = true
   }
 

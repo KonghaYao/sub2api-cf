@@ -160,7 +160,7 @@ describe('synchronous image handler', () => {
         headers: { authorization: `Bearer ${RAW_KEY}`, 'content-type': 'application/json' },
         body: JSON.stringify({ model: 'gpt-image-2', prompt: 'draw another square' }),
       }, test.env as never)
-      expect(denied.status).toBe(503)
+      expect(denied.status).toBe(404)
       expect(test.upstreamBodies).toHaveLength(1)
     } finally { test.raw.close() }
   })

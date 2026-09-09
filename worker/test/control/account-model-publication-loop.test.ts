@@ -138,6 +138,104 @@ describe('account model mapping publication loop on createApp and SQLite', () =>
     } finally { test.raw.close() }
   })
 
+  it('shrinks mapped group support and preserves it until the last account mapping is removed', async () => {
+    const test = await fixture()
+    try {
+      const create = await test.app.request('/api/v1/admin/accounts', {
+        method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'idempotency-key': 'mapping-shrink-primary' },
+        body: JSON.stringify({ name: 'Mapping shrink primary', platform: 'openai', type: 'apikey',
+          base_url: 'https://api.openai.test/v1', api_key: 'upstream-primary',
+          group_links: [{ group_id: 'sync-group', priority: 0, weight: 1 }],
+          credentials: { model_mapping: { 'mapped-a': 'mapped-a', 'mapped-b': 'mapped-b' } } }),
+      }, test.env)
+      expect(create.status, await create.clone().text()).toBe(201)
+      const primary = (await create.json() as any).data
+      expect(test.raw.prepare("SELECT json_extract(ui_config_json, '$.original_model_routing') AS original FROM accounts WHERE id=?")
+        .get(primary.id)).toEqual({ original: 0 })
+
+      // Reproduce an account retained from the legacy original-form migration.
+      test.raw.prepare("UPDATE accounts SET ui_config_json=json_set(ui_config_json, '$.original_model_routing', json('true')) WHERE id=?")
+        .run(primary.id)
+      const shrink = await test.app.request(`/api/v1/admin/accounts/${primary.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': `"${primary.control_version}"` },
+        body: JSON.stringify({ credentials: { model_mapping: { 'mapped-b': 'mapped-b' } } }),
+      }, test.env)
+      expect(shrink.status, await shrink.clone().text()).toBe(200)
+      const shrunk = (await shrink.json() as any).data
+      expect(test.raw.prepare(`SELECT m.public_name,gm.enabled,gm.disabled_by_account_sync
+        FROM group_models gm JOIN models m ON m.id=gm.model_id
+        WHERE gm.group_id='sync-group' AND m.public_name IN ('mapped-a','mapped-b') ORDER BY m.public_name`).all()).toEqual([
+        { public_name: 'mapped-a', enabled: 0, disabled_by_account_sync: 1 },
+        { public_name: 'mapped-b', enabled: 1, disabled_by_account_sync: 0 },
+      ])
+      expect(test.raw.prepare("SELECT json_extract(ui_config_json, '$.original_model_routing') AS original FROM accounts WHERE id=?")
+        .get(primary.id)).toEqual({ original: 0 })
+
+      const createShared = await test.app.request('/api/v1/admin/accounts', {
+        method: 'POST', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'idempotency-key': 'mapping-shrink-secondary' },
+        body: JSON.stringify({ name: 'Mapping shrink secondary', platform: 'openai', type: 'apikey',
+          base_url: 'https://api.openai.test/v1', api_key: 'upstream-secondary',
+          group_links: [{ group_id: 'sync-group', priority: 0, weight: 1 }],
+          credentials: { model_mapping: { 'mapped-b': 'mapped-b' } } }),
+      }, test.env)
+      expect(createShared.status, await createShared.clone().text()).toBe(201)
+      const secondary = (await createShared.json() as any).data
+
+      const clearPrimary = await test.app.request(`/api/v1/admin/accounts/${primary.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': `"${shrunk.control_version}"` },
+        body: JSON.stringify({ credentials: { model_mapping: {} } }),
+      }, test.env)
+      expect(clearPrimary.status, await clearPrimary.clone().text()).toBe(200)
+      expect(test.raw.prepare("SELECT COUNT(*) AS count FROM account_models WHERE account_id=? AND source='mapping'")
+        .get(primary.id)).toEqual({ count: 0 })
+      expect(test.raw.prepare(`SELECT gm.enabled,gm.disabled_by_account_sync FROM group_models gm JOIN models m ON m.id=gm.model_id
+        WHERE gm.group_id='sync-group' AND m.public_name='mapped-b'`).get())
+        .toEqual({ enabled: 1, disabled_by_account_sync: 0 })
+
+      const clearSecondary = await test.app.request(`/api/v1/admin/accounts/${secondary.id}`, {
+        method: 'PUT', headers: { ...test.adminHeaders, 'content-type': 'application/json', 'if-match': `"${secondary.control_version}"` },
+        body: JSON.stringify({ credentials: { model_mapping: {} } }),
+      }, test.env)
+      expect(clearSecondary.status, await clearSecondary.clone().text()).toBe(200)
+      expect(test.raw.prepare(`SELECT gm.enabled,gm.disabled_by_account_sync FROM group_models gm JOIN models m ON m.id=gm.model_id
+        WHERE gm.group_id='sync-group' AND m.public_name='mapped-b'`).get())
+        .toEqual({ enabled: 0, disabled_by_account_sync: 1 })
+    } finally { test.raw.close() }
+  })
+
+  it('migration 124 removes broad legacy support and converges stale group models', () => {
+    const { raw } = createSqliteD1()
+    try {
+      applyMigrations(raw, 123)
+      raw.exec(`
+        INSERT INTO "groups" (id,name,platform,enabled,created_at_ms,updated_at_ms)
+        VALUES ('legacy-group','Legacy Group','openai',1,1,1);
+        INSERT INTO models (id,platform,public_name,upstream_name,endpoint,enabled,created_at_ms,updated_at_ms) VALUES
+        ('legacy-a','openai','legacy-public-a','legacy-route-a','chat_completions',1,1,1),
+        ('legacy-b','openai','legacy-public-b','legacy-route-b','chat_completions',1,1,1);
+        INSERT INTO accounts (id,platform,name,credential_ref,enabled,ui_config_json,created_at_ms,updated_at_ms)
+        VALUES ('legacy-account','openai','Legacy Account','legacy-secret',1,
+          '{"original_model_routing":true,"credentials":{"model_mapping":{"legacy-route-a":"upstream-a"}}}',1,1);
+        INSERT INTO account_groups (account_id,group_id,created_at_ms,updated_at_ms)
+        VALUES ('legacy-account','legacy-group',1,1);
+        INSERT INTO group_models (group_id,model_id,enabled,created_at_ms,updated_at_ms) VALUES
+        ('legacy-group','legacy-a',1,1,1),('legacy-group','legacy-b',1,1,1);
+      `)
+      expect(raw.prepare("SELECT model_id FROM group_model_account_support WHERE group_id='legacy-group' ORDER BY model_id").all())
+        .toEqual([{ model_id: 'legacy-a' }, { model_id: 'legacy-b' }])
+
+      applyMigrations(raw, 124)
+
+      expect(raw.prepare("SELECT model_id FROM group_model_account_support WHERE group_id='legacy-group' ORDER BY model_id").all())
+        .toEqual([{ model_id: 'legacy-a' }])
+      expect(raw.prepare("SELECT model_id,enabled,disabled_by_account_sync FROM group_models WHERE group_id='legacy-group' ORDER BY model_id").all())
+        .toEqual([
+          { model_id: 'legacy-a', enabled: 1, disabled_by_account_sync: 0 },
+          { model_id: 'legacy-b', enabled: 0, disabled_by_account_sync: 1 },
+        ])
+    } finally { raw.close() }
+  })
+
   it('keeps shared support active and suspends it after the last linked account is removed', async () => {
     const test = await fixture()
     try {
